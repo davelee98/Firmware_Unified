@@ -33,21 +33,38 @@ shared/          target-agnostic. MUST NOT include any vendor SDK header.
   compress/      inflate engines (uzlib bit-serial, ROM tinfl adapter) behind one API
   hal/           abstract interfaces that targets implement (SPI, GPIO, timers, NVS, radio)
 targets/         one directory per target: chip drivers + build system + HAL implementation
+third_party/     vendored cross-target libraries whose IO layer is per-target (bb_epaper)
 tools/           protocol-header sync, provisioning, device CLI
 docs/            architecture and migration notes
 ```
+
+`third_party/` exists because `bb_epaper` selects its IO backend by `#ifdef` and each backend
+includes vendor headers, so it can never satisfy the `shared/` rule — but it is still one
+vendored copy shared by every target, not a per-target fork.
 
 ## Targets
 
 | Directory | Chips | Build system | From |
 |---|---|---|---|
-| `targets/esp32-nrf52840-pio/` | ESP32-S3 / C3 / C6, nRF52840 | PlatformIO (Arduino) | `Firmware` |
-| `targets/nrf54l15-zephyr/` | XIAO nRF54L15 | Zephyr / nRF Connect SDK + west | `Firmware_NRF54` |
-| `targets/efr32bg22-slc/` | EFR32BG22 | Simplicity SDK + CMake (SLC-managed) | `Firmware_Silabs` |
-| `targets/nrf52-sdk/` | nRF52 (legacy) | Nordic SDK (bare C) | `Firmware_NRF` |
+| `targets/esp32-idf/` | ESP32-S3 / C3 / C6 / classic | **ESP-IDF** (CMake + Kconfig) | `Firmware` |
+| `targets/nordic-zephyr/` | nRF54L15, nRF52840 | Zephyr / nRF Connect SDK + west | `Firmware_NRF54`, `Firmware` |
+| `targets/efr32bg22-slc/` | EFR32BG22 | Simplicity SDK + SLC (CMake) — **unchanged** | `Firmware_Silabs` |
+| ~~`targets/nrf52-sdk/`~~ | nRF52 (legacy) | Nordic SDK (bare C) | `Firmware_NRF` — **out of scope** |
 
-Four toolchains stay four toolchains — unification is about **shared source**, not a single
-build system. Do not attempt to make one build system drive all four.
+Targets are grouped **by silicon vendor, not by repo of origin**. That is why nRF52840 sits with
+nRF54L15 rather than with the ESP32s it currently shares a repo with: the two Nordic parts share
+a BLE stack, crypto API, storage API, and panel stack, so nRF52840 is a *board* on the Zephyr
+target, not a target of its own.
+
+**No PlatformIO and no Arduino anywhere in this repo.** All three targets build with CMake,
+which is what lets `shared/` be one library consumed by all of them. Two of the three add
+Kconfig; the Silabs target does not, so `shared/` takes plain preprocessor constants and Kconfig
+is only how the other two set them. The full analysis — including the Arduino-API replacement
+census and the PlatformIO-knob → sdkconfig translation table — is in
+[docs/TOOLCHAINS.md](docs/TOOLCHAINS.md).
+
+Three build systems stay three build systems: unification is about **shared source**, not a
+single build system. Do not attempt to make one build system drive all three.
 
 ## The `shared/` rule
 
@@ -80,5 +97,9 @@ tools/sync_protocol_header.py --check    # fail if any copy drifted (CI/pre-comm
 ## Getting started
 
 Per-target builds are documented in each `targets/*/README.md` once that target is imported.
-Migration order and the rationale are in [docs/MIGRATION.md](docs/MIGRATION.md); the
-`shared`/`hal` boundary is specified in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Note that **neither toolchain is installed on the primary dev box today** — no `idf.py`, no
+`west` — so CI carries more weight here than usual; see docs/TOOLCHAINS.md.
+
+- [docs/TOOLCHAINS.md](docs/TOOLCHAINS.md) — which toolchain each target uses and why
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the `shared`/`hal` boundary
+- [docs/MIGRATION.md](docs/MIGRATION.md) — migration order and per-target procedure
