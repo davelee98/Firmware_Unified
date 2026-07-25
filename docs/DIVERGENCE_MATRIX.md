@@ -1,0 +1,295 @@
+# Divergence matrix
+
+Where the four repos' protocol semantics actually differ, verified by reading the
+implementations side by side (2026-07-25). This is the input MIGRATION.md's "silent
+behavioural divergence" risk asks for: every difference below must be resolved
+*deliberately* when its subsystem is promoted to `shared/core`, and the resolution column
+here is the proposed default. Citations are `repo-relative path:line` in the source repos;
+`Firmware` cites are the local checkout unless marked `upstream/main`.
+
+Legacy `Firmware_NRF` is included only where it matters. Verified verdict: it is a **strict
+subset** — no compression, no 0x76, no PIPE, no NFC, no LED_STOP, no CONFIG_CLEAR, no
+READ_MSD handler, `ocrypto`-backed crypto, and its `CMD_DEEP_SLEEP` log string still says
+"(0x0052)" (`Firmware_NRF/EPD/EPD_service.c:619-666`, `:658`). Dropping it loses no
+protocol semantics.
+
+## Reference implementation and direction of travel
+
+**`Firmware` — specifically its ESP32 branch — models the feature set.** It is the most
+actively developed, carries the widest capability coverage, and is where new protocol features
+land first (WiFi/LAN transport and the tinfl inflate engine arrived in `#124`, 2026-07-25,
+ESP32-only). When a behaviour is contested and no correctness argument decides it, `Firmware`'s
+ESP32 shape is the default answer.
+
+The other repos — `Firmware_NRF54`, `Firmware_Silabs`, `Firmware_NRF` — **should converge
+toward it.** That is the default direction for anything they implement differently for no
+reason beyond history.
+
+Three qualifications, all load-bearing:
+
+1. **"Reference" is about feature coverage, not correctness.** Where another repo is
+   demonstrably right, it wins and `Firmware` changes — the resolution column below already
+   does this repeatedly (NRF54's size-table TLV scan §2.2, its chunked-write validation §2.3,
+   its mid-session plaintext rejection §1.5a). Modelling the feature set does not make
+   `Firmware` the arbiter of every detail.
+2. **Other repos will sometimes have *more*.** `CMD_NFC_ENDPOINT` is implemented on Silabs and
+   NRF54 and *not* on `Firmware`; Channel Sounding is nRF54L15-only. Convergence is not
+   one-way.
+3. **Other repos will sometimes have *less*, permanently, and that is fine.** BG22 will never
+   run PIPE or `0x76`; a gap is not a defect and not a backlog item. See SHARED_API_DESIGN.md
+   § "Feature parity across targets is **not** a goal" for how the API expresses this.
+
+**The canonical protocol headers are what bind them together.**
+`opendisplay_protocol.h` and `opendisplay_structs.h` are the single contract every repo
+implements a subset of: they own the wire values, the config TLV types, and the error codes.
+A capability may be absent from a target, but its *opcode and encoding never differ* between
+targets — a divergence in wire meaning is always a bug, whereas a divergence in coverage is a
+design decision. That distinction is the organising rule for everything below.
+
+### The opcode space is conservative
+
+**Avoid introducing new opcodes.** Every opcode is permanent wire surface: it has to be
+implemented or deliberately NACKed on four targets, taught to `py-opendisplay` and the HA
+integration, and supported for the life of every deployed device. The cost is paid by
+everything downstream, forever, and it is paid even by targets that will never implement it.
+
+Before proposing one, exhaust the cheaper options in this order:
+
+1. **An existing opcode with an existing field.** Most "new" needs are a value, not a verb.
+2. **An existing opcode with a reserved or extension field.** Several responses already carry
+   documented reserved bytes (the 4-byte ack's two trailing zeros, §1.4).
+3. **A new error/status code in an existing namespace.** The "subsystem compiled out" case is
+   exactly this — a target that lacks `0x76` or PIPE needs a *code* meaning "unsupported", not
+   a new opcode (see §1 opcode coverage, where `OD_ERR_PIPE_START_BAD_HEADER` is currently
+   misused for it).
+4. **A new packet type in the config TLV**, which is versioned and skippable by design, so
+   unknown types degrade gracefully on old firmware. Far cheaper than a new opcode.
+5. **A new opcode** — last resort.
+
+**But do propose one when it genuinely simplifies the structure.** This is not a prohibition.
+If a new opcode removes a class of special-casing, collapses several overloaded meanings of an
+existing opcode, or replaces a fragile inference with an explicit signal, that is a real
+simplification and worth the wire cost. Two live candidates from this document:
+
+- **Capability / limits discovery.** `MAX_CONFIG_SIZE` diverges (2048 on BG22, 4096 elsewhere,
+  §2.7) with no way for a host to learn the limit, so oversized configs are silently truncated.
+  Today the host must infer capability from firmware version. Whether that becomes a new
+  opcode, an extension of `0x43 FIRMWARE_VERSION`, or a config TLV field is exactly the kind of
+  trade-off to argue explicitly rather than settle by whoever implements first.
+- **Explicit compression signalling.** Direct-write infers "compressed" from payload length
+  rather than a flag (§3.1). It works, but it is inference where a bit would do.
+
+A proposal must state: what it replaces, why options 1-4 cannot carry it, and the cost to every
+target including those that will NACK it. Land the argument in these docs first — the canonical
+headers are frozen, so no opcode can be added unilaterally regardless.
+
+**This document is maintained, not a one-time survey.** Update it when a feature lands in any
+repo, when a target adds or drops a capability, and when a subsystem is promoted to
+`shared/core`. The capability matrix in § "Opcode coverage" is the quick answer to "what does
+this repo support"; the behavioural tables are the detail.
+
+## Reading the table
+
+- **spec** = the canonical header (`shared/protocol/opendisplay_protocol.h`, 2.2+unreleased).
+- "all three" = `Firmware` (ESP32/nRF52840), `Firmware_NRF54`, `Firmware_Silabs`.
+- Where implementations unanimously contradict the spec, the fix is a **spec correction**
+  (recommendation only — the header is frozen for this exercise), not three firmware changes.
+
+## 0. Capability matrix — what each repo supports
+
+The non-opcode half of "what does this repo do". Opcode-level coverage is in § "Opcode
+coverage" below. `Firmware` is split where its two chip families differ, because they do.
+
+| Capability | Firmware / ESP32 | Firmware / nRF52840 | NRF54 | Silabs | NRF legacy |
+|---|---|---|---|---|---|
+| BLE transport | NimBLE | Bluefruit | Zephyr BT host | Silabs BGAPI (`sl_bt_*`) | Nordic SoftDevice |
+| WiFi / LAN TLS transport | **yes** (`#124`) | no | no | no | no |
+| Inflate engine | uzlib + **tinfl ROM** (`#124`) | uzlib | uzlib | uzlib | **none** (uncompressed only) |
+| zlib window default | 512 B (32 KB on `esp32-s3-E1004` only) | 512 B | 512 B | 512 B | n/a |
+| Panel backend | bb_epaper SPI + **FastEPD parallel** (S3) | bb_epaper SPI | bb_epaper SPI | bb_epaper SPI | direct driver |
+| `MAX_CONFIG_SIZE` | 4096 | 4096 | 4096 | **2048** | — |
+| Crypto backend | mbedTLS CCM | mbedTLS CCM | PSA | PSA | `ocrypto` |
+| PIPE sliding window `0x80`-`0x82` | **yes — only implementation** | no | no | no | no |
+| Partial region `0x76` | yes | yes | yes | no (fail-fast NACK) | no |
+| NFC endpoint (TNB132M) | no | no | **yes** | **yes** | no |
+| Buzzer | yes | yes | yes | no (NACK) | no |
+| Channel Sounding / ranging | no | no | **yes** (`device_flags` bit 5, default off) | no | no |
+| Kernel | Arduino loop / FreeRTOS | Arduino loop | Zephyr | **none** (superloop) | none |
+| Config storage | LittleFS/NVS | NVS | Zephyr settings | NVM3 | flash |
+
+Bold marks a capability unique to one column, in either direction — those are the cells that
+show convergence is not one-way. `Firmware`'s ESP32 column is the widest, which is what
+"models the feature set" means concretely; Silabs is the narrowest and defines the floor
+`shared/core` must fit through.
+
+Keep this table current as features land. A cell that changes without the table changing is
+how the four repos drifted apart the first time.
+
+## 1. Framing and dispatch
+
+| # | Behaviour | spec | Firmware | NRF54 | Silabs | Resolution for `shared/core` |
+|---|---|---|---|---|---|---|
+| 1.1 | Auth-required reply | `[0xFE][echo]` (status byte 0xFE) | `{0x00, cmd_lo, 0xFE}` — 0xFE as *data* (`src/communication.cpp:630,637`) | same (`src/opendisplay_pipe.c:277`) | same (`opendisplay_pipe.c:227`) | Implementations are unanimous and clients parse the shipped shape. **Correct the spec** to `[0x00][echo][0xFE]`; do not change firmware. |
+| 1.2 | Decrypt-failure reply | not specified | `{0x00, cmd_lo, 0xFF}` (`communication.cpp:668`) | same (`opendisplay_pipe.c:1349`) | same (`opendisplay_pipe.c:1244`) | Adopt as-is; document in spec. |
+| 1.3 | Oversize inbound frame | reject via ATT 0x0D (declared GATT max) | GATT `max_len` = `OD_BLE_MAX_FRAME` rejects at ATT layer (`src/ble_init.cpp:277-286`) | app-level NACK `{0xFF, cmd_lo, 0xFE}` (`opendisplay_pipe.c:1333-1337`) | same app-level NACK (`opendisplay_pipe.c:1231-1235`) | Keep both belts: declare GATT max per target *and* keep the core-level length check (LAN has no ATT layer). |
+| 1.4 | Ack frame width | 2-byte `[0x00][echo]` | config/LED/buzzer acks are **4-byte** `{status, echo, 0x00, 0x00}` (`communication.cpp:476-486`); direct-write acks 2-byte | same split (`opendisplay_pipe.c:811-812, 891-892, 743-755`) | same | Adopt the shipped shapes verbatim (clients depend on them); spec should document the two trailing zero bytes as reserved. |
+| 1.5 | Plaintext exemptions when security on, pre-auth | AUTHENTICATE + FIRMWARE_VERSION always plaintext; Silabs also READ_MSD | exempts AUTH + FW_VERSION before the gate (`communication.cpp:613-621`); config write/chunk pass if `rewrite_allowed` flag, after secure erase (`:447-455, 508-517`) | same policy (`opendisplay_pipe.c:1187-1214`), plus rejects *plaintext* non-FW_VERSION commands **mid-session** (`:1356-1370`) | dispatch auth-gates everything except AUTHENTICATE (`opendisplay_pipe.c:1079-1084`); READ_MSD forced plaintext in `pipe_send` (`:532`) | **NRF54 is right** (most complete and matches spec). Shared dispatcher fixes both Silabs issues on adoption. |
+| 1.5a | **Encrypted-frame detection when security on** | gate on `isEncryptionEnabled()` | length gate: decrypt only if `len ≥ BLE_CMD_HEADER+NONCE+TAG` else treat as auth-required (`communication.cpp:635`) | length gate `frame_len ≥ 31`, but **also** rejects short plaintext mid-session (`opendisplay_pipe.c:1342-1370`) — closes the hole | length gate `frame_len ≥ 31` with **no mid-session guard** (`opendisplay_pipe.c:1238-1251`) | **Security bug on Silabs**: once any client authenticates, a *short* (<31 B) plaintext command — REBOOT (2 B), DEEP_SLEEP, DIRECT_WRITE_END — bypasses CCM and executes, because `dispatch()` only blocks when there is *no* live session. NRF54's mid-session plaintext rejection is the correct model; shared dispatcher must gate on `sec_enabled()`, never on frame length. |
+| 1.5b | NACK confidentiality | unspecified | NACKs (0xFF) sent unencrypted (`communication.cpp:218`) | same (`opendisplay_pipe.c:571`) | same — every NACK forced plaintext (`opendisplay_pipe.c:532`) | Unanimous; document. A NACK leaks only an opcode+error code, so plaintext is acceptable, but make it a deliberate rule in `shared/core`. |
+| 1.6 | Origin-gated decrypt (LAN TLS bypasses CCM) | SECTION 9 rule 4 | implemented via `g_commandOrigin` (`communication.cpp:27-45, 623-679`) | n/a (no LAN) | n/a | Core takes `origin` as an explicit argument of frame RX (see SHARED_API_DESIGN.md); no global. |
+| 1.7 | Execution context | unspecified | single `loop()` task; BLE cb enqueues to `commandQueue`, responses via 10-slot ring (`communication.cpp:89-131`) | BT RX thread copies into `K_MSGQ` (8 × 514 B ≈ 4.1 KB), main thread drains via `opendisplay_pipe_process()` (`opendisplay_pipe.c:70-84, 1375-1425`) | dispatch runs directly in the BGAPI event handler, i.e. superloop context (`opendisplay_pipe.c:1271-1298`) | Adopt the NRF54 shape as the core API: RX enqueue + `od_core_process()` pump. Silabs pumps inline (queue depth 1); queue depth is a target macro. |
+| 1.8 | Long-write reassembly (ATT prepare/execute) | unspecified | not needed (NimBLE hands whole values) | rejects > 509 B at msgq bound (`opendisplay_pipe.c:75, 1380`) | explicit offset-based reassembly into `s_long_write_buf` (`opendisplay_pipe.c:1209-1227`) | Keep reassembly in the target BLE glue, not in core — it is a transport artifact. |
+| 1.9 | Unknown opcode | no reply specified | logs, **no reply** (`communication.cpp:750-752`) | logs, no reply (`opendisplay_pipe.c:1316-1318`) | logs, no reply (`:1188-1190`) | Adopt; note clients must use timeouts for unknown commands. |
+
+### Opcode coverage (implemented handler exists)
+
+| Opcode | Firmware | NRF54 | Silabs | NRF legacy | Notes |
+|---|---|---|---|---|---|
+| 0x0F REBOOT | yes | yes | yes | yes | |
+| 0x40/41/42 CONFIG R/W/CHUNK | yes | yes | yes | yes | |
+| 0x43 FW_VERSION | yes | yes | yes | yes | all reply `[00][43][maj][min][sha_len][sha≤40]` — the `sha_len` byte is not in the spec's layout (`communication.cpp:382-392`, `opendisplay_pipe.c:587-608`) |
+| 0x44 READ_MSD | yes | yes | yes | **no** (macro only) | |
+| 0x45 CONFIG_CLEAR | yes | yes | **no case — silent drop** (grep: zero hits in `opendisplay_pipe.c`) | no | **spec error**: `@targets` for 0x45 lists Silabs. Either implement on Silabs or fix `@targets`. |
+| 0x50 AUTHENTICATE | yes | yes | yes | yes | |
+| 0x51 ENTER_DFU | yes | yes | yes | yes | |
+| 0x52 POWER_OFF | yes (latch HW) | **no case — silent drop** (`opendisplay_pipe.c:1216-1319` switch) | NACK unsupported (`:1114-1123`) | no | spec says non-latch targets NACK `[FF][52][00]`. **NRF54 gap** — Silabs is the compliant model. |
+| 0x53 DEEP_SLEEP | yes | recognized, deliberately **no reply** (`:1248-1254`) | ACKs then EM4, ignores payload (`:1124-1130`) | yes (opcode drift, see above) | spec permits both ("may instead stay silent"); shared handler should emit the proper NACK namespace and make silence unnecessary. |
+| 0x70/71/72 DIRECT_WRITE | yes | yes | yes | yes (uncompressed only) | |
+| 0x73/0x75 LED | yes | yes | yes | 0x73 only | |
+| 0x76 PARTIAL | yes | yes | NACK `{FF,76,07,00}` fail-fast (`:1177-1186`) | no | Silabs fail-fast NACK is correct behaviour for an unsupporting target — adopt as the default for any compiled-out subsystem. |
+| 0x77 BUZZER | yes | yes | NACK `{FF,77,07,00}` | no | |
+| 0x80-0x82 PIPE | **yes — only implementation** | no (silent drop) | no (silent drop) | no | non-implementing targets should NACK the 0x80 START (`OD_ERR_PIPE_START_BAD_HEADER` is wrong; needs an "unsupported" code — spec gap) rather than silently drop. |
+| 0x83 NFC | no (falls to default; `communication.cpp:684-685`) | yes | yes | no | |
+
+## 2. Config TLV parsing
+
+Three parsers (`Firmware/src/config_parser.cpp` 919 C++, `Firmware_NRF54/src/opendisplay_config_parser.c` 696 C, `Firmware_Silabs/opendisplay_config_parser.c` 529 C) share the same outer container: toolbox-outer CRC16-CCITT-FALSE with the two length bytes fed as zeros (`config_parser.cpp:252-268`, NRF54 `:70-95`, Silabs `:17-45` — Silabs alone uses the `OD_CONFIG_CRC_*` named constants).
+
+| # | Behaviour | Firmware | NRF54 | Silabs | Resolution |
+|---|---|---|---|---|---|
+| 2.1 | Packet-type coverage | 14 types; **no 0x2A NFC** (`config_parser.cpp:329-614`) | size-table for all types, cross-checked against three sources (`:105-109`) | 15 types incl. 0x2A NFC; skips 0x26/0x28/0x29/0x2C as host-only (`:103-463`) | Shared parser covers the full `opendisplay_structs.h` set; per-target `#if` only for *applying* a packet, never for parsing it. |
+| 2.2 | Unknown packet type | skip to CRC | **size-table skip**: known-size packets are stepped over; only genuinely unknown IDs force skip-to-CRC, plus a `rescan_security_packet` fallback so 0x27 after an unknown ID still loads (`:42-46, 621-623`) | skip handling per-type | **NRF54 is right** — its comment documents the exact bug the others have (a new packet type ahead of 0x27 silently drops security config). Take the size-table + ordered-scan design. |
+| 2.3 | Chunked-write validation | does **not** validate declared total ≤ `MAX_CONFIG_SIZE` at START; commits when `receivedChunks ≥ expectedChunks` without checking `receivedSize == totalSize` (`communication.cpp:456-478, 527-537`) | validates total at START (`opendisplay_pipe.c:906`), rejects END with `received_size != total_size` (`:1004-1009`), binds the chunk context to a connection (`:901, 972`) | as NRF54 minus some checks | **NRF54 is right**; adopt all three tightenings. |
+| 2.4 | Session invalidation after config save | `clearEncryptionSession()` in `reloadConfigAfterSave` (`communication.cpp:67`) | `clear_session()` on every save path (`opendisplay_pipe.c:939, 960, 1012`) | **never clears the session after a save** (`clear_session` call sites: `:118, 431, 621, 673, 1263` — none post-save) | **Security-relevant Silabs bug**: change the encryption key over an old session and the old session keeps working. Firmware/NRF54 behaviour wins. |
+| 2.5 | Config-read scratch | shared 4 KB scratch, `getConfigScratch()` — deliberate stack-overflow avoidance (`communication.cpp:395-399`) | **own 4 KB static** `config_data[MAX_CONFIG_SIZE]` (`opendisplay_pipe.c:824`) on top of the 4 KB chunk buffer — ~20 KB of config buffers total across the file | shared scratch `opendisplay_config_buf()` (`opendisplay_pipe.c:725-727`) | One shared scratch (Firmware/Silabs pattern). On BG22 the NRF54 pattern would waste 4 KB of a 32 KB chip. |
+| 2.6 | Read chunk cap | `(MAX_CONFIG_SIZE+93)/94` (`communication.cpp:405-408`) | same, with the derivation comment (`:826-832`) | `ceil(MAX_CONFIG_SIZE / (MAX_RESPONSE_DATA_SIZE-6))` — same value, cleaner form (`:729-735`) | Silabs form. |
+| 2.7 | **`MAX_CONFIG_SIZE`** | — | **4096** (`config_parser.h:7`) | **4096** (`opendisplay_config_storage.h:18`) | **2048** (`opendisplay_config_storage.h:7`, NVM3 record 2064 B) | **Genuine wire-relevant divergence.** A config that fits on nRF but not BG22 is silently truncated at 2048 on Silabs. `shared/core` must expose `MAX_CONFIG_SIZE` as a target macro, and the host (`py-opendisplay`) must know the smallest target's limit. Not a "buffer sizing" nicety — it caps how much config a device can hold. |
+| 2.8 | Outer CRC16 enforcement | advisory only — mismatch logs, config still applied (`config_parser.cpp:665-672` region) | advisory only (`opendisplay_config_parser.c:657-670`) | advisory only (`opendisplay_config_parser.c:490-498`) | **Unanimous** — the toolbox-outer CRC16 is never enforced anywhere; a second inner CRC32 in the storage record *is* enforced on load. So there is no divergence, but `shared/core` should decide deliberately whether to start enforcing CRC16 (it currently protects nothing). |
+
+## 3. Direct-write 0x70/0x71/0x72
+
+| # | Behaviour | Firmware | NRF54 | Silabs | Resolution |
+|---|---|---|---|---|---|
+| 3.1 | Compressed START detection | `len >= 4` ⇒ compressed, `[uncompressed_size:4 LE]` validated against computed panel geometry (`display_service.cpp:2138-2148`). **No flag byte** — length is the only signal | same wire contract via `opendisplay_display_direct_write_start` (`.cpp:771`) | same (`opendisplay_display.cpp:788`) | identical — promote as-is, but document that "compressed" is inferred from payload length, not a flag. |
+| 3.1a | **zlib window (`OPENDISPLAY_ZLIB_WINDOW_BITS`)** | encoder must match | default **9 (512 B)**; only `env:esp32-s3-E1004` pins **15 (32 KB)** (`platformio.ini:152`); heap window on most envs | **9 static** (`zephyr/CMakeLists.txt:66` sets `USE_HEAP_WINDOW=0`) | **9 static** (`opendisplay-bg22.cmake:269-270`) | **The workspace-level "existing targets pin 32 KB for legacy-client compatibility" note is wrong for all but one board.** The real default is 512 B everywhere; exactly one ESP32-S3 board wants 32 KB. All targets *reject* a stream whose CMF declares a window larger than their limit (`od_zlib_stream.c:641-644`), so the encoder MUST cap `windowBits` at the smallest target it addresses — 9. `shared/compress` treats window as a per-target macro, floor 9; see MEMORY_CONSTRAINTS.md. |
+| 3.2 | Uncompressed auto-complete | when `bytes_written == total`, END runs implicitly without a 0x72 (`display_service.cpp:2331-2332`) | *unverified at line level* (delegated into `opendisplay_display.cpp`) | *unverified* | Spec does not document auto-complete. Keep it (clients rely on it for full-frame pushes) and document it; verify NRF54/Silabs parity during their subsystem swaps. |
+| 3.3 | END ack ordering | END-ack **before** the blocking refresh, then 0x73/0x74 (`display_service.cpp:2382-2385` comment + code) | same, explicitly, with a 20 ms TX drain gap (`opendisplay_pipe.c:796-799`) | **refresh happens first** — `opendisplay_display_direct_write_end` blocks through the ≤60 s refresh (`opendisplay_display.cpp:854-894`) and only then are `[00][72]` + `[00][73/74]` sent (`opendisplay_pipe.c:707-722`) | Spec and two of three say ack-then-refresh. **Silabs diverges**: its END ack can arrive a minute late; clients that time out on the END ack see false failures. Fix on adoption. |
+| 3.4 | Refresh-mode byte on END | partial session: 0 FULL / 1 FAST / else PARTIAL (`display_service.cpp:2362-2364`); full: 0/1 | same contract | `payload[0]==1` ⇒ FAST else FULL (`opendisplay_display.cpp:875-877`) — no partial mode exists | consistent given capability differences. |
+| 3.5 | Stray legacy frames mid-PIPE | 0x71/0x72 silently discarded while `pipeState.active` (`display_service.cpp:2280-2285, 2339-2343`) | n/a | n/a | Part of the PIPE state machine; promote with it. |
+
+## 4. Partial-region 0x76
+
+Only `Firmware` and `Firmware_NRF54` implement it. The `Firmware` handler is the reference
+(`display_service.cpp:2173-2278`): 17-byte **big-endian** header, flags-whitelist →
+etag (`old != 0 && old == displayed && new != 0`) → 1bpp-only → rect OOB → x/w alignment
+(mult. of 8), then a two-plane stream (`plane_size * 2`, old plane then new). Error codes
+are the `OD_ERR_PARTIAL_*` namespace, and any geometry/etag NACK clears `displayed_etag`.
+NRF54 delegates to `opendisplay_display_partial_write_start(payload, len, &err_code_out)`
+(`opendisplay_pipe.c:727-739`) with the same NACK framing; its internal validation order was
+**not line-verified** here — check parity during the subsystem swap.
+
+Two spec gaps found: 0x76 has no `RESP_*` mirror constant, so the echo byte is a raw
+literal in firmware (TODO recorded at `display_service.cpp:2231-2234`) — add
+`RESP_PARTIAL_WRITE_START` to the canonical header. And the PIPE-partial twin packs the
+same geometry **little**-endian (`display_service.cpp:2483-2494`), which the spec does
+document but which any shared header-parser must treat as two distinct layouts.
+
+## 5. PIPE sliding window 0x80-0x82 (Firmware only)
+
+The one subsystem with a single implementation, so no divergence — but its constants and
+invariants must be recorded before promotion because no other repo can cross-check them:
+
+- **Reorder queue**: `PIPE_REORDER_SLOTS` 33 (17 with `PIPE_SMALL_DRAM_WINDOW`), slot =
+  4 + 248 data bytes ⇒ **~8.3 KB .bss** (~4.3 KB small) (`src/structs.h:32-53, 99-104`,
+  `display_service.cpp:573-577`). `seq % SLOTS` is collision-free because a live window
+  spans ≤ W < SLOTS.
+- **Negotiation**: min-rule on window/ack-cadence/frame (`display_service.cpp:2725-2731`),
+  response `{00,80,ver,W,N,frame:2LE,resp_flags}` (`:2785-2787`).
+- **SACK**: 7-byte `{00,81,highest_seen,mask:4 LE}`; mask bit *i* = chunk
+  `highest_seen-1-i` received; the accepted-prefix depth is bounded by `received_count` to
+  avoid mod-256 phantom acks in the first 32 chunks (`:2512-2546`).
+- **NACKs are fatal**: 8-byte `{FF,81,err,hs,mask:4}`; state deliberately not reset so the
+  NACK payload reflects it; further 0x81 discarded until next START (`:2562-2566`).
+- **The replay-window coupling is a hidden invariant**: the AES-CCM nonce counter advances
+  at decrypt time for *every* 0x81 frame, including ones later queued or discarded, and the
+  design depends on `in-flight ≤ W ≤ 32 ≤ ±32 replay window`
+  (`communication.cpp:740-745`, `encryption.cpp:128-136`). If `shared/core` ever raises
+  `PIPE_MAX_W` above 32 it must raise the replay window in lock-step. Encode this as a
+  `static_assert` in the shared implementation.
+- Uncompressed full-frame transfers auto-complete like legacy; **partial transfers never
+  auto-complete** (`display_service.cpp:2481-2494, 2848`).
+
+`shared/core` must make PIPE fully compile-out (`OD_PIPE_ENABLE=0`): Silabs cannot spend
+8.3 KB (or even 4.3 KB) of RAM on it, and the spec's own `@targets` says only Firmware has
+it. A non-implementing target should NACK the 0x80 START instead of today's silent drop —
+which needs an "unsupported" code in the `OD_ERR_PIPE_START_*` namespace (spec addition).
+
+## 6. Session auth / AES-CCM
+
+The good news: the KDF chain is **byte-identical in all four repos** — label
+`"OpenDisplay session"`, CMAC over `label||0x00||device_id||client_nonce||server_nonce||0x00 0x80`,
+ECB finalization, session_id = first 8 bytes of CMAC(session_key, client||server)
+(`encryption.cpp:61-107`, NRF54 `opendisplay_pipe.c:218-265`, Silabs same,
+`Firmware_NRF/encryption.c:96-126`). Also identical: 30 s challenge window, 10-attempts/60 s
+rate limit, ±32 counter window + 64-entry seen-list, 3-strike integrity teardown
+(`encryption.cpp:526-560`, NRF54 `:407-438, 129-141`).
+
+| # | Behaviour | Firmware | NRF54 | Silabs | Resolution |
+|---|---|---|---|---|---|
+| 6.1 | STEP-2 success frame | **19 bytes**: `[00][50][00][server_proof:16]` where proof = CMAC(session_key, server_nonce‖client_nonce‖device_id) (`encryption.cpp:626-641`) | identical (`opendisplay_pipe.c:714-724`) | identical | Spec documents only `[0x00][0x50][AUTH_STATUS_SUCCESS]` — the 16-byte mutual-auth proof is **undocumented**. Spec correction. |
+| 6.2 | Session timeout basis | absolute from `session_start_time` (`checkEncryptionSessionTimeout`) | absolute, with a comment explaining why idle-based is wrong (`opendisplay_pipe.c:163-171`) | **idle-based** on `last_activity_ms` (`opendisplay_pipe.c:117`) — a continuously active session never expires | Firmware/NRF54 win; the NRF54 comment is the rationale. Fix Silabs on adoption. |
+| 6.3 | Crypto backend | mbedTLS CMAC/CCM or CC310 (`#ifdef` arms, `encryption.cpp:15`) | PSA for CMAC/ECB/RNG, but **CCM hand-rolled** RFC 3610 over ECB (`opendisplay_pipe.c:282-405`) | same hand-rolled CCM | `od_hal_crypto` exposes **CCM as the primitive** (mbedTLS, PSA `psa_aead_*`, and CC3xx all have native CCM); keep the RFC 3610-over-ECB implementation in `shared/core` as a selectable soft fallback (`OD_CRYPTO_SOFT_CCM`), not per-target copies. |
+| 6.4 | Legacy backend | — | — | — | `Firmware_NRF` uses Nordic `ocrypto_*` (`encryption.c:7-9`) — SDK-locked; irrelevant once the repo is dropped. |
+
+## 7. Advertisement / MSD
+
+No semantic divergence — one 16-byte `struct MsdAdvertisement` (canonical
+`opendisplay_structs.h`), company id `0x2446` little-endian, dynamic sensor bytes,
+temperature byte, battery-voltage low byte + 9th bit in status, 4-bit loop counter:
+
+- Firmware builds via the canonical struct and dedupes identical payloads before
+  re-advertising (`display_service.cpp:1734-1821`).
+- Silabs packs the same `msd_payload[2..15]` into the 0xFF AD record and moves the 16-bit
+  service UUID `0x2446` to the scan response for space (`opendisplay_ble.c:1705-1754`,
+  company id at `:22`).
+- NRF54 uses the same company id and GATT UUID (`opendisplay_ble.c:33, 308-309`).
+
+Resolution: the 16-byte payload build (sensor encode, voltage clamp to 511×10 mV,
+temperature offset+40 ×2, status bits) is pure logic → `shared/core`. AD-record packing and
+re-advertise mechanics stay per target (NimBLE vs Zephyr `bt_le_adv_update_data` vs
+`sl_bt_legacy_advertiser_set_data` differ in whether the name fits the ADV PDU).
+
+## 8. Protocol-header state (report only — headers frozen)
+
+Verified with `sync_protocol_header.py --check` and `git show`:
+
+1. Canonical is 2.2 + an unreleased `OD_BLE_MAX_FRAME` addition. The vendored **protocol**
+   copies in NRF54 / Silabs / NRF are one push behind (missing `OD_BLE_MAX_FRAME`);
+   `Firmware` local and `Firmware_Unified/shared/protocol/` match canonical.
+2. **`upstream/main` of `Firmware` — the true ESP32 import source — is at 2.1**, missing
+   all of 2.2 (SECTION 9 LAN) and the unreleased entries.
+3. `upstream/main` hand-edited `include/opendisplay_structs.h` in PR #120 — three
+   comment-only Seeed_GFX→FastEPD wording changes (PanelIC `@external` note, ids 3000/3001
+   doc strings, `dc_pin` doc). No wire change. **Canonical still carries the old wording**,
+   so the required sequence is: apply the FastEPD wording to the canonical structs header
+   first, then `--push` — a bare `--push` today would *revert* upstream's edit.
+4. `Firmware_Silabs` has a second, unmaintained `include/opendisplay_protocol.h` stale at
+   2.1; nothing compiles it today only by include-path order. Do not carry it into
+   `targets/efr32bg22-slc/` (see `targets/efr32bg22-slc/README.md`).
+5. The sync tool's copy map still lacks `Firmware_Unified/shared/protocol/`.
+
+Spec corrections accumulated from the matrix (all backward-looking documentation of shipped
+behaviour, i.e. no-bump or MINOR under the header's own policy): 1.1 auth-required shape,
+1.2 decrypt-failure shape, 1.4 reserved ack padding, 0x43's `sha_len` byte, 6.1 the STEP-2
+server proof, 3.2 auto-complete, `RESP_PARTIAL_WRITE_START`, a PIPE-START "unsupported"
+error code, and the 0x45 `@targets` fix (or a Silabs implementation).
