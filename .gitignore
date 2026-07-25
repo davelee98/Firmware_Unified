@@ -1,0 +1,41 @@
+# PlatformIO (targets/esp32-nrf52840-pio)
+.pio/
+.pioenvs/
+.piolibdeps/
+platformio.local.ini
+
+# Zephyr / nRF Connect SDK (targets/nrf54l15-zephyr)
+build/
+twister-out*/
+.west/
+
+# Simplicity SDK / SLC (targets/efr32bg22-slc)
+autogen/
+cmake_gcc/build/
+*.slps
+artifact/
+
+# Nordic SDK (targets/nrf52-sdk)
+_build/
+
+# Build artefacts
+*.o
+*.a
+*.elf
+*.bin
+*.hex
+*.uf2
+*.map
+*.gbl
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Secrets and provisioning — never commit these
+*.pem
+*.key
+secrets.*
+factory_config*.hex

@@ -1,0 +1,44 @@
+name: shared boundary
+
+# The value of this repo rests on one invariant: shared/ compiles for EVERY target, so it
+# may not include a vendor or framework header. That decays into a review habit unless it is
+# enforced mechanically -- the moment one esp_*/nrf_*/zephyr include lands in shared/, that
+# file stops being shareable and the repo quietly becomes four codebases in one directory.
+on:
+  push:
+  pull_request:
+
+jobs:
+  no-vendor-includes-in-shared:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject vendor/framework includes under shared/
+        run: |
+          # Header patterns that pin a file to one SDK. Extend as targets are imported.
+          PATTERN='#[[:space:]]*include[[:space:]]*[<"]([[:space:]]*)?(esp_|esp32|nrf_|nrfx|nrf\.h|sl_|sli_|em_|zephyr/|Arduino\.h|WiFi\.h|bluefruit\.h|NimBLE|bb_epaper|TFT_eSPI|freertos/)'
+          if grep -rInE "$PATTERN" shared/ ; then
+            echo
+            echo "::error::vendor/framework include found under shared/."
+            echo "shared/ must use only the C/C++ standard library and shared/hal interfaces."
+            echo "Move the offending file to targets/<target>/, or route the dependency"
+            echo "through a shared/hal interface. See docs/ARCHITECTURE.md."
+            exit 1
+          fi
+          echo "OK: no vendor/framework includes under shared/"
+
+      - name: Protocol headers must not be hand-edited
+        run: |
+          # shared/protocol/ is a byte-for-byte copy of the canonical opendisplay-protocol
+          # source. It deliberately contains no structs-with-behaviour, functions, or
+          # typedefs beyond the config packets -- those are per-target concerns.
+          if grep -rInE '^[[:space:]]*(void|int|bool|uint[0-9]+_t|static)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(' shared/protocol/ ; then
+            echo
+            echo "::error::function declaration found in shared/protocol/."
+            echo "These files are pure constants + config structs, synced from"
+            echo "opendisplay-protocol. Never hand-edit them; change the canonical source"
+            echo "and re-run tools/sync_protocol_header.py --push."
+            exit 1
+          fi
+          echo "OK: protocol headers contain no function declarations"
