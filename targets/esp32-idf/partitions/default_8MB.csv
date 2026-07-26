@@ -1,0 +1,13 @@
+# ESP32-S3 8 MB, dual app slots. Equivalent to the Arduino core's default_8MB.csv, which the
+# PlatformIO build pulled from the platform package rather than the source repo -- so it is
+# authored here, same as default_16MB.csv.
+#
+# 3.2 MB per slot. The S3 image measures ~1.26 MB (2026-07-26, board s3-n16r8), so this has
+# roughly 2.5x headroom and is not a gate the way the 4 MB parts are.
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xe000,   0x2000,
+app0,       app,  ota_0,    0x10000,  0x330000,
+app1,       app,  ota_1,    0x340000, 0x330000,
+spiffs,     data, spiffs,   0x670000, 0x180000,
+coredump,   data, coredump, 0x7f0000, 0x10000,

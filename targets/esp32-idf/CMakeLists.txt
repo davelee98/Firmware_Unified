@@ -36,6 +36,43 @@ foreach(frag ${OD_SDKCONFIG_FRAGMENTS})
     set(SDKCONFIG_DEFAULTS "${SDKCONFIG_DEFAULTS};${CMAKE_CURRENT_LIST_DIR}/${frag}")
 endforeach()
 
+# OD_PARTITION_CSV vs CONFIG_PARTITION_TABLE_CUSTOM_FILENAME: two places naming one layout.
+#
+# The partition table is really selected by the CONFIG_ line in the board's sdkconfig
+# fragment; OD_PARTITION_CSV is documentation. That made it a trap -- set one, forget the
+# other, and you silently build the wrong layout with nothing to notice. Rather than delete
+# the variable (it is the only place a reader sees the layout next to the board's other
+# facts), make disagreement a configure-time error.
+if(DEFINED OD_PARTITION_CSV)
+    if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/${OD_PARTITION_CSV}")
+        message(FATAL_ERROR
+            "Board '${OD_BOARD}' sets OD_PARTITION_CSV=${OD_PARTITION_CSV}, which does not exist.")
+    endif()
+    set(_od_csv_seen FALSE)
+    foreach(frag ${OD_SDKCONFIG_FRAGMENTS})
+        file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/${frag}" _od_lines
+             REGEX "^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=")
+        foreach(_line ${_od_lines})
+            string(REGEX REPLACE "^CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"?([^\"]*)\"?$"
+                   "\\1" _od_csv "${_line}")
+            set(_od_csv_seen TRUE)
+            if(NOT _od_csv STREQUAL OD_PARTITION_CSV)
+                message(FATAL_ERROR
+                    "Board '${OD_BOARD}' disagrees about its partition table:\n"
+                    "  OD_PARTITION_CSV                     = ${OD_PARTITION_CSV}\n"
+                    "  CONFIG_PARTITION_TABLE_CUSTOM_FILENAME = ${_od_csv}  (in ${frag})\n"
+                    "The CONFIG_ line is what actually takes effect. Make them match.")
+            endif()
+        endforeach()
+    endforeach()
+    if(NOT _od_csv_seen)
+        message(FATAL_ERROR
+            "Board '${OD_BOARD}' sets OD_PARTITION_CSV but no sdkconfig fragment sets "
+            "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME, so the layout would silently be IDF's "
+            "default rather than ${OD_PARTITION_CSV}.")
+    endif()
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 project(opendisplay)

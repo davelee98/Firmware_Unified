@@ -62,15 +62,39 @@ Two things worth carrying forward:
   tree was already correctly gated. That is a real result about the phase-B port's quality and
   it de-risks item 3.
 
-## 3. The remaining eight boards
+## 3. The remaining boards — DONE (2026-07-26), except `s3-e1004`
 
-`s3-n16r8` and `c6-n4` exist. The other eight from `platformio.ini` need board fragments; most are
-copies differing in flash size, PSRAM and the FastEPD/Seeed flags. `esp32-n4` (classic, 320 KB
-RAM) is the one to expect trouble from — it needs the reduced PIPE reorder window.
+All ten fragments exist and all ten build. Sizes and slot headroom are in
+[targets/esp32-idf/README.md](../targets/esp32-idf/README.md) § Boards.
 
-## 4. Phase C — drive `SHIM_BUDGET` from 21 to 0
+`esp32-n4` was expected to be the troublesome one; it was not. `PIPE_SMALL_DRAM_WINDOW` was
+already in `structs.h` from the import, and at 695 KB it is the *smallest* image of the ten by
+45% — it is the only board that does not compile the WiFi/LAN transport. The board actually
+worth watching is `c6-n4`: 23% slot headroom against 62-81% everywhere else, and it is shipped.
 
-The ratchet (`targets/esp32-idf/compat/ratchet.sh`) enforces that the number only falls. Each
+`s3-e1004` has no fragment on purpose. The source env pins `limengdu/bb_epaper` for T133A01;
+this repo vendors a fork without it, so the board would build and be unable to drive its
+panel. It needs a re-vendor plus a fix to `e1004_write_stream_bytes()` (calls `SPI.writeBytes()`
+with nothing calling `SPI.begin()`). See third_party/NOTICE.md.
+
+Three findings fell out of doing this, all fixed:
+
+* `OD_FASTEPD_BOARDS` was wrong — it listed `s3-e1004`, whose env sets neither the FastEPD
+  define nor the lib_dep, and omitted `s3-n8r8` and both `s3-n16r8-extuart` boards.
+* `compat/HardwareSerial.h` did not exist. `main.cpp` has included it since the import, inside
+  the `OPENDISPLAY_LOG_UART` guard that no board fragment defined until now — so the target's
+  most Arduino-dependent file was also scoring zero against the ratchet.
+* `OD_PARTITION_CSV` was documentation only; the layout is really chosen by
+  `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME`. Disagreement between the two is now a
+  configure-time error instead of a silently wrong flash layout.
+
+## 4. Phase C — drive `SHIM_BUDGET` from 22 to 0
+
+The ratchet (`targets/esp32-idf/compat/ratchet.sh`) enforces that the number only falls.
+It reads 22, not the 21 of the phase-B baseline: adding the `*-extuart` boards revealed that
+`HardwareSerial.h` was missing from the pattern and `main.cpp` had never been counted. The
+shim did not grow — see compat/SHIM_BUDGET for why that distinction is recorded rather than
+quietly applied. Each
 step is a subsystem that stops needing Arduino, and MIGRATION.md forbids batching them: one at a
 time, each independently revertable.
 

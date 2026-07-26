@@ -57,7 +57,7 @@ fi
 # aborts the script on the healthiest possible state -- zero shim users. Without it this check
 # fails hardest exactly when the port has succeeded.
 shim_users() {
-    grep -rlE '#[[:space:]]*include[[:space:]]*[<"][[:space:]]*(arduino_compat|Arduino|Wire|SPI|WiFi|ledc_compat|esp32-hal-gpio)\.h' \
+    grep -rlE '#[[:space:]]*include[[:space:]]*[<"][[:space:]]*(arduino_compat|Arduino|Wire|SPI|WiFi|ledc_compat|esp32-hal-gpio|HardwareSerial)\.h' \
          targets/esp32-idf --include='*.c' --include='*.cpp' --include='*.h' \
          --include='*.hpp' --include='*.inl' 2>/dev/null \
         | grep -v '^targets/esp32-idf/compat/' || true
@@ -73,7 +73,7 @@ shim_users() {
 # Reported separately and never enforced. The real fix for these is upstream IO backends
 # (see third_party/NOTICE.md), not a number that has to fall.
 third_party_shim_users() {
-    grep -rlE '#[[:space:]]*include[[:space:]]*[<"][[:space:]]*(arduino_compat|Arduino|Wire|SPI|WiFi|ledc_compat|esp32-hal-gpio)\.h' \
+    grep -rlE '#[[:space:]]*include[[:space:]]*[<"][[:space:]]*(arduino_compat|Arduino|Wire|SPI|WiFi|ledc_compat|esp32-hal-gpio|HardwareSerial)\.h' \
          third_party --include='*.c' --include='*.cpp' --include='*.h' \
          --include='*.hpp' --include='*.inl' 2>/dev/null || true
 }

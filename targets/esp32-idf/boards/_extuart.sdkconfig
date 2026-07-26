@@ -1,0 +1,10 @@
+# Console on the onboard CH343P USB-UART (U0TXD=GPIO43, U0RXD=GPIO44) instead of native
+# USB-CDC. Shared by every *-extuart board.
+#
+# This fragment must be listed AFTER sdkconfig.defaults.esp32s3, which sets
+# CONFIG_ESP_CONSOLE_USB_CDC=y for the USB-CDC boards; later fragments win, so this is what
+# turns ARDUINO_USB_MODE=0 / ARDUINO_USB_CDC_ON_BOOT=0 into IDF terms.
+#
+# The GPIO43/44 pin choice itself is NOT here: od_log's UART is opened by main.cpp from
+# OPENDISPLAY_LOG_UART_TX/RX, which the board fragment sets as defines.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
