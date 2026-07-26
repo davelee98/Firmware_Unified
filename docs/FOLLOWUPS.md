@@ -142,26 +142,49 @@ pass.
 
 ## 3. This repo
 
-### 3.1 `MAX_CONFIG_SIZE` is 4096 stored but 4000 transferable
+### 3.1 `MAX_CONFIG_SIZE` 4096 is the absolute ceiling — `MAX_CONFIG_CHUNKS` must become 21
 
-**verified** — `MAX_CONFIG_CHUNKS` is `20` (`opendisplay_protocol.h:889`) and each chunk
-carries at most `CONFIG_CHUNK_SIZE` = 200 data bytes, so the chunked `CONFIG_WRITE` path tops
-out at **20 × 200 = 4000 bytes**.
+**DECIDED 2026-07-25: 4096 is the absolute config ceiling — storable *and* transferable.**
+Option 2 of the three previously listed here. The two numbers must agree, so the chunk bound
+moves to meet the size bound rather than the size bound being quietly reinterpreted as storage-
+only.
 
-The fleet-wide 4096 decision (DIVERGENCE §2.7, MEMORY_CONSTRAINTS item 3) is not wrong, but it
-is incomplete as stated: a 4001–4096-byte config is storable and **not writable over the
-chunked path** — it NACKs mid-transfer. Raising `MAX_CONFIG_CHUNKS` to 21 is a canonical-header
-change, and the headers are frozen.
+**The required change:** `MAX_CONFIG_CHUNKS` `20` → **`21`**. That is exact, not padded —
+the header specifies `expectedChunks = ceil(total / 200)` (`opendisplay_protocol.h:320`), and
+`ceil(4096 / 200) = 21`. The count includes the START frame's 200-byte payload, which is why 20
+yields 4000 and not 4200.
 
-Decide which of these is intended, and record it where the 4096 decision lives:
+This is a **canonical-header change and the headers are frozen**, so it is queued, not done.
+It is a *relaxation* (a device accepts one more chunk), so under the header's own policy it is
+a MINOR bump: old hosts sending ≤ 20 chunks are unaffected.
 
-1. **The effective ceiling is 4000** and 4096 is only a storage bound. Cheapest; costs 96 bytes
-   of schema headroom that nobody is using yet.
-2. **Raise `MAX_CONFIG_CHUNKS` to 21** when the freeze lifts, making the two numbers agree.
-3. **Leave the gap and document it** as a host obligation — `py-opendisplay` must refuse to
-   build a config above 4000 bytes rather than failing partway through a transfer.
+**verified — the bound is enforced on every target**, so this is a real barrier and not a
+documentation artifact:
 
-Until this is settled, prefer (1) in anything written, since it is what the wire does today.
+| Target | Enforcement |
+|---|---|
+| `Firmware` | `communication.cpp:557` — `receivedChunks >= MAX_CONFIG_CHUNKS` → NACK |
+| `Firmware_NRF54` | `opendisplay_pipe.c:1018`; and `opendisplay_config_storage.h:13` documents the cap in prose as `MAX_CONFIG_CHUNKS(20)*CONFIG_CHUNK_SIZE(200)` |
+| `Firmware_Silabs` | `opendisplay_pipe.c:889` |
+
+**The consequence that does not go away with the header fix.** Deployed devices enforce 20 and
+will keep doing so until they are reflashed — which for ESP32-C6 and nRF52840 means a bench
+visit, and for ESP32-S3 means an OTA path that is not built. So the 4001–4096 band is
+undeliverable to the existing fleet regardless of what the canonical header says, and stays that
+way for as long as those units are in service.
+
+That reintroduces, in a narrow band, exactly the discoverability problem the fleet-wide 4096
+decision was taken to remove. It is much smaller than the original 2048-vs-4096 split, but it is
+the same shape, and it should be handled the way ARCHITECTURE § "Capabilities are discovered by
+interrogation" already prescribes: attempt-and-degrade on the NACK, never a timeout.
+
+**Interim rule until the header change lands:** a host must not build a config above **4000**
+bytes. Failing at chunk 21 wastes a full transfer and leaves the operator with a mid-stream
+NACK rather than a refusal up front. This is cheap to honour — real configs are far below the
+ceiling, and the whole 4096 figure is headroom rather than a live constraint.
+
+**Still to do:** add the `MAX_CONFIG_CHUNKS = 21` change to the queue of canonical-header edits
+that land when the freeze lifts (DIVERGENCE_MATRIX §8), sequenced with the other pending ones.
 
 ### 3.2 Corpus schema gaps
 
