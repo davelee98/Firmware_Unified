@@ -1,0 +1,7 @@
+# ESP32-C6: RISC-V, no PSRAM, console on the built-in USB Serial/JTAG peripheral.
+#
+# env:esp32-c6-N4 sets ARDUINO_USB_MODE=1 / ARDUINO_USB_CDC_ON_BOOT=1. On the C6 there is no
+# native USB-OTG device (that is the S3); Arduino's "USB CDC on boot" resolves to the USB
+# Serial/JTAG peripheral, so the correct IDF translation is the USB_SERIAL_JTAG console, not
+# CONFIG_ESP_CONSOLE_USB_CDC (which the C6 does not offer).
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

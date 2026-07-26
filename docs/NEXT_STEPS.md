@@ -42,17 +42,29 @@ Highest-risk items specifically, because they were rewritten rather than shimmed
 - **The panel**: the drawing layer collision was resolved by giving FastEPD a private copy.
   Verify both an SPI panel and a parallel (FastEPD) panel actually render.
 
-## 2. Measure the C6 image against 1.25 MB
+## 2. ~~Measure the C6 image against 1.25 MB~~ — DONE 2026-07-26: it does not fit
 
-The S3 build is 1.18 MB, which is encouraging but is *not* the C6 number — it carries FastEPD,
-WiFi/LAN and PSRAM. The C6 partition decision (`default.csv`, dual 1.25 MB slots) rests on the
-IDF image fitting, and README § Partitions calls this a phase-B gate rather than a
-rollout-time discovery. Add a `c6-n4` board fragment and build it. Cheap, and it either
-confirms the decision or changes it to `min_spiffs.csv`.
+`c6-n4` exists (`boards/c6-n4.cmake`, `boards/c6-n4.sdkconfig`, `sdkconfig.defaults.esp32c6`)
+and builds on ESP-IDF v5.5.4. **The image is 1 498 256 bytes — 187 536 over the 1.25 MB slot**,
+so `default.csv` is out and the decision changed to `min_spiffs.csv` (1.875 MB per slot, 24%
+free, 128 KB of SPIFFS left). `partitions/min_spiffs_4MB.csv` is added and the fragment points
+at it. Full numbers and the per-archive breakdown are in targets/esp32-idf/README.md
+§ Partitions.
 
-## 3. The remaining nine boards
+Two things worth carrying forward:
 
-Only `s3-n16r8` exists. The other nine from `platformio.ini` need board fragments; most are
+- The guess that "the IDF image will be smaller than the Arduino build" was not testable this
+  way and the *intuition behind it was wrong*: the C6 is **257 KB larger than the S3** while
+  compiling strictly less code (no FastEPD, no PSRAM). +146 KB of that is the C6's precompiled
+  BLE controller blob and the rest is RISC-V code density plus a fatter WiFi stack. Nothing
+  the application can shrink.
+- Adding a board needed **zero changes outside `boards/`** — every S3-specific thing in the
+  tree was already correctly gated. That is a real result about the phase-B port's quality and
+  it de-risks item 3.
+
+## 3. The remaining eight boards
+
+`s3-n16r8` and `c6-n4` exist. The other eight from `platformio.ini` need board fragments; most are
 copies differing in flash size, PSRAM and the FastEPD/Seeed flags. `esp32-n4` (classic, 320 KB
 RAM) is the one to expect trouble from — it needs the reduced PIPE reorder window.
 
