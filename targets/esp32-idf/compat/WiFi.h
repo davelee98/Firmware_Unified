@@ -19,6 +19,7 @@
 
 #include "arduino_compat.h"
 
+#include <errno.h>
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
 
@@ -83,7 +84,34 @@ public:
     explicit WiFiClient(int fd) : _fd(fd) {}
 
     operator bool() const { return _fd >= 0; }
-    bool connected() const { return _fd >= 0; }
+
+    /* Arduino's connected() reports the PEER's state, not just "I hold an fd" -- it peeks the
+     * socket and returns false once the peer has sent FIN. Returning `_fd >= 0` looked
+     * equivalent and is not: on the plain-TCP LAN path available() also returns 0 for a
+     * closed socket, so a client that vanished left wifiServerConnected true indefinitely and
+     * the session was never reaped. (The TLS path was unaffected: it maps recv == 0 to
+     * OD_LAN_READ_CLOSED itself.) */
+    bool connected() const
+    {
+        if (_fd < 0) {
+            return false;
+        }
+        uint8_t b;
+        int r = lwip_recv(_fd, &b, 1, MSG_PEEK | MSG_DONTWAIT);
+        if (r > 0) {
+            return true;            /* data waiting */
+        }
+        if (r == 0) {
+            return false;           /* orderly shutdown by the peer */
+        }
+        /* Report DISCONNECTED only on an errno that definitely means it. Everything else --
+         * including EWOULDBLOCK (the common "idle but healthy" case) and any errno this lwip
+         * build might return for an unsupported flag -- stays connected. Erring the other way
+         * would tear down live sessions on a spurious error, which is worse than the leak
+         * this check exists to fix. */
+        return !(errno == ECONNRESET || errno == ENOTCONN ||
+                 errno == EPIPE      || errno == EBADF);
+    }
 
     int available() const
     {
@@ -168,8 +196,11 @@ public:
         a.sin_addr.s_addr = htonl(INADDR_ANY);
         a.sin_port        = htons(_port);
 
+        /* Backlog 4, not 1: the accept poll runs from the main loop, which can be parked in a
+         * panel refresh for tens of seconds, and a backlog of 1 refuses every connection
+         * attempt that arrives in that window. Arduino's WiFiServer defaults to 4 as well. */
         if (lwip_bind(_listen, (struct sockaddr *)&a, sizeof a) != 0 ||
-            lwip_listen(_listen, 1) != 0) {
+            lwip_listen(_listen, 4) != 0) {
             lwip_close(_listen);
             _listen = -1;
             return;

@@ -179,10 +179,8 @@ bool clearStoredConfig(void) {
     }
     #elif defined(TARGET_ESP32)
     if (od_hal_nvs_erase() != OD_HAL_NVS_OK) {
-        if (true) {
-            od_log_error("ERROR: Failed to remove config file");
-            return false;
-        }
+        od_log_error("ERROR: Failed to remove stored config");
+        return false;
     }
     #endif
     memset(&globalConfig, 0, sizeof(globalConfig));
@@ -296,15 +294,11 @@ bool hasValidStoredConfig(void) {
         return false;
     }
 #elif defined(TARGET_ESP32)
-    /* Presence check: NVS has no path to stat, so ask the HAL for the record and treat
-     * ENOENT as "nothing stored". */
-    {
-        static uint8_t probe[sizeof(config_header_t)];
-        uint32_t probeLen = 0;
-        if (od_hal_nvs_load(probe, (uint32_t)sizeof(probe), &probeLen) == OD_HAL_NVS_ENOENT) {
-            return false;
-        }
-    }
+    /* No presence probe on ESP32. The obvious one -- load into a sizeof(config_header_t)
+     * buffer and check for ENOENT -- cannot work: any real record is header + payload, so
+     * the HAL returns E2BIG and logs "stored config is N B, buffer is 12 B" at ERROR level
+     * on EVERY boot of a perfectly healthy device. The probe never told us anything either,
+     * since loadConfig() below already returns false on ENOENT. */
 #endif
     uint32_t len = MAX_CONFIG_SIZE;
     return loadConfig(getConfigScratch(), &len);
@@ -708,10 +702,17 @@ bool loadGlobalConfig(){
                 break;
         }
     }
-    if (offset < configLen - 2) {
+    // Advisory (warn-only) validation using CRC-16/CCITT to match the toolbox, nRF and
+    // Silabs firmware. Not enforced: a mismatch logs a warning only.
+    //
+    // The guard used to be `if (offset < configLen - 2)`, which never fired for a config
+    // that parsed cleanly: the loop above only exits once offset has REACHED configLen - 2
+    // (or overshot it), so the condition was false for every well-formed config and true
+    // only for one the parser had already decided was truncated. The check therefore ran
+    // exclusively on inputs it could not validate. Same defect in Firmware/src (and so in
+    // the shipped fleet) -- see docs/FOLLOWUPS.md for the upstream propagation.
+    if (configLen >= 2) {
         uint16_t crcGiven = configData[configLen - 2] | (configData[configLen - 1] << 8);
-        // Advisory (warn-only) validation using CRC-16/CCITT to match the toolbox,
-        // nRF and Silabs firmware. Not enforced: a mismatch logs a warning only.
         uint16_t crcCalculated = config_toolbox_outer_crc16(configData, configLen - 2);
         if (crcGiven != crcCalculated) {
             od_log_warn("WARNING: Config CRC mismatch (given: 0x%04X, calculated: 0x%04X)", crcGiven, crcCalculated);

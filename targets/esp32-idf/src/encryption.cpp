@@ -806,8 +806,12 @@ String getChipIdHex() {
 
 void secureEraseConfig() {
     od_log_info("=== SECURE ERASE CONFIG ===");
+#ifdef TARGET_NRF
+    /* Only the LittleFS path writes through this; on ESP32 the overwrite happens inside
+     * od_hal_nvs_secure_erase(), so scoping it here keeps 512 B of BSS off that build. */
     static uint8_t zeroBuffer[512];
     memset(zeroBuffer, 0, sizeof(zeroBuffer));
+#endif
 
 #ifdef TARGET_NRF
     if (InternalFS.exists(CONFIG_FILE_PATH_LOCAL)) {
@@ -827,12 +831,16 @@ void secureEraseConfig() {
         InternalFS.remove(CONFIG_FILE_PATH_LOCAL);
     }
 #elif defined(TARGET_ESP32)
-    /* Was: open the stored config file, patch it in place, then remove it. Under NVS the
-     * record is a single opaque blob owned by config_parser, so the equivalent -- and the
-     * only thing this call site actually needed -- is to invalidate it. Erasing here rather
-     * than rewriting also removes a path that wrote config bytes from outside the config
-     * subsystem, which is the sort of second writer that makes a storage format drift. */
-    (void)od_hal_nvs_erase();
+    /* Was: open the stored config file, zero its bytes, then remove it. The NVS port briefly
+     * reduced this to a plain od_hal_nvs_erase(), which drops the overwrite entirely --
+     * nvs_erase_key() only marks the entry deleted, so the AES-128 master key in config
+     * packet 0x27 stayed recoverable from a raw flash dump after a "secure erase".
+     *
+     * od_hal_nvs_secure_erase() restores the zero-write. Read its contract in od_hal_nvs.h
+     * before relying on it: on a log-structured store it is best-effort, not a guaranteed
+     * overwrite. The overwrite stays inside the HAL rather than here, so this file is not a
+     * second writer of the config record's byte format. */
+    (void)od_hal_nvs_secure_erase();
 #endif
     od_log_info("Config securely erased");
 }

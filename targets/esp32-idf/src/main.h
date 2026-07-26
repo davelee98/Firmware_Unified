@@ -362,8 +362,9 @@ BLECharacteristic imageCharacteristic("2446", BLEWrite | BLEWriteWithoutResponse
 // this file and communication.cpp cannot drift apart on the slot size.
 // PIPE_WRITE ingest sizing: 33 slots hold a full W=32 in-flight window + END across a
 // 60 s Spectra SPI stall (loop blocked in bbepWriteData). OD_BLE_MAX_FRAME (256) covers
-// pipe <=244, legacy <=232, HA <=244; the GATT layer now rejects anything larger with
-// ATT 0x0D rather than the app dropping it silently.
+// pipe <=244, legacy <=232, HA <=244. NOTE: nothing returns ATT 0x0D for an oversized
+// write -- an earlier version of this comment claimed it did. od_ble_on_write() drops
+// anything larger with a warning; the GATT layer does not enforce a value length.
 #define COMMAND_QUEUE_SIZE 33
 #define MAX_COMMAND_SIZE OD_BLE_MAX_FRAME
 

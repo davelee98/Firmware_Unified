@@ -9,6 +9,13 @@
 #include "esp_system.h"
 #include "esp_heap_caps.h"
 #include "esp_mac.h"
+#include "esp_log.h"
+
+#include "esp_adc/adc_oneshot.h"
+#include "soc/soc_caps.h"
+#if SOC_TEMP_SENSOR_SUPPORTED
+#include "driver/temperature_sensor.h"
+#endif
 
 SerialCompat Serial;
 
@@ -49,3 +56,143 @@ void delayMicroseconds(long us)
 {
     esp_rom_delay_us((uint32_t)(us < 0 ? 0 : us));
 }
+
+/* ------------------------------------------------------------------ ADC
+ *
+ * Arduino's analogRead over IDF's oneshot driver. Replaces a `return 0` stub whose two
+ * callers both turned it into a plausible-looking wrong answer rather than an obvious
+ * failure -- 0.0 V battery, and a permanently-pressed ADC ladder button. See the note in
+ * arduino_compat.h.
+ *
+ * Real state (one unit handle, one attenuation table) so this cannot be static inline.
+ */
+extern "C" {
+
+static const char *ADC_TAG = "od_adc";
+
+/* Only ADC1 is used: ADC2 shares its hardware with the WiFi radio on ESP32/S2/S3 and reads
+ * fail with ESP_ERR_TIMEOUT whenever WiFi is up -- and this target's boards run WiFi. A pin
+ * that maps to ADC2 is reported as unreadable rather than read unreliably. */
+static adc_oneshot_unit_handle_t s_adc1 = nullptr;
+static int  s_adc_bits = 12;                 /* Arduino's ESP32 default */
+static uint8_t s_atten[SOC_ADC_CHANNEL_NUM(0)];   /* per-channel, indexed by channel */
+static bool s_atten_set[SOC_ADC_CHANNEL_NUM(0)];
+static bool s_configured[SOC_ADC_CHANNEL_NUM(0)];
+
+static bool adc_unit_ready(void)
+{
+    if (s_adc1) {
+        return true;
+    }
+    adc_oneshot_unit_init_cfg_t cfg = {};
+    cfg.unit_id = ADC_UNIT_1;
+    if (adc_oneshot_new_unit(&cfg, &s_adc1) != ESP_OK) {
+        s_adc1 = nullptr;
+        return false;
+    }
+    return true;
+}
+
+/* Maps a GPIO to an ADC1 channel. Returns false for pins that are not ADC1-capable. */
+static bool adc_channel_for_pin(int pin, adc_channel_t *chan_out)
+{
+    adc_unit_t unit;
+    adc_channel_t chan;
+    if (adc_oneshot_io_to_channel(pin, &unit, &chan) != ESP_OK) {
+        return false;
+    }
+    if (unit != ADC_UNIT_1) {
+        return false;
+    }
+    *chan_out = chan;
+    return true;
+}
+
+void analogSetPinAttenuation(int pin, int atten)
+{
+    adc_channel_t chan;
+    if (!adc_channel_for_pin(pin, &chan) || (int)chan >= (int)SOC_ADC_CHANNEL_NUM(0)) {
+        return;
+    }
+    /* Arduino's ADC_0db/ADC_11db constants. ADC_ATTEN_DB_11 is deprecated in IDF 5.x in
+     * favour of DB_12, which is the same setting under a name that matches the silicon. */
+    adc_atten_t a = (atten == ADC_0db) ? ADC_ATTEN_DB_0 : ADC_ATTEN_DB_12;
+    if (s_atten_set[chan] && s_atten[chan] == (uint8_t)a) {
+        return;
+    }
+    s_atten[chan]     = (uint8_t)a;
+    s_atten_set[chan] = true;
+    s_configured[chan] = false;   /* force a re-config on the next read */
+}
+
+void analogReadResolution(int bits)
+{
+    if (bits >= 9 && bits <= 12) {
+        s_adc_bits = bits;
+    }
+}
+
+int analogRead(int pin)
+{
+    adc_channel_t chan;
+    if (!adc_channel_for_pin(pin, &chan) || (int)chan >= (int)SOC_ADC_CHANNEL_NUM(0)) {
+        ESP_LOGW(ADC_TAG, "GPIO %d is not an ADC1 input", pin);
+        return 0;
+    }
+    if (!adc_unit_ready()) {
+        return 0;
+    }
+    if (!s_configured[chan]) {
+        adc_oneshot_chan_cfg_t ccfg = {};
+        ccfg.atten    = s_atten_set[chan] ? (adc_atten_t)s_atten[chan] : ADC_ATTEN_DB_12;
+        ccfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+        if (adc_oneshot_config_channel(s_adc1, chan, &ccfg) != ESP_OK) {
+            return 0;
+        }
+        s_configured[chan] = true;
+    }
+    int raw = 0;
+    if (adc_oneshot_read(s_adc1, chan, &raw) != ESP_OK) {
+        return 0;
+    }
+    /* The driver yields the SoC's native width (12 bits on every variant here); Arduino's
+     * analogReadResolution() rescales. Shifting rather than multiplying keeps 12 -> 12 exact. */
+    if (s_adc_bits < 12) {
+        raw >>= (12 - s_adc_bits);
+    }
+    return raw;
+}
+
+/* ------------------------------------------------------------------ die temperature */
+
+float temperatureRead(void)
+{
+#if SOC_TEMP_SENSOR_SUPPORTED
+    static temperature_sensor_handle_t s_tsens = nullptr;
+    if (!s_tsens) {
+        /* -10..80 C covers the panel's rated operating range with margin; the driver picks
+         * the matching internal range setting. */
+        temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+        if (temperature_sensor_install(&cfg, &s_tsens) != ESP_OK) {
+            s_tsens = nullptr;
+            return -999.0f;
+        }
+        if (temperature_sensor_enable(s_tsens) != ESP_OK) {
+            temperature_sensor_uninstall(s_tsens);
+            s_tsens = nullptr;
+            return -999.0f;
+        }
+    }
+    float c = 0.0f;
+    if (temperature_sensor_get_celsius(s_tsens, &c) != ESP_OK) {
+        return -999.0f;
+    }
+    return c;
+#else
+    /* Classic ESP32 has no usable die sensor. -999.0 is the sentinel the NRF path uses for
+     * "no reading", and readChipTemperature()'s callers already understand it. */
+    return -999.0f;
+#endif
+}
+
+} /* extern "C" */

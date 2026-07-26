@@ -81,6 +81,40 @@ owner. Assign one before step 2.
 Apache-2.0 code vendored inside a GPL-3.0 work is fine; the combined work is GPL-3.0 and this
 tree keeps its own licence and notice. Do not relicense it.
 
+### FastEPD has no ESP-IDF IO backend — OD-PATCH applied
+
+FastEPD picks its IO backend with `#ifdef ARDUINO` / `#elif defined(__LINUX__)`. There is no
+third arm, and under ESP-IDF **neither macro is defined**. That is not a compile error: every
+`it8951*` transport function in `FastEPD.inl` simply collapsed to an *empty body between two
+`gpio_set_level()` calls*.
+
+The consequences were invisible to the build and to the boot log:
+
+- `it8951WriteCmdCode` / `it8951WriteData` / `it8951WriteNData` transmitted nothing
+- `it8951ReadData` / `it8951ReadNData` returned 0, so the controller probe read all zeros
+- the GPIO reset/busy/power handshake still ran, so the panel *looked* alive
+
+`bbepInitIT8951` therefore "succeeded" against a panel that had never received a byte. Only an
+IT8951-over-SPI panel is affected; the parallel ED103 path drives the S3 LCD peripheral and
+never went through this code.
+
+**The patch.** Every affected guard becomes
+`#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)`, and
+`targets/esp32-idf/main/CMakeLists.txt` sets `OD_FASTEPD_IDF_SPI=1` on `FastEPD.cpp` alone.
+The Arduino branch is reused verbatim because `targets/esp32-idf/compat/SPI.h` provides exactly
+that API over IDF's `spi_master`. Patched sites are marked `OD-PATCH` and all point at the
+explanatory note on `it8951WriteData()`.
+
+**Why not just define `ARDUINO`.** Tried, and rejected: it also selects FastEPD's Arduino
+font/`Print`/`PROGMEM` surface (`pgm_read_*`, `memcpy_P`, `ledcAttach`, `TwoWire::setTimeout`)
+— an entire Arduino core rather than an IO backend — and `bb_epaper` reads the same macro to
+choose *its* backend and must keep the `esp_idf` one.
+
+**Retiring it.** The upstream-shaped fix is an `esp_idf_io.inl` in FastEPD selected by
+`ESP_PLATFORM`. When that exists, delete both the patch and the CMake define. Until then, note
+that `compat/` cannot be removed at the end of phase C while FastEPD still depends on it —
+`compat/ratchet.sh` reports these vendored users separately for exactly that reason.
+
 ---
 
 ## The Group5 collision — the same code, twice, under two licences

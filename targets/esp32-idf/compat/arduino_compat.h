@@ -67,8 +67,20 @@ extern "C" {
  * (docs/TOOLCHAINS.md § "Arduino API census"). Note that the real destination for these is
  * od_hal_gpio, NOT this file -- shared/core must never see a raw pin number.
  */
+/* Pin numbers reach these from host-written config packets, where 0xFF is the codebase's
+ * "unused" sentinel. Most call sites filter it, but `1ULL << 255` is undefined behaviour and
+ * one unguarded path is enough -- Arduino-ESP32's own pinMode validates with
+ * GPIO_IS_VALID_GPIO for the same reason. Reject rather than trust the caller. */
+static inline bool od_pin_valid(int pin)
+{
+    return pin >= 0 && pin < GPIO_NUM_MAX && GPIO_IS_VALID_GPIO(pin);
+}
+
 static inline void pinMode(int pin, int mode)
 {
+    if (!od_pin_valid(pin)) {
+        return;
+    }
     gpio_config_t cfg = {
         .pin_bit_mask = (1ULL << (uint32_t)pin),
         .mode         = (mode == OUTPUT) ? GPIO_MODE_OUTPUT : GPIO_MODE_INPUT,
@@ -81,11 +93,17 @@ static inline void pinMode(int pin, int mode)
 
 static inline void digitalWrite(int pin, int level)
 {
+    if (!od_pin_valid(pin)) {
+        return;
+    }
     gpio_set_level((gpio_num_t)pin, level ? 1 : 0);
 }
 
 static inline int digitalRead(int pin)
 {
+    if (!od_pin_valid(pin)) {
+        return 0;
+    }
     return gpio_get_level((gpio_num_t)pin);
 }
 
@@ -165,13 +183,25 @@ static inline void detachInterrupt(int pin)
  * which is NOT the same guarantee -- these call sites need auditing when the code they
  * guard moves to shared/core, which has no global-disable primitive at all and needs an
  * explicit od_hal irq-lock (flagged in DESIGN_REVIEW § "Big-picture soundness"). */
-/* Arduino ADC. analogRead returns 12-bit on ESP32 by default; oneshot ADC is the IDF
- * replacement and these call sites move to it when device_control is touched. */
+/* Arduino ADC over IDF's oneshot driver.
+ *
+ * These were stubs -- analogRead() returned 0 unconditionally. That is not a safe stub for
+ * either caller: display_service.cpp's readBatteryVoltageUncached() multiplies it by the
+ * scaling factor and reports 0.0 V, which is a PLAUSIBLE reading rather than the -1.0
+ * "unknown" sentinel the same function returns when no sense pin is configured, and it gets
+ * published in the MSD advert to every scanning host. device_control.cpp's ADC button ladder
+ * classifies 0 into the catch-all bottom bucket, so it reports the last button permanently
+ * pressed: one phantom press at boot, then latched so no real press is reportable.
+ *
+ * Real functions, not static inline, because the ADC unit handle and the per-pin attenuation
+ * table are shared state -- a static inline copy per translation unit would re-create the
+ * unit in each. Defined in arduino_compat.cpp.
+ */
 #define ADC_11db 3
 #define ADC_0db  0
-static inline void analogSetPinAttenuation(int, int) {}
-static inline int  analogRead(int) { return 0; }
-static inline void analogReadResolution(int) {}
+void analogSetPinAttenuation(int pin, int atten);
+int  analogRead(int pin);
+void analogReadResolution(int bits);
 
 /* attachInterruptArg passes a context pointer; IDF's handler takes void* natively. */
 static inline void attachInterruptArg(int pin, void (*fn)(void *), void *arg, int mode)
@@ -187,11 +217,13 @@ static inline void attachInterruptArg(int pin, void (*fn)(void *), void *arg, in
 /* On ESP32 the Arduino pin number IS the GPIO number. */
 static inline int digitalPinToGPIONumber(int pin) { return pin; }
 
-/* Internal die-temperature sensor. Arduino exposes it as temperatureRead(); IDF has a
- * driver (esp_driver_tsens) that needs explicit setup, so this returns a sentinel rather
- * than a plausible-looking lie. The advert clamps temperature anyway, and a wrong reading
- * there would be published to every scanning host. */
-static inline float temperatureRead(void) { return 0.0f; }
+/* Internal die-temperature sensor, over IDF's temperature_sensor driver.
+ *
+ * This used to `return 0.0f` with a comment calling it "a sentinel rather than a
+ * plausible-looking lie" -- but 0.0 IS a plausible reading (0 C), it is published in the MSD
+ * advert to every scanning host, and the NRF path's actual sentinel for this is -999.0. On a
+ * part with no die sensor (classic ESP32) it now returns that same -999.0. */
+float temperatureRead(void);
 
 static inline void noInterrupts(void) { portDISABLE_INTERRUPTS(); }
 static inline void interrupts(void)   { portENABLE_INTERRUPTS(); }

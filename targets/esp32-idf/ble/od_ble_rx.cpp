@@ -32,6 +32,32 @@ void od_ble_on_write(const uint8_t *data, uint16_t len)
         return;
     }
 
+    /* One-line RX log, mirroring the "[BLE] TX ..." response log and gated by the same
+     * mid-stream quiet check the Arduino callback used. The port dropped this; it is the
+     * single most useful line on the console while bringing a board up, because it is the
+     * only evidence that a write reached the application at all. */
+    if (!imageWriteLogQuietFrame(data, len)) {
+        uint16_t cmd = (len >= 2) ? (uint16_t)((data[0] << 8) | data[1]) : data[0];
+        char line[160] = {0};
+        int pos = snprintf(line, sizeof(line), "BLE: RX 0x%04X (%u B):", cmd, (unsigned)len);
+        if (pos < 0) {
+            pos = 0;
+            line[0] = '\0';
+        }
+        int dumpLen = (len < 32) ? (int)len : 32;
+        for (int i = 0; i < dumpLen && pos < (int)sizeof(line); i++) {
+            int n = snprintf(line + pos, sizeof(line) - pos, " %02X", data[i]);
+            if (n < 0) {
+                break;
+            }
+            pos += n;
+        }
+        if (len > 32 && pos < (int)sizeof(line)) {
+            snprintf(line + pos, sizeof(line) - pos, " ...");
+        }
+        od_log_debug("%s", line);
+    }
+
     uint8_t head     = __atomic_load_n(&commandQueueHead, __ATOMIC_RELAXED);
     uint8_t tail     = __atomic_load_n(&commandQueueTail, __ATOMIC_ACQUIRE);
     uint8_t nextHead = (head + 1) % COMMAND_QUEUE_SIZE;

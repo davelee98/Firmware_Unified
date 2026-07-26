@@ -15,11 +15,27 @@ bool imageWriteLogQuietFrame(const uint8_t* data, uint16_t len);
 // Kept in sync with main.h (included first, so its values win). PIPE_WRITE ingest:
 // 33 slots hold a full W=32 window + END across a 60 s Spectra SPI stall; 256 covers
 // pipe <=244 / legacy <=232 / HA <=244.
+//
+// The fallbacks below are an ODR hazard, which is why the static_assert is here. main.h
+// defines MAX_COMMAND_SIZE as OD_BLE_MAX_FRAME (a protocol-header constant); this file
+// hardcodes 256. main.cpp sees the former, od_ble_rx.cpp sees only the latter. They agree
+// today. If OD_BLE_MAX_FRAME ever changes, the two translation units would disagree on
+// sizeof(CommandQueueItem) -- one writing the SPSC ring with a stride the other does not
+// use, corrupting memory with no diagnostic at all. Fail the build instead.
 #ifndef COMMAND_QUEUE_SIZE
 #define COMMAND_QUEUE_SIZE 33
 #endif
 #ifndef MAX_COMMAND_SIZE
 #define MAX_COMMAND_SIZE 256
+#endif
+
+#include "opendisplay_protocol.h"   // OD_BLE_MAX_FRAME, for the assert below
+#ifdef __cplusplus
+static_assert(MAX_COMMAND_SIZE == OD_BLE_MAX_FRAME,
+              "MAX_COMMAND_SIZE disagrees with OD_BLE_MAX_FRAME: main.cpp and od_ble_rx.cpp "
+              "would size CommandQueueItem differently and corrupt the command ring");
+static_assert(COMMAND_QUEUE_SIZE == 33,
+              "COMMAND_QUEUE_SIZE must match main.h; the ring is shared across translation units");
 #endif
 
 struct CommandQueueItem {

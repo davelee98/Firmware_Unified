@@ -1941,7 +1941,8 @@ void it8951WaitForReady(FASTEPDSTATE *pState)
 
 void it8951WriteNData(FASTEPDSTATE *pState, const uint16_t *buf, uint32_t word_count) {
     gpio_set_level((gpio_num_t)pState->u8CS, LOW);
-#ifdef ARDUINO
+/* OD-PATCH: see the OD-PATCH note at the head of it8951WriteData(). */
+#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)
     SPI.beginTransaction(SPISettings(pState->spi_frequency, MSBFIRST, SPI_MODE0));
     //it8951GetSystemInfo(pState);
     it8951WaitForReady(pState);
@@ -1962,7 +1963,22 @@ void it8951WriteNData(FASTEPDSTATE *pState, const uint16_t *buf, uint32_t word_c
 
 void it8951WriteData(FASTEPDSTATE *pState, uint16_t data) {
     gpio_set_level((gpio_num_t)pState->u8CS, LOW);
-#ifdef ARDUINO
+/* OD-PATCH: FastEPD has no ESP-IDF IO backend. Every it8951 transport function below selects
+ * its implementation with `#ifdef ARDUINO / #elif defined(__LINUX__)`, and under ESP-IDF
+ * NEITHER is defined -- so each one compiled to an EMPTY BODY between two gpio_set_level()
+ * calls. Commands sent nothing, pixel writes sent nothing, it8951ReadData() returned 0, and
+ * the GPIO reset/busy handshake still looked healthy, so the build linked and booted with a
+ * panel that never received a byte.
+ *
+ * OD_FASTEPD_IDF_SPI (set per-source in targets/esp32-idf/main/CMakeLists.txt) selects the
+ * Arduino branch verbatim, because targets/esp32-idf/compat/SPI.h provides exactly this API
+ * over IDF's spi_master. Defining ARDUINO instead was tried and rejected: it also pulls in
+ * FastEPD's Arduino font/Print/PROGMEM surface, and bb_epaper reads the same macro to pick
+ * ITS backend and must keep the esp_idf one.
+ *
+ * Delete the patch when FastEPD gains an esp_idf backend upstream.
+ * See third_party/NOTICE.md § "FastEPD has no ESP-IDF IO backend". */
+#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)
     SPI.beginTransaction(SPISettings(pState->spi_frequency, MSBFIRST, SPI_MODE0));
     it8951WaitForReady(pState);
     SPI.transfer16(0x0000); // data preamble
@@ -1980,7 +1996,8 @@ void it8951WriteData(FASTEPDSTATE *pState, uint16_t data) {
 
 void it8951WriteCmdCode(FASTEPDSTATE *pState, uint16_t cmd) {
     gpio_set_level((gpio_num_t)pState->u8CS, LOW);
-#ifdef ARDUINO
+/* OD-PATCH: see the OD-PATCH note at the head of it8951WriteData(). */
+#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)
     SPI.beginTransaction(SPISettings(pState->spi_frequency, MSBFIRST, SPI_MODE0));
     it8951WaitForReady(pState);
     SPI.transfer16(0x6000); // command preamble
@@ -2014,7 +2031,8 @@ void it8951WriteVcom(FASTEPDSTATE *pState, uint16_t selector, uint16_t value)
 uint16_t it8951ReadData(FASTEPDSTATE *pState) {
 uint16_t data = 0;
     gpio_set_level((gpio_num_t)pState->u8CS, LOW);
-#ifdef ARDUINO
+/* OD-PATCH: see the OD-PATCH note at the head of it8951WriteData(). */
+#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)
     SPI.beginTransaction(SPISettings(pState->spi_frequency, MSBFIRST, SPI_MODE0));
     it8951WaitForReady(pState);
     SPI.transfer16(0x1000); // read preamble
@@ -2036,7 +2054,8 @@ uint16_t data = 0;
 void it8951ReadNData(FASTEPDSTATE *pState, uint16_t *buf, uint32_t word_count)
 {
     gpio_set_level((gpio_num_t)pState->u8CS, LOW);
-#ifdef ARDUINO
+/* OD-PATCH: see the OD-PATCH note at the head of it8951WriteData(). */
+#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)
     SPI.beginTransaction(SPISettings(pState->spi_frequency, MSBFIRST, SPI_MODE0));
     it8951WaitForReady(pState);
     SPI.transfer16(0x1000); // read preamble
@@ -2368,7 +2387,9 @@ int bbepInitIT8951(FASTEPDSTATE *pState, uint8_t u8MOSI, uint8_t u8MISO, uint8_t
     gpio_set_level((gpio_num_t)u8RST, HIGH);
     gpio_set_level((gpio_num_t)u8EN, HIGH);
     gpio_set_level((gpio_num_t)u8ITE_EN, HIGH);
-#ifdef ARDUINO
+/* OD-PATCH: see the OD-PATCH note at the head of it8951WriteData(). Without this the SPI bus
+ * is never initialised at all, so even a correct transport would have nothing to talk over. */
+#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)
     SPI.begin(u8CLK, u8MISO, u8MOSI, -1);
 #elif defined(__LINUX__)
     linux_spi_init(u8MISO, u8MOSI, u8CLK);
