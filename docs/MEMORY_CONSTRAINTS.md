@@ -97,6 +97,13 @@ buffer with the CCM plaintext buffer, and shrink the replay window (below).
    fleet-wide 4096, and reverting BG22 to 2048 re-opens the divergence deliberately rather than
    by discovery. Historical context follows.
 
+   **Caveat found 2026-07-25, after this was decided: 4096 is storable but only 4000 is
+   transferable.** `MAX_CONFIG_CHUNKS` is 20 × 200 B, so the chunked `CONFIG_WRITE` path caps at
+   4000 and a 4001-4096 byte config NACKs mid-transfer. Raising the chunk count is a
+   frozen-header change. The decision stands; what it means needs settling — see
+   FOLLOWUPS.md § 3.1, and prefer "the effective ceiling is 4000" in anything written until
+   then, because that is what the wire does today.
+
    BG22 stored 2048 (NVM3 record 2064 B) while nRF/ESP32 stored 4096, so a config that fit nRF
    but not BG22 was silently truncated on BG22 (DIVERGENCE_MATRIX 2.7). The decision above
    removes that split rather than making it discoverable: with one fleet-wide value there is no
