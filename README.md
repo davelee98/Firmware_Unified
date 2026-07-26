@@ -190,6 +190,7 @@ cmake -S tests/host -B build -G Ninja && cmake --build build && ctest --test-dir
 - [docs/TOOLCHAINS.md](docs/TOOLCHAINS.md) — which toolchain each target uses and why
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the `shared`/`hal` boundary
 - [docs/MIGRATION.md](docs/MIGRATION.md) — migration order and per-target procedure
+- [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) — where the migration stands and what to do next, in order
 - [docs/FOLLOWUPS.md](docs/FOLLOWUPS.md) — known defects and open items awaiting action,
   including host-side bugs the wire corpus found
 
