@@ -1,0 +1,11 @@
+# Number of files under targets/esp32-idf/ that may include arduino_compat.h.
+#
+# This number may only ever go DOWN. Raising it is the failure mode the ratchet exists to
+# prevent -- see ratchet.sh and docs/MIGRATION.md § "The ESP32 import is different".
+#
+# Phase B will set it to the real count once the shim exists and the target links. Lower it
+# with each subsystem that stops needing the shim; when it reaches 0 and arduino_compat.h is
+# deleted, remove this directory and the workflow that reads it.
+#
+# 0 = phase A. The shim does not exist yet, and nothing includes it.
+0

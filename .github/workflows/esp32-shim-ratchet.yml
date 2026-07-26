@@ -1,0 +1,36 @@
+name: esp32 shim ratchet
+
+# The Arduino shim may only shrink.
+#
+# docs/MIGRATION.md names the shim outliving its purpose as "the biggest risk in this plan",
+# and the reason is not technical: temporary compatibility layers become permanent ones. Its
+# prescribed mitigation is a mechanical ratchet "rather than good intentions", and
+# DESIGN_REVIEW § "Likely pitfalls" #4 predicts that a ratchet not built before phase B starts
+# will be built never. Hence this workflow exists in phase A, with a budget of 0, before the
+# shim it polices.
+#
+# DELETE this file together with targets/esp32-idf/compat/ when phase C finishes. A check that
+# can no longer fail is noise, and noise is how the checks that matter get ignored.
+
+# Only runs when something that could change the count actually changed -- the target sources
+# or the ratchet itself. A check that runs on every docs commit trains people to ignore it.
+# `paths` must be nested under each event; as a sibling of push/pull_request it is silently
+# ignored and the workflow runs on everything, which is the failure this filter exists to avoid.
+on:
+  push:
+    paths:
+      - 'targets/esp32-idf/**'
+      - '.github/workflows/esp32-shim-ratchet.yml'
+  pull_request:
+    paths:
+      - 'targets/esp32-idf/**'
+      - '.github/workflows/esp32-shim-ratchet.yml'
+
+jobs:
+  ratchet:
+    name: arduino_compat.h usage may only decrease
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check shim budget
+        run: ./targets/esp32-idf/compat/ratchet.sh
