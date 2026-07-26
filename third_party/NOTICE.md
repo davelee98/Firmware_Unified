@@ -31,6 +31,22 @@ a per-target fork. Do not "fix" this by moving it into `shared/`.
 `fontconvert/`, `imageconvert/`, and the `ch32v`/`macos`/`rpi`/`rpi_pico` ports. None is
 reachable from a firmware build.
 
+### Local patches (2026-07-25) — both are upstream bugs, marked `OD-PATCH`
+
+The tree does not compile as vendored. Two defects, each fixed with a one-line change tagged
+`OD-PATCH` so a future bump can find them:
+
+1. **`src/bb_ep.inl` defined `epd42yr_init_full` twice** (lines 1109 and 1151) while line 3831
+   referenced `epd42yr2_init_full`, which existed nowhere. A copy-paste that was never renamed.
+   The second definition is now `epd42yr2_init_full`, which is what the panel table expects.
+2. **`src/bb_epaper.h` declared `void delay(int)` while `esp_idf/esp_generic.inl` defines
+   `void delay(long)`.** Two different overloads of the library's own function, so any
+   `delay(uint32_t)` call inside the library was ambiguous. The declaration now says `long`.
+
+Both are bugs in the library itself, not incompatibilities with this repo — worth reporting
+upstream, and worth checking against `bitbank2/bb_epaper` to see whether the fork introduced
+them. Re-apply or re-verify on every bump.
+
 **Two things to know before bumping it.**
 
 *It is vendored from a fork.* `Firmware`'s `platformio.ini` pulls `bitbank2/bb_epaper.git`

@@ -1148,7 +1148,7 @@ const uint8_t epd42yr_init_fast[] PROGMEM =
 };
 
 // created new epd42yr2.  init sequence identical to the epd266yr 184x300 except resolution set to 400x300.  does not support fast update.  
-const uint8_t epd42yr_init_full[] PROGMEM =
+const uint8_t epd42yr2_init_full[] PROGMEM = /* OD-PATCH: was a duplicate epd42yr_init_full */
 {
 0x02, 0x4d, 0x78,
    0x03, 0x00, 0x0f, 0x09,

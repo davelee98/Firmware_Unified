@@ -7,7 +7,9 @@
 # Lower it with each subsystem that stops needing the shim; when it reaches 0 and
 # arduino_compat.h is deleted, remove this directory and the workflow that reads it.
 #
-# 20 = the phase-B baseline, measured 2026-07-25 against the phase-A import. Every entry is
-# a file that must eventually either move to shared/core (which forbids Arduino outright) or
-# be rewritten against IDF/shared-hal directly.
-20
+# 21 = the phase-B baseline. It was 20 when the metric counted only arduino_compat.h/Arduino.h;
+# widening it to every shim header (Wire, SPI, WiFi, ledc, esp32-hal-gpio) found one more file.
+# The shim did not grow -- the measurement got honest. Every entry is a file that must
+# eventually either move to shared/core (which forbids Arduino outright) or be rewritten
+# against IDF and shared/hal directly.
+21

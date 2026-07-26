@@ -296,8 +296,14 @@ bool hasValidStoredConfig(void) {
         return false;
     }
 #elif defined(TARGET_ESP32)
-    if (!LittleFS.exists(CONFIG_FILE_PATH)) {
-        return false;
+    /* Presence check: NVS has no path to stat, so ask the HAL for the record and treat
+     * ENOENT as "nothing stored". */
+    {
+        static uint8_t probe[sizeof(config_header_t)];
+        uint32_t probeLen = 0;
+        if (od_hal_nvs_load(probe, (uint32_t)sizeof(probe), &probeLen) == OD_HAL_NVS_ENOENT) {
+            return false;
+        }
     }
 #endif
     uint32_t len = MAX_CONFIG_SIZE;

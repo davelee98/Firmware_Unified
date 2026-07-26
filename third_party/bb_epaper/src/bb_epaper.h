@@ -44,7 +44,7 @@
 #define INPUT_PULLUP 2
 #define HIGH 1
 #define LOW 0
-void delay(int);
+void delay(long); /* OD-PATCH: was delay(int); esp_idf/esp_generic.inl defines delay(long) */
 void pinMode(int pin, int mode);
 void digitalWrite(int pin, int value);
 int digitalRead(int pin);

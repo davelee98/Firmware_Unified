@@ -22,6 +22,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -33,6 +34,13 @@
 #include <string>
 #endif
 
+/* The imported sources gate platform code on Arduino's arch macro. Defining it here keeps
+ * that gating working during phase B without editing those files; it disappears with the
+ * shim, at which point those #ifdefs must be rewritten against IDF's own target macros. */
+#ifndef ARDUINO_ARCH_ESP32
+#define ARDUINO_ARCH_ESP32 1
+#endif
+
 /* ---------------------------------------------------------------- pin levels + modes */
 
 #define HIGH 1
@@ -42,6 +50,12 @@
 #define OUTPUT        0x02
 #define INPUT_PULLUP  0x05
 #define INPUT_PULLDOWN 0x09
+
+/* Radix constants for String(v, radix) and Serial.print(v, radix). */
+#define DEC 10
+#define HEX 16
+#define OCT 8
+#define BIN 2
 
 #ifdef __cplusplus
 extern "C" {
@@ -108,6 +122,49 @@ static inline void yield(void)
     taskYIELD();
 }
 
+/* ---------------------------------------------------------------- interrupts
+ * Arduino's GPIO interrupt API over IDF's gpio ISR service. Used by touch_input and the
+ * wake button. The destination is od_hal_gpio's config_irq (docs/SHARED_API_DESIGN.md),
+ * whose contract is stricter than Arduino's and worth remembering while reading these call
+ * sites: an ISR handler may SET A FLAG ONLY.
+ */
+#define RISING   GPIO_INTR_POSEDGE
+#define FALLING  GPIO_INTR_NEGEDGE
+#define CHANGE   GPIO_INTR_ANYEDGE
+
+typedef void (*od_isr_fn)(void);
+
+/* Arduino maps a pin to an "interrupt number"; on ESP32 they are the same thing. */
+static inline int digitalPinToInterrupt(int pin) { return pin; }
+
+static inline void attachInterrupt(int pin, od_isr_fn fn, int mode)
+{
+    /* Idempotent: the ISR service is installed once, and re-attaching a pin replaces its
+     * handler rather than erroring, which is what the Arduino callers assume. */
+    static bool isr_service_started = false;
+    if (!isr_service_started) {
+        gpio_install_isr_service(0);
+        isr_service_started = true;
+    }
+    gpio_set_intr_type((gpio_num_t)pin, (gpio_int_type_t)mode);
+    gpio_isr_handler_remove((gpio_num_t)pin);
+    gpio_isr_handler_add((gpio_num_t)pin, (gpio_isr_t)fn, NULL);
+    gpio_intr_enable((gpio_num_t)pin);
+}
+
+static inline void detachInterrupt(int pin)
+{
+    gpio_intr_disable((gpio_num_t)pin);
+    gpio_isr_handler_remove((gpio_num_t)pin);
+}
+
+/* Arduino's global interrupt enable/disable. portDISABLE_INTERRUPTS is per-core on ESP32,
+ * which is NOT the same guarantee -- these call sites need auditing when the code they
+ * guard moves to shared/core, which has no global-disable primitive at all and needs an
+ * explicit od_hal irq-lock (flagged in DESIGN_REVIEW § "Big-picture soundness"). */
+static inline void noInterrupts(void) { portDISABLE_INTERRUPTS(); }
+static inline void interrupts(void)   { portENABLE_INTERRUPTS(); }
+
 #ifdef __cplusplus
 }   /* extern "C" */
 #endif
@@ -133,6 +190,11 @@ public:
     explicit String(unsigned v) { char b[16]; snprintf(b, sizeof b, "%u", v);   s_ = b; }
     explicit String(long v)     { char b[24]; snprintf(b, sizeof b, "%ld", v);  s_ = b; }
     explicit String(char c)     { s_ = std::string(1, c); }
+    /* String(v, HEX) -- the two-arg radix form. Only HEX and DEC appear in the sources. */
+    String(unsigned long v, int radix)
+    { char b[24]; snprintf(b, sizeof b, radix == 16 ? "%lX" : "%lu", v); s_ = b; }
+    String(unsigned v, int radix)
+    { char b[16]; snprintf(b, sizeof b, radix == 16 ? "%X" : "%u", v); s_ = b; }
 
     const char *c_str() const { return s_.c_str(); }
     size_t length() const     { return s_.size(); }
@@ -150,6 +212,21 @@ public:
     bool operator!=(const String &o) const { return !(*this == o); }
 
     char operator[](size_t i) const { return i < s_.size() ? s_[i] : '\0'; }
+
+    char charAt(size_t i) const { return (*this)[i]; }
+    void setCharAt(size_t i, char c) { if (i < s_.size()) s_[i] = c; }
+    String substring(size_t from) const
+    { return from >= s_.size() ? String() : String(s_.substr(from)); }
+    String substring(size_t from, size_t to) const
+    { if (from >= s_.size() || to <= from) return String(); return String(s_.substr(from, to - from)); }
+    int indexOf(char c) const { size_t p = s_.find(c); return p == std::string::npos ? -1 : (int)p; }
+    int indexOf(const char *n) const
+    { if (!n) return -1; size_t p = s_.find(n); return p == std::string::npos ? -1 : (int)p; }
+    bool startsWith(const char *p) const { return p && s_.rfind(p, 0) == 0; }
+    void toUpperCase() { for (auto &ch : s_) ch = (char)toupper((unsigned char)ch); }
+    void trim()
+    { size_t b = s_.find_first_not_of(" \t\r\n"); size_t e = s_.find_last_not_of(" \t\r\n");
+      s_ = (b == std::string::npos) ? "" : s_.substr(b, e - b + 1); }
 
 private:
     std::string s_;
@@ -200,5 +277,17 @@ public:
 };
 
 extern SerialCompat Serial;
+
+/* ESP.* -- three accessors, mapped onto their IDF equivalents. */
+class EspClass {
+public:
+    uint32_t getFreeHeap() const;
+    uint32_t getMinFreeHeap() const;
+    uint64_t getEfuseMac() const;
+};
+
+extern EspClass ESP;
+
+#include "ledc_compat.h"   /* Arduino LEDC PWM, used by buzzer_hw */
 
 #endif /* __cplusplus */

@@ -45,11 +45,19 @@ fi
 # What the check is *for* is "how many files still need Arduino", so that is what it counts.
 # compat/ itself is excluded -- the shim including its own header is not a user of it.
 #
+# Widened 2026-07-25 to every shim header, not just arduino_compat.h/Arduino.h. Phase B added
+# Wire.h, SPI.h, WiFi.h, ledc_compat.h and esp32-hal-gpio.h, and a file that includes Wire.h
+# but not Arduino.h is just as much a shim user. Measured both ways at the time: 20 under the
+# old pattern, 21 under this one. The shim did NOT grow -- the METRIC did, by one file. That
+# distinction is recorded here because "we widened the definition" is otherwise
+# indistinguishable from "we let it grow", and a ratchet that cannot tell them apart is not
+# a ratchet.
+#
 # NOTE the `|| true`: grep exits 1 when it matches nothing, which under `set -e` + `pipefail`
 # aborts the script on the healthiest possible state -- zero shim users. Without it this check
 # fails hardest exactly when the port has succeeded.
 shim_users() {
-    grep -rlE '#[[:space:]]*include[[:space:]]*[<"][[:space:]]*(arduino_compat|Arduino)\.h' \
+    grep -rlE '#[[:space:]]*include[[:space:]]*[<"][[:space:]]*(arduino_compat|Arduino|Wire|SPI|WiFi|ledc_compat|esp32-hal-gpio)\.h' \
          targets/esp32-idf --include='*.c' --include='*.cpp' --include='*.h' \
          --include='*.hpp' --include='*.inl' 2>/dev/null \
         | grep -v '^targets/esp32-idf/compat/' || true

@@ -833,7 +833,6 @@ void secureEraseConfig() {
      * than rewriting also removes a path that wrote config bytes from outside the config
      * subsystem, which is the sort of second writer that makes a storage format drift. */
     (void)od_hal_nvs_erase();
-    }
 #endif
     od_log_info("Config securely erased");
 }
