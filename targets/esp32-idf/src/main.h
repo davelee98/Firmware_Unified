@@ -76,10 +76,8 @@ extern "C" {
 #include <ESPmDNS.h>
 
 extern BLEServer* pServer;
-extern BLEService* pService;
 extern BLECharacteristic* pTxCharacteristic;
 extern BLECharacteristic* pRxCharacteristic;
-extern BLEAdvertisementData* advertisementData;  // Pointer to global advertisementData object
 
 // RTC memory variables for deep sleep state tracking (declared in main.cpp)
 extern bool advertising_timeout_active;
@@ -379,14 +377,14 @@ CommandQueueItem commandQueue[COMMAND_QUEUE_SIZE];
 volatile uint8_t commandQueueHead = 0;
 volatile uint8_t commandQueueTail = 0;
 
-BLEServer* pServer = nullptr;
-BLEService* pService = nullptr;
-BLECharacteristic* pTxCharacteristic = nullptr;
-BLECharacteristic* pRxCharacteristic = nullptr;
-BLEAdvertisementData globalAdvertisementData;  // Global object, not pointer
-BLEAdvertisementData* advertisementData = &globalAdvertisementData;  // Pointer to global object
-MyBLEServerCallbacks staticServerCallbacks;  // Static callback object (no dynamic allocation)
-MyBLECharacteristicCallbacks staticCharCallbacks;  // Static callback object (no dynamic allocation)
+/* Facade instances. The real state lives in ble/od_ble_nimble.cpp; these exist so the
+ * imported call sites (pServer->getConnectedCount(), pTxCharacteristic->notify(...)) keep
+ * compiling. They are non-null once BLE is up, and od_ble_* answers correctly either way. */
+static BLEServer odBleServerFacade;
+static BLECharacteristic odBleCharFacade;
+BLEServer* pServer = &odBleServerFacade;
+BLECharacteristic* pTxCharacteristic = &odBleCharFacade;
+BLECharacteristic* pRxCharacteristic = &odBleCharFacade;
 #endif
 
 extern const uint8_t writelineFont[] PROGMEM;

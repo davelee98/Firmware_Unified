@@ -18,3 +18,10 @@ CONFIG_COMPILER_CXX_RTTI=n
 # IDF caps this Kconfig at [1,60]; platformio.ini asked for 120 via -D, which the Arduino
 # core accepted. 60 is the closest legal value -- a real translation finding, not a typo.
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=60
+
+# TLS-PSK for the LAN transport (SECTION 9: TLS-PSK on server_port + 1). IDF defaults the
+# PSK key-exchange modes OFF, so mbedtls_ssl_conf_psk() does not exist without this. The
+# Arduino build got it enabled by default -- a translation finding, not a preference: without
+# it the encrypted LAN port silently fails to build.
+CONFIG_MBEDTLS_PSK_MODES=y
+CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y

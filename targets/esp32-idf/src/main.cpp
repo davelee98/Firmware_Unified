@@ -89,7 +89,7 @@ void setup() {
         deep_sleep_count++;
         od_log_info("=== WOKE FROM DEEP SLEEP ===");
         woke_by_button = detectButtonWake(wakeup_reason);  // logs the named cause + pin(s)
-        od_log_info("Deep sleep count: %u", deep_sleep_count);
+        od_log_info("Deep sleep count: %u", (unsigned)deep_sleep_count);
     } else {
         woke_from_deep_sleep = false;
         od_log_info("=== NORMAL BOOT ===");
@@ -98,7 +98,7 @@ void setup() {
         // panic/WDT/SW/brownout resets: a hidden mid-cycle reset lands here with
         // count 0, indistinguishable from a true first boot (captured on hardware
         // in docs/FINDINGS_DEEP_SLEEP_WAKE_BOOT_SCREEN_2026-07-07.md).
-        od_log_info("Deep sleep count (RTC): %u", deep_sleep_count);
+        od_log_info("Deep sleep count (RTC): %u", (unsigned)deep_sleep_count);
     }
     #endif
     od_log_info("Starting setup...");
@@ -448,7 +448,7 @@ void loop() {
     static uint32_t lastWiFiCheck = 0;
     if (wifiInitialized && (millis() - lastWiFiCheck > 10000)) {
         lastWiFiCheck = millis();
-        wl_status_t wifiStatus = WiFi.status();
+        int wifiStatus = WiFi.status();   /* OD: wl_status_t is an Arduino enum; the shim returns int */
         if (wifiStatus != WL_CONNECTED && wifiConnected) {
             od_log_warn("WiFi connection lost (status: %d)", wifiStatus);
             wifiConnected = false;
@@ -616,7 +616,7 @@ void enterDeepSleep(bool force, uint16_t overrideSleepSeconds) {
         }
     }
     delay(200);
-    BLEDevice::deinit(true);
+    od_ble_stop_advertising();   /* OD: see device_control.cpp for why not a full deinit */
     esp32_ble_clear_handles();
     delay(100);
     od_log_info("BLE deinitialized");

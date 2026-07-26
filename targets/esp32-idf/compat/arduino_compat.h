@@ -253,6 +253,7 @@ public:
     { if (!n) return -1; size_t p = s_.find(n); return p == std::string::npos ? -1 : (int)p; }
     bool startsWith(const char *p) const { return p && s_.rfind(p, 0) == 0; }
     void toUpperCase() { for (auto &ch : s_) ch = (char)toupper((unsigned char)ch); }
+    void toLowerCase() { for (auto &ch : s_) ch = (char)tolower((unsigned char)ch); }
     void trim()
     { size_t b = s_.find_first_not_of(" \t\r\n"); size_t e = s_.find_last_not_of(" \t\r\n");
       s_ = (b == std::string::npos) ? "" : s_.substr(b, e - b + 1); }

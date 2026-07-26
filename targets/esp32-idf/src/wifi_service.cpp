@@ -1,4 +1,5 @@
 #include "wifi_service.h"
+#include "host/ble_hs.h"   /* OD: BLE identity address for the mDNS TXT record */
 
 #ifdef OPENDISPLAY_HAS_WIFI
 
@@ -393,10 +394,19 @@ void opendisplay_mdns_update_msd_txt(void) {
 // VALIDATION REQUIRED: confirm NimBLEDevice::getAddress() == the advertised AdvA
 // HA sees (public vs static-random) on BOTH S3 and C6.
 static String advertisedBleMacLower(void) {
-    auto s = NimBLEDevice::getAddress().toString();
-    String out(s.c_str());
-    out.toLowerCase();
-    return out;
+    /* OD: was NimBLEDevice::getAddress(). The C API reads the identity address directly. */
+    uint8_t addr[6] = {0};
+    uint8_t addr_type = 0;
+    char buf[18] = {0};
+    if (ble_hs_id_copy_addr(BLE_ADDR_PUBLIC, addr, NULL) != 0) {
+        (void)addr_type;
+        return String("");
+    }
+    /* NimBLE stores the address little-endian; print it MSB-first, lower-case, which is the
+     * form Home Assistant matches on. */
+    snprintf(buf, sizeof buf, "%02x:%02x:%02x:%02x:%02x:%02x",
+             addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
+    return String(buf);
 }
 
 static void restartLanService(void) {

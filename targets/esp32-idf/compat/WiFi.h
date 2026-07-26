@@ -31,6 +31,33 @@
 #define WL_CONNECT_FAILED   4
 #define WL_DISCONNECTED     6
 
+#define WIFI_ALL_CHANNEL_SCAN 1
+#define WIFI_FAST_SCAN        0
+
+#define WIFI_POWER_15dBm      60
+#define WIFI_POWER_19_5dBm    78
+
+/* Arduino's wl_status_t is an enum; the shim's status() returns int, so alias it. */
+typedef int wl_status_t;
+
+/* Arduino's WiFi event plumbing. The sources register a diagnostic handler; IDF uses the
+ * default event loop with a different signature, so the handler is not wired up here --
+ * it is diagnostics only, and wiring it wrongly would be worse than leaving it silent. */
+typedef int arduino_event_id_t;
+
+#define ARDUINO_EVENT_WIFI_STA_CONNECTED     0
+#define ARDUINO_EVENT_WIFI_STA_DISCONNECTED  1
+#define ARDUINO_EVENT_WIFI_STA_GOT_IP        2
+
+/* The diagnostic handler reads fields off this union. Providing the shape keeps the handler
+ * compiling; it is never dispatched (see onEvent below), so the fields stay zero rather than
+ * carrying stale values that would read as real diagnostics. */
+struct arduino_event_info_t {
+    struct { uint8_t bssid[6]; uint8_t channel; } wifi_sta_connected;
+    struct { uint8_t reason; } wifi_sta_disconnected;
+    struct { struct { uint32_t addr; } ip; struct { uint32_t addr; } ip_info; } got_ip;
+};
+
 class IPAddress {
 public:
     IPAddress() {}
@@ -169,6 +196,19 @@ public:
     int32_t channel() const;
     String BSSIDstr() const;
     void setTxPower(int) {}
+    void setScanMethod(int) {}
+    void setMinSecurity(int) {}
+    uint8_t *BSSID() { static uint8_t b[6] = {0}; return b; }
+    /* Arduino's begin() has several overloads; the sources use the 4-arg form with an
+     * explicit channel and BSSID. Channel/BSSID pinning is not modelled -- esp_wifi will
+     * scan for the SSID -- which is slower to associate but not incorrect. */
+    int begin(const char *ssid, const char *pass, int32_t, const uint8_t *)
+    { return begin(ssid, pass); }
+    /* NOT dispatched. Arduino's event callback signature and IDF's default-event-loop
+     * handler are different shapes, and this handler is diagnostics only -- wiring it
+     * wrongly would produce misleading link diagnostics, which is worse than none. */
+    void onEvent(void (*)(arduino_event_id_t, arduino_event_info_t)) {}
+    void setAutoReconnect(bool) {}
     void setSortMethod(int) {}
     void mode(int) {}
 };
