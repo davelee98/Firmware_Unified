@@ -82,6 +82,11 @@ nRF54 (MCUboot, `Firmware_NRF54/zephyr/prj.conf:78-79`) and Silabs (.gbl appload
 unchanged) look genuinely low-risk here — but that conclusion should be written down as a
 checked decision, not left implicit.
 
+*(Resolved 2026-07-25 — both facts were supplied and the decisions recorded: ESP32 deployed
+units are flash-and-reconfigure with no LittleFS→NVS migration path, ESP32 OTA is unimplemented
+(S3 dual-slot capable, C6 single-slot until its bench visit), and bootloaders are decided. See
+MIGRATION.md § "Deployed fleet status" and the open-decisions table below.)*
+
 ### F3 — The migration order maximizes exposure to its own top-ranked risk
 
 MIGRATION.md names concurrent development on `Firmware` as "the risk most likely to derail the
@@ -107,6 +112,10 @@ v1 would lack its optional subsystems — but they are compile-gated options by 
 promoted during the ESP32 step. This deserves an explicit decision with the trade-off written
 down; right now the doc asserts the order without ever pricing the alternative, and the cost of
 reordering is zero until Phase A lands.
+
+*(2026-07-25: the alternative is now priced in MIGRATION.md § "Risks to watch" — "Migration
+order was set before the fleet status was known" — but the order has not been re-decided. That
+remains a human call.)*
 
 ### F4 — There is no test story, for the one component that is trivially testable
 
@@ -139,7 +148,10 @@ manual hardware smoke tests on boards two of which cannot even be built on the p
 - **`MAX_CONFIG_SIZE`:** the host hardcodes 4096 with no per-device limit
   (`py-opendisplay/src/opendisplay/protocol/config_serializer.py:672-675`). A 2.5 KB config
   sent to a BG22 truncates silently at 2048 *today*. The firmware side is recorded
-  (DIVERGENCE 2.7); the host-side work item exists nowhere.
+  (DIVERGENCE 2.7); the host-side work item exists nowhere. *(Resolved 2026-07-25 — 4096
+  fleet-wide. The host-side work item is closed by never being created: the hardcoded 4096 this
+  finding flags as a defect is simply correct under the new decision. The firmware side moves
+  instead, and only on BG22.)*
 - **The zlib window "unresolved contract" (MEMORY_CONSTRAINTS.md open question) is resolved de
   facto:** the host encodes `window_bits = FIRMWARE_ZLIB_WINDOW_BITS = 9` unconditionally
   (`py-opendisplay/src/opendisplay/encoding/compression.py:14`, `device.py:389`) and rejects
@@ -147,7 +159,8 @@ manual hardware smoke tests on boards two of which cannot even be built on the p
   9 bits; the E1004's 32 KB window build is **host-unreachable dead capability**. The real
   remaining question is not "what does the host send" but "does anyone want >9 bits ever, and
   where does the per-device bit live" — which is F1's capability problem, not a compression
-  problem. MEMORY_CONSTRAINTS should be corrected to say so.
+  problem. MEMORY_CONSTRAINTS should be corrected to say so. *(Done 2026-07-25 —
+  MEMORY_CONSTRAINTS.md and TOOLCHAINS.md now say exactly this.)*
 - Generalized rule the docs should adopt: **every DIVERGENCE resolution with wire effect gets a
   named `py-opendisplay` work item in the same row.** Currently zero rows have one.
 
@@ -163,6 +176,21 @@ per-target; how the host expresses "this fix exists on nRF54 ≥ X but ESP32 ≥
 the first release from the unified repo and blocks any host-side compatibility matrix. It is
 mentioned in no document.
 
+*(**RESOLVED 2026-07-25 — semver, one version line for the whole repo**, first release `v2.0.0`;
+recorded in README.md § "Versioning and releases". Two of this finding's points were decided by
+the review's own evidence rather than against it. The **per-target-tags option was rejected as
+unavailable, not merely unwanted**, on F1.4's grounds: with no target identity on the wire, a
+per-target number cannot be interpreted by the host that reads it — so this finding's item 4
+is what settles its item here. And **the "maj/min/sha, no patch" premise above is incomplete**:
+the canonical `0x43` response is `[major][minor][shaLen][sha][patch]?`, with a documented
+trailing patch byte that older firmware omits and hosts read as 0 — so semver maps onto the
+frozen wire with no protocol change at all. Starting at 2.0.0 rather than 1.0.0 is deliberate:
+every shipped firmware is below 2.0, so `major >= 2` now identifies unified firmware, which
+partially compensates for the missing target identity. **Still open**, and not resolved by this:
+how the host expresses "fixed on nRF54 ≥ X but ESP32 ≥ Y" — under a single version line that
+becomes "fixed in ≥ X, on the targets that release note X says were rebuilt", which is a release-
+notes convention rather than a wire mechanism.)*
+
 ### F7 — Security: known shipped vulnerabilities are queued behind a multi-month migration
 
 The Silabs <31-byte plaintext auth bypass (`Firmware_Silabs/opendisplay_pipe.c:1238-1251` —
@@ -172,6 +200,18 @@ session-survives-key-change bug (DIVERGENCE 2.4), the `diff==0` replay acceptanc
 adoption" — i.e., at migration step 3, months out. **These are fixes to shipping firmware and
 should be hotfixed in the source repos now, out-of-band from the migration.** The migration
 docs are becoming the place vulnerabilities go to wait.
+
+*(Decided 2026-07-25 — against this recommendation: hotfixes are deferred, the bugs are fixed
+on promotion to `shared/core`, and the exposure is accepted and tabulated in MIGRATION.md
+§ "Risks to watch". Revisit if the timeline slips.)*
+
+*(Later the same day — the premise the deferral was priced on changed. **EFR32BG22 was confirmed
+shipped**, and it is the only fleet with a working field-update path (`.gbl` via the AppLoader,
+the sole OTA extra HA pins). Two of the four defects above are Silabs defects, so this finding's
+"shipping firmware" claim is now literal for them, and the delivery cost of fixing them early is
+an OTA release rather than a bench visit. That is the leg the deferral leaned on. The decision
+still stands until re-taken — but it should be re-taken deliberately, not left to the timeline
+to slip first.)*
 
 The structural point is bigger: the repo's value proposition — "fixes land once" — has a dual
 the docs never state: **bugs land everywhere.** `shared/core` becomes a single point of failure
@@ -186,7 +226,8 @@ changes (F9), and staged rollout across targets rather than simultaneous release
 - The `od_hal_` exemption is a **line filter** (`grep -vE 'od_hal_'`), so any vendor include
   sharing a line with the string passes: `#include <esp_timer.h> /* backs od_hal_time */` is
   invisible. Fix by exempting the specific include form (`"od_hal_[a-z]+\.h"`), or drop the
-  `hal/` include style so no exemption is needed.
+  `hal/` include style so no exemption is needed. *(Fixed 2026-07-25 — the exemption in
+  shared-boundary.yml is now anchored on the include form. The other bullets stand.)*
 - A grep sees only `#include` lines. `extern`-declared vendor symbols, macros leaked through a
   target-supplied config header, and freestanding-unfriendly libc calls all pass. The honest
   enforcement is F4's host compile, which the docs never schedule despite admitting the grep is
@@ -217,6 +258,9 @@ All four source repos are GPL-3.0; `bb_epaper` is GPL-3.0; FastEPD is Apache-2.0
 unlicensed repo. One-file fix; must precede import. (No incompatibility issue — Apache-2.0
 vendored inside a GPL-3 work is fine — but the combined-work license should be stated.)
 
+*(Resolved 2026-07-25 — GPL-3.0 `LICENSE` added at the repo root, with a vendored-tree
+provenance rule; see README § License.)*
+
 ## Big-picture soundness
 
 **The `shared/core` + `shared/hal` cut is right.** Dependencies-inward, link-time HAL binding,
@@ -226,7 +270,8 @@ implementer: ARCHITECTURE.md/CLAUDE.md still describe the HAL as "a plain C stru
 pointers **or** compile-time-selected functions" while SHARED_API_DESIGN.md (correctly) mandates
 link-time `extern` functions with one deliberate vtable exception — align on the latter. And
 README.md:70 permits "the C/C++ standard library" in `shared/` while CI rejects `.cpp` — say
-plain C everywhere.
+plain C everywhere. *(Both resolved 2026-07-25 — ARCHITECTURE.md, CLAUDE.md, and README.md now
+state link-time binding with the `od_panel_ops` exception, and plain C.)*
 
 **The value proposition is real but bundled with a cost that is not dedup.** The duplicated
 logic is roughly 2-4 k lines per target (parsers, state machines, session); eliminating three
@@ -377,6 +422,14 @@ is ~20-40 bytes and affordable, but size it deliberately: the failure mode is th
 target truncating the very packet that exists to report its limits. (A 32-byte opcode bitmap
 would also fit; the objection above is shape, not RAM.)
 
+*(Recheck after 2026-07-25. The trap gets **better in shape and worse in absolute cost**: the
+scratch is now 4096 rather than 2048, so ~20-40 synthetic bytes are proportionally easier to
+find — but the scratch itself doubled, which is the real BG22 expense, and the read-chunk-count
+derivation shifts for that reason rather than this one. The packet also has one fewer field to
+carry, `MAX_CONFIG_SIZE` having become a constant both sides know. The "affordable, but size it
+deliberately" conclusion stands; the affordability now depends on MEMORY_CONSTRAINTS item 3's
+mitigations landing.)*
+
 ## Open decisions not yet recorded (or recorded but under-specified)
 
 | Decision | Status | Blocks |
@@ -385,7 +438,8 @@ would also fit; the objection above is shape, not RAM.)
 | Capability-discovery design (F1; ARCHITECTURE § interrogation) | **Mostly settled 2026-07-25**: clamp on **write** not read (your argument accepted); clamp firmware-authoritative bits only — never panel-descriptive fields, since the device cannot interrogate the panel; device self-determines the firmware half. **Still open**: whether the opcode bitmap survives (you argue drop it), and the `py-opendisplay` counterpart is unbudgeted | `MAX_CONFIG_SIZE` reporting; host-side capability storage |
 | ESP32 config-storage migration for deployed units (F2) | **DECIDED 2026-07-25 — flash and reconfigure.** No LittleFS→NVS migration path is built; deployed units are reflashed and reconfigured from the host. Frees the partition layout and removes the Phase B migration work | Resolved (MIGRATION.md § Deployed fleet status) |
 | Does ESP32 field OTA exist at all | **ANSWERED 2026-07-25.** No OTA implemented on any ESP32. But S3 (shipped) already has `app0`+`app1` partitions, so it is implementable without touching units; C6 (shipped) is `huge_app.csv`, single-slot — not implementable without a physical reflash | Resolved; C6 now bounds Phase B (MIGRATION.md § Deployed fleet status) |
-| Versioning/tag/release scheme across targets (F6) | Absent | First unified release; host compat matrix |
+| Versioning/tag/release scheme across targets (F6) | **DECIDED 2026-07-25 — semver, one line for the whole repo**, tags `vMAJOR.MINOR.PATCH`, first release `v2.0.0` (above every shipped version, so `major ≥ 2` = unified firmware). Per-target tags rejected as *unavailable* — no target identity on the wire (F1.4). Maps onto `0x43` unchanged: it already carries a trailing patch byte. README.md § "Versioning and releases" | Resolved for release identity. Still open: expressing per-target fix levels, now a release-notes convention |
+| **`MAX_CONFIG_SIZE` 2048 vs 4096 (F5)** | **DECIDED 2026-07-25 — 4096 fleet-wide**, BG22 raised to match; a global cap, not a per-target macro. Closes the host work item by making `py-opendisplay`'s existing hardcoded 4096 correct, and removes the value from capability reporting. Cost is BG22-only: +2048 B NVM3 record +2048 B scratch against a 10 576 B heap, so MEMORY_CONSTRAINTS' shared-scratch and bitmap-replay-window mitigations become required, and NVM3 object/instance capacity must be verified before the Silabs swap | Resolved — but gates the Silabs swap on a measurement |
 | Host test harness + golden vectors (F4) | **DECIDED 2026-07-25** — this repo owns tests, harnesses and corpus; mechanism, versioning and first step specified in TEST_OWNERSHIP.md. **Not yet built** — corpus is new construction, and wire captures have their own deadline | Trusting any subsystem swap (until built) |
 | LICENSE + provenance policy | **DECIDED 2026-07-25 — GPL-3.0**, byte-identical to all three source repos; `LICENSE` added to the repo root (README § License). Vendored third-party trees keep their own licence and notice | ~~First import commit~~ — unblocked |
 | CODEOWNERS / cross-target review policy (F9) | Absent | First `shared/` PR |
@@ -393,15 +447,20 @@ would also fit; the objection above is shape, not RAM.)
 | `shared/` consumption mechanics: Zephyr module (`module.yml`) vs `target_sources`; `.slcp` source registration; `idf_component_register` | Asserted as easy, never specified | First cross-target build |
 | Canonical macro registry (`OD_*_ENABLE`, sizes, floors) — one header or per-target convention | **DECIDED 2026-07-25** — `opendisplay-protocol` owns wire constants *and fleet floors*; per-target selection and `OD_*_ENABLE` stay in `targets/<t>/` build files (ARCHITECTURE.md § canonical macros) | Resolved — but now depends on the header-sync mechanism, which is 1-in-sync/5-drifted/2-missing and unenforced |
 | Submodule vs script-sync for `shared/protocol` | Inherited without decision | Header-drift class |
-| Hotfix policy for security bugs found during survey (F7) | **DECIDED 2026-07-25 — deferred.** Fixed on promotion to `shared/core`, not hotfixed in source repos. Exposure accepted and tabulated in MIGRATION.md § Risks | Nothing — accepted risk, revisit if the timeline slips |
-| Fleet status: which targets are shipped | **ANSWERED 2026-07-25.** Shipped: ESP32-S3, ESP32-C6, nRF52840, and legacy nRF52 (`Firmware_NRF`, a handful of low-capability units). Not shipped: nRF54L15. `Firmware_NRF` is maintained in place, never migrated, and sets the host's backward-compat floor | Resolved (MIGRATION.md § Deployed fleet status) |
+| Hotfix policy for security bugs found during survey (F7) | **DECIDED 2026-07-25 — deferred**, then **flagged for revisit the same day**: BG22 was confirmed shipped *and* field-updatable, so the two Silabs defects sit on reachable hardware and could ship as an OTA release rather than waiting for step 3. Decision stands until explicitly re-taken | Nothing mechanically — but the revisit trigger is already met, not pending a slip |
+| Fleet status: which targets are shipped | **ANSWERED 2026-07-25.** Shipped: ESP32-S3, ESP32-C6, nRF52840, **EFR32BG22**, and legacy nRF52 (`Firmware_NRF`, a handful of low-capability units). Not shipped: nRF54L15 — the only one. `Firmware_NRF` is maintained in place, never migrated, and sets the host's backward-compat floor. BG22 was omitted from the first pass and added once noticed; it is the only shipped fleet that is **field-updatable**, which bears on the F7 hotfix deferral | Resolved (MIGRATION.md § Deployed fleet status) |
 
 ## Likely pitfalls, ranked, with triggers
 
 1. **Deployed ESP32 unit updated to a Phase-B/C build loses its config** (F2). Trigger: first
    reflash of a provisioned unit with NVS-only firmware. Data loss, device blind.
-2. **Host sends a 2049-4096 B config to a BG22 → silent truncation → partially applied config**
-   (F5). Trigger exists today; probability grows with every TLV added (NFC did).
+2. ~~**Host sends a 2049-4096 B config to a BG22 → silent truncation → partially applied
+   config**~~ (F5). **Closed 2026-07-25 by the 4096 fleet-wide decision** — for firmware built
+   from this repo. What remains is a rollout window, not a permanent hazard: BG22 **is** a
+   deployed fleet (confirmed 2026-07-25), so those units stay at 2048 until updated and the host
+   cannot tell an updated device from a stale one. The window closes over the air — BG22 is the
+   one target whose field update works — so the mitigation is release ordering: ship the 4096
+   firmware before any host change that assumes configs above 2048 bytes.
 3. **Stale `0x10` bit + `OD_PIPE_ENABLE=0` → per-connection probe timeout; the designed NACK
    cannot be emitted because its error code is frozen out** (F1.2). Trigger: any non-PIPE
    target provisioned from a pipe-era config template.
@@ -427,26 +486,37 @@ would also fit; the objection above is shape, not RAM.)
 ## Improvements to make before the first import (cost of change ≈ 0 now)
 
 1. **Add LICENSE** (GPL-3.0 to match sources) and a `NOTICE`-style provenance convention for
-   `third_party/`.
+   `third_party/`. *(Done 2026-07-25 — README § License.)*
 2. **Stand up the host build + first tests now.** An empty `shared/` compiling under
    `gcc -Wall -Werror` in CI costs an afternoon; promote the config parser as the first
    `shared/core` unit *with tests and py-opendisplay golden vectors* before any target consumes
-   it. This also converts the boundary check from grep to compiler.
+   it. This also converts the boundary check from grep to compiler. *(Ownership and mechanism
+   decided 2026-07-25 — TEST_OWNERSHIP.md; nothing built yet.)*
 3. **Build the two missing ratchets** — `arduino_compat.h` include-count and BG22 size budget —
-   before the phases that need them.
+   before the phases that need them. *(Outstanding.)*
 4. **Fix shared-boundary.yml**: exempt `od_hal_*.h` by include form not by line, scope the
    `String` grep to C sources, and record that the grep is a stopgap for the host compile.
+   *(Partially done 2026-07-25: the exemption is anchored on the include form. Still open: the
+   `String` grep is unscoped to C sources, and the stopgap note is unrecorded in the
+   workflow.)*
 5. **Do the opendisplay-protocol PR** now: copy-map entry for `Firmware_Unified/shared/protocol/`
    plus the PR-#120 wording applied to canonical — sequenced, small, and it closes pitfall 7.
-6. **Hotfix F7's security bugs in the shipping repos**, decoupled from migration.
+   *(Outstanding — the copy map still lacks this repo.)*
+6. **Hotfix F7's security bugs in the shipping repos**, decoupled from migration. *(Superseded
+   2026-07-25 — decided the other way: deferred to promotion, exposure accepted; MIGRATION.md
+   § "Risks to watch".)*
 7. **Settle the capability-discovery design** (F1; now drafted in ARCHITECTURE.md) with the
    reshape argued above — clamp on write not read, named fields not an opcode bitmap — plus the
    host counterpart work items, and fold the `MAX_CONFIG_SIZE` and window-bits questions into it
    rather than keeping three separate opens. The *unsupported* error code is its spec
-   prerequisite and lands first.
+   prerequisite and lands first. *(Mostly settled 2026-07-25 — clamp on write,
+   firmware-authoritative bits only; still open: whether the opcode bitmap survives, and the
+   unbudgeted `py-opendisplay` counterpart. See the open-decisions table.)*
 8. **Record the versioning/tagging scheme** (F6) and add target identity to the discovery
-   design — the wire currently cannot express it.
+   design — the wire currently cannot express it. *(Still open.)*
 9. **Re-decide the migration order with the NRF54-first alternative priced** (F3). If ESP32-first
    survives the comparison, write down why; the current rationale does not engage with it.
+   *(Priced 2026-07-25 in MIGRATION.md § "Risks to watch"; not re-decided.)*
 10. **Answer the two deployed-fleet questions** (ESP32 field-update path; nRF52840 product
-    status) — both are facts, not designs, and both gate irreversible choices.
+    status) — both are facts, not designs, and both gate irreversible choices. *(Answered
+    2026-07-25 — MIGRATION.md § "Deployed fleet status".)*

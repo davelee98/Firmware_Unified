@@ -32,10 +32,13 @@ hardware.
    — so the earlier "confirm it is no longer shipped, then delete" instruction is answered, and
    answered the other way. Lower priority for development, not absent from the fleet.
 
-   The plan: it stays in `Firmware_NRF`, in maintenance only, and never becomes a target here.
-   Delete `targets/nrf52-sdk/` from this repo so the layout does not imply a migration that will
-   not happen — but record in this file that the deployed units are served from the original
-   repo, or the deletion will later read as "that fleet was forgotten."
+   **Resolved 2026-07-25: it stays in `Firmware_NRF`, in maintenance only, and never becomes a
+   target here.** `targets/nrf52-sdk/` has been removed from this repo so the layout does not
+   imply a migration that will not happen. The removal is *scope*, not abandonment — this entry
+   is the record that the deployed units are served from the original repo, so the missing
+   directory does not later read as "that fleet was forgotten." Anyone looking for the nRF52
+   legacy firmware should look in `Firmware_NRF`, not here; do not re-create the directory as a
+   marker, because a directory under `targets/` means "a target this repo builds."
 
    **It still binds the wire contract.** Those units cannot be updated in practice, so the host
    must keep working with them, and DIVERGENCE_MATRIX records what that means: no compression,
@@ -59,9 +62,15 @@ the procedure.
 | **ESP32-C6** | **yes** | IDF 2nd-stage | **no** — `huge_app.csv` has `app0` only | Cannot OTA without repartitioning, and repartitioning *is* a physical reflash. Field units are bench-update-only |
 | **nRF52840** | **yes** | Adafruit UF2 | n/a | Moving to MCUboot replaces the bootloader → physical reflash of every deployed unit |
 | **nRF54L15** | **no** | — | — | Greenfield. No compatibility burden of any kind |
+| **EFR32BG22** | **yes** (established 2026-07-25) | Gecko Bootloader + AppLoader | n/a — `.gbl` OTA works | **The only shipped target that can actually be updated in the field today**, via `.gbl` through the AppLoader — the sole OTA extra HA pins. Deployed units are reachable without a bench visit, which makes it the cheapest fleet to change and the only one where a firmware fix reaches customers on the host's schedule |
 | **nRF52 (legacy, `Firmware_NRF`)** | **yes** — a handful of low-capability devices | Nordic SDK | not assessed | Not migrated; maintained in place. Sets the host's backward-compatibility floor (strict feature subset — see "Order and rationale" item 5) |
 
-Three consequences that change decisions already recorded:
+**The BG22 row was missing when this table was first written and is now filled in: it is
+shipped.** That matters more than a table cell, because this target is simultaneously the one
+paying the full cost of the 4096 config decision, the one carrying three known security defects,
+and the *only* one whose fleet can be reached over the air. Consequence 4 below.
+
+Four consequences that change decisions already recorded:
 
 1. **ESP32-S3 is the cheapest place to gain OTA.** The partition layout already has two app
    slots, so `esp_ota` needs no layout change and no physical access. If the answer to
@@ -74,6 +83,20 @@ Three consequences that change decisions already recorded:
    partitioning, storage format, and wire behaviour can all change freely. Combined with it
    being the better structural donor for `shared/` (already C, already HAL-shaped), this is a
    real argument for reconsidering migration order — see the risk of the same name below.
+4. **EFR32BG22 is shipped *and* field-updatable — which weakens the security-hotfix deferral
+   specifically for this target.** The deferral (§ "Risks to watch") rests on the exposure being
+   bounded and the fix being expensive to deliver early. The second half does not hold here:
+   `.gbl` through the AppLoader is the one update path HA actually ships, so a Silabs fix
+   reaches deployed units without touching them. Two of the three deferred defects are Silabs
+   defects — the `<31 byte` plaintext auth bypass and the session surviving a key change — and
+   they sit on shipped hardware until migration **step 3**, months away, on the one fleet that
+   could have been patched in a release. Nothing here re-decides the deferral; it removes the
+   "expensive to fix now" leg of it, which is reason to revisit rather than inherit it.
+
+   The same fact carries the 4096 config decision's rollout: deployed BG22 units keep
+   truncating at 2048 until updated, and a host cannot tell an updated device from a stale one
+   — but the window closes over the air rather than at a bench, which is why this is a rollout
+   ordering problem and not a permanent hazard.
 
 **ESP32 deployed-unit migration, decided 2026-07-25: flash and reconfigure.** No
 LittleFS→NVS config migration path is built. A deployed S3 or C6 unit is physically reflashed
@@ -296,6 +319,15 @@ on the chip. But a subsystem that fails Gate 1 should never reach a board.
   and the shared implementations must land with these closed, so they are Gate 1 test cases
   (DIVERGENCE_MATRIX §1.5a, §2.4), not TODOs. If the timeline slips materially, revisit this
   decision rather than inheriting it by default.
+
+  **Revisit trigger reached 2026-07-25, before the timeline even started to slip.** EFR32BG22
+  was confirmed shipped, and it is the one target with a working field-update path (§ "Deployed
+  fleet status", consequence 4). The first two defects in the table are Silabs defects on that
+  fleet. So the deferral now trades a real, months-long exposure on deployed hardware against a
+  fix that could ship over the air — which is not the trade that was priced when the deferral
+  was taken, because BG22's fleet status was not in the table at the time. The decision stands
+  until it is explicitly re-taken; this note exists so that re-taking it is a choice and not an
+  archaeology exercise.
 - **Silent behavioural divergence.** The repos do not implement identical semantics today. When
   promoting logic to `shared/`, differences must be resolved deliberately and written down — not
   settled by whichever repo was copied first. Note the two donors pull in different directions
@@ -312,12 +344,12 @@ on the chip. But a subsystem that fails Gate 1 should never reach a board.
   canonical, not trusted as-is. And `upstream/main` PR #120 made a comment-only Seeed_GFX→FastEPD
   edit to the *vendored* `opendisplay_structs.h` that canonical does not yet carry; apply that
   wording to the canonical structs header *before* any `--push`, or a push will revert it.
-- **Scaffold docs disagree on the nRF52840 step number (pending fix).**
-  `targets/nordic-zephyr/README.md` calls the nRF52840 port "step 3 of the migration order,"
-  but the order in this file makes it **step 4** (Silabs is step 3). The order here is
-  authoritative — Silabs must bite third to keep `shared/` honest. Correct the target README
-  to say step 4 when it is next touched (it is outside the docs-only scope of the analysis that
-  found this).
+- ~~**Scaffold docs disagree on the nRF52840 step number.**~~ **Fixed 2026-07-25.**
+  `targets/nordic-zephyr/README.md` said "step 3"; the order in this file is authoritative and
+  makes the nRF52840 port **step 4** (Silabs is step 3, because it must bite third to keep
+  `shared/` honest). The target README now says step 4, and additionally distinguishes the
+  nRF52840 — a supported board of `nordic-zephyr` — from the legacy nRF52 of item 5, which is
+  not migrated here at all.
 - **Memory regressions on small targets.** Shared code sized for the ESP32 will not fit the
   EFR32BG22's 32 KB. Keep buffer sizes target-parameterised as plain preprocessor constants —
   *not* as Kconfig options, since the Silabs target has no Kconfig. See ARCHITECTURE.md.
@@ -328,11 +360,14 @@ on the chip. But a subsystem that fails Gate 1 should never reach a board.
   machine today, and the Silabs target additionally needs a full Simplicity SDK for
   `slc generate`. Stand up a CI build matrix early — the `shared/` boundary grep is necessary
   and nowhere near sufficient.
-- **OTA exists for exactly one target, and the migration assumes more.** Field firmware update
-  works only on EFR32BG22 (`.gbl` via the Silabs AppLoader, the sole OTA extra pinned in
-  `Home_Assistant_Integration`'s `manifest.json`). ESP32 has none — `ENTER_DFU` merely reboots.
-  `py-opendisplay` carries a legacy Nordic DFU implementation (`ota.py: perform_nrf_dfu`) that
-  HA does not pin, so it is unshipped library capability.
+- **OTA shipped through HA exists for exactly one target, and the migration assumes more.**
+  Field firmware update through the shipped HA path works only on EFR32BG22 (`.gbl` via the
+  Silabs AppLoader, the sole OTA extra pinned in `Home_Assistant_Integration`'s
+  `manifest.json`). ESP32 has none — `ENTER_DFU` merely reboots. Deployed nRF52840 units *do*
+  have a working BLE DFU path — the Adafruit bootloader plus in-app `bledfu`, driven by
+  `py-opendisplay`'s `perform_nrf_dfu` (targets/nordic-zephyr/README.md § "Deployed nRF52840")
+  — but HA does not pin the `nrf-ota` extra, so it is library capability rather than shipped
+  product behaviour.
 
   The consequence is concrete: **a target with no field-update path cannot have its flash
   layout or bootloader changed without a bench reflash of every deployed unit.** That is a hard
@@ -342,6 +377,12 @@ on the chip. But a subsystem that fails Gate 1 should never reach a board.
   it before Phase B commits to a partition layout, and record the answer here. It may
   legitimately conclude "no, and these units are bench-updated only" — but that must be a
   decision, not a discovery made after the layout changed.
+
+  *(Partially resolved 2026-07-25 — § "Deployed fleet status" above: the transition is
+  flash-and-reconfigure, so the partition layout no longer waits on this (S3 stays dual-slot,
+  C6 moves to `default.csv` on the bench). What remains of the open item is whether the update
+  implementations get built: `esp_ota` on S3, and the unbudgeted SMP/mcumgr host backend the
+  Nordic MCUboot path needs.)*
 - **Vendored binaries bloating history permanently.** The Silabs SDK is the large case (see "The
   Silabs SDK is not imported as-is"), but the rule is general: a binary committed once is
   carried forever, and every target here vendors *something*. Decide what a blob's pruned form

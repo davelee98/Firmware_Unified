@@ -49,7 +49,15 @@ vendored copy shared by every target, not a per-target fork.
 | `targets/esp32-idf/` | ESP32-S3 / C3 / C6 / classic | **ESP-IDF** (CMake + Kconfig) | `Firmware` |
 | `targets/nordic-zephyr/` | nRF54L15, nRF52840 | Zephyr / nRF Connect SDK + west | `Firmware_NRF54`, `Firmware` |
 | `targets/efr32bg22-slc/` | EFR32BG22 | Simplicity SDK + SLC (CMake) — **unchanged** | `Firmware_Silabs` |
-| ~~`targets/nrf52-sdk/`~~ | nRF52 (legacy) | Nordic SDK (bare C) | `Firmware_NRF` — **out of scope** |
+
+**Three targets, not four.** The legacy nRF52 (bare Nordic SDK, `Firmware_NRF` — *not* the
+nRF52840, which is a board of `targets/nordic-zephyr/` above) is deliberately absent: it **is
+shipped** — a handful of low-capability devices — but it is maintained in place in its own repo
+and never migrates here, so this repo carries no directory for it. It still
+binds the wire contract, and is the strictest one in the fleet: no compression, no `0x76`, no
+PIPE, no NFC, no `LED_STOP`, no `CONFIG_CLEAR`, no `READ_MSD`. That is the
+backward-compatibility floor `py-opendisplay` must keep meeting, because those units cannot be
+updated in practice. See [docs/MIGRATION.md](docs/MIGRATION.md) § "Order and rationale" item 5.
 
 Targets are grouped **by silicon vendor, not by repo of origin**. That is why nRF52840 sits with
 nRF54L15 rather than with the ESP32s it currently shares a repo with: the two Nordic parts share
@@ -68,8 +76,10 @@ single build system. Do not attempt to make one build system drive all three.
 
 ## The `shared/` rule
 
-`shared/` compiles for every target, so it may use only the C/C++ standard library and
-`shared/hal` interfaces. **No `esp_*`, `nrf_*`, `sl_*`, `zephyr/*`, or `Arduino.h` includes.**
+`shared/` compiles for every target, so it may use only the C standard library and
+`shared/hal` interfaces. It is **plain C** — two targets are C-only, and CI rejects
+`.cpp`/`.hpp` and Arduino `String` under `shared/`. **No `esp_*`, `nrf_*`, `sl_*`, `zephyr/*`,
+or `Arduino.h` includes.**
 Anything needing a peripheral goes through `shared/hal`, implemented per target.
 
 This is the invariant that makes the repo worth having. Code that reaches for a vendor
@@ -94,11 +104,81 @@ tools/sync_protocol_header.py --check    # fail if any copy drifted (CI/pre-comm
 > `Firmware_Unified/shared/protocol/` as a destination in
 > `opendisplay-protocol/tools/sync_protocol_header.py` before relying on them.
 
+## Versioning and releases
+
+**Semantic versioning, one version line for the whole repository.** Decided 2026-07-25,
+resolving docs/DESIGN_REVIEW_2026-07-25.md § F6. Tags are `vMAJOR.MINOR.PATCH`; the four
+per-repo schemes this repo replaces (ESP32 `BUILD_VERSION "1.0.0"`, nRF54 `OD_APP_VERSION`
+`0x0100`, Silabs `0x0019`) do not carry over.
+
+For firmware, the semver components mean:
+
+| Bump | When |
+|---|---|
+| **MAJOR** | a breaking wire or stored-config change, or anything that requires a coordinated `py-opendisplay` release to keep working |
+| **MINOR** | a new backward-compatible capability — a new opcode handler, a new config packet, a new panel or board |
+| **PATCH** | a fix with no observable wire change |
+
+### One line for all targets, not one per target
+
+The alternative — per-target tags like `esp32-idf/v2.3.0` — is what the four separate version
+schemes suggest, and it is **not available today**, for a hard reason rather than a stylistic
+one: *nothing on the wire identifies which target a device is.* `CMD_FIRMWARE_VERSION` (`0x43`)
+returns version bytes and a commit SHA but no hardware type, and `MsdAdvertisement` carries none
+either (DESIGN_REVIEW § F1.4). A host reading `1.4.2` from an unknown device would have no way
+to know *whose* 1.4.2 it is, so per-target numbering would be uninterpretable by the only
+consumer that matters. A single line is unambiguous without target identity.
+
+Revisit this if target identity ever lands on the wire — that is the one change that makes
+per-target versioning workable, and it is currently blocked by the header freeze.
+
+The cost of a single line, stated plainly: **a release bumps the version for targets that did
+not change.** That is accepted. The version identifies the *source tree* a binary was built
+from, which is what a host actually needs in order to reason about behaviour; the commit SHA in
+the same response pins the exact build.
+
+### It maps onto the frozen wire exactly
+
+No protocol change is needed, which is why this could be decided while the headers are frozen.
+The `0x43` response is already:
+
+```
+[0x00][0x43][major:1][minor:1][shaLen:1][sha:shaLen][patch:1]?
+```
+
+Three consequences. Each component is **one byte, so 0-255** — not a practical limit, but a real
+one. Older firmware **omits** the trailing patch byte and a host must read a missing byte as
+patch `0`, which the canonical header already mandates. And `major`/`minor` stay at fixed
+offsets ahead of the SHA, so an old host parsing a new device still gets a correct major.minor.
+
+### The first release is `v2.0.0`
+
+Deliberately not `v1.0.0`, and deliberately not `v0.1.0`. Every shipped firmware reports a
+version below 2.0 — ESP32 `1.0.0`, nRF54L15 `1.0`, EFR32BG22 `0.25` — so starting at 2 makes
+**`major >= 2` mean "built from `Firmware_Unified`"**. That recovers a *codebase* identity on
+the wire even though target identity is still missing, and it guarantees no unified build can
+be confused with a legacy one by version alone. This is a deliberate deviation from semver's
+"start at 0.1.0" convention, taken because the version namespace is shared with deployed
+devices that cannot be renumbered.
+
+During the migration the repo ships nothing and stays untagged; `v2.0.0` is cut when the first
+target passes hardware verification (Gate 2 in docs/MIGRATION.md). A release records **which
+targets were built and hardware-verified at that tag** — targets are verified separately by
+construction, and a target that was not rebuilt keeps reporting the older version on real
+devices. That is expected, not a defect.
+
+> **Do not couple this to `OD_PROTOCOL_VERSION`.** Both happen to be 2.x today and they are
+> unrelated numbers on different schedules: the protocol version (`2.2`) is the wire contract
+> owned by `opendisplay-protocol`, and firmware `2.0.0` is this repo's build. A firmware patch
+> release does not touch the protocol version, and a protocol MINOR bump does not require a
+> firmware MAJOR.
+
 ## Getting started
 
 Per-target builds are documented in each `targets/*/README.md` once that target is imported.
-Note that **neither toolchain is installed on the primary dev box today** — no `idf.py`, no
-`west` — so CI carries more weight here than usual; see docs/TOOLCHAINS.md.
+Note that **of the three toolchains, only the Silabs one is installed on the primary dev box
+today** — no `idf.py`, no `west` — so CI carries more weight here than usual; see
+docs/TOOLCHAINS.md.
 
 - [docs/TOOLCHAINS.md](docs/TOOLCHAINS.md) — which toolchain each target uses and why
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the `shared`/`hal` boundary

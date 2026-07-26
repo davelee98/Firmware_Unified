@@ -64,13 +64,44 @@ buffer with the CCM plaintext buffer, and shrink the replay window (below).
    | ESP32-S3 `env:esp32-s3-E1004` **only** | 15 | 32 KB | heap |
 
    So `shared/compress` treats the window as a per-target macro with **512 B as the documented
-   floor**, and `py-opendisplay` needs a per-device capability bit for "9-bit window". Resolve
-   this contract in writing before `shared/compress` ships (open question, below).
+   floor**. The host side already complies unconditionally — `py-opendisplay` encodes
+   `window_bits = 9` for every device and rejects its own output if the header advertises more
+   (DESIGN_REVIEW_2026-07-25.md F5) — so the wire contract holds today and the E1004's 15-bit
+   build is host-unreachable dead capability. What is left open is narrower; see below.
 
-3. **`MAX_CONFIG_SIZE` divergence (2048 vs 4096).** BG22 stores 2048 (NVM3 record 2064 B);
-   nRF/ESP32 store 4096. A config that fits nRF but not BG22 is silently truncated on BG22. This
-   must be a per-target macro *and* a host-visible device limit — not folded into a generic
-   "buffer sizing" note, because it caps device capability, not just RAM (DIVERGENCE_MATRIX 2.7).
+3. **`MAX_CONFIG_SIZE` — DECIDED 2026-07-25: 4096 fleet-wide, BG22 included.** It is a single
+   product-wide value, not a per-target macro: the host may send up to 4096 bytes of config to
+   any device. This ends the silent-truncation class and makes `py-opendisplay` correct as it
+   stands (it already hardcodes 4096 — DESIGN_REVIEW F5), but **the cost lands entirely on the
+   BG22 and it is the largest single RAM ask in this document.** Before the Silabs swap
+   (migration step 3), measure it:
+
+   | Item | Today | At 4096 | Delta |
+   |---|---:|---:|---:|
+   | `s_cfg_rec` NVM3 record (16 hdr + data) | 2064 B | 4112 B | **+2048 B** |
+   | `opendisplay_config_buf()` read scratch (`MAX_CONFIG_SIZE`-shaped) | 2048 B | 4096 B | **+2048 B** |
+
+   Against a **10 576 B heap** and a realistic recoverable budget of ~6 KB (above), +4 KB is
+   more than the whole negotiating margin. Two mitigations are already identified and now become
+   load-bearing rather than optional: unify the read scratch with the CCM plaintext buffer (2.5
+   says one shared scratch, which removes the second row), and shrink the 512 B replay window to
+   a 64-bit bitmap (§ below, ~8 B). That converts the ask from ~4 KB to ~2 KB, which the ~6 KB
+   budget absorbs.
+
+   **Also verify on the NVM3 side, not just the RAM side:** a 4112-byte object must fit the
+   configured NVM3 max-object-size and the NVM3 instance's flash capacity. Neither is a given —
+   check both before committing the Silabs build, because this is the one target where the
+   decision can fail to *fit* rather than merely cost.
+
+   If it does not fit after the two mitigations, that is a finding to escalate — the decision is
+   fleet-wide 4096, and reverting BG22 to 2048 re-opens the divergence deliberately rather than
+   by discovery. Historical context follows.
+
+   BG22 stored 2048 (NVM3 record 2064 B) while nRF/ESP32 stored 4096, so a config that fit nRF
+   but not BG22 was silently truncated on BG22 (DIVERGENCE_MATRIX 2.7). The decision above
+   removes that split rather than making it discoverable: with one fleet-wide value there is no
+   per-device limit for a host to interrogate, which is why `MAX_CONFIG_SIZE` also drops out of
+   the capability-reporting bytes in ARCHITECTURE.md § "The gap, and a proposed fix".
 
 4. **Any assumption of heap.** The core must run on caller/static buffers only. No `malloc`
    exists in BG22 app code today; the one `malloc` in the inflater is compiled out
@@ -193,11 +224,18 @@ as the default. bb_epaper remains the streaming (`needs_framebuffer=false`) defa
 
 ## Open questions needing a human decision
 
-- **The zlib window contract.** BG22 and nRF54 are 9-bit (512 B) and cannot do more; only one
-  ESP32 board is 15-bit. `shared/compress`'s floor and `py-opendisplay`'s per-device encoder
-  setting are an unresolved contract. Settle before `shared/compress` ships.
-- **`MAX_CONFIG_SIZE` 2048 vs 4096.** Is the host allowed to send a >2 KB config to a BG22, or
-  is 2 KB the product-wide ceiling? Decides whether this is a per-target macro or a global cap.
+- **The zlib window — the contract itself is no longer open** (corrected 2026-07-25). The host
+  encodes `window_bits = 9` unconditionally and rejects its own output if the header says
+  otherwise (`py-opendisplay` `encoding/compression.py:14`, `device.py:389, 1842` —
+  DESIGN_REVIEW_2026-07-25.md F5), so everything on the wire is 9 bits and the E1004's 15-bit
+  build is host-unreachable dead capability. What still needs a human is narrower: does anyone
+  ever want >9 bits, and where does the per-device "max windowBits" value live — which is the
+  capability-discovery problem (ARCHITECTURE.md § "Capabilities are discovered by
+  interrogation"), not a compression one.
+- ~~**`MAX_CONFIG_SIZE` 2048 vs 4096.**~~ **DECIDED 2026-07-25 — 4096, product-wide, a global
+  cap rather than a per-target macro.** The host may send up to 4096 bytes to any device,
+  BG22 included. See item 3 above for the BG22 cost (~+4 KB naive, ~+2 KB after the two
+  required mitigations) and the NVM3 checks that must precede the Silabs swap.
 - **`CMD_NFC_ENDPOINT` placement.** In the header, implemented only on NRF54/Silabs, absent on
   Firmware. Core-behind-`OD_NFC_ENABLE`, or target-local? (SHARED_API_DESIGN.md assumes the
   former.)

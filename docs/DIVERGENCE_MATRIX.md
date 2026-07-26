@@ -87,11 +87,15 @@ If a new opcode removes a class of special-casing, collapses several overloaded 
 existing opcode, or replaces a fragile inference with an explicit signal, that is a real
 simplification and worth the wire cost. Two live candidates from this document:
 
-- **Capability / limits discovery.** `MAX_CONFIG_SIZE` diverges (2048 on BG22, 4096 elsewhere,
-  §2.7) with no way for a host to learn the limit, so oversized configs are silently truncated.
-  Today the host must infer capability from firmware version. Whether that becomes a new
-  opcode, an extension of `0x43 FIRMWARE_VERSION`, or a config TLV field is exactly the kind of
-  trade-off to argue explicitly rather than settle by whoever implements first.
+- **Capability / limits discovery.** ~~`MAX_CONFIG_SIZE` diverges (2048 on BG22, 4096
+  elsewhere, §2.7) with no way for a host to learn the limit.~~ **This candidate lost its
+  motivating case on 2026-07-25**: `MAX_CONFIG_SIZE` is now 4096 fleet-wide, so there is no
+  per-device limit to discover and no oversized-config truncation to report. Limits discovery
+  may still be wanted for the remaining values (max accepted `windowBits`, max frame size), but
+  it must now be argued on those alone — which is a materially weaker case than the one that
+  put it on this list. Whether it becomes a new opcode, an extension of
+  `0x43 FIRMWARE_VERSION`, or a config TLV field remains the kind of trade-off to argue
+  explicitly rather than settle by whoever implements first.
 - **Explicit compression signalling.** Direct-write infers "compressed" from payload length
   rather than a flag (§3.1). It works, but it is inference where a bit would do.
 
@@ -124,14 +128,14 @@ coverage" below. `Firmware` is split where its two chip families differ, because
 | Inflate RAM cost | **~11 KB** tinfl tables + 4 KB dict (9-bit window) vs ~2.5 KB uzlib | ~2.5 KB | ~2.5 KB | 1676 B measured | n/a |
 | zlib window default | 512 B (32 KB on `esp32-s3-E1004` only) | 512 B | 512 B | 512 B | n/a |
 | Panel backend | bb_epaper SPI + **FastEPD parallel** (S3) | bb_epaper SPI | bb_epaper SPI | bb_epaper SPI | direct driver |
-| `MAX_CONFIG_SIZE` | 4096 | 4096 | 4096 | **2048** | — |
+| `MAX_CONFIG_SIZE` | 4096 | 4096 | 4096 | **2048** → 4096 (decided 2026-07-25, §2.7) | — |
 | Crypto backend | mbedTLS CCM | mbedTLS CCM | PSA | PSA | `ocrypto` |
 | PIPE sliding window `0x80`-`0x82` | **yes — only implementation** | no | no | no | no |
 | Partial region `0x76` | yes | yes | yes | no (fail-fast NACK) | no |
 | NFC endpoint (TNB132M) | no | no | **yes** | **yes** | no |
 | Buzzer | yes | yes | yes | no (NACK) | no |
 | Channel Sounding / ranging | no | no | **yes** (`device_flags` bit 5, default off) | no | no |
-| Field OTA (host-driven) | **none** — `ENTER_DFU` only reboots | unverified (UF2 bootloader is USB, not field) | unverified | **yes** — `.gbl` via Silabs AppLoader, the only path wired into HA | library support exists (`perform_nrf_dfu`, legacy Nordic DFU `.zip`) but unused by HA |
+| Field OTA (host-driven) | **none** — `ENTER_DFU` only reboots | **yes** — Adafruit bootloader BLE DFU (`bledfu.begin()`, `CMD_ENTER_DFU` sets the bootloader magic), driven by `perform_nrf_dfu`; not wired into HA (verified 2026-07-25 — targets/nordic-zephyr/README.md § "Deployed nRF52840") | firmware-complete (MCUboot + SMP BT OTA DFU) but **undriveable** — `py-opendisplay` has no SMP/mcumgr client (targets/nordic-zephyr/README.md § Bootloader) | **yes** — `.gbl` via Silabs AppLoader, the only path wired into HA | library support exists (`perform_nrf_dfu`, legacy Nordic DFU `.zip`) but unused by HA |
 | Kernel | Arduino loop / FreeRTOS | Arduino loop | Zephyr | **none** (superloop) | none |
 | Config storage | LittleFS/NVS | NVS | Zephyr settings | NVM3 | flash |
 
@@ -191,7 +195,7 @@ Three parsers (`Firmware/src/config_parser.cpp` 919 C++, `Firmware_NRF54/src/ope
 | 2.4 | Session invalidation after config save | `clearEncryptionSession()` in `reloadConfigAfterSave` (`communication.cpp:67`) | `clear_session()` on every save path (`opendisplay_pipe.c:939, 960, 1012`) | **never clears the session after a save** (`clear_session` call sites: `:118, 431, 621, 673, 1263` — none post-save) | **Security-relevant Silabs bug**: change the encryption key over an old session and the old session keeps working. Firmware/NRF54 behaviour wins. |
 | 2.5 | Config-read scratch | shared 4 KB scratch, `getConfigScratch()` — deliberate stack-overflow avoidance (`communication.cpp:395-399`) | **own 4 KB static** `config_data[MAX_CONFIG_SIZE]` (`opendisplay_pipe.c:824`) on top of the 4 KB chunk buffer — ~20 KB of config buffers total across the file | shared scratch `opendisplay_config_buf()` (`opendisplay_pipe.c:725-727`) | One shared scratch (Firmware/Silabs pattern). On BG22 the NRF54 pattern would waste 4 KB of a 32 KB chip. |
 | 2.6 | Read chunk cap | `(MAX_CONFIG_SIZE+93)/94` (`communication.cpp:405-408`) | same, with the derivation comment (`:826-832`) | `ceil(MAX_CONFIG_SIZE / (MAX_RESPONSE_DATA_SIZE-6))` — same value, cleaner form (`:729-735`) | Silabs form. |
-| 2.7 | **`MAX_CONFIG_SIZE`** | — | **4096** (`config_parser.h:7`) | **4096** (`opendisplay_config_storage.h:18`) | **2048** (`opendisplay_config_storage.h:7`, NVM3 record 2064 B) | **Genuine wire-relevant divergence.** A config that fits on nRF but not BG22 is silently truncated at 2048 on Silabs. `shared/core` must expose `MAX_CONFIG_SIZE` as a target macro, and the host (`py-opendisplay`) must know the smallest target's limit. Not a "buffer sizing" nicety — it caps how much config a device can hold. |
+| 2.7 | **`MAX_CONFIG_SIZE`** | — | **4096** (`config_parser.h:7`) | **4096** (`opendisplay_config_storage.h:18`) | **2048** (`opendisplay_config_storage.h:7`, NVM3 record 2064 B) | **RESOLVED 2026-07-25 — 4096 fleet-wide, BG22 raised to match.** A single product-wide constant, *not* a per-target macro: any device accepts up to 4096 bytes of config, so the divergence is removed rather than made discoverable. Three consequences. (1) `py-opendisplay` needs no change — it already hardcodes 4096 (`config_serializer.py:672-675`), so the host-side work item F5 opened is closed by the decision instead. (2) `MAX_CONFIG_SIZE` drops out of the capability-reporting reserved bytes (ARCHITECTURE.md § "The gap, and a proposed fix"), since there is no longer a per-device number to report. (3) **The cost is BG22-only and material** — +2048 B of NVM3 record and +2048 B of read scratch against a 10 576 B heap; the two mitigations in MEMORY_CONSTRAINTS.md item 3 (shared scratch, bitmap replay window) become required rather than optional, and NVM3 max-object-size and instance capacity must be verified before the Silabs swap. |
 | 2.8 | Outer CRC16 enforcement | advisory only — mismatch logs, config still applied (`config_parser.cpp:665-672` region) | advisory only (`opendisplay_config_parser.c:657-670`) | advisory only (`opendisplay_config_parser.c:490-498`) | **Unanimous** — the toolbox-outer CRC16 is never enforced anywhere; a second inner CRC32 in the storage record *is* enforced on load. So there is no divergence, but `shared/core` should decide deliberately whether to start enforcing CRC16 (it currently protects nothing). |
 
 ## 3. Direct-write 0x70/0x71/0x72

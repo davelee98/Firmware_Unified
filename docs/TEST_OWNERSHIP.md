@@ -40,8 +40,9 @@ Nothing in this recommendation requires a PR to `py-opendisplay`, `opendisplay-p
 
 ## The premise that does not survive contact
 
-ARCHITECTURE.md:273-278 says `py-opendisplay` "already ships captured wire frames" that "should
-become a shared corpus." Measured, the corpus is:
+An earlier draft of ARCHITECTURE.md said `py-opendisplay` "already ships captured wire frames"
+that "should become a shared corpus" (since corrected there, 2026-07-25 — its § "Shared vectors
+with `py-opendisplay`" now records the same measurement as below). Measured, the corpus is:
 
 ```
 tests/fixtures/real_protocol_data/   5 files, 284 bytes total
@@ -220,8 +221,8 @@ found crash becomes a permanent unit test — that, not the fuzzer runtime, is w
 compounds.
 
 oss-fuzz is **not** recommended now: it wants a public, multi-maintainer project with a
-maintained build, and this repo has one author, no license (F10), and no build. Revisit after
-the first two targets land.
+maintained build, and this repo has one author and no build (the no-license gap F10 flagged
+was closed 2026-07-25 — GPL-3.0, README § License). Revisit after the first two targets land.
 
 ## Ownership
 

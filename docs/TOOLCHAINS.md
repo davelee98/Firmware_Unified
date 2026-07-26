@@ -2,8 +2,9 @@
 
 Which build system and framework each target uses in `Firmware_Unified`.
 Scope: **ESP32 (all `platformio.ini` variants), nRF52840, nRF54L15, EFR32BG22.**
-`Firmware_NRF` (legacy nRF52 + bare Nordic SDK) is out of scope and should be treated as
-end-of-life unless someone establishes it is still shipped.
+`Firmware_NRF` (legacy nRF52 + bare Nordic SDK) is out of scope — it **is** still shipped
+(a handful of low-capability units, established 2026-07-25), but it is maintained in place in
+its own repo and never migrates here; see MIGRATION.md § "Order and rationale" item 5.
 
 ## Decision
 
@@ -420,7 +421,9 @@ The scaffold has been updated to match this analysis. Recorded here so the reaso
 attached to the change:
 
 1. **`targets/` layout** — `esp32-nrf52840-pio/` → `esp32-idf/`, `nrf54l15-zephyr/` →
-   `nordic-zephyr/` (both now multi-board), `nrf52-sdk/` marked out-of-scope/EOL.
+   `nordic-zephyr/` (both now multi-board), `nrf52-sdk/` marked out-of-scope/EOL. *(Superseded
+   2026-07-25: `targets/nrf52-sdk/` is now deleted outright, not marked — the legacy fleet is
+   shipped and stays in `Firmware_NRF`. See MIGRATION.md § "Order and rationale" item 5.)*
 2. **`README.md`** — target table rebuilt around the vendor split; `third_party/` added to the
    layout; "no PlatformIO, no Arduino" stated up front.
 3. **`docs/ARCHITECTURE.md`** — the "one build system" non-goal reworded (this lands on *three*
@@ -450,7 +453,8 @@ their IO calls, and the nRF52840 port reuses the nRF54L15 drivers.
   against concurrent feature work. Either freeze feature work on `Firmware` for the duration,
   or accept that the port will be re-done against a moving target. Decide deliberately, up
   front — this is the risk most likely to derail the migration, and it is a scheduling problem,
-  not a technical one.
+  not a technical one. *(Decided 2026-07-25: frozen for the duration of the port —
+  MIGRATION.md § "Risks to watch".)*
 - **`String` removal touches 575 sites**, concentrated in the files whose logic is going to
   `shared/` anyway. High volume, low per-site difficulty, but it is where the hours go.
 - **BLE is a genuine rewrite** (~450 lines, NimBLE C API). Everything else is mechanical or
@@ -469,22 +473,40 @@ their IO calls, and the nRF52840 port reuses the nRF54L15 drivers.
 ## Open questions
 
 - **Is nRF52840 still in the product line, or is nRF54L15 its replacement?** Decides whether
-  the Zephyr port is worth doing at all.
+  the Zephyr port is worth doing at all. *Answered 2026-07-25: shipped, yes — MIGRATION.md
+  § "Deployed fleet status"; the port stays step 4.*
 - **Are there deployed nRF52840 units that must accept OTA from the current UF2/Bluefruit flash
-  layout?** If so, this constrains or blocks the Zephyr move.
+  layout?** If so, this constrains or blocks the Zephyr move. *Largely answered 2026-07-25:
+  deployed units run the Adafruit UF2 bootloader with a working BLE DFU path, and moving them
+  to Zephyr almost certainly means replacing the bootloader — physical access — see
+  targets/nordic-zephyr/README.md § "Deployed nRF52840". Still open is the product call
+  recorded there: migrate deployed units at all, or leave them on Arduino/Bluefruit while new
+  production ships Zephyr + MCUboot.*
 - **Does ESP32 LittleFS hold anything besides the config blob?** Decides whether
-  `esp_littlefs` is needed at all or whether NVS covers it.
+  `esp_littlefs` is needed at all or whether NVS covers it. *Largely mooted 2026-07-25 by the
+  flash-and-reconfigure decision (MIGRATION.md § "Deployed fleet status"): stored data is not
+  preserved across the transition, so nothing needs migrating out of LittleFS either way. What
+  survives of the question is only whether the new IDF build wants a filesystem component at
+  all — answer that at import.*
 - **Is `Firmware_NRF` (legacy nRF52, bare Nordic SDK) still shipped?** If not, delete it from
-  the plan rather than carrying it as a fourth target.
-- **Can `Firmware` feature work pause during the IDF port?** See the first risk.
+  the plan rather than carrying it as a fourth target. *Answered 2026-07-25: yes — a handful of
+  low-capability units, maintained in place in `Firmware_NRF` and never migrated here; they set
+  `py-opendisplay`'s backward-compatibility floor. MIGRATION.md § "Order and rationale"
+  item 5.*
+- **Can `Firmware` feature work pause during the IDF port?** See the first risk. *Decided
+  2026-07-25: frozen for the duration of the port — MIGRATION.md § "Risks to watch".*
 - **What zlib window does the host encoder target per device?** Settled on the firmware side:
   the default is **9 bits / 512 B on every target** (`uzlib.h:22`), targets *reject* streams
   declaring a larger window, and only `esp32-s3-E1004` builds `=15`. The "32 KB for
   legacy-client compatibility" note was simply wrong and is corrected in the workspace
   `CLAUDE.md`; `opendisplay-protocol/docs/AUDIT_2026-07-19_SUMMARY.md:113` reached the same
-  conclusion independently. What remains open is the *contract*: `py-opendisplay` must select
-  window size per device, and `shared/compress` must expose it as a per-target parameter with
-  512 B as the floor.
+  conclusion independently. *The contract half has since resolved too (2026-07-25): the host
+  already encodes `windowBits = 9` unconditionally and rejects its own output otherwise
+  (DESIGN_REVIEW_2026-07-25.md F5), so the E1004's 15-bit build is host-unreachable dead
+  capability. What remains open is narrower — whether anyone ever wants >9 bits and where the
+  per-device capability value lives, which is the capability-discovery problem, not a
+  compression one. `shared/compress` still exposes the window as a per-target parameter with
+  512 B as the floor (MEMORY_CONSTRAINTS.md).*
 - **Is `CMD_NFC_ENDPOINT` (TNB132M) going to any other target?** It is in the canonical protocol
   header but only EFR32BG22 implements it. Decides whether it belongs in `shared/core` behind a
   capability flag or stays target-local.

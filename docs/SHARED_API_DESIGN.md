@@ -85,15 +85,27 @@ Two obligations follow, and both are easy to skip:
    to retry it. This is the prerequisite for capability discovery's secondary mechanism
    (ARCHITECTURE.md § "Capabilities are discovered by interrogation, not assumed").
 2. **Capability differences the host must know about become host-visible**, not silent. The
-   `MAX_CONFIG_SIZE` split (2048 on BG22, 4096 elsewhere — DIVERGENCE_MATRIX) is the live
-   example: a config that fits nRF is truncated on BG22 today with no way for the sender to
-   know. Divergence is fine; *undiscoverable* divergence is the bug.
+   `MAX_CONFIG_SIZE` split (2048 on BG22, 4096 elsewhere — DIVERGENCE_MATRIX) was the
+   motivating example: a config that fit nRF was truncated on BG22 with no way for the sender
+   to know. Divergence is fine; *undiscoverable* divergence is the bug.
 
-   Concretely, `od_config.c` must **clamp capability fields on read** — mask
-   `transmission_modes`, `communication_modes`, and `partial_update_support` against a
-   compile-time mask derived from this target's `OD_*_ENABLE` set, so `CONFIG_READ` reports
-   what the device *will do* rather than echoing what a host once wrote. That is the primary
-   discovery mechanism and it costs no wire surface.
+   (That example was resolved on 2026-07-25 the other way — by making
+   the value uniform at 4096 rather than making it discoverable, DIVERGENCE_MATRIX §2.7. It is
+   kept here because the *principle* is unchanged: what could not be unified would still have
+   to be discoverable.)
+
+   Concretely, `od_config.c` must **clamp capability fields on write** (settled 2026-07-25 —
+   an earlier draft of this paragraph said clamp on read, which was overturned: clamp-on-read
+   makes config export lossy and collapses "can't" into "don't"; see ARCHITECTURE.md § "The
+   gap, and a proposed fix" and DESIGN_REVIEW_2026-07-25.md § "Proposal 1"). Mask
+   `transmission_modes` and `communication_modes` against a compile-time mask derived from
+   this target's `OD_*_ENABLE` set at `CONFIG_WRITE`, apply the same mask at NVS load (so
+   blobs provisioned by pre-clamp firmware are corrected too), and report "accepted with
+   modifications" via a bit in the config ack's reserved bytes. `CONFIG_READ` stays a
+   faithful, byte-stable mirror of stored config. Clamp only bits the firmware is
+   authoritative over — never `partial_update_support`, `panel_ic_type`, geometry, or pins,
+   which describe the attached panel the firmware cannot interrogate and must not overrule.
+   That is the primary discovery mechanism and it costs no wire surface.
 
 ## Layering
 
@@ -194,8 +206,11 @@ int  od_hal_nvs_erase(void);
 ```
 
 The core owns the record framing (magic, version, inner CRC32 — which *is* enforced on load in
-all three) so the HAL stores an opaque blob. `cap` lets the core pass `MAX_CONFIG_SIZE`, which
-differs per target (4096 nRF/ESP32, **2048 Silabs** — DIVERGENCE_MATRIX 2.7).
+all three) so the HAL stores an opaque blob. `cap` carries `MAX_CONFIG_SIZE`, which since
+2026-07-25 is **4096 on every target** (DIVERGENCE_MATRIX 2.7) — the parameter stays rather
+than becoming a constant, because the HAL should not have to be recompiled to change a size the
+core owns, and because it keeps the bound explicit at the call site. On BG22 this is the
+4112-byte NVM3 record; see MEMORY_CONSTRAINTS.md item 3 for what that costs there.
 
 ### `od_hal_crypto` — the CCM decision
 

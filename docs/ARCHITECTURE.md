@@ -2,7 +2,7 @@
 
 ## The one rule
 
-`shared/` must compile for **every** target. It may use the C/C++ standard library and
+`shared/` must compile for **every** target. It may use the C standard library and
 `shared/hal` interfaces, and nothing else.
 
 Forbidden in `shared/`: `esp_*.h`, `driver/*.h`, `soc/*.h`, `hal/*.h`, `freertos/*.h`,
@@ -92,6 +92,13 @@ distinct ways, and all three are affected by decisions in this repo:
   which sets a hard limit on what the ESP32 framework change may alter for units already in the
   field. Answer it before Phase B, not after. See MIGRATION.md § "Risks to watch".
 
+  *(Partially answered 2026-07-25 — MIGRATION.md § "Deployed fleet status": the ESP32
+  transition is flash-and-reconfigure, so every deployed unit is bench-touched once anyway and
+  Phase B is no longer constrained by in-field units; S3 already carries dual app slots, C6
+  moves to `default.csv` during that bench visit, and the bootloaders are decided. What remains
+  open is whether the update implementations get built — `esp_ota` on ESP32, and the SMP/mcumgr
+  host backend that MCUboot OTA needs on the Nordic boards.)*
+
 **`py-opendisplay` is to the host side what `Firmware`/ESP32 is to the firmware side: the
 reference implementation.** It is the only complete client of the wire protocol — everything
 above it (the HA integration, the CLI, `odl-renderer` output) reaches devices *through* it. A
@@ -108,9 +115,11 @@ Three consequences for work in this repo:
    timeout.
 2. **Capability divergence must be *expressible to the host*, not merely tolerated by it.**
    Feature parity across targets is explicitly not a goal (SHARED_API_DESIGN.md), which is only
-   safe if a host can discover what a given device supports. Where it cannot — the 2048-vs-4096
-   `MAX_CONFIG_SIZE` split is the live case — the divergence is a defect on the host side even
-   though both firmwares are individually correct.
+   safe if a host can discover what a given device supports. Where it cannot, the divergence is
+   a defect on the host side even though both firmwares are individually correct. (The case that
+   used to be cited here — the 2048-vs-4096 `MAX_CONFIG_SIZE` split — was closed on 2026-07-25
+   by *removing* the divergence: 4096 fleet-wide. That is the other way to discharge this
+   obligation, and the cheaper one where a value can genuinely be made uniform.)
 3. **Version coupling is exact and already enforced.** `Home_Assistant_Integration`'s
    `manifest.json` pins exact versions — as of 2026-07-25,
    `py-opendisplay[silabs-ota]==7.14.0` and `odl-renderer==0.5.12` — and `py-opendisplay` pins
@@ -143,15 +152,21 @@ would force one value on targets that legitimately differ.
 | Kind | Owner | Examples |
 |---|---|---|
 | Wire constants | canonical header | opcodes, error codes, frame/chunk sizes, envelope sizes, ports |
-| **Fleet floors and limits** | canonical header | the minimum zlib `windowBits` every device must accept; the smallest `MAX_CONFIG_SIZE` a host may assume |
-| Per-target selection | `targets/<t>/` build files | `OPENDISPLAY_ZLIB_WINDOW_BITS` for *this* build, this target's `MAX_CONFIG_SIZE`, buffer sizes |
+| **Fleet floors and limits** | canonical header | the minimum zlib `windowBits` every device must accept; **`MAX_CONFIG_SIZE` — now a uniform 4096, not a floor over differing values** |
+| Per-target selection | `targets/<t>/` build files | `OPENDISPLAY_ZLIB_WINDOW_BITS` for *this* build, buffer sizes |
 | Capability gating | `targets/<t>/` build files | `OD_PIPE_ENABLE`, `OD_PARTIAL_ENABLE`, `OD_NFC_ENABLE`, … |
 
 The distinction that matters: **a floor is contract, a selection is not.** "Every device accepts
 a 512-byte window" is a promise a host relies on and belongs in the header. "This build uses
-512 bytes" is a target's business. The same split applies to `MAX_CONFIG_SIZE` — the fleet
-minimum a host must respect is contract; BG22's 2048 and ESP32's 4096 are build values, which
-is exactly why capability discovery has to report the per-device number.
+512 bytes" is a target's business.
+
+`MAX_CONFIG_SIZE` used to be the second worked example of that split, with BG22 at 2048 and
+everyone else at 4096. **Decided 2026-07-25: it is 4096 everywhere** (MEMORY_CONSTRAINTS.md
+item 3, DIVERGENCE_MATRIX §2.7), which makes it a plain wire constant rather than a floor —
+there is no per-device number left for capability discovery to report. Note what that
+illustrates: where a value *can* be made uniform, making it uniform is strictly cheaper than
+building the machinery to discover it. The zlib window is the case where it cannot, because
+32 KB does not exist on a 32 KB chip.
 
 `OD_*_ENABLE` never goes canonical. A capability macro in a shared header would either impose a
 feature on targets that cannot implement it or default to off and silently disable it
@@ -192,9 +207,11 @@ parsers skip.
 
 **2. Minimize changes to config.** Even permitted changes have costs that land in five places at
 once — every firmware parser, `py-opendisplay`'s build and parse paths, the HA config flow,
-factory provisioning, and the size budget. That budget is real: BG22 caps a config at **2048
-bytes** while every other target allows 4096, so bytes added to the schema are spent against the
-smallest device in the fleet, not the largest.
+factory provisioning, and the size budget. That budget is real: every device caps a config at
+**4096 bytes** (uniform since 2026-07-25 — BG22 was raised from 2048), and on the BG22 those
+bytes are stored in a 4112-byte NVM3 record and staged through a 4096-byte scratch on a chip
+with 32 KB of RAM. So schema growth is cheap on the wire and expensive in exactly one place;
+spend it against that device, not against the largest.
 
 So prefer, in order: **reserved bits** in an existing bitfield → **reserved bytes** in an
 existing packet → **a new packet type** → a schema change of any other kind, which the backward
@@ -267,8 +284,10 @@ from outside.
 
 **The firmware half is self-knowable, and the firmware is authoritative over it.** Whether PIPE,
 partial region, NFC, LAN, or a given inflate engine is present is fixed at build time by the
-`OD_*_ENABLE` set. So is `MAX_CONFIG_SIZE`, the maximum accepted zlib `windowBits`, the maximum
-frame size, and the protocol version. A device never has to be *told* any of this and should
+`OD_*_ENABLE` set. So is the maximum accepted zlib `windowBits`, the maximum frame size, and
+the protocol version. (`MAX_CONFIG_SIZE` was in this list until 2026-07-25; it is now a uniform
+4096, so it is a constant both parties already know rather than something to report.) A device
+never has to be *told* any of this and should
 never be trusted to have been told it correctly — a config blob asserting PIPE support on a
 build compiled without PIPE is simply wrong, and the firmware is the party that knows.
 
@@ -351,15 +370,19 @@ a mirror, not an interrogation. Three changes fix that, in increasing cost:
    what was kept, and leave read byte-stable.
 2. **Report capability *values* in reserved bytes of an existing packet — not a new one.**
    `SystemConfig` already carries `uint8_t reserved[15]` (and `DeviceConfig` another
-   `reserved[6]`), at fixed offsets, declared "must be 0". Spending ~7 of those 15 bytes covers
-   everything the values case needs:
+   `reserved[6]`), at fixed offsets, declared "must be 0". Spending ~5 of those 15 bytes covers
+   everything the values case still needs:
 
    | Value | Bytes | Why it cannot be a reserved *bit* |
    |---|---|---|
-   | `MAX_CONFIG_SIZE` | 2 (u16 LE) | a size, not a flag — the 2048-vs-4096 split |
    | max accepted zlib `windowBits` | 1 | range 9..15 |
    | max frame size | 2 | differs by transport |
    | protocol version major/minor | 2 | |
+
+   ~~`MAX_CONFIG_SIZE` | 2 (u16 LE) | the 2048-vs-4096 split~~ — **removed 2026-07-25.** It is
+   4096 on every device now, so there is nothing per-device to report. This was the largest and
+   most-cited entry in the table; the values case is correspondingly weaker without it, which is
+   worth noticing before spending wire surface on the other three.
 
    **`0` already means "not reported", for free.** Existing firmware zeroes those bytes, so a
    host reading zero knows the device predates capability reporting and falls back to
@@ -478,8 +501,13 @@ starting set:
 | `od_hal_log` | line-oriented log sink |
 | `od_hal_panel` | row/plane writes + refresh, the one genuinely display-specific call |
 
-Design each as a plain C struct of function pointers or a compile-time-selected set of
-functions — not C++ virtual classes, since two targets are C-only.
+Bind each at **link time**: a header of `extern` C declarations whose definitions the target
+supplies in `targets/<t>/hal/` — never C++ virtual classes (two targets are C-only), and not a
+function-pointer vtable either, which costs RAM and indirection the BG22 cannot spare and which
+link-time substitution already makes unnecessary for testing. The one deliberate exception is
+the panel: a single target legitimately carries 2-3 panel backends, so `od_panel_ops` alone
+earns a function-pointer table, selected once at init from `panel_ic_type`. See
+SHARED_API_DESIGN.md, consequence 1.
 
 Two of these already exist in embryo and should be promoted rather than designed from scratch:
 `Firmware_NRF54/src/nrf54_zephyr_compat.h` is `od_hal_time` plus device-id
@@ -530,5 +558,10 @@ PIPE_WRITE reorder queue).
 
 The zlib window is the worked example of why this must be a parameter and not a constant: the
 EFR32BG22 pins a **512-byte** window (`OPENDISPLAY_ZLIB_WINDOW_BITS=9`) because 32 KB is a third
-of the whole chip's RAM, while other targets pin 32 KB for legacy-client compatibility. 512 B is
-the documented floor, and the encoder side must know which devices are 9-bit.
+of the whole chip's RAM — and 9 bits is in fact the default on **every** target, with each
+target rejecting streams that declare a larger window; only the `esp32-s3-E1004` build sets 15
+(32 KB), a capability the host never exercises because `py-opendisplay` encodes
+`windowBits = 9` unconditionally (DIVERGENCE_MATRIX.md §3.1a, DESIGN_REVIEW_2026-07-25.md F5;
+an earlier claim here that "other targets pin 32 KB for legacy-client compatibility" was
+wrong). 512 B is the documented floor, and anything above it is per-device capability the host
+would have to discover.

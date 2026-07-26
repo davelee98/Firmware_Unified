@@ -36,8 +36,10 @@ in one directory. It is enforced mechanically by
 grep locally before proposing anything under `shared/`. Extend the pattern list as new
 targets are imported.
 
-`shared/` is **plain C, not C++.** Two targets are C-only, so shared interfaces must be C
-structs of function pointers or compile-time-selected functions, never C++ virtual classes.
+`shared/` is **plain C, not C++.** Two targets are C-only, so shared interfaces are
+link-time-bound `extern` C functions the target implements — never C++ virtual classes, and no
+function-pointer vtables except the one deliberate `od_panel_ops` exception (a single target
+legitimately has 2-3 panel backends); see docs/SHARED_API_DESIGN.md, consequence 1.
 Arduino's `String` must never appear.
 
 `third_party/` (top level, outside `shared/`) is the exception by design: `bb_epaper` picks its
@@ -58,11 +60,16 @@ targets/         one dir per target: chip drivers + build system + HAL implement
   esp32-idf/            ESP32-S3/C3/C6/classic, ESP-IDF         (from Firmware)
   nordic-zephyr/        nRF54L15 + nRF52840, west/NCS           (from Firmware_NRF54, Firmware)
   efr32bg22-slc/        EFR32BG22, Simplicity SDK + CMake       (from Firmware_Silabs)
-  nrf52-sdk/            nRF52 legacy — OUT OF SCOPE, end-of-life
 third_party/     vendored cross-target libs with per-target IO (bb_epaper)
 tools/           protocol-header sync, provisioning, device CLI
 docs/            architecture, toolchain, and migration notes
 ```
+
+There is deliberately **no `targets/nrf52-sdk/`**. The legacy nRF52 (bare Nordic SDK) is *not*
+migrated here — but it **is shipped**, so it is maintained in place in `Firmware_NRF` and it
+sets the host's backward-compatibility floor (no compression, no `0x76`, no PIPE, no NFC).
+Do not re-create the directory as a placeholder: a directory under `targets/` means "a target
+this repo builds." See [docs/MIGRATION.md](docs/MIGRATION.md) § "Order and rationale" item 5.
 
 ## Toolchains — no PlatformIO, no Arduino
 
@@ -90,9 +97,10 @@ census with call-site counts, the PlatformIO-knob → sdkconfig translation tabl
 already portable (`bb_epaper` is already an ESP-IDF component upstream; Seeed_GFX's ESP32
 processor layer is already IDF-level). Read it before touching a build file.
 
-**Neither toolchain is installed on the primary dev box** — no `idf.py`, no `west`, no `~/ncs`
-(only `~/.platformio`). Nothing here can be built locally today. Do not claim a build passes
-without having run it.
+**Of the three toolchains, only the Silabs one is installed on the primary dev box** — no
+`idf.py`, no `west`, no `~/ncs` (only `~/.platformio`, plus the full Simplicity SDK 2025.12.2;
+see docs/TOOLCHAINS.md). Nothing in *this repo* can be built locally today regardless, because
+no target is imported. Do not claim a build passes without having run it.
 
 ## Protocol header — do not hand-edit
 
@@ -154,3 +162,9 @@ RAM varies enormously: EFR32BG22 32 KB, nRF52840 256 KB, ESP32-S3 512 KB + PSRAM
 `shared/` must avoid large static buffers sized for the biggest target, unbounded heap
 allocation, and assuming a heap exists at all. Buffer sizes belong behind compile-time
 constants the target sets, with a documented floor.
+
+**`MAX_CONFIG_SIZE` is the exception: 4096 on every target** (decided 2026-07-25 — a global cap,
+not a per-target macro; BG22 was raised from 2048). It is the one size deliberately *not*
+target-parameterised, because a uniform value removes a wire divergence a host could not
+discover. The BG22 pays for it — see docs/MEMORY_CONSTRAINTS.md item 3 for the required
+mitigations and the NVM3 checks that gate the Silabs swap.

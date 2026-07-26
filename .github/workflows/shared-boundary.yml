@@ -56,11 +56,22 @@ jobs:
             find shared/ -name '*.cpp' -o -name '*.cc' -o -name '*.hpp'
             exit 1
           fi
-          if grep -rInE '\bString\b' shared/ ; then
+          # Scope the String check to C sources. Unscoped, it fires on prose in any future
+          # shared/**/README.md ("a length+ptr pair rather than a String"), and a check that
+          # cries wolf on documentation is a check someone eventually deletes.
+          if grep -rInE --include='*.c' --include='*.h' '\bString\b' shared/ ; then
             echo "::error::Arduino String found under shared/. Use char[] or a length+ptr pair."
             exit 1
           fi
           echo "OK: shared/ is C-only with no Arduino String"
+
+      # NOTE: everything above is a GREP, and a grep only sees #include lines and literal
+      # tokens. It cannot see an `extern` declaration of a vendor symbol, a macro leaked in
+      # through a target-supplied config header, or a libc call that is unavailable on a
+      # freestanding target. The real enforcement of the shared/ boundary is COMPILING it for
+      # the host under gcc and clang at -std=c99 -Wall -Wextra -Werror -- specified in
+      # docs/TEST_OWNERSHIP.md § "Build system", and green against an empty shared/ from day
+      # one. Treat this workflow as the stopgap until that lands, not as the boundary check.
 
       - name: Protocol headers must not be hand-edited
         run: |

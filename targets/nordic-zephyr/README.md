@@ -18,8 +18,14 @@ Not yet imported. Build (once imported): `./build.sh`, flash with `./flash.sh`.
 It currently builds with PlatformIO + Arduino (Adafruit Bluefruit, `Adafruit_LittleFS`,
 `Adafruit_nRFCrypto`/CC310) in the `Firmware` repo. It arrives here as a **third board** on this
 target — devicetree/overlay + pinctrl, an nRF52-series `prj.conf`, and reuse of the nRF54L15
-drivers. It depends on this target existing first, so it is step 3 of the migration order, not
-part of the first import.
+drivers. It depends on this target existing first, so it is **step 4** of the migration order
+(Silabs is step 3), not part of the first import.
+
+**Do not confuse nRF52840 with the legacy nRF52.** nRF52840 is a supported board of this
+target, shipped and migrating here from `Firmware`. The legacy nRF52 is a different, older
+product built on the bare Nordic SDK in `Firmware_NRF`; it is also shipped but is **not**
+migrated to this repo at all, which is why there is no `targets/nrf52-sdk/` (MIGRATION.md
+§ "Order and rationale" item 5).
 
 Settle **before** starting: whether deployed nRF52840 units must accept OTA from the current
 UF2/Bluefruit flash layout. That constrains or blocks the move — see § Bootloader below, where
