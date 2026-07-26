@@ -165,15 +165,37 @@ The Zephyr side is already **C**, for everything except `opendisplay_display.cpp
 and `od_hal_gpio` in embryo, already using the `od_` prefix. Promote these rather than
 designing from scratch.
 
-### Only the Silabs toolchain is installed on this dev box
+### All three toolchains are installed on this dev box
 
-`~/.platformio/platforms/` has `espressif32` and `nordicnrf52`. There is **no `~/ncs`, no
-`west`, and no `idf.py`**. So neither *recommended* toolchain is currently installed:
-`Firmware_NRF54` cannot be built here today, and IDF will need installing before any ESP32
-work starts.
+**Corrected 2026-07-25.** This section previously said only the Silabs toolchain was present
+and that there was "no `~/ncs`, no `west`, and no `idf.py`". That was wrong, and the way it was
+wrong is worth recording, because it is easy to repeat: **none of the three is on `PATH`**, so
+`which idf.py west` returns nothing and the absence looks confirmed. Each needs an activation
+step instead.
 
-The EFR32BG22 toolchain, by contrast, **is** installed and verified building headless
-(2026-07-20, Simplicity SDK 2025.12.2):
+| Toolchain | Version | Location | Activation |
+|---|---|---|---|
+| **ESP-IDF** | **v5.5.4** | `~/esp/esp-idf` (tools in `~/.espressif`) | `source ~/esp/esp-idf/export.sh` |
+| **nRF Connect SDK** | **v3.3.1**, west **v1.5.0** | `~/ncs/v3.3.1`, toolchain `~/ncs/toolchains/911f4c5c26` | `nrfutil toolchain-manager launch --ncs-version v3.3.1 -- <cmd>` |
+| **Simplicity SDK** | 2025.12.2 | see table below | `slt`, plus Java on `PATH` for `slc` |
+
+Verified 2026-07-25 by running `idf.py --version` (→ `ESP-IDF v5.5.4`) and
+`west --version` (→ `West version: v1.5.0`) — *version invocations only*. No target
+source is imported yet, so nothing here has been built from this repo, and this is not a
+claim that any target builds.
+
+**Both installed versions satisfy the floors this document sets, and are the obvious pins:**
+
+- **IDF v5.5.4** clears ≥ 5.1 (C6 support) and ≥ 5.2 (`driver/i2c_master.h`), so the "pin one
+  explicit release" open item has a concrete candidate that costs nothing to adopt.
+- **NCS v3.3.1** is the *only* version installed, which incidentally settles the
+  reproducibility complaint about `Firmware_NRF54/ncs-env.sh` globbing `~/ncs/v3.*` and taking
+  the first hit: here there is exactly one hit. Pin it explicitly anyway — the glob is still
+  wrong on a machine with two.
+
+The EFR32BG22 toolchain is installed and additionally **verified building headless**
+(2026-07-20, Simplicity SDK 2025.12.2) — a stronger claim than the other two, which have only
+been run for their version strings:
 
 | Piece | Location |
 |---|---|
@@ -459,9 +481,14 @@ their IO calls, and the nRF52840 port reuses the nRF54L15 drivers.
   `shared/` anyway. High volume, low per-site difficulty, but it is where the hours go.
 - **BLE is a genuine rewrite** (~450 lines, NimBLE C API). Everything else is mechanical or
   already IDF-level.
-- **This dev box can build exactly one of the three targets** (EFR32BG22). Install IDF and NCS,
-  and stand up a CI matrix (per-board `idf.py build` + a west build + the BG22 CMake build)
-  early. The `shared/` boundary grep is necessary and nowhere near sufficient.
+- ~~**This dev box can build exactly one of the three targets** (EFR32BG22). Install IDF and
+  NCS~~ — **stale, corrected 2026-07-25: all three toolchains are installed** (§ "All three
+  toolchains are installed on this dev box"). The risk does not disappear, it changes shape:
+  local builds are now possible, so a broken target can be caught before pushing — but "it
+  builds on Dave's box" is one machine with one set of versions, and the CI matrix
+  (per-board `idf.py build` + a west build + the BG22 CMake build) is still what makes that
+  reproducible for anyone else. Stand it up early regardless; the `shared/` boundary grep is
+  necessary and nowhere near sufficient.
 - **EFR32BG22 has no headroom for `shared/` to be careless.** ~35 KB of 272 KB flash free and a
   32 KB RAM budget already fully accounted for (~22 KB static + 10.3 KB heap). A shared
   implementation that costs a few KB more than the target's hand-written one is a build failure

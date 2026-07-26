@@ -356,10 +356,18 @@ on the chip. But a subsystem that fails Gate 1 should never reach a board.
 - **Designing `shared/` against the wrong target's assumptions.** The EFR32BG22 has no kernel,
   no threads, no blocking sleep, and 32 KB of RAM. An API shaped by the ESP32's FreeRTOS and
   PSRAM will not retrofit onto it. This is why Silabs is step 3, not step 4.
-- **No dev box builds every target.** Neither `idf.py` nor `west` is installed on the primary
-  machine today, and the Silabs target additionally needs a full Simplicity SDK for
-  `slc generate`. Stand up a CI build matrix early — the `shared/` boundary grep is necessary
-  and nowhere near sufficient.
+- **No dev box builds every target.** ~~Neither `idf.py` nor `west` is installed on the primary
+  machine today~~ — **corrected 2026-07-25: all three are installed** (ESP-IDF v5.5.4, NCS
+  v3.3.1 with west v1.5.0, Simplicity SDK 2025.12.2 — TOOLCHAINS.md § "All three toolchains are
+  installed on this dev box"). None is on `PATH`, which is how the earlier claim survived: each
+  needs an activation step, so `which` reports nothing.
+
+  This downgrades the risk rather than closing it. One machine with one set of versions is not
+  a build matrix, and nothing here has actually been built yet — only version strings were run.
+  Stand up the CI matrix early anyway; the `shared/` boundary grep is necessary and nowhere
+  near sufficient. What *does* change is the migration's inner loop: a target import can now be
+  compiled locally before it is pushed, so the "verify on hardware" gate is no longer the first
+  time anyone learns whether the thing links.
 - **OTA shipped through HA exists for exactly one target, and the migration assumes more.**
   Field firmware update through the shipped HA path works only on EFR32BG22 (`.gbl` via the
   Silabs AppLoader, the sole OTA extra pinned in `Home_Assistant_Integration`'s

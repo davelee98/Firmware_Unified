@@ -1,0 +1,103 @@
+name: host tests
+
+# Compiles shared/ for the host and replays the wire-vector corpus against py-opendisplay.
+#
+# This is the boundary check that actually works. shared-boundary.yml is a grep: it sees
+# #include lines and literal tokens, and cannot see an extern-declared vendor symbol, a
+# macro leaked through a target config header, or a libc call absent on a freestanding
+# target. A strict C99 compile does. The two workflows are complementary, and this one is
+# the load-bearing half -- see docs/DESIGN_REVIEW_2026-07-25.md F4 and F8.
+#
+# It is green against an empty shared/ by design (docs/TEST_OWNERSHIP.md § "First step"),
+# which is the point: every later import lands as a test-first change into a build that
+# already enforces the contract, rather than having to stand the contract up first.
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Nightly, 03:17 UTC. Deliberately off the hour -- see the nightly job below.
+    - cron: '17 3 * * *'
+
+jobs:
+  # ---------------------------------------------------------------------------------
+  # The compile gate. Both compilers, warnings are errors, no GNU extensions.
+  # ---------------------------------------------------------------------------------
+  host-build:
+    name: shared/ compiles (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false          # a clang-only failure must stay visible when gcc passes
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+          # gcc and clang are both preinstalled on ubuntu-latest; assert rather than
+          # install, so a runner image change surfaces here instead of silently
+          # dropping half the matrix.
+          ${{ matrix.cc }} --version
+
+      - name: Configure
+        run: cmake -S tests/host -B build -G Ninja -DCMAKE_C_COMPILER=${{ matrix.cc }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # ---------------------------------------------------------------------------------
+  # The corpus, against the version Home_Assistant_Integration actually pins.
+  # ---------------------------------------------------------------------------------
+  replay-pinned:
+    name: corpus vs py-opendisplay 7.14.0 (pinned)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # py-opendisplay 7.14.0 declares requires-python >=3.13. Pinning 3.12 here
+          # would fail at install, not at test, which is a confusing way to learn it.
+          python-version: '3.13'
+
+      - name: Install pinned py-opendisplay
+        run: pip install 'py-opendisplay==7.14.0'
+
+      - name: Replay vectors
+        run: python tests/host/replay_vectors.py tests/vectors
+
+  # ---------------------------------------------------------------------------------
+  # The corpus, against whatever py-opendisplay released most recently.
+  # ---------------------------------------------------------------------------------
+  # This is the asymmetry TEST_OWNERSHIP § Ownership calls out and accepts: a
+  # py-opendisplay change that breaks the wire contract will NOT fail on their PR,
+  # because we pin. It fails here, up to 24 h late, and lands on us -- who then file it
+  # upstream with a named vector, a byte string, and two decodes attached.
+  #
+  # It is scheduled-only and continue-on-error: an upstream release must not turn every
+  # PR in this repo red, or the signal gets muted and the job stops meaning anything.
+  replay-latest:
+    name: corpus vs py-opendisplay latest (nightly, advisory)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # py-opendisplay 7.14.0 declares requires-python >=3.13. Pinning 3.12 here
+          # would fail at install, not at test, which is a confusing way to learn it.
+          python-version: '3.13'
+
+      - name: Install latest py-opendisplay
+        run: |
+          pip install --upgrade py-opendisplay
+          pip show py-opendisplay | grep -i '^version'
+
+      - name: Replay vectors
+        run: python tests/host/replay_vectors.py tests/vectors

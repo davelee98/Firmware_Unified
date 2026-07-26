@@ -1,0 +1,25 @@
+# Code owners.
+#
+# docs/DESIGN_REVIEW_2026-07-25.md § F9 asks a question this file answers: who signs off
+# on the BG22 RAM budget when the change is motivated by the ESP32? A shared/ change
+# touches every product at once -- that is the repo's value proposition and its risk,
+# stated in F7: "fixes land once" has a dual, "bugs land everywhere."
+#
+# shared/** and tests/** route to the same reviewer set deliberately (TEST_OWNERSHIP.md
+# § Ownership). A shared/core change and the vectors that constrain it are one review,
+# not two: splitting them is how a promotion lands with its tests relaxed to match.
+
+* @davelee98
+
+# The boundary and the contract. Every target consumes these.
+/shared/                    @davelee98
+/tests/                     @davelee98
+
+# Synced byte-for-byte from opendisplay-protocol -- never hand-edited here. A diff in
+# this directory means either a legitimate --push or a mistake, and both want eyes.
+# See CLAUDE.md § "Protocol header -- do not hand-edit".
+/shared/protocol/           @davelee98
+
+# The mechanical enforcement. Weakening a check here is the cheapest way to make a real
+# problem invisible, so it should never be an incidental part of a larger diff.
+/.github/workflows/         @davelee98

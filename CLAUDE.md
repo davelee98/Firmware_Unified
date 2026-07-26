@@ -97,10 +97,19 @@ census with call-site counts, the PlatformIO-knob → sdkconfig translation tabl
 already portable (`bb_epaper` is already an ESP-IDF component upstream; Seeed_GFX's ESP32
 processor layer is already IDF-level). Read it before touching a build file.
 
-**Of the three toolchains, only the Silabs one is installed on the primary dev box** — no
-`idf.py`, no `west`, no `~/ncs` (only `~/.platformio`, plus the full Simplicity SDK 2025.12.2;
-see docs/TOOLCHAINS.md). Nothing in *this repo* can be built locally today regardless, because
-no target is imported. Do not claim a build passes without having run it.
+**All three toolchains are installed on the primary dev box** (verified 2026-07-25) — but
+**none is on `PATH`**, so `which idf.py west` returns nothing and it is easy to conclude they
+are absent. An earlier version of this file did exactly that. Each needs activation:
+
+| Toolchain | Version | Activate with |
+|---|---|---|
+| ESP-IDF | v5.5.4 | `source ~/esp/esp-idf/export.sh` |
+| nRF Connect SDK / west | v3.3.1 / west v1.5.0 | `nrfutil toolchain-manager launch --ncs-version v3.3.1 -- <cmd>` |
+| Simplicity SDK | 2025.12.2 | `slt`; `slc` additionally needs the bundled Java on `PATH` |
+
+Nothing in *this repo* can be built locally regardless, because no target is imported yet —
+and only version strings have been run, not builds. **Do not claim a build passes without
+having run it.** See docs/TOOLCHAINS.md for the full table and the version pins these imply.
 
 ## Protocol header — do not hand-edit
 

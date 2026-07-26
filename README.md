@@ -176,9 +176,16 @@ devices. That is expected, not a defect.
 ## Getting started
 
 Per-target builds are documented in each `targets/*/README.md` once that target is imported.
-Note that **of the three toolchains, only the Silabs one is installed on the primary dev box
-today** — no `idf.py`, no `west` — so CI carries more weight here than usual; see
-docs/TOOLCHAINS.md.
+All three toolchains are installed on the primary dev box (ESP-IDF v5.5.4, nRF Connect SDK
+v3.3.1 with west v1.5.0, Simplicity SDK 2025.12.2), though **none is on `PATH`** — each needs
+an activation step, listed in [docs/TOOLCHAINS.md](docs/TOOLCHAINS.md). CI still carries more
+weight than usual: one machine with one set of versions is not a build matrix.
+
+Host-runnable tests for `shared/` need none of that — see [tests/](tests/README.md):
+
+```bash
+cmake -S tests/host -B build -G Ninja && cmake --build build && ctest --test-dir build
+```
 
 - [docs/TOOLCHAINS.md](docs/TOOLCHAINS.md) — which toolchain each target uses and why
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the `shared`/`hal` boundary

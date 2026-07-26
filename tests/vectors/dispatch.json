@@ -1,0 +1,271 @@
+{
+  "_meta": {
+    "schema": "opendisplay-wire-vectors/1",
+    "file": "dispatch.json",
+    "subject": "frame dispatch: auth gate, ack/nack shapes, opcode coverage",
+    "hex": "all frame/reply strings are lowercase hex, even length, no 0x prefix, no spaces",
+    "dir": "h2d = host->device (expect.reply is what the device emits); d2h = an unsolicited device->host notification (expect.reply is always null)",
+    "expect.reply": "lowercase hex of the device's reply frame, or null when the device emits NO frame at all",
+    "expect.note": "provenance: a DIVERGENCE_MATRIX.md row, a shared/protocol/opendisplay_protocol.h line, or a real capture",
+    "min_protocol": "OD_PROTOCOL_VERSION at which the vector became valid; canonical is 2.2",
+    "requires": "OD_*_ENABLE flags that must be ON. NOTE: it cannot express 'must be OFF', which is what the disabled-subsystem NACK vectors need; those use the cap_* state keys instead",
+    "state": {
+      "sec_enabled": "stored SecurityConfig has encryption_enabled=1 and a non-zero key",
+      "session": "null = no live session; \"live\" = an authenticated session is open",
+      "xfer_active": "a direct-write (0x70) transfer session is open",
+      "storage_ok": "config storage init/save succeeds",
+      "fw_patch_byte": "firmware appends the optional trailing [patch] byte to its 0x43 reply",
+      "cap_partial": "0x76 partial-region support compiled in / panel is 1bpp",
+      "cap_buzzer": "0x77 buzzer support compiled in",
+      "cap_power_latch": "D-FF power-latch hardware present (0x52 POWER_OFF)"
+    }
+  },
+  "vectors": [
+    {
+      "id": "dispatch/auth-required-direct-write-start",
+      "dir": "h2d",
+      "frame": "0070",
+      "state": {
+        "sec_enabled": true,
+        "session": null
+      },
+      "expect": {
+        "reply": "0070fe",
+        "note": "DIVERGENCE 1.1 - [0x00][echo][0xFE]. 0xFE is carried as DATA in a 3-byte frame, not as a leading status byte. The header's [0xFE][cmd_echo] (opendisplay_protocol.h:190,222) is wrong; all three shipped implementations agree on this shape (Firmware communication.cpp:630,637; NRF54 send_auth_required_response() opendisplay_pipe.c:293-297; Silabs opendisplay_pipe.c:227)."
+      },
+      "min_protocol": "2.0",
+      "requires": []
+    },
+    {
+      "id": "dispatch/auth-required-reboot",
+      "dir": "h2d",
+      "frame": "000f",
+      "state": {
+        "sec_enabled": true,
+        "session": null
+      },
+      "expect": {
+        "reply": "000ffe",
+        "note": "DIVERGENCE 1.1, second opcode. The echo byte is the LOW byte of the command (0x0F), not the whole opcode. NRF54 dispatch() auth gate at opendisplay_pipe.c:1210-1224 exempts only FIRMWARE_VERSION (and a flagged config rewrite)."
+      },
+      "min_protocol": "2.0",
+      "requires": []
+    },
+    {
+      "id": "dispatch/firmware-version-plaintext-exempt",
+      "dir": "h2d",
+      "frame": "0043",
+      "state": {
+        "sec_enabled": true,
+        "session": null,
+        "fw_patch_byte": false
+      },
+      "expect": {
+        "reply": "004300412865363361653332343437613833663362363466333134363939393036306361316539303662663135",
+        "note": "DIVERGENCE 1.5 + opendisplay_protocol.h:349 (ALWAYS PLAINTEXT): 0x43 is NOT auth-gated, so it answers with a version frame rather than [00][43][FE] even with security on and no session. Reply bytes are the real capture py-opendisplay/tests/fixtures/real_protocol_data/02_read_firmware_response.bin (45 B), paired with the real request capture 02_read_firmware_command.bin."
+      },
+      "min_protocol": "2.0",
+      "requires": []
+    },
+    {
+      "id": "dispatch/firmware-version-response-no-patch",
+      "dir": "d2h",
+      "frame": "004300412865363361653332343437613833663362363466333134363939393036306361316539303662663135",
+      "state": {
+        "fw_patch_byte": false
+      },
+      "expect": {
+        "reply": null,
+        "note": "REAL CAPTURE 02_read_firmware_response.bin (45 B): [00][43][major=0x00][minor=0x41][shaLen=0x28=40][sha:40 ASCII] and NO trailing patch byte. opendisplay_protocol.h:342-348 - older firmware omits [patch] and hosts MUST read the missing byte as patch 0. reply is null because this IS the device->host frame; the host answers nothing. HOST GAP: py-opendisplay 7.14.0 parse_firmware_version() (responses.py:223-271) returns only major/minor/sha - it never reads a patch byte at all, so 'missing patch => 0' is untested on the host side and a present patch byte is silently discarded."
+      },
+      "min_protocol": "2.0",
+      "requires": []
+    },
+    {
+      "id": "dispatch/firmware-version-response-with-patch",
+      "dir": "d2h",
+      "frame": "0043010508316132623363346403",
+      "state": {
+        "fw_patch_byte": true
+      },
+      "expect": {
+        "reply": null,
+        "note": "AUTHORED (not captured) from opendisplay_protocol.h:342-348: [00][43][major=1][minor=5][shaLen=8]['1a2b3c4d'][patch=3]. major/minor/shaLen stay at fixed offsets so an old host that stops after the SHA still decodes; the patch byte trails. Emitted by NRF54 reply_firmware_version() (opendisplay_pipe.c:605-620, whose comment states the ordering rationale). shaLen is deliberately 8 (a short SHA) rather than 0: shaLen 0 is legal per the header (range 0..40) but py-opendisplay 7.14.0 raises InvalidResponseError on it (responses.py:249-251), so a shaLen-0 vector would assert a host behaviour that contradicts the spec - recorded here rather than authored."
+      },
+      "min_protocol": "2.0",
+      "requires": []
+    },
+    {
+      "id": "dispatch/decrypt-failure",
+      "dir": "h2d",
+      "frame": "00700000000000000000000000000000000000000000000000000000000000",
+      "state": {
+        "sec_enabled": true,
+        "session": "live"
+      },
+      "expect": {
+        "reply": "0070ff",
+        "note": "DIVERGENCE 1.2 - [0x00][echo][0xFF] on decrypt failure (Firmware communication.cpp:668; NRF54 on_pipe_write() decrypt arm; Silabs opendisplay_pipe.c:1244). Frame is a minimum-length encrypted envelope [cmd:2][nonce:16][ct:1][tag:12] = 31 B (opendisplay_protocol.h:209-214) with an all-zero nonce and tag, so the CCM tag cannot validate. 31 is also the >= 31 length gate that makes the frame be treated as encrypted at all (DIVERGENCE 1.5a)."
+      },
+      "min_protocol": "2.0",
+      "requires": []
+    },
+    {
+      "id": "dispatch/oversize-inbound-frame-nack",
+      "dir": "h2d",
+      "frame": "0071424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242424242",
+      "state": {
+        "sec_enabled": false,
+        "session": null
+      },
+      "expect": {
+        "reply": "ff71fe",
+        "note": "DIVERGENCE 1.3 - app-level NACK [0xFF][cmd_lo][0xFE] when frame_len > OD_PIPE_MAX_PAYLOAD (244, opendisplay_protocol.h:881). NRF54 opendisplay_pipe.c:1366-1370, Silabs opendisplay_pipe.c:1231-1235. Frame is 245 B, one over the ceiling. On Firmware/ESP32 the same write is rejected one layer down by the declared GATT max (ATT 0x0D) and never reaches the core - keep both belts. HOST SIDE (added 2026-07-25): py-opendisplay cannot build this frame at all - build_direct_write_data_command() raises ValueError at a 230-byte chunk ceiling (the unencrypted chunk budget), well below the device's 244. That is correct host behaviour, so host_error is the expectation: a conforming host never emits an oversize frame, and only a broken or hostile peer exercises the firmware arm of this vector. Two different ceilings - 230 host chunk budget vs 244 device frame max - and neither is wrong.",
+        "host_error": true
+      },
+      "min_protocol": "2.0",
+      "requires": []
+    },
+    {
+      "id": "dispatch/ack-width-config-write-4byte",
+      "dir": "h2d",
+      "frame": "0041550001000107000100ff000000000000000000000000000000ffff01020100010100000000000000000000000000000000000002040100000000000000ffff00010000000000000000ffff0000000000000000d294",
+      "state": {
+        "sec_enabled": false,
+        "session": null,
+        "storage_ok": true
+      },
+      "expect": {
+        "reply": "00410000",
+        "note": "DIVERGENCE 1.4 - config/LED/buzzer acks are FOUR bytes [status][echo][0x00][0x00] (Firmware communication.cpp:476-486; NRF54 handle_config_write() ack[] opendisplay_pipe.c:913; Silabs same). The two trailing zeros are reserved, not payload. Payload is the 85-byte minimal config also used by config_tlv/minimal-required-singletons; 85 <= CONFIG_CHUNK_SIZE (200) so this takes the single-frame path."
+      },
+      "min_protocol": "2.0",
+      "requires": []
+    },
+    {
+      "id": "dispatch/ack-width-direct-write-start-2byte",
+      "dir": "h2d",
+      "frame": "0070",
+      "state": {
+        "sec_enabled": false,
+        "session": null
+      },
+      "expect": {
+        "reply": "0070",
+        "note": "DIVERGENCE 1.4 - direct-write acks are TWO bytes [0x00][echo], NOT padded to four. A runner that assumes one ack width breaks on the other. NRF54 handle_direct_write_start() ok[] = {0x00, 0x70} (opendisplay_pipe.c:764-775); opendisplay_protocol.h:499. Frame is the real capture 03_upload_start_uncompressed_command.bin (bare 0x70 = uncompressed; a compressed START would carry [uncompressed_size:4 LE])."
+      },
+      "min_protocol": "2.0",
+      "requires": []
+    },
+    {
+      "id": "dispatch/direct-write-data-chunk-ack",
+      "dir": "h2d",
+      "frame": "00714141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141",
+      "state": {
+        "sec_enabled": false,
+        "session": null,
+        "xfer_active": true
+      },
+      "expect": {
+        "reply": "0071",
+        "note": "REAL CAPTURE 04_data_chunk_command.bin: 0x71 + 230 filler bytes ('A' * 230), which is exactly the unencrypted chunk budget of 230 data bytes (opendisplay_protocol.h:225, 514). Per-chunk ack is 2-byte [0x00][0x71] (NRF54 handle_direct_write_data(), opendisplay_pipe.c:777-796). The payload is filler, not image data - this vector asserts framing and the chunk ceiling only, never decode output."
+      },
+      "min_protocol": "2.0",
+      "requires": []
+    },
+    {
+      "id": "dispatch/direct-write-end-ack",
+      "dir": "h2d",
+      "frame": "007200",
+      "state": {
+        "sec_enabled": false,
+        "session": null,
+        "xfer_active": true
+      },
+      "expect": {
+        "reply": "0072",
+        "note": "REAL CAPTURE 05_upload_end_command.bin: [00][72][refresh=0x00] = FULL refresh (opendisplay_protocol.h:521-527). The END ack is 2 bytes and is followed by a SEPARATE unsolicited [00][73] or [00][74] refresh notification, which this schema cannot attach to the same vector - see dispatch/refresh-success-notification. DIVERGENCE 3.3: Firmware/NRF54 send this ack BEFORE the blocking refresh; Silabs sends it after (up to 60 s late)."
+      },
+      "min_protocol": "2.0",
+      "requires": []
+    },
+    {
+      "id": "dispatch/refresh-success-notification",
+      "dir": "d2h",
+      "frame": "0073",
+      "state": {
+        "sec_enabled": false,
+        "session": null
+      },
+      "expect": {
+        "reply": null,
+        "note": "Unsolicited device->host notification following a 0x72/0x82 END: [0x00][0x73] RESP_DIRECT_WRITE_REFRESH_SUCCESS (0x74 = timeout). opendisplay_protocol.h:523-527. The host sends nothing back, so reply is null. NOTE the documented collision at opendisplay_protocol.h:543-544: the same byte 0x73 is RESP_LED_ACTIVATE_ACK; the two are told apart only by direction and by the 4-byte vs 2-byte width (DIVERGENCE 1.4)."
+      },
+      "min_protocol": "2.0",
+      "requires": []
+    },
+    {
+      "id": "dispatch/unknown-opcode-no-reply",
+      "dir": "h2d",
+      "frame": "0060",
+      "state": {
+        "sec_enabled": false,
+        "session": null
+      },
+      "expect": {
+        "reply": null,
+        "note": "DIVERGENCE 1.9 - an unassigned opcode is logged and draws NO reply at all on all three implementations (Firmware communication.cpp:750-752; NRF54 dispatch() default: opendisplay_pipe.c:1348-1350; Silabs opendisplay_pipe.c:1188-1190). 0x0060 is in no SECTION 1 block. Clients must use a timeout, not a NACK, to detect an unimplemented command. This is the vector that proves the corpus can express silence."
+      },
+      "min_protocol": "2.0",
+      "requires": []
+    },
+    {
+      "id": "dispatch/partial-unsupported-nack",
+      "dir": "h2d",
+      "frame": "00760000000000000000010000000000080008",
+      "state": {
+        "sec_enabled": false,
+        "session": null,
+        "cap_partial": false
+      },
+      "expect": {
+        "reply": "ff760700",
+        "note": "DIVERGENCE 1 opcode-coverage row 0x76: a target WITHOUT partial support fail-fast NACKs [0xFF][0x76][0x07][0x00], where 0x07 = OD_ERR_PARTIAL_UNSUPPORTED (opendisplay_protocol.h:570, 794). Silabs opendisplay_pipe.c:1177-1186 - adopted as the default for any compiled-out subsystem (ARCHITECTURE.md: a disabled subsystem NACKs rather than drops). Frame carries a well-formed 17-byte BIG-ENDIAN header so the NACK is provably a capability refusal, not a parse error."
+      },
+      "min_protocol": "2.0",
+      "requires": []
+    },
+    {
+      "id": "dispatch/buzzer-unsupported-nack",
+      "dir": "h2d",
+      "frame": "0077000100",
+      "state": {
+        "sec_enabled": false,
+        "session": null,
+        "cap_buzzer": false
+      },
+      "expect": {
+        "reply": "ff770700",
+        "note": "DIVERGENCE 1 opcode-coverage row 0x77: buzzer unsupported NACKs [0xFF][0x77][0x07][0x00] (Silabs opendisplay_pipe.c:1177-1186, same fail-fast arm as 0x76). Frame is [instance=0][outer_repeats=1][n_patterns=0] per opendisplay_protocol.h:582. Error byte 0x07 is decoded in the SCOPE of echo 0x77 (opendisplay_protocol.h:194-203) - it is NOT OD_ERR_PARTIAL_UNSUPPORTED here, it is the same numeric 'unsupported' the client's parse_nack() reads."
+      },
+      "min_protocol": "2.0",
+      "requires": []
+    },
+    {
+      "id": "dispatch/power-off-unsupported-nack",
+      "dir": "h2d",
+      "frame": "0052",
+      "state": {
+        "sec_enabled": false,
+        "session": null,
+        "cap_power_latch": false
+      },
+      "expect": {
+        "reply": "ff520000",
+        "note": "DIVERGENCE 1 opcode-coverage row 0x52 on a non-latch target: 0x00 = OD_ERR_POWER_OFF_UNSUPPORTED (opendisplay_protocol.h:828). SPEC DISAGREEMENT recorded here: opendisplay_protocol.h:420 (@response) says the 4-byte [0xFF][0x52][0x00][0x00] while :432 (@targets) and DIVERGENCE 1's 0x52 row say the 3-byte [0xFF][0x52][0x00]. The only shipped implementation sends FOUR bytes (Silabs opendisplay_pipe.c:1114-1123, {RESP_NACK, RESP_POWER_OFF, OD_ERR_POWER_OFF_UNSUPPORTED, 0x00}); the shipped shape wins, as in 1.1. NRF54 has no 0x52 case at all and silently drops (DIVERGENCE: NRF54 gap). HOST GAP: py-opendisplay 7.14.0 still maps 0x0052 to DEEP_SLEEP (commands.py:40, build_deep_sleep_command()) and defines no POWER_OFF - it has not adopted the 2.1 swap, so a host on that version aiming to deep-sleep a 2.1 device hits POWER_OFF instead."
+      },
+      "min_protocol": "2.1",
+      "requires": []
+    }
+  ]
+}

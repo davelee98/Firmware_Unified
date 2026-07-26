@@ -1,0 +1,105 @@
+# Host build of shared/ + the test harness.
+#
+# This is the real enforcement of the shared/ boundary. .github/workflows/shared-boundary.yml
+# is a grep: it sees #include lines and literal tokens, and structurally cannot see an
+# extern-declared vendor symbol, a macro leaked through a target config header, or a libc
+# call that does not exist on a freestanding target. Compiling shared/ for the host with a
+# strict, warning-clean C99 toolchain does. See docs/DESIGN_REVIEW_2026-07-25.md § F4/F8.
+#
+#   cmake -S tests/host -B build && cmake --build build && ctest --test-dir build
+#
+# Green against an empty shared/ by design (docs/TEST_OWNERSHIP.md § "First step").
+
+cmake_minimum_required(VERSION 3.16)
+project(od_host_tests C)
+
+enable_testing()
+
+# -----------------------------------------------------------------------------------
+# The contract: C99, no compiler extensions, warnings are errors.
+# -----------------------------------------------------------------------------------
+# No GNU extensions: shared/ must build under three unrelated vendor toolchains, and a
+# GNU-ism that gcc accepts here is a failure discovered later on a target instead.
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+
+add_compile_options(-Wall -Wextra -Werror)
+
+# Both gcc and clang are supported and CI runs both; neither is required locally. Select
+# with -DCMAKE_C_COMPILER=clang. Anything else builds too, it is just not what CI gates on.
+message(STATUS "od: C compiler is ${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION}")
+
+# -----------------------------------------------------------------------------------
+# shared/ — one source list, shared with the three target builds.
+# -----------------------------------------------------------------------------------
+include(${CMAKE_CURRENT_LIST_DIR}/../../shared/sources.cmake)
+
+if(OD_SHARED_SOURCES)
+    add_library(od_shared STATIC ${OD_SHARED_SOURCES})
+    target_include_directories(od_shared PUBLIC ${OD_SHARED_INCLUDE_DIRS})
+    message(STATUS "od: shared/ has ${CMAKE_CURRENT_LIST_DIR} sources — building od_shared")
+else()
+    # No target code is imported yet. An INTERFACE library keeps every consumer below
+    # writing `target_link_libraries(... od_shared)` unchanged, so the first real source
+    # to land flips the branch above and nothing else in this file moves.
+    add_library(od_shared INTERFACE)
+    target_include_directories(od_shared INTERFACE ${OD_SHARED_INCLUDE_DIRS})
+    message(STATUS "od: shared/ source list is empty (expected — scaffold; see shared/sources.cmake)")
+endif()
+
+# -----------------------------------------------------------------------------------
+# Tests
+# -----------------------------------------------------------------------------------
+# canary: compiles the synced protocol headers under the flags above and checks a few
+# wire invariants at compile time. Its job is to make this build non-vacuous while
+# shared/ is empty — delete it once there are real sources. See canary.c.
+add_executable(od_canary canary.c)
+target_link_libraries(od_canary od_shared)
+add_test(NAME canary COMMAND od_canary)
+
+# replay_vectors: the corpus replayed through py-opendisplay's public API. This is the
+# dual-stack half of the contract test — the same vectors will later run against the C
+# core, and a vector the two sides disagree on is exactly the host/firmware divergence
+# this repo exists to eliminate.
+#
+# Optional by design: it needs Python plus a pinned py-opendisplay from PyPI, which is a
+# heavier dependency than a C build should mandate. CI always runs it; a developer with
+# neither still gets the compile gate. Absence is reported, never silently skipped —
+# a test that vanishes quietly is how coverage rots.
+find_package(Python3 COMPONENTS Interpreter)
+
+set(OD_REPLAY_SCRIPT ${CMAKE_CURRENT_LIST_DIR}/replay_vectors.py)
+set(OD_VECTORS_DIR   ${CMAKE_CURRENT_LIST_DIR}/../vectors)
+
+if(Python3_FOUND AND EXISTS ${OD_REPLAY_SCRIPT})
+    # py-opendisplay must be importable by *this* interpreter. It declares
+    # requires-python >=3.13, so a distro python of 3.12 or older cannot host it at all —
+    # which is the common local case and must not present as a test failure.
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import opendisplay"
+        RESULT_VARIABLE OD_PYOD_IMPORT
+        OUTPUT_QUIET ERROR_QUIET)
+
+    if(OD_PYOD_IMPORT EQUAL 0)
+        add_test(NAME replay_vectors
+                 COMMAND ${Python3_EXECUTABLE} ${OD_REPLAY_SCRIPT} ${OD_VECTORS_DIR})
+        # The runner exits non-zero on failure and prints SKIP lines for vectors it cannot
+        # express against the host API; those are not failures. It also exits non-zero on an
+        # empty corpus — a runner that is green because it found nothing is the exact
+        # failure mode TEST_OWNERSHIP.md indicts in py-opendisplay's own fixture fallbacks.
+        message(STATUS "od: replay_vectors test registered (${Python3_EXECUTABLE})")
+    else()
+        message(WARNING
+            "od: py-opendisplay is not importable by ${Python3_EXECUTABLE} "
+            "(v${Python3_VERSION}; py-opendisplay 7.14.0 needs >=3.13) — replay_vectors "
+            "NOT registered. The corpus is UNCHECKED in this build. CI always runs it; "
+            "to run it here: uv run --python 3.13 --with py-opendisplay==7.14.0 "
+            "python tests/host/replay_vectors.py tests/vectors")
+    endif()
+elseif(NOT Python3_FOUND)
+    message(WARNING "od: Python3 not found — replay_vectors NOT registered. "
+                    "The corpus is unchecked in this build.")
+else()
+    message(WARNING "od: ${OD_REPLAY_SCRIPT} missing — replay_vectors NOT registered.")
+endif()
