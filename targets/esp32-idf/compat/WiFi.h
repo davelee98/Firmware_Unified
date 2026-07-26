@@ -55,7 +55,7 @@ typedef int arduino_event_id_t;
 struct arduino_event_info_t {
     struct { uint8_t bssid[6]; uint8_t channel; } wifi_sta_connected;
     struct { uint8_t reason; } wifi_sta_disconnected;
-    struct { struct { uint32_t addr; } ip; struct { uint32_t addr; } ip_info; } got_ip;
+    struct { struct { struct { uint32_t addr; } ip; } ip_info; } got_ip;
 };
 
 class IPAddress {
@@ -120,6 +120,28 @@ public:
         }
     }
 
+    /* Arduino's setTimeout is in ms and applies to blocking reads. Mapped to SO_RCVTIMEO,
+     * which is the closest lwip equivalent -- note it bounds a single recv(), not a whole
+     * frame read, so a caller relying on it to bound framing needs its own deadline. */
+    void setTimeout(uint32_t ms)
+    {
+        if (_fd < 0) return;
+        struct timeval tv;
+        tv.tv_sec  = (time_t)(ms / 1000);
+        tv.tv_usec = (suseconds_t)((ms % 1000) * 1000);
+        lwip_setsockopt(_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    }
+
+    IPAddress remoteIP() const
+    {
+        struct sockaddr_in a;
+        socklen_t len = sizeof a;
+        if (_fd < 0 || lwip_getpeername(_fd, (struct sockaddr *)&a, &len) != 0) {
+            return IPAddress();
+        }
+        return IPAddress(a.sin_addr.s_addr);
+    }
+
     int fd() const { return _fd; }
 
 private:
@@ -168,7 +190,12 @@ public:
 
     void setNoDelay(bool on) { _noDelay = on; }
 
-    WiFiClient available()
+    /* accept() is the current Arduino spelling; available() is the legacy one. Same call. */
+    WiFiClient accept() { return acceptOne(); }
+    WiFiClient available() { return acceptOne(); }
+
+private:
+    WiFiClient acceptOne()
     {
         if (_listen < 0) return WiFiClient();
         int fd = lwip_accept(_listen, nullptr, nullptr);
@@ -179,6 +206,9 @@ public:
         }
         return WiFiClient(fd);
     }
+
+public:
+    uint16_t port() const { return _port; }
 
 private:
     uint16_t _port = 0;

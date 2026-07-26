@@ -1,2 +1,8 @@
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/default_16MB.csv"
+
+# 16 MB module. IDF defaults to 2 MB, which rejects default_16MB.csv at partition-table
+# generation -- a PlatformIO board_upload.flash_size knob that has no -D equivalent and
+# must be translated to sdkconfig, per docs/TOOLCHAINS.md's translation table.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"

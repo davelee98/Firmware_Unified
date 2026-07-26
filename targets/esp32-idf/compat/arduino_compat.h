@@ -104,6 +104,7 @@ static inline uint32_t micros(void)
     return (uint32_t)esp_timer_get_time();
 }
 
+#if 0
 static inline void delay(long ms)
 {
     /* vTaskDelay rounds DOWN to whole ticks; at the default 100 Hz tick a delay(5) would
@@ -113,10 +114,11 @@ static inline void delay(long ms)
     vTaskDelay(ticks ? ticks : 1);
 }
 
-static inline void delayMicroseconds(long us)
+static inline void delayMicroseconds_unused(long us)
 {
     esp_rom_delay_us((uint32_t)(us < 0 ? 0 : us));
 }
+#endif
 
 static inline void yield(void)
 {
@@ -198,6 +200,12 @@ static inline void interrupts(void)   { portENABLE_INTERRUPTS(); }
 }   /* extern "C" */
 #endif
 
+/* C++ LINKAGE, deliberately. bb_epaper.h declares `void delay(long)` without extern "C",
+ * so it links against the mangled name. Declaring these inside the extern "C" block above
+ * produced an unmangled symbol and left every bb_epaper delay() call unresolved. */
+void delay(long ms);
+void delayMicroseconds(long us);
+
 /* ---------------------------------------------------------------- String
  *
  * The single largest item in the census: 575 call sites. This is a minimal std::string
@@ -222,6 +230,8 @@ public:
     /* String(v, HEX) -- the two-arg radix form. Only HEX and DEC appear in the sources. */
     String(unsigned long v, int radix)
     { char b[24]; snprintf(b, sizeof b, radix == 16 ? "%lX" : "%lu", v); s_ = b; }
+    String(uint8_t v, int radix)
+    { char b[8]; snprintf(b, sizeof b, radix == 16 ? "%X" : "%u", (unsigned)v); s_ = b; }
     String(unsigned v, int radix)
     { char b[16]; snprintf(b, sizeof b, radix == 16 ? "%X" : "%u", v); s_ = b; }
 

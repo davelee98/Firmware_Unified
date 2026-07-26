@@ -35,3 +35,17 @@ uint64_t EspClass::getEfuseMac() const
     }
     return v;
 }
+
+/* External linkage, not static inline: bb_epaper's translation unit sees only the
+ * declaration from bb_epaper.h and needs a real symbol to link against. */
+void delay(long ms)
+{
+    if (ms < 0) ms = 0;
+    TickType_t ticks = (TickType_t)(((uint32_t)ms + portTICK_PERIOD_MS - 1) / portTICK_PERIOD_MS);
+    vTaskDelay(ticks ? ticks : 1);
+}
+
+void delayMicroseconds(long us)
+{
+    esp_rom_delay_us((uint32_t)(us < 0 ? 0 : us));
+}
