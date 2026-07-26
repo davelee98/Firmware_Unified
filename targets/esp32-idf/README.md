@@ -137,16 +137,41 @@ targets — see the ESP32 section of ../../docs/MIGRATION.md.
 
 ## Boards
 
-Ten variants from the source repo's `platformio.ini`:
+Eleven variants in the source repo's `platformio.ini`. **Ten have fragments and all ten
+build** (measured 2026-07-26, ESP-IDF v5.5.4, clean tree each time). The eleventh,
+`s3-e1004`, is deliberately absent — see below.
 
-| Board | Chip | Flash / PSRAM | Notes |
-|---|---|---|---|
-| `s3-n8r8` / `s3-n16r8` / `s3-n32r8` | ESP32-S3 | 8/16/32 MB + 8 MB OPI PSRAM | `Seeed_GFX` path on N16R8/N32R8 |
-| `s3-n16r8-extuart` / `s3-n32r8-extuart` | ESP32-S3 | as above | console on CH343P UART (GPIO43/44), not USB-CDC |
-| `s3-e1004` | ESP32-S3 | 32 MB + 8 MB | Seeed reTerminal E1004; pinned bb_epaper for T133A01 |
-| `c3-n4` / `c3-n16` | ESP32-C3 | 4/16 MB, no PSRAM | `c3-n16` uses DIO flash to free GPIO12/13 |
-| `c6-n4` | ESP32-C6 | 4 MB, no PSRAM | requires IDF ≥ 5.1. **Shipped.** **Fragment exists and builds.** Partition: `min_spiffs_4MB.csv` — see below |
-| `esp32-n4` | classic ESP32 | 4 MB, no PSRAM | 320 KB RAM: needs the reduced PIPE reorder window |
+| Board | Chip | Flash / PSRAM | FastEPD | Image | Slot free | Notes |
+|---|---|---|---|---|---|---|
+| `s3-n16r8` | ESP32-S3 | 16 MB + 8 MB OPI | yes | 1,260,992 | 81% | reference board |
+| `s3-n8r8` | ESP32-S3 | 8 MB + 8 MB OPI | yes | 1,260,992 | 62% | |
+| `s3-n32r8` | ESP32-S3 | 32 MB + 8 MB OPI | yes | 1,260,992 | 81% | |
+| `s3-n16r8-extuart` | ESP32-S3 | 16 MB + 8 MB OPI | yes | 1,284,256 | 80% | console on CH343P UART (GPIO43/44) |
+| `s3-n16r8-extuart-debug` | ESP32-S3 | 16 MB + 8 MB OPI | yes | 1,296,224 | 80% | `OD_LOG_LEVEL=DEBUG`; +12 KB. Debug build, not a shipping one |
+| `s3-n32r8-extuart` | ESP32-S3 | 32 MB + 8 MB OPI | **no** | 1,269,248 | 81% | reTerminal Sticky; panel via bb_epaper |
+| `c3-n4` | ESP32-C3 | 4 MB, no PSRAM | no | 1,327,536 | 32% | |
+| `c3-n16` | ESP32-C3 | 16 MB, no PSRAM | no | 1,327,536 | 80% | DIO flash to free GPIO12/13 |
+| `c6-n4` | ESP32-C6 | 4 MB, no PSRAM | no | 1,518,032 | 23% | IDF ≥ 5.1. **Shipped.** `min_spiffs_4MB.csv` — see below |
+| `esp32-n4` | classic ESP32 | 4 MB, no PSRAM | no | **695,104** | 65% | no WiFi; reduced PIPE reorder window |
+| `s3-e1004` | ESP32-S3 | 32 MB + 8 MB | no | — | — | **NO FRAGMENT.** Blocked: wrong bb_epaper fork vendored — see below |
+
+Two things the table makes obvious that were not obvious before:
+
+* **The classic ESP32 is by far the smallest image at 695 KB — 45% smaller than the S3.**
+  It is the one board that does not compile the WiFi/LAN transport. NEXT_STEPS.md item 3
+  expected this board to be the troublesome one; the reduced PIPE window
+  (`PIPE_SMALL_DRAM_WINDOW`) was already in `structs.h` from the import and it built first try.
+* **The C6 is the tightest fit by a wide margin** — 23% slot headroom against 62-81% for
+  everything else, and it is a *shipped* board. It is the one to watch as `shared/core` lands.
+
+### `s3-e1004` is blocked, not forgotten
+
+`env:esp32-s3-E1004` pins `limengdu/bb_epaper` (PR bitbank2#32, T133A01); this repo vendors
+`davelee98-creator/bb_epaper`, which defines neither `BBEP_T133A01` nor the
+`EP133A_SPECTRA_1200x1600` enum that `display_service.cpp:700` maps onto. Writing the fragment
+would produce a board that builds and cannot drive its own panel. It needs a re-vendor *and* a
+fix to `e1004_write_stream_bytes()`, which calls `SPI.writeBytes()` with nothing calling
+`SPI.begin()`. Full detail in [third_party/NOTICE.md](../../third_party/NOTICE.md).
 
 ## Partitions — ESP32-C6 moves to `min_spiffs.csv` (gate measured 2026-07-26)
 

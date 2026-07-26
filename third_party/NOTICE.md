@@ -81,6 +81,36 @@ owner. Assign one before step 2.
 Apache-2.0 code vendored inside a GPL-3.0 work is fine; the combined work is GPL-3.0 and this
 tree keeps its own licence and notice. Do not relicense it.
 
+### The vendored bb_epaper cannot build `s3-e1004` — wrong fork
+
+`env:esp32-s3-E1004` in the source repo pins a **different bb_epaper fork** from the one
+vendored here:
+
+| | |
+|---|---|
+| Vendored | `davelee98-creator/bb_epaper` @ `2ef09a1` |
+| Required by E1004 | `limengdu/bb_epaper` @ `95fd94af` — limengdu's PR bitbank2#32, T133A01 support |
+
+The vendored copy defines neither `BBEP_T133A01` nor the `EP133A_SPECTRA_1200x1600` panel
+enum. `display_service.cpp:700` maps `OD_PANEL_IC_EP133A_SPECTRA_1200X1600` onto that enum,
+and the whole E1004 dual-CS stream is behind `#ifdef BBEP_T133A01` — which is why the current
+build compiles: the guard is false everywhere and `e1004_write_stream_bytes()` is a no-op stub.
+
+**So `boards/s3-e1004.cmake` is deliberately absent.** Writing the fragment would produce a
+board that builds and cannot drive its own panel — the exact failure mode this repo's audit
+has been removing. It needs one of:
+
+1. re-vendor bb_epaper from a revision containing the T133A01 work (upstream if bitbank2#32
+   has merged since, otherwise the limengdu fork the source env pins), then add the fragment
+   with `BBEP_T133A01` defined; **and**
+2. fix `e1004_write_stream_bytes()`, which calls `SPI.writeBytes()` while nothing calls
+   `SPI.begin()`. Under Arduino it shared the global SPI object with bb_epaper; under IDF
+   bb_epaper owns its own `SPI2_HOST` bus and device, so those bytes must go through
+   bb_epaper's existing device handle — the one that just sent `DTM1` — not a second handle
+   on the shim.
+
+Item 2 is a live defect today, merely unreachable. Do not add the board without it.
+
 ### FastEPD has no ESP-IDF IO backend — OD-PATCH applied
 
 FastEPD picks its IO backend with `#ifdef ARDUINO` / `#elif defined(__LINUX__)`. There is no

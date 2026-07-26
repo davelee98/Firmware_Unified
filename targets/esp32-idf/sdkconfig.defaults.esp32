@@ -1,0 +1,7 @@
+# Classic ESP32 (esp32dev): no PSRAM, no USB peripheral of any kind -- console is UART0 on
+# the stock bootstrap pins, which is IDF's default and is spelled out here so the absence of
+# a USB console line reads as deliberate rather than forgotten.
+#
+# env:esp32-N4 is the ONE env that does not set OPENDISPLAY_ENABLE_WIFI. That is a code
+# decision (see the board fragment), not an sdkconfig one.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y

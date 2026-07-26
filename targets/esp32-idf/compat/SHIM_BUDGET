@@ -12,4 +12,16 @@
 # The shim did not grow -- the measurement got honest. Every entry is a file that must
 # eventually either move to shared/core (which forbids Arduino outright) or be rewritten
 # against IDF and shared/hal directly.
-21
+#
+# 22 = the same thing happening a second time, 2026-07-26, when the remaining ESP32 boards
+# were added. HardwareSerial.h was missing from the pattern, and src/main.cpp has included it
+# since the import -- inside the OPENDISPLAY_LOG_UART guard, which no board fragment defined
+# until the *-extuart boards existed, so the header did not even exist to be counted. main.cpp
+# is arguably the most Arduino-dependent file in the target and it was scoring zero.
+#
+# THE SHIM DID NOT GROW EITHER TIME. Both bumps are the metric catching up with reality, and
+# both are recorded here rather than quietly applied, because "we widened the definition" and
+# "we let it grow" are indistinguishable from the number alone -- and a ratchet that cannot
+# tell them apart is not a ratchet. Any future bump needs the same paragraph, or it is the
+# failure this file exists to prevent.
+22

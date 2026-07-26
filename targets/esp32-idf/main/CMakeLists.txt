@@ -64,7 +64,21 @@ file(GLOB OD_BBEP_SOURCES ${OD_TP_DIR}/bb_epaper/src/*.cpp)
 # OD_BOARD is a -D on the command line, so it is in the cache from the first pass onward and
 # both passes agree. FastEPD is ESP32-S3-only and PSRAM-mandatory (MEMORY_CONSTRAINTS.md
 # § "FastEPD is ESP32-only and PSRAM-mandatory"), so this list can only ever hold S3 boards.
-set(OD_FASTEPD_BOARDS s3-n16r8 s3-n32r8 s3-e1004)
+# Boards whose source env sets -DOPENDISPLAY_FASTEPD *and* lists the FastEPD lib_dep.
+# Read from platformio.ini, not guessed -- the two are not the same set:
+#
+#   s3-e1004 was WRONG in this list. env:esp32-s3-E1004 extends env:esp32-s3-N32R8-extuart,
+#   which sets neither the define nor the lib_dep; that board's panel goes through bb_epaper.
+#   Listing it here would have given it FastEPD's Group5 and excluded bb_epaper's, changing
+#   which copy wins the collision resolved below.
+#
+#   s3-n8r8 and the two s3-n16r8-extuart boards were MISSING. All three set the define.
+set(OD_FASTEPD_BOARDS
+    s3-n16r8
+    s3-n8r8
+    s3-n32r8
+    s3-n16r8-extuart
+    s3-n16r8-extuart-debug)
 
 if(OD_BOARD IN_LIST OD_FASTEPD_BOARDS)
     list(APPEND OD_APP_SOURCES ${OD_TP_DIR}/FastEPD/src/FastEPD.cpp

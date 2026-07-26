@@ -1,0 +1,10 @@
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/default_16MB.csv"
+
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# DIO rather than QIO: keeps GPIO12/13 available as general GPIO (battery-latch MOSFET on
+# some units). Carried from board_build.flash_mode = dio in env:esp32-c3-N16.
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+CONFIG_ESPTOOLPY_FLASHMODE="dio"
