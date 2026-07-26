@@ -507,9 +507,13 @@ their IO calls, and the nRF52840 port reuses the nRF54L15 drivers.
   per-device capability value lives, which is the capability-discovery problem, not a
   compression one. `shared/compress` still exposes the window as a per-target parameter with
   512 B as the floor (MEMORY_CONSTRAINTS.md).*
-- **Is `CMD_NFC_ENDPOINT` (TNB132M) going to any other target?** It is in the canonical protocol
-  header but only EFR32BG22 implements it. Decides whether it belongs in `shared/core` behind a
-  capability flag or stays target-local.
+- ~~**Is `CMD_NFC_ENDPOINT` (TNB132M) going to any other target?**~~ **ANSWERED 2026-07-25 —
+  it is already on two targets**, and the premise here ("only EFR32BG22 implements it") was
+  wrong: `Firmware_NRF54/src/opendisplay_nfc.c` implements it as well, dispatched at
+  `opendisplay_pipe.c:1325`. Placement decided with it: the `0x83` endpoint goes to
+  `shared/core` behind `OD_NFC_ENABLE`, the IC drivers stay target-local, and the `0x2A` config
+  packet is parsed unconditionally on every target because it is canonical schema. Full split
+  in SHARED_API_DESIGN.md § "NFC: standard packet, optional support".
 - **Who owns regenerating `cmake_gcc/opendisplay-bg22.cmake`?** Largely answered: the full
   Simplicity SDK 2025.12.2 **is** installed on the primary dev box, so regen is possible here
   once `slc` is pointed at it (`--sdk-package-path`, or a project `.slconf`). What is still open

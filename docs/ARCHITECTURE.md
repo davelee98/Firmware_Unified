@@ -233,6 +233,16 @@ actually available* for anything that must work on deployed hardware — which p
 capability-reporting values into `SystemConfig.reserved[15]`, as § "The gap, and a proposed fix"
 does. Adopting NRF54's parser is what re-opens that option for future firmware.
 
+**This is not a future risk — it has already happened, with `0x2A`.** `OD_PKT_NFC` is canonical
+schema today, and `Firmware`/ESP32 does not parse it (DIVERGENCE_MATRIX §2.1), so an ESP32
+handed a config containing an NFC packet already discards everything after it. The escape hatch
+was not merely unsafe *to use in future*; the packet that exercises it is in the header now. Two
+things follow. The size-table parser moves from "the better design" to a **precondition for the
+schema being what it claims to be** — a standard packet only exists on a target that can step
+over it. And optionality has to be read carefully: a packet may be optional *to contain* and a
+capability optional *to support*, but no packet is ever optional *to parse*
+(SHARED_API_DESIGN.md § "NFC: standard packet, optional support").
+
 ## Secrets are never logged verbatim — presence and length only
 
 **Rule.** No code in `shared/` logs credential or key material at any log level. Report that a

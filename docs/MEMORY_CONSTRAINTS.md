@@ -236,9 +236,12 @@ as the default. bb_epaper remains the streaming (`needs_framebuffer=false`) defa
   cap rather than a per-target macro.** The host may send up to 4096 bytes to any device,
   BG22 included. See item 3 above for the BG22 cost (~+4 KB naive, ~+2 KB after the two
   required mitigations) and the NVM3 checks that must precede the Silabs swap.
-- **`CMD_NFC_ENDPOINT` placement.** In the header, implemented only on NRF54/Silabs, absent on
-  Firmware. Core-behind-`OD_NFC_ENABLE`, or target-local? (SHARED_API_DESIGN.md assumes the
-  former.)
+- ~~**`CMD_NFC_ENDPOINT` placement.**~~ **DECIDED 2026-07-25 — core behind `OD_NFC_ENABLE`**,
+  which is what SHARED_API_DESIGN.md assumed. Two targets implement it (NRF54 and Silabs), so
+  the endpoint logic is duplicated today and promoting it is the ordinary case, not a special
+  one. The flag gates the `0x83` endpoint and the IC drivers only: the `0x2A` config packet is
+  canonical schema (`OD_PKT_NFC`) and is parsed unconditionally on every target, ESP32
+  included. See SHARED_API_DESIGN.md § "NFC: standard packet, optional support".
 - **Group5 de-duplication vs `--allow-multiple-definition`.** Recommendation is to compile the
   duplicated files from one library only; confirm both drawing APIs are not simultaneously
   required on any single board first.

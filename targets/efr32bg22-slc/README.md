@@ -147,9 +147,13 @@ already visible, before any code moves:
    `REBOOT`, `ENTER_DFU`. So `shared/core`'s transfer state machines must be selectable —
    a target that does not implement PIPE must not pay for its reorder queue in flash or
    RAM.
-3. **`CMD_NFC_ENDPOINT` / TNB132M is Silabs-only.** It is in the protocol header, so it is
-   shared surface, but this is the only implementation. Decide whether it lands in
-   `shared/core` behind a capability flag or stays in `targets/efr32bg22-slc/`.
+3. **`CMD_NFC_ENDPOINT` / TNB132M — decided 2026-07-25, and this is *not* the only
+   implementation.** The earlier "Silabs-only" claim here was wrong: `Firmware_NRF54` implements
+   the same endpoint (`src/opendisplay_nfc.c`, dispatched at `opendisplay_pipe.c:1325`), so the
+   logic is duplicated across two targets today. It lands in `shared/core` behind
+   `OD_NFC_ENABLE`; the TNB132M I2C driver stays here in `targets/efr32bg22-slc/`. Note the flag
+   does **not** gate config parsing — `0x2A` is canonical schema and every target parses it.
+   See ../../docs/SHARED_API_DESIGN.md § "NFC: standard packet, optional support".
 4. **`opendisplay_display.cpp` is C++ while everything around it is C**, purely because
    `bb_epaper` is a C++ class. Consistent with `Firmware_NRF54`, and fine — but it means the
    `od_hal_panel` boundary is where C++ has to stop.

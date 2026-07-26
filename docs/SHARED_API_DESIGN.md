@@ -67,7 +67,7 @@ The divergence is real and permanent, not a migration backlog to burn down:
 | Partial region `0x76` | targets with a framebuffer | BG22 has no framebuffer to compose into |
 | WiFi/LAN transport | ESP32 | no radio for it elsewhere |
 | tinfl ROM inflate | ESP32 | ROM-provided; others use uzlib bit-serial |
-| `CMD_NFC_ENDPOINT` (TNB132M) | EFR32BG22 | one product's hardware |
+| `CMD_NFC_ENDPOINT` (`0x83`) + NFC hardware | **EFR32BG22 and nRF54L15** | product hardware; ESP32 has no NFC part. *Corrected 2026-07-25 — this row said "EFR32BG22, one product's hardware", which was wrong: NRF54 implements it too (`Firmware_NRF54/src/opendisplay_nfc.c`, dispatch at `opendisplay_pipe.c:1325`; Silabs at `opendisplay_pipe.c:1165`). Two implementations is why the endpoint logic is promoted rather than left target-local — see § "NFC: standard packet, optional support" below.* |
 | Channel Sounding | nRF54L15 | silicon feature |
 | Parallel e-paper (FastEPD) | ESP32-S3 | needs the S3 LCD peripheral + PSRAM |
 
@@ -438,13 +438,58 @@ is the correct model; its silent drop of 0x45/0x80-0x82 is not — DIVERGENCE_MA
 ```c
 #define OD_PIPE_ENABLE      0   /* Silabs/NRF54: 0 — no 8.3 KB reorder queue in .bss */
 #define OD_PARTIAL_ENABLE   0   /* Silabs: 0 (no framebuffer) */
-#define OD_NFC_ENABLE       1   /* Silabs/NRF54: 1; Firmware: 0 */
+#define OD_NFC_ENABLE       1   /* Silabs/NRF54: 1; Firmware: 0. Gates the 0x83 endpoint
+                                 * and the hardware ONLY -- never the 0x2A config parse. */
 #define OD_BUZZER_ENABLE    0   /* Silabs: 0 */
 #define OD_LAN_ENABLE       0   /* ESP32-with-WiFi only */
 ```
 
 `OD_PIPE_ENABLE=0` must exclude the reorder queue from `.bss` entirely (`#if` around the
 `PipeReorderSlot[]`), because 8.3 KB — or even the 4.3 KB small-window form — does not fit BG22.
+
+### NFC: standard packet, optional support
+
+Decided 2026-07-25, resolving the `CMD_NFC_ENDPOINT` placement question that MEMORY_CONSTRAINTS
+and TOOLCHAINS both carried as open. NFC is the worked example for every capability flag here,
+because it is the one where "optional" means three different things and only two of them are
+true:
+
+| Sense of *optional* | NFC | Mechanism |
+|---|---|---|
+| Optional **in a config blob** — a config need not contain one | **yes** | schema: `@packet 0x2A @repeatable max=2`, unlike `system`/`manufacturer`/`power`, which are required singletons |
+| Optional **to support** — a target need not drive NFC hardware or answer `0x83` | **yes** | `OD_NFC_ENABLE`; a target with `0` links no NFC code and NACKs the opcode |
+| Optional **to parse** — a target may fail to step over the packet | **NO** | the size-table parser walks every canonical packet unconditionally |
+
+So the placement is a three-way split, not a two-way one:
+
+| Concern | Placement | Gate |
+|---|---|---|
+| `0x2A` TLV parse into `struct NfcConfig` | `shared/core` — `od_config.c` | **none. Never gated.** |
+| `0x83` dispatch + the §5 NFC sub-protocol framing | `shared/core` — `od_dispatch.c` | `OD_NFC_ENABLE`, NACK when `0` |
+| TNB132M-over-I2C / SoC-NFCT driver | `targets/<t>/` | target-local backend |
+
+**`OD_NFC_ENABLE` gates *applying and answering*, never *parsing*.** `OD_PKT_NFC = 0x2A` is a
+first-class member of the canonical packet enum in `opendisplay_structs.h`, so a target that
+cannot do NFC still walks the packet, stores it, and returns it byte-stable on `CONFIG_READ` —
+it simply never acts on it. This is DIVERGENCE §2.1's rule stated for the case that motivated
+it: *per-target `#if` only for applying a packet, never for parsing it.* A target is entitled
+to ignore a packet; it is not entitled to lose the rest of the blob because of one.
+
+Two consequences worth stating, because both are easy to get backwards:
+
+- **The NRF54 size-table parser is a precondition, not a preference.** Only a parser that knows
+  every canonical packet's size can step over one it does not act on. A skip-to-CRC parser
+  cannot implement the middle row of the first table above.
+- **`NfcConfig` is peripheral-descriptive, so it is not a clamp-on-write candidate.**
+  `nfc_ic_type`, the data bus, and the field-detect GPIO describe attached hardware, which the
+  firmware is explicitly *not* authoritative over (ARCHITECTURE.md § "A device should determine
+  its own capabilities"). Effective capability is the AND of firmware and peripheral; the host
+  learns the firmware half from the `0x83` NACK, not from a rewritten config.
+
+The backend split is not hypothetical even within one target: nRF54 already drives an external
+TNB132M *and* the SoC NFCT peripheral on the LM20 board (`opendisplay_nfc.c:161`). That is the
+same shape as `od_hal_panel`'s ops table — a shared upper layer over a thin backend seam — and
+it is an argument for promotion, not against it.
 
 ### Invariants the core must assert at compile time
 
