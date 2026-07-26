@@ -24,7 +24,9 @@
 using namespace Adafruit_LittleFS_Namespace;
 #endif
 #ifdef TARGET_ESP32
-#include <LittleFS.h>
+/* ESP32: config storage is NVS, not LittleFS -- see config_parser.cpp and
+ * hal/od_hal_nvs.h. This file only needs to invalidate the stored record. */
+#include "od_hal_nvs.h"
 #include <esp_system.h>
 #endif
 
@@ -825,21 +827,12 @@ void secureEraseConfig() {
         InternalFS.remove(CONFIG_FILE_PATH_LOCAL);
     }
 #elif defined(TARGET_ESP32)
-    if (LittleFS.exists(CONFIG_FILE_PATH_LOCAL)) {
-        File file = LittleFS.open(CONFIG_FILE_PATH_LOCAL, FILE_WRITE);
-        if (file) {
-            size_t fileSize = file.size();
-            file.seek(0);
-            size_t written = 0;
-            while (written < fileSize) {
-                size_t toWrite = (fileSize - written < sizeof(zeroBuffer)) ? (fileSize - written) : sizeof(zeroBuffer);
-                file.write(zeroBuffer, toWrite);
-                written += toWrite;
-            }
-            file.close();
-            od_log_info("Config file securely erased (%zu bytes)", written);
-        }
-        LittleFS.remove(CONFIG_FILE_PATH_LOCAL);
+    /* Was: open the stored config file, patch it in place, then remove it. Under NVS the
+     * record is a single opaque blob owned by config_parser, so the equivalent -- and the
+     * only thing this call site actually needed -- is to invalidate it. Erasing here rather
+     * than rewriting also removes a path that wrote config bytes from outside the config
+     * subsystem, which is the sort of second writer that makes a storage format drift. */
+    (void)od_hal_nvs_erase();
     }
 #endif
     od_log_info("Config securely erased");

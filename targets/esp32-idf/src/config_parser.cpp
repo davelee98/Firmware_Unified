@@ -15,7 +15,10 @@
 using namespace Adafruit_LittleFS_Namespace;
 #endif
 #ifdef TARGET_ESP32
-#include <LittleFS.h>
+/* ESP32: config lives in NVS, not LittleFS (decided 2026-07-25). The three-function seam
+ * is od_hal_nvs, shaped per docs/SHARED_API_DESIGN.md so the eventual promotion of this
+ * subsystem into shared/core is a repoint rather than a rewrite. */
+#include "od_hal_nvs.h"
 #include <WiFi.h>
 #endif
 
@@ -64,8 +67,8 @@ bool initConfigStorage(){
     return true;
     #endif
     #ifdef TARGET_ESP32
-    if (!LittleFS.begin(true)) { // true = format on failure
-        od_log_error("ERROR: Failed to mount LittleFS");
+    if (od_hal_nvs_init() != OD_HAL_NVS_OK) {
+        od_log_error("ERROR: Failed to initialise NVS config storage");
         return false;
     }
     return true;
@@ -78,7 +81,7 @@ void formatConfigStorage(){
     InternalFS.format();
     #endif
     #ifdef TARGET_ESP32
-    LittleFS.format();
+    (void)od_hal_nvs_erase();
     #endif
 }
 
@@ -108,6 +111,27 @@ bool saveConfig(uint8_t* configData, uint32_t len){
     header.version = CONFIG_STORAGE_VERSION;
     header.crc = calculateConfigCRC(configData, len);
     header.data_len = len;
+    #ifdef TARGET_ESP32
+    /* NVS stores one opaque blob, so header and payload are staged contiguously. The
+     * LittleFS path wrote them as two sequential file writes; the bytes on the medium are
+     * the same record either way, which keeps loadConfig's validation unchanged.
+     *
+     * The staging buffer is the cost of the blob interface. It is affordable here -- an
+     * ESP32-S3 has 512 KB plus PSRAM -- and it is NOT affordable on the EFR32BG22, whose
+     * whole heap is 10.3 KB. When this subsystem is promoted to shared/core, that target
+     * will need either a two-key record or a streaming write; do not carry this buffer
+     * across as if it were free. See docs/MEMORY_CONSTRAINTS.md.
+     */
+    static uint8_t blob[sizeof(config_header_t) + MAX_CONFIG_SIZE];
+    memcpy(blob, &header, sizeof(header));
+    if (len > 0) {
+        memcpy(blob + sizeof(header), configData, len);
+    }
+    if (od_hal_nvs_save(blob, (uint32_t)(sizeof(header) + len)) != OD_HAL_NVS_OK) {
+        od_log_error("ERROR: Failed to write config to NVS");
+        return false;
+    }
+    #else
     #ifdef TARGET_NRF
     if (InternalFS.exists(CONFIG_FILE_PATH)) {
         InternalFS.remove(CONFIG_FILE_PATH);
@@ -141,6 +165,7 @@ bool saveConfig(uint8_t* configData, uint32_t len){
         od_log_error("ERROR: Failed to write complete config data (expected %u, wrote %u)", (unsigned)totalSize, (unsigned)bytesWritten);
         return false;
     }
+    #endif
     return true;
 }
 
@@ -153,8 +178,8 @@ bool clearStoredConfig(void) {
         }
     }
     #elif defined(TARGET_ESP32)
-    if (LittleFS.exists(CONFIG_FILE_PATH)) {
-        if (!LittleFS.remove(CONFIG_FILE_PATH)) {
+    if (od_hal_nvs_erase() != OD_HAL_NVS_OK) {
+        if (true) {
             od_log_error("ERROR: Failed to remove config file");
             return false;
         }
@@ -170,6 +195,45 @@ bool clearStoredConfig(void) {
 }
 
 bool loadConfig(uint8_t* configData, uint32_t* len){
+    if (configData == nullptr || len == nullptr) {
+        return false;
+    }
+    config_header_t header;
+#ifdef TARGET_ESP32
+    /* One blob out of NVS, then the same validation the LittleFS path applied. Reading the
+     * record whole rather than header-then-payload is the one behavioural difference, and it
+     * is the safer order: the length check below happens before anything is copied into the
+     * caller's buffer, which the sequential-read version could only do after staging. */
+    static uint8_t blob[sizeof(config_header_t) + MAX_CONFIG_SIZE];
+    uint32_t blobLen = 0;
+    int rc = od_hal_nvs_load(blob, (uint32_t)sizeof(blob), &blobLen);
+    if (rc == OD_HAL_NVS_ENOENT) {
+        return false;           /* unprovisioned device -- not an error, just nothing stored */
+    }
+    if (rc != OD_HAL_NVS_OK || blobLen < sizeof(config_header_t)) {
+        od_log_error("ERROR: Failed to read config from NVS (rc=%d, len=%u)", rc, (unsigned)blobLen);
+        return false;
+    }
+    memcpy(&header, blob, sizeof(header));
+    if (header.magic != CONFIG_STORAGE_MAGIC) {
+        od_log_error("ERROR: Invalid config magic number");
+        return false;
+    }
+    if (header.data_len > MAX_CONFIG_SIZE) {
+        od_log_error("ERROR: Config data too large");
+        return false;
+    }
+    if (header.data_len > *len) {
+        od_log_error("ERROR: Config data larger than buffer");
+        return false;
+    }
+    if (blobLen < sizeof(config_header_t) + header.data_len) {
+        od_log_error("ERROR: Stored config truncated (header says %u, blob holds %u)",
+                     (unsigned)header.data_len, (unsigned)(blobLen - sizeof(config_header_t)));
+        return false;
+    }
+    memcpy(configData, blob + sizeof(config_header_t), header.data_len);
+#else
     #ifdef TARGET_NRF
     File file = InternalFS.open(CONFIG_FILE_PATH, FILE_O_READ);
     #elif defined(TARGET_ESP32)
@@ -216,6 +280,7 @@ bool loadConfig(uint8_t* configData, uint32_t* len){
         od_log_error("ERROR: Failed to read complete config data (expected %u, read %u)", (unsigned)header.data_len, (unsigned)bytesRead);
         return false;
     }
+#endif
     uint32_t calculatedCRC = calculateConfigCRC(configData, header.data_len);
     if (header.crc != calculatedCRC) {
         od_log_error("ERROR: Config CRC mismatch");

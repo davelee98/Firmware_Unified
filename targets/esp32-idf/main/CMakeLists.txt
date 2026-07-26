@@ -25,6 +25,10 @@ list(APPEND OD_APP_SOURCES
 # The Arduino shim. TEMPORARY -- removed in phase C together with compat/ and its ratchet.
 list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../compat/arduino_compat.cpp)
 
+# Target HAL implementations. od_hal_nvs is the first: config storage moved off LittleFS onto
+# NVS (2026-07-25), written to the shared/hal signature so promotion is a repoint.
+list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_nvs.c)
+
 # ---------------------------------------------------------------------------------------
 # Panel libraries, vendored -- see ../../../third_party/NOTICE.md for origin and licence.
 # ---------------------------------------------------------------------------------------
@@ -74,6 +78,7 @@ idf_component_register(
     INCLUDE_DIRS
         ${OD_SRC_DIR}
         ${CMAKE_CURRENT_LIST_DIR}/../compat
+        ${CMAKE_CURRENT_LIST_DIR}/../hal
         ${OD_LIB_DIR}/uzlib/src
         ${CMAKE_CURRENT_LIST_DIR}/../../../third_party/bb_epaper/src
         ${CMAKE_CURRENT_LIST_DIR}/../../../third_party/FastEPD/src
