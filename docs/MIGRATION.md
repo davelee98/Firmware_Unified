@@ -344,6 +344,14 @@ on the chip. But a subsystem that fails Gate 1 should never reach a board.
   canonical, not trusted as-is. And `upstream/main` PR #120 made a comment-only Seeed_GFX→FastEPD
   edit to the *vendored* `opendisplay_structs.h` that canonical does not yet carry; apply that
   wording to the canonical structs header *before* any `--push`, or a push will revert it.
+
+  **Half of this risk is now void (2026-07-25, measured at the Phase A import).** The
+  "import lands a stale 2.1 header" limb was based on a wrong reading: `upstream/main` is at
+  **2.2**, because `#124` *is* the SECTION 9 LAN feature. Its header differs from canonical by
+  ten doc-only lines with no wire difference, and Phase A did not import it at all — the ESP32
+  target uses `shared/protocol/` directly, so there is no tenth copy to drift. What remains
+  live is the second limb: the copy-map gap, and PR #120's structs wording, which must be
+  applied to canonical *before* any `--push`.
 - ~~**Scaffold docs disagree on the nRF52840 step number.**~~ **Fixed 2026-07-25.**
   `targets/nordic-zephyr/README.md` said "step 3"; the order in this file is authoritative and
   makes the nRF52840 port **step 4** (Silabs is step 3, because it must bite third to keep

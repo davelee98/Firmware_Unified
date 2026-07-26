@@ -1,9 +1,67 @@
 # Target: ESP32-S3 / C3 / C6 / classic (ESP-IDF)
 
-Source repo: `Firmware` (https://github.com/davelee98/Firmware)
+Source repo: `Firmware` (https://github.com/OpenDisplay/Firmware.git)
 
-Not yet imported — build from the original repo for now. First target in the migration order;
-see ../../docs/MIGRATION.md.
+## Import status: **Phase A complete — does not build**
+
+| | |
+|---|---|
+| Imported from | `upstream/main` @ `2e2131b9980c9a46f1c8e56ce2d3dcb4b7aa5bd3` |
+| Commit | `feat(wifi/lan): WiFi/LAN transport + tinfl inflate; pin pioarduino 55.03.39 (#124)`, 2026-07-25 |
+| Contents | `src/` `lib/` `tools/` `scripts/` — 67 files, verified byte-identical to the source tree |
+
+**This does not compile, and that is the expected state.** Phase A exists for provenance and
+reviewable blame, not for a working build (../../docs/MIGRATION.md § "The ESP32 import is
+different"). The sources are Arduino/PlatformIO and this target is ESP-IDF; Phase B adds the IDF
+skeleton plus the temporary `compat/arduino_compat.h` shim and aims to **link and boot on
+hardware early**, so every later step is bisectable against a known-good baseline.
+
+Until Phase B lands, build this target from the original repo.
+
+### What was deliberately NOT imported
+
+Step 1 says "import unchanged", and these are the exceptions — decided before the first commit,
+the way the Silabs SDK exclusion was, because a file committed once is carried forever:
+
+- **`include/opendisplay_protocol.h` and `include/opendisplay_structs.h`.** They are a vendored
+  copy of the canonical wire contract, and this repo already holds exactly one copy at
+  `shared/protocol/`. Importing them would make this the *tenth* copy in a workspace whose
+  header-sync mechanism is already measured at 1-in-sync/5-drifted/2-missing. Phase B points the
+  include path at `shared/protocol/` instead. (Checked at import: the source copy differs from
+  canonical by ten lines, all in a doc-only changelog entry, with no wire difference — see
+  "Protocol header state" below.)
+- **`platformio.ini`, `boards/`, `variants/`, `bin/`.** PlatformIO and Arduino board artifacts
+  with no meaning under IDF; carrying them in would contradict the repo's "no PlatformIO, no
+  Arduino" rule and leave dead files that look authoritative. The board *information* is still
+  needed — it is the input to the sdkconfig translation table in ../../docs/TOOLCHAINS.md — and
+  its source of truth remains the `Firmware` repo, which is not retired until migration step 4.
+- The source repo's own `README.md`, `CLAUDE.md`, `AGENTS.md`, `docs/`, `LICENSE`.
+
+### Two things to know before reading this code
+
+**`src/` is an ESP32 *and* nRF52840 tree.** The two chip families are interleaved *within*
+files — `ble_init.cpp`, `communication.cpp`, `device_control.cpp` and `display_service.cpp` all
+carry Bluefruit/nRF52 code behind `#ifdef` — not separated into per-chip files. So this
+directory legitimately contains Nordic code that does not belong to this target. It leaves at
+migration **step 4**, when the nRF52840 half becomes a board on `targets/nordic-zephyr/`; that
+is why `Firmware` is not retired until step 4 completes.
+
+**`lib/uzlib/src/od_zlib_stream.c` is destined for `shared/compress/`, not this target.** It is
+the resumable inflate engine, pure C with no vendor headers, already vendored identically in the
+NRF54 and Silabs repos — SHARED_API_DESIGN.md § `shared/compress` says to lift it unchanged. It
+was imported *here* rather than straight into `shared/` on purpose: promotion is migration step
+3-4, and doing it during Phase A would conflate an import with a refactor and cost the clean
+blame this phase exists to preserve. It is the obvious first promotion candidate.
+
+### Protocol header state at import
+
+The risk recorded in MIGRATION.md § "Risks to watch" — that the import would land a header stale
+at protocol 2.1, missing all of SECTION 9 (LAN) — **did not materialise, and the underlying
+claim was itself stale.** `upstream/main` is at 2.2 *because* `#124` is the LAN feature. The
+source copy differs from canonical only by a ten-line doc-only changelog entry describing the
+`0x43` trailing patch byte. Nothing needs re-syncing; DIVERGENCE_MATRIX §8.2 should be corrected.
+
+First target in the migration order; see ../../docs/MIGRATION.md.
 
 **This target changes framework on import.** The source repo builds with PlatformIO + Arduino;
 this target is **ESP-IDF, no Arduino**. The rationale, the per-API replacement census, and the
@@ -68,5 +126,9 @@ compat/arduino_compat.h         TEMPORARY import shim; deleted during phase C
 ## Toolchain
 
 ESP-IDF, pinned to one explicit release. Floors: **≥ 5.1** for ESP32-C6, **≥ 5.2** for
-`driver/i2c_master.h` (do not port onto the deprecated `driver/i2c.h`). Not currently installed
-on the primary dev box — `idf.py` must be installed before any work here.
+`driver/i2c_master.h` (do not port onto the deprecated `driver/i2c.h`).
+
+**Installed on the primary dev box: ESP-IDF v5.5.4** at `~/esp/esp-idf`, activated with
+`source ~/esp/esp-idf/export.sh` (it is not on `PATH`). That clears both floors and is the
+obvious pin — adopt it explicitly in Phase B rather than depending on whatever a given machine
+has exported.

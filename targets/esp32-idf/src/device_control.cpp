@@ -1,0 +1,957 @@
+#include "device_control.h"
+#include "structs.h"
+#include "touch_input.h"
+#include "power_latch.h"
+#include "buzzer_control.h"
+#include "od_log.h"
+#include <string.h>
+
+#ifdef TARGET_ESP32
+void enterDeepSleep(bool force = false, uint16_t overrideSleepSeconds = 0);
+#endif
+
+#ifdef TARGET_NRF
+#include <bluefruit.h>
+#include "ble_init.h"
+extern "C" {
+#include "nrf_soc.h"
+}
+extern "C" void bootloader_util_app_start(uint32_t start_addr);
+#endif
+#ifdef TARGET_ESP32
+#include <esp_system.h>
+#include "driver/gpio.h"
+#include "esp32-hal-gpio.h"
+#include "ble_init.h"          // BLEDevice/BLEServer/BLEAdvertising aliases + esp32_ble_clear_handles()
+#include "wifi_service.h"      // OPENDISPLAY_HAS_WIFI + opendisplay_lan_teardown()
+extern BLEServer* pServer;     // defined in main.cpp
+#endif
+
+extern uint8_t rebootFlag;
+extern struct GlobalConfig globalConfig;
+extern uint8_t activeLedInstance;
+extern bool ledFlashActive;
+extern uint8_t ledFlashPosition;
+extern uint8_t dynamicreturndata[11];
+extern uint8_t buttonStateCount;
+extern volatile bool buttonEventPending;
+extern volatile uint8_t lastChangedButtonIndex;
+void updatemsdata();
+void cleanupDirectWriteState(bool refreshDisplay);
+void cleanupPartialWriteOnDisconnect(void);
+void resetPipeWriteState(void);
+void sendResponse(uint8_t* response, uint16_t len);
+
+extern ButtonState buttonStates[MAX_BUTTONS];
+
+#ifdef TARGET_ESP32
+static bool s_pwrOffReleased[MAX_BUTTONS];
+static bool s_pwrOffPressing[MAX_BUTTONS];
+static bool s_pwrOffDone[MAX_BUTTONS];
+static uint32_t s_pwrOffStartMs[MAX_BUTTONS];
+
+static void pollConfiguredPowerOffButtons() {
+    if (!powerLatchDffConfigured() && !powerLatchMosfetConfigured()) {
+        return;
+    }
+    for (uint8_t i = 0; i < buttonStateCount; i++) {
+        ButtonState* btn = &buttonStates[i];
+        if (!btn->initialized || !btn->power_off) {
+            continue;
+        }
+        bool pinState = digitalRead(btn->pin);
+        bool down = btn->inverted ? !pinState : pinState;
+        if (!down) {
+            s_pwrOffReleased[i] = true;
+            s_pwrOffPressing[i] = false;
+            s_pwrOffDone[i] = false;
+            continue;
+        }
+        if (!s_pwrOffReleased[i]) {
+            continue;
+        }
+        if (!s_pwrOffPressing[i]) {
+            s_pwrOffPressing[i] = true;
+            s_pwrOffStartMs[i] = millis();
+            continue;
+        }
+        if (!s_pwrOffDone[i] && millis() - s_pwrOffStartMs[i] >= btn->power_off_hold_ms) {
+            s_pwrOffDone[i] = true;
+            passiveBuzzerPowerOffAlert();
+            powerLatchTriggerOff();
+        }
+    }
+}
+
+// BinaryInputs.input_type wire values (see structs.h for the full contract).
+// 2 is reserved for switches (host-side feature); the ADC ladder uses 3.
+#define BINARY_INPUT_TYPE_ADC_LADDER 3
+
+// --- ADC resistor-ladder buttons (e.g. XTEINK X4) -------------------------
+// Several buttons share one ADC pin via a resistor ladder, distinguished by
+// voltage. They have no edge interrupt, so they are polled. Reported through
+// the same MSD button byte as digital buttons for a uniform host contract.
+#define MAX_ADC_LADDERS     4
+#define MAX_LADDER_BUTTONS  4    // reserved[] holds at most N+1 = 5 LE uint16 thresholds
+#define ADC_LADDER_POLL_MS  5
+#define ADC_LADDER_DEBOUNCE 3    // consecutive equal samples required to accept a change
+
+// Thresholds for N+1 buttons must fit in BinaryInputs.reserved[]; fail the build if not.
+static_assert(2 + 2 * (MAX_LADDER_BUTTONS + 1) <= sizeof(BinaryInputs::reserved),
+              "ADC ladder thresholds would overflow BinaryInputs.reserved[]");
+
+struct AdcLadder {
+    uint8_t  pin;
+    uint8_t  num_buttons;
+    uint8_t  id_base;
+    uint8_t  byte_index;
+    uint16_t thresholds[MAX_LADDER_BUTTONS + 1];  // descending; [0] = idle ceiling
+    int8_t   current_button;     // -1 = none pressed
+    int8_t   candidate_button;   // debounce: last raw classification
+    uint8_t  candidate_count;    // consecutive samples equal to candidate
+    uint8_t  press_count;        // 0-15, increments per press (5 s reset window)
+    uint8_t  last_button_id;     // id of most recent press (for clean release reporting)
+    uint32_t last_press_time;
+};
+static AdcLadder adcLadders[MAX_ADC_LADDERS];
+static uint8_t   adcLadderCount = 0;
+
+// Returns button index 0..num_buttons-1, or -1 when nothing is pressed.
+static int classifyAdcLadder(int adc, const AdcLadder* l) {
+    if (adc > (int)l->thresholds[0]) return -1;            // above idle ceiling
+    for (uint8_t i = 0; i < l->num_buttons; i++) {
+        if (adc > (int)l->thresholds[i + 1]) return (int)i; // thr[i+1] < adc <= thr[i]
+    }
+    return (int)l->num_buttons - 1;                        // catch-all bottom bucket
+}
+
+static void registerAdcLadder(const struct BinaryInputs* input) {
+    if (adcLadderCount >= MAX_ADC_LADDERS) return;
+    uint8_t n = input->reserved[0];                        // num_buttons
+    if (n == 0 || n > MAX_LADDER_BUTTONS) {
+        od_log_warn("ADC ladder: count %u out of range 1..%u on pin %u, skipping",
+                    n, MAX_LADDER_BUTTONS, input->input_pin_1);
+        return;
+    }
+    if (input->button_data_byte_index > 10) {              // index into the 11-byte MSD block
+        od_log_warn("ADC ladder: byte_index %u out of range 0..10 on pin %u, skipping",
+                    input->button_data_byte_index, input->input_pin_1);
+        return;
+    }
+    if ((int)input->reserved[1] + n > 8) {                 // 3-bit id field: id_base..id_base+n-1 must be <= 7
+        od_log_warn("ADC ladder: id_base %u + count %u exceeds 3-bit id space on pin %u, skipping",
+                    input->reserved[1], n, input->input_pin_1);
+        return;
+    }
+    AdcLadder* l = &adcLadders[adcLadderCount];
+    l->pin = input->input_pin_1;                            // ADC GPIO
+    l->num_buttons = n;
+    l->id_base = input->reserved[1];
+    l->byte_index = input->button_data_byte_index;
+    for (uint8_t k = 0; k <= n; k++) {
+        l->thresholds[k] = (uint16_t)input->reserved[2 + 2 * k] |
+                           ((uint16_t)input->reserved[3 + 2 * k] << 8);
+    }
+    for (uint8_t k = 0; k < n; k++) {                      // contract: thresholds strictly descending
+        if (l->thresholds[k] <= l->thresholds[k + 1]) {    // reject malformed config from any host
+            od_log_warn("ADC ladder: thresholds not strictly descending on pin %u, skipping", input->input_pin_1);
+            return;
+        }
+    }
+    l->current_button = -1;
+    l->candidate_button = -1;
+    l->candidate_count = 0;
+    l->press_count = 0;
+    l->last_button_id = (uint8_t)(l->id_base & 0x07);
+    l->last_press_time = 0;
+    pinMode(l->pin, INPUT);
+    analogSetPinAttenuation(l->pin, ADC_11db);
+    adcLadderCount++;
+    od_log_info("ADC ladder: pin %u n %u idBase %u byteIdx %u", l->pin, n, l->id_base, l->byte_index);
+}
+
+static void pollAdcButtons() {
+    if (adcLadderCount == 0) return;
+    static uint32_t lastPoll = 0;
+    uint32_t now = millis();
+    if (now - lastPoll < ADC_LADDER_POLL_MS) return;
+    lastPoll = now;
+    for (uint8_t i = 0; i < adcLadderCount; i++) {
+        AdcLadder* l = &adcLadders[i];
+        int adc = analogRead(l->pin);
+        int btn = classifyAdcLadder(adc, l);
+        if (btn == l->candidate_button) {
+            if (l->candidate_count < 255) l->candidate_count++;
+        } else {
+            l->candidate_button = (int8_t)btn;
+            l->candidate_count = 1;
+        }
+        if (l->candidate_count < ADC_LADDER_DEBOUNCE) continue;  // not yet stable
+        if (btn == l->current_button) continue;                 // no change
+        uint8_t state;
+        if (btn >= 0) {
+            if (l->last_press_time == 0 || now - l->last_press_time > 5000) l->press_count = 0;
+            l->press_count = (uint8_t)((l->press_count + 1) & 0x0F);
+            l->last_press_time = now;
+            l->last_button_id = (uint8_t)((l->id_base + btn) & 0x07);
+            state = 1;
+        } else {
+            state = 0;  // released; last_button_id identifies which button
+        }
+        l->current_button = (int8_t)btn;
+        uint8_t data = (uint8_t)((l->last_button_id & 0x07) |
+                                 ((l->press_count & 0x0F) << 3) |
+                                 ((state & 0x01) << 7));
+        if (l->byte_index < 11) dynamicreturndata[l->byte_index] = data;
+        updatemsdata();
+        od_log_debug("ADC btn pin %u adc=%d idx=%d id=%u cnt=%u state=%u",
+                    l->pin, adc, btn, l->last_button_id, l->press_count, state);
+    }
+}
+#else
+static void pollAdcButtons() {}
+#endif
+
+void connect_callback(uint16_t conn_handle) {
+    (void)conn_handle;
+    od_log_info("=== BLE CLIENT CONNECTED ===");
+    rebootFlag = 0;
+    updatemsdata();
+#ifdef TARGET_NRF
+    ble_nrf_log_link_params(conn_handle, "at connect");  // baseline (pre-negotiation)
+    ble_nrf_request_fast_link(conn_handle);              // request 2M PHY + 251-octet DLE
+    ble_nrf_arm_link_diag(conn_handle);                  // re-log once negotiation settles
+#endif
+}
+
+void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
+    (void)conn_handle;
+    (void)reason;
+    od_log_info("=== BLE CLIENT DISCONNECTED ===");
+    od_log_info("Disconnect reason: %u", reason);
+    // Panel power on disconnect follows the ACTIVE-only-teardown invariant, so no
+    // logic change is needed here: a WARM (post-successful-refresh) panel SURVIVES
+    // disconnect and keeps its keep-alive window — a reconnect within the window
+    // pays only a warm re-acquire. Only a disconnect mid-transfer (still PWR_ACTIVE) tears the
+    // panel down, via the cleanup calls below (which no-op on power when WARM).
+    cleanupDirectWriteState(true);
+    cleanupPartialWriteOnDisconnect();   // 0x76 / pipe-partial session bookkeeping + panel power
+    resetPipeWriteState();   // clear any pipe transfer + reorder queue on disconnect
+}
+
+#ifdef TARGET_ESP32
+// Tear NimBLE down before esp_restart(): esp_restart() resets the CPU but NOT the
+// BT controller hardware, so on the next (software-reset) boot BLEDevice::init()
+// tries to enable an already-enabled controller and aborts -> PANIC boot loop that
+// only a physical power cycle clears. Mirrors the deep-sleep teardown in
+// enterDeepSleep() (main.cpp), which is why sleep->wake re-inits cleanly.
+static void esp32_ble_deinit_before_restart() {
+#ifdef OPENDISPLAY_HAS_WIFI
+    // F5 (extends PR #114): esp_restart() resets the CPU but not the WiFi radio or
+    // open sockets/TLS context. Tear the LAN listener + mbedTLS state down first so
+    // the next boot re-inits WiFi cleanly (mirrors the BLE deinit below).
+    opendisplay_lan_teardown();
+#endif
+    if (pServer != nullptr) {
+        BLEAdvertising* pAdvertising = pServer->getAdvertising();
+        if (pAdvertising != nullptr) pAdvertising->stop();
+    }
+    delay(200);
+    BLEDevice::deinit(true);      // clearAll: disables + releases the BT controller
+    esp32_ble_clear_handles();
+    delay(100);
+    od_log_info("BLE deinitialized before restart");
+}
+#endif
+
+void reboot(){
+    // Banner logged by the dispatcher (commandName() in communication.cpp).
+    delay(100);
+#ifdef TARGET_NRF
+    NVIC_SystemReset();
+#endif
+#ifdef TARGET_ESP32
+    esp32_ble_deinit_before_restart();
+    esp_restart();
+#endif
+}
+
+#define LED_DELAY_FACTOR_MS 100u
+#define LED_MIN_STEP_DELAY_MS 1u
+
+typedef enum {
+    LED_PHASE_IDLE = 0,
+    LED_PHASE_GROUP,
+    LED_PHASE_LOOP1,
+    LED_PHASE_LOOP1_DELAY,
+    LED_PHASE_INTER1_DELAY,
+    LED_PHASE_LOOP2,
+    LED_PHASE_LOOP2_DELAY,
+    LED_PHASE_INTER2_DELAY,
+    LED_PHASE_LOOP3,
+    LED_PHASE_LOOP3_DELAY,
+    LED_PHASE_INTER3_DELAY,
+} led_phase_t;
+
+static struct {
+    bool active;
+    uint8_t instance;
+    struct LedConfig* led;
+    uint8_t brightness;
+    uint8_t c1;
+    uint8_t c2;
+    uint8_t c3;
+    uint8_t loop1delay;
+    uint8_t loop2delay;
+    uint8_t loop3delay;
+    uint8_t loopcnt1;
+    uint8_t loopcnt2;
+    uint8_t loopcnt3;
+    uint8_t ildelay1;
+    uint8_t ildelay2;
+    uint8_t ildelay3;
+    uint8_t grouprepeats;
+    uint8_t group_pos;
+    uint8_t i1;
+    uint8_t i2;
+    uint8_t i3;
+    led_phase_t phase;
+    bool waiting_delay;
+    uint32_t delay_until_ms;
+} s_led;
+
+static void led_all_off(struct LedConfig* led) {
+    if (led == NULL) {
+        return;
+    }
+    bool invertRed = (led->led_flags & 0x01) != 0;
+    bool invertGreen = (led->led_flags & 0x02) != 0;
+    bool invertBlue = (led->led_flags & 0x04) != 0;
+    if (led->led_1_r != 0xFF) {
+        digitalWrite(led->led_1_r, invertRed ? HIGH : LOW);
+    }
+    if (led->led_2_g != 0xFF) {
+        digitalWrite(led->led_2_g, invertGreen ? HIGH : LOW);
+    }
+    if (led->led_3_b != 0xFF) {
+        digitalWrite(led->led_3_b, invertBlue ? HIGH : LOW);
+    }
+}
+
+static void led_stop_internal(bool clear_mode) {
+    struct LedConfig* led = s_led.led;
+    s_led.waiting_delay = false;
+    if (led != NULL) {
+        led_all_off(led);
+        if (clear_mode) {
+            led->reserved[0] = 0x00;
+        }
+    }
+    memset(&s_led, 0, sizeof(s_led));
+    ledFlashActive = false;
+    activeLedInstance = 0xFF;
+    ledFlashPosition = 0;
+}
+
+static void led_schedule_delay_ms(uint16_t ms) {
+    if (ms == 0) {
+        s_led.waiting_delay = false;
+        return;
+    }
+    s_led.waiting_delay = true;
+    s_led.delay_until_ms = millis() + ms;
+}
+
+static void led_load_config(struct LedConfig* led) {
+    // The 12-byte flash pattern persisted in LedConfig.reserved[] is struct
+    // LedFlashPattern (all single bytes, no endianness). Overlay-read to name the
+    // fields; the nibble packing (mode/brightness, delay/count) stays hand-decoded.
+    const struct LedFlashPattern* p = (const struct LedFlashPattern*)led->reserved;
+    s_led.led = led;
+    s_led.brightness = (uint8_t)(((p->mode_brightness >> 4) & 0x0F) + 1);
+    s_led.c1 = p->color1;
+    s_led.c2 = p->color2;
+    s_led.c3 = p->color3;
+    s_led.loop1delay = (uint8_t)((p->loop1_delay_count >> 4) & 0x0F);
+    s_led.loop2delay = (uint8_t)((p->loop2_delay_count >> 4) & 0x0F);
+    s_led.loop3delay = (uint8_t)((p->loop3_delay_count >> 4) & 0x0F);
+    s_led.loopcnt1 = (uint8_t)(p->loop1_delay_count & 0x0F);
+    s_led.loopcnt2 = (uint8_t)(p->loop2_delay_count & 0x0F);
+    s_led.loopcnt3 = (uint8_t)(p->loop3_delay_count & 0x0F);
+    s_led.ildelay1 = p->inter_loop_delay1;
+    s_led.ildelay2 = p->inter_loop_delay2;
+    s_led.ildelay3 = p->inter_loop_delay3;
+    s_led.grouprepeats = (uint8_t)(p->group_repeats + 1);
+    s_led.group_pos = 0;
+    s_led.i1 = 0;
+    s_led.i2 = 0;
+    s_led.i3 = 0;
+    s_led.phase = LED_PHASE_GROUP;
+    s_led.waiting_delay = false;
+}
+
+static void led_run_finish(void) {
+    led_stop_internal(false);
+}
+
+static void led_run_step(void) {
+    struct LedConfig* led;
+    uint8_t mode;
+
+    if (!s_led.active || s_led.led == NULL) {
+        return;
+    }
+    led = s_led.led;
+    activeLedInstance = s_led.instance;
+    mode = (uint8_t)(led->reserved[0] & 0x0F);
+    if (mode != 1) {
+        led_run_finish();
+        return;
+    }
+
+    for (;;) {
+        if (!s_led.active) {
+            return;
+        }
+
+        switch (s_led.phase) {
+            case LED_PHASE_GROUP:
+                if (s_led.group_pos >= s_led.grouprepeats && s_led.grouprepeats != 255) {
+                    led->reserved[0] = 0x00;
+                    led_run_finish();
+                    return;
+                }
+                s_led.i1 = 0;
+                s_led.i2 = 0;
+                s_led.i3 = 0;
+                s_led.phase = LED_PHASE_LOOP1;
+                break;
+
+            case LED_PHASE_LOOP1:
+                if (s_led.i1 >= s_led.loopcnt1) {
+                    if (s_led.ildelay1 > 0) {
+                        s_led.phase = LED_PHASE_INTER1_DELAY;
+                        led_schedule_delay_ms((uint16_t)(s_led.ildelay1 * LED_DELAY_FACTOR_MS));
+                        return;
+                    }
+                    s_led.phase = LED_PHASE_LOOP2;
+                    break;
+                }
+                flashLed(s_led.c1, s_led.brightness);
+                s_led.i1++;
+                if (s_led.loop1delay > 0) {
+                    s_led.phase = LED_PHASE_LOOP1_DELAY;
+                    led_schedule_delay_ms((uint16_t)(s_led.loop1delay * LED_DELAY_FACTOR_MS));
+                } else {
+                    led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
+                }
+                return;
+
+            case LED_PHASE_LOOP1_DELAY:
+                s_led.phase = LED_PHASE_LOOP1;
+                break;
+
+            case LED_PHASE_INTER1_DELAY:
+                s_led.phase = LED_PHASE_LOOP2;
+                break;
+
+            case LED_PHASE_LOOP2:
+                if (s_led.i2 >= s_led.loopcnt2) {
+                    if (s_led.ildelay2 > 0) {
+                        s_led.phase = LED_PHASE_INTER2_DELAY;
+                        led_schedule_delay_ms((uint16_t)(s_led.ildelay2 * LED_DELAY_FACTOR_MS));
+                        return;
+                    }
+                    s_led.phase = LED_PHASE_LOOP3;
+                    break;
+                }
+                flashLed(s_led.c2, s_led.brightness);
+                s_led.i2++;
+                if (s_led.loop2delay > 0) {
+                    s_led.phase = LED_PHASE_LOOP2_DELAY;
+                    led_schedule_delay_ms((uint16_t)(s_led.loop2delay * LED_DELAY_FACTOR_MS));
+                } else {
+                    led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
+                }
+                return;
+
+            case LED_PHASE_LOOP2_DELAY:
+                s_led.phase = LED_PHASE_LOOP2;
+                break;
+
+            case LED_PHASE_INTER2_DELAY:
+                s_led.phase = LED_PHASE_LOOP3;
+                break;
+
+            case LED_PHASE_LOOP3:
+                if (s_led.i3 >= s_led.loopcnt3) {
+                    if (s_led.ildelay3 > 0) {
+                        s_led.phase = LED_PHASE_INTER3_DELAY;
+                        led_schedule_delay_ms((uint16_t)(s_led.ildelay3 * LED_DELAY_FACTOR_MS));
+                        return;
+                    }
+                    s_led.group_pos++;
+                    s_led.phase = LED_PHASE_GROUP;
+                    led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
+                    return;
+                }
+                flashLed(s_led.c3, s_led.brightness);
+                s_led.i3++;
+                if (s_led.loop3delay > 0) {
+                    s_led.phase = LED_PHASE_LOOP3_DELAY;
+                    led_schedule_delay_ms((uint16_t)(s_led.loop3delay * LED_DELAY_FACTOR_MS));
+                } else {
+                    led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
+                }
+                return;
+
+            case LED_PHASE_LOOP3_DELAY:
+                s_led.phase = LED_PHASE_LOOP3;
+                break;
+
+            case LED_PHASE_INTER3_DELAY:
+                s_led.group_pos++;
+                s_led.phase = LED_PHASE_GROUP;
+                break;
+
+            default:
+                led_run_finish();
+                return;
+        }
+    }
+}
+
+void processLedFlash() {
+    if (!s_led.active) {
+        return;
+    }
+    if (s_led.waiting_delay) {
+        if ((int32_t)(millis() - s_led.delay_until_ms) < 0) {
+            return;
+        }
+        s_led.waiting_delay = false;
+    }
+    led_run_step();
+}
+
+void handleLedActivate(uint8_t* data, uint16_t len) {
+    if (len < 1) {
+        uint8_t errorResponse[] = {RESP_NACK, RESP_LED_ACTIVATE_ACK, 0x01, 0x00};
+        sendResponse(errorResponse, sizeof(errorResponse));
+        return;
+    }
+    uint8_t ledInstance = data[0];
+    if (ledInstance >= globalConfig.led_count) {
+        uint8_t errorResponse[] = {RESP_NACK, RESP_LED_ACTIVATE_ACK, 0x02, 0x00};
+        sendResponse(errorResponse, sizeof(errorResponse));
+        return;
+    }
+    struct LedConfig* led = &globalConfig.leds[ledInstance];
+    // Payload is [led_instance:1][LedFlashPattern:12]; stash the pattern in reserved[].
+    if (len >= 1 + sizeof(struct LedFlashPattern)) {
+        memcpy(led->reserved, data + 1, sizeof(struct LedFlashPattern));
+    }
+    uint8_t mode = (uint8_t)(led->reserved[0] & 0x0F);
+    if (mode != 1) {
+        led_stop_internal(true);
+        uint8_t successResponse[] = {RESP_ACK, RESP_LED_ACTIVATE_ACK, 0x00, 0x00};
+        sendResponse(successResponse, sizeof(successResponse));
+        return;
+    }
+
+    led_stop_internal(false);
+    s_led.active = true;
+    s_led.instance = ledInstance;
+    activeLedInstance = ledInstance;
+    ledFlashActive = true;
+    ledFlashPosition = 0;
+    led_load_config(led);
+    led_run_step();
+
+    uint8_t successResponse[] = {RESP_ACK, RESP_LED_ACTIVATE_ACK, 0x00, 0x00};
+    sendResponse(successResponse, sizeof(successResponse));
+}
+
+void handleLedStop(uint8_t* data, uint16_t len) {
+    if (s_led.active && len >= 1 && data[0] != s_led.instance) {
+        uint8_t errorResponse[] = {RESP_NACK, RESP_LED_STOP_ACK, 0x02, 0x00};
+        sendResponse(errorResponse, sizeof(errorResponse));
+        return;
+    }
+    led_stop_internal(true);
+    uint8_t successResponse[] = {RESP_ACK, RESP_LED_STOP_ACK, 0x00, 0x00};
+    sendResponse(successResponse, sizeof(successResponse));
+}
+
+void processButtonEvents() {
+    powerButtonPoll();
+#ifdef TARGET_ESP32
+    pollConfiguredPowerOffButtons();
+#endif
+    pollAdcButtons();
+    if (buttonEventPending) {
+        noInterrupts();
+        buttonEventPending = false;
+        uint8_t changedButtonIndex = lastChangedButtonIndex;
+        lastChangedButtonIndex = 0xFF;
+        interrupts();
+        od_log_debug("Button event pending: %u", changedButtonIndex);
+        if (changedButtonIndex < MAX_BUTTONS && buttonStates[changedButtonIndex].initialized) {
+            ButtonState* btn = &buttonStates[changedButtonIndex];
+            bool pinState = digitalRead(btn->pin);
+            bool logicalPressed = btn->inverted ? !pinState : pinState;
+            od_log_debug("Pin state: %d, Logical pressed: %d, inverted: %d", pinState, logicalPressed, btn->inverted);
+            uint8_t logicalState = logicalPressed ? 1 : 0;
+            btn->current_state = logicalState;
+            od_log_debug("Button: %u, Press count: %u, Current state: %u", btn->button_id, btn->press_count, btn->current_state);
+            uint8_t buttonData = (btn->button_id & 0x07) |
+                                 ((btn->press_count & 0x0F) << 3) |
+                                 ((btn->current_state & 0x01) << 7);
+            if (btn->byte_index < 11) {
+                dynamicreturndata[btn->byte_index] = buttonData;
+            }
+        }
+        updatemsdata();
+#ifdef TARGET_NRF
+        ble_nrf_boost_advertising();
+#endif
+    }
+}
+
+static inline void ledFlashWrite(uint8_t pin, bool level) {
+    if (pin != 0xFF) {
+        digitalWrite(pin, level ? HIGH : LOW);
+    }
+}
+
+void flashLed(uint8_t color, uint8_t brightness) {
+    if (activeLedInstance == 0xFF) {
+        for (uint8_t i = 0; i < globalConfig.led_count; i++) {
+            if (globalConfig.leds[i].led_type == 1) {
+                activeLedInstance = i;
+                break;
+            }
+        }
+        if (activeLedInstance == 0xFF) return;
+    }
+    struct LedConfig* led = &globalConfig.leds[activeLedInstance];
+    uint8_t ledRedPin = led->led_1_r;
+    uint8_t ledGreenPin = led->led_2_g;
+    uint8_t ledBluePin = led->led_3_b;
+    bool invertRed = (led->led_flags & 0x01) != 0;
+    bool invertGreen = (led->led_flags & 0x02) != 0;
+    bool invertBlue = (led->led_flags & 0x04) != 0;
+    uint8_t colorred = (color >> 5) & 0b00000111;
+    uint8_t colorgreen = (color >> 2) & 0b00000111;
+    uint8_t colorblue = color & 0b00000011;
+    for (uint16_t i = 0; i < brightness; i++) {
+        ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 7) : (colorred >= 7));
+        ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 7) : (colorgreen >= 7));
+        ledFlashWrite(ledBluePin,invertBlue ? !(colorblue >= 3) : (colorblue >= 3));
+        delayMicroseconds(100);
+        ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 1) : (colorred >= 1));
+        ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 1) : (colorgreen >= 1));
+        delayMicroseconds(100);
+        ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 6) : (colorred >= 6));
+        ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 6) : (colorgreen >= 6));
+        ledFlashWrite(ledBluePin,invertBlue ? !(colorblue >= 1) : (colorblue >= 1));
+        delayMicroseconds(100);
+        ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 2) : (colorred >= 2));
+        ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 2) : (colorgreen >= 2));
+        delayMicroseconds(100);
+        ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 5) : (colorred >= 5));
+        ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 5) : (colorgreen >= 5));
+        delayMicroseconds(100);
+        ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 3) : (colorred >= 3));
+        ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 3) : (colorgreen >= 3));
+        ledFlashWrite(ledBluePin,invertBlue ? !(colorblue >= 2) : (colorblue >= 2));
+        delayMicroseconds(100);
+        ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 4) : (colorred >= 4));
+        ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 4) : (colorgreen >= 4));
+        delayMicroseconds(100);
+        ledFlashWrite(ledRedPin,invertRed ? HIGH : LOW);
+        ledFlashWrite(ledGreenPin,invertGreen ? HIGH : LOW);
+        ledFlashWrite(ledBluePin,invertBlue ? HIGH : LOW);
+    }
+}
+
+#ifdef TARGET_ESP32
+void IRAM_ATTR handleButtonISR(uint8_t buttonIndex) {
+#else
+void handleButtonISR(uint8_t buttonIndex) {
+#endif
+    if (buttonIndex >= MAX_BUTTONS || !buttonStates[buttonIndex].initialized) return;
+    ButtonState* btn = &buttonStates[buttonIndex];
+    bool pinState = digitalRead(btn->pin);
+    bool pressed = btn->inverted ? !pinState : pinState;
+    uint8_t newState = pressed ? 1 : 0;
+    if (newState != btn->current_state) {
+        btn->current_state = newState;
+        lastChangedButtonIndex = buttonIndex;
+        if (pressed) btn->press_count = (btn->press_count + 1) & 0x0F;
+        buttonEventPending = true;
+    }
+}
+
+#ifdef TARGET_ESP32
+void IRAM_ATTR buttonISR(void* arg) {
+    uint8_t buttonIndex = (uint8_t)(uintptr_t)arg;
+    handleButtonISR(buttonIndex);
+}
+#elif defined(TARGET_NRF)
+void buttonISRGeneric() {
+    for (uint8_t i = 0; i < buttonStateCount; i++) {
+        if (buttonStates[i].initialized) {
+            ButtonState* btn = &buttonStates[i];
+            bool pinState = digitalRead(btn->pin);
+            bool pressed = btn->inverted ? !pinState : pinState;
+            uint8_t newState = pressed ? 1 : 0;
+            if (newState != btn->current_state) {
+                handleButtonISR(i);
+                break;
+            }
+        }
+    }
+}
+#endif
+
+void initButtons() {
+    od_log_info("=== Initializing Buttons ===");
+    buttonStateCount = 0;
+    for (uint8_t i = 0; i < MAX_BUTTONS; i++) {
+        buttonStates[i].initialized = false;
+        buttonStates[i].button_id = 0;
+        buttonStates[i].press_count = 0;
+        buttonStates[i].current_state = 0;
+        buttonStates[i].byte_index = 0xFF;
+        buttonStates[i].pin = 0xFF;
+        buttonStates[i].instance_index = 0xFF;
+        buttonStates[i].power_off = false;
+        buttonStates[i].power_off_hold_ms = 0;
+    }
+#ifdef TARGET_ESP32
+    adcLadderCount = 0;
+#endif
+    if (globalConfig.binary_input_count == 0) return;
+    for (uint8_t instanceIdx = 0; instanceIdx < globalConfig.binary_input_count; instanceIdx++) {
+        struct BinaryInputs* input = &globalConfig.binary_inputs[instanceIdx];
+#ifdef TARGET_ESP32
+        if (input->input_type == BINARY_INPUT_TYPE_ADC_LADDER) {
+            registerAdcLadder(input);
+            continue;
+        }
+#endif
+        if (input->input_type != OD_INPUT_TYPE_BUTTON) continue;
+        if (input->button_data_byte_index > 10) continue;
+        uint16_t instanceHoldMs = (input->power_off_hold_sec == 0) ? 3000u : (uint16_t)input->power_off_hold_sec * 1000u;
+        uint8_t* instancePins[8] = {
+            &input->input_pin_1,&input->input_pin_2,&input->input_pin_3,&input->input_pin_4,
+            &input->input_pin_5,&input->input_pin_6,&input->input_pin_7,&input->input_pin_8
+        };
+        for (uint8_t pinIdx = 0; pinIdx < 8; pinIdx++) {
+            if (input->pins_used != 0 && (input->pins_used & (1 << pinIdx)) == 0) {
+                continue;
+            }
+            uint8_t pin = *instancePins[pinIdx];
+            if (pin == 0xFF) continue;
+            if (touch_input_gpio_is_touch_int(pin)) {
+                od_log_debug("Button: skip pin %u (reserved for GT911 INT)", pin);
+                continue;
+            }
+            if (buttonStateCount >= MAX_BUTTONS) break;
+            ButtonState* btn = &buttonStates[buttonStateCount];
+            btn->button_id = (input->instance_number * 8) + pinIdx;
+            if (btn->button_id > 7) btn->button_id = btn->button_id % 8;
+            btn->byte_index = input->button_data_byte_index;
+            btn->pin = pin;
+            btn->instance_index = instanceIdx;
+            btn->press_count = 0;
+            btn->pin_offset = pinIdx;
+            btn->inverted = (input->invert & (1 << pinIdx)) != 0;
+            btn->power_off = (input->power_off_flags & (1 << pinIdx)) != 0;
+            btn->power_off_hold_ms = instanceHoldMs;
+            pinMode(pin, INPUT);
+            bool hasPullup = (input->pullups & (1 << pinIdx)) != 0;
+#ifdef TARGET_ESP32
+            bool hasPulldown = (input->pulldowns & (1 << pinIdx)) != 0;
+            if (hasPullup) pinMode(pin, INPUT_PULLUP);
+            else if (hasPulldown) pinMode(pin, INPUT_PULLDOWN);
+#elif defined(TARGET_NRF)
+            if (hasPullup) pinMode(pin, INPUT_PULLUP);
+#endif
+            delay(10);
+            bool initialPinState = digitalRead(pin);
+            bool initialPressed = btn->inverted ? !initialPinState : initialPinState;
+            btn->current_state = initialPressed ? 1 : 0;
+#ifdef TARGET_ESP32
+            attachInterruptArg(pin, buttonISR, (void*)(uintptr_t)buttonStateCount, CHANGE);
+#elif defined(TARGET_NRF)
+            attachInterrupt(pin, buttonISRGeneric, CHANGE);
+#endif
+            btn->initialized = true;
+            buttonStateCount++;
+        }
+    }
+    if (buttonStateCount > 0) {
+#ifdef TARGET_ESP32
+        for (uint8_t i = 0; i < buttonStateCount; i++) {
+            if (buttonStates[i].initialized) {
+                gpio_intr_disable((gpio_num_t)digitalPinToGPIONumber(buttonStates[i].pin));
+            }
+        }
+#elif defined(TARGET_NRF)
+        for (uint8_t i = 0; i < buttonStateCount; i++) {
+            if (buttonStates[i].initialized) {
+                detachInterrupt(buttonStates[i].pin);
+            }
+        }
+#endif
+        delay(50);
+        buttonEventPending = false;
+        lastChangedButtonIndex = 0xFF;
+        for (uint8_t i = 0; i < buttonStateCount; i++) {
+            if (!buttonStates[i].initialized) continue;
+            ButtonState* btn = &buttonStates[i];
+            bool pinState = digitalRead(btn->pin);
+            bool initialPressed = btn->inverted ? !pinState : pinState;
+            btn->current_state = initialPressed ? 1 : 0;
+            btn->press_count = 0;
+        }
+#ifdef TARGET_ESP32
+        for (uint8_t i = 0; i < buttonStateCount; i++) {
+            if (buttonStates[i].initialized) {
+                gpio_intr_enable((gpio_num_t)digitalPinToGPIONumber(buttonStates[i].pin));
+            }
+        }
+#elif defined(TARGET_NRF)
+        for (uint8_t i = 0; i < buttonStateCount; i++) {
+            if (!buttonStates[i].initialized) continue;
+            uint8_t pin = buttonStates[i].pin;
+            attachInterrupt(pin, buttonISRGeneric, CHANGE);
+        }
+#endif
+    }
+}
+
+void enterDFUMode() {
+    // Banner logged by the dispatcher (commandName() in communication.cpp).
+
+#ifdef TARGET_NRF
+    od_log_info("Preparing to enter DFU bootloader mode...");
+
+    Bluefruit.Advertising.restartOnDisconnect(false);
+
+    if (Bluefruit.connected()) {
+        od_log_info("Disconnecting BLE...");
+        Bluefruit.disconnect(Bluefruit.connHandle());
+        delay(100);
+    }
+
+    sd_power_gpregret_clr(0, 0xFF);
+    sd_power_gpregret_set(0, 0xB1);
+
+    sd_softdevice_disable();
+
+    NVIC->ICER[0] = 0xFFFFFFFF;
+    NVIC->ICPR[0] = 0xFFFFFFFF;
+#if defined(__NRF_NVIC_ISER_COUNT) && __NRF_NVIC_ISER_COUNT == 2
+    NVIC->ICER[1] = 0xFFFFFFFF;
+    NVIC->ICPR[1] = 0xFFFFFFFF;
+#endif
+
+    sd_softdevice_vector_table_base_set(NRF_UICR->NRFFW[0]);
+    __set_CONTROL(0);
+    bootloader_util_app_start(NRF_UICR->NRFFW[0]);
+
+    while (1) {}
+#endif
+
+#ifdef TARGET_ESP32
+    od_log_info("ESP32: Rebooting (OTA typically handled via WiFi)");
+    delay(100);
+    esp32_ble_deinit_before_restart();
+    esp_restart();
+#endif
+}
+
+void handleDeepSleepCommand(const uint8_t* payload, uint16_t payloadLen) {
+    // Banner logged by the dispatcher (commandName() in communication.cpp).
+#ifdef TARGET_ESP32
+    // Optional 2-byte big-endian seconds payload overrides the configured
+    // deep-sleep duration for exactly one cycle. 0x0000 = explicit no-override.
+    uint16_t overrideSeconds = 0;
+    if (payloadLen >= 2) {
+        overrideSeconds = ((uint16_t)payload[0] << 8) | payload[1];
+        // Bytes beyond 2 ignored for forward compatibility.
+    } else if (payloadLen == 1) {
+        od_log_warn("WARNING: malformed 0x%04X payload length 1 - ignoring", CMD_DEEP_SLEEP);
+    }
+    // Enforce a 60 s floor on host overrides: a very short wake timer risks a rapid
+    // sleep/wake churn that never stays awake long enough to service a client. This
+    // applies to the OVERRIDE only; overrideSeconds == 0 means "no override" and defers
+    // to the configured deep_sleep_time_seconds, which is not subject to this floor.
+    constexpr uint16_t MIN_DEEP_SLEEP_OVERRIDE_SECONDS = 60;
+    if (overrideSeconds != 0 && overrideSeconds < MIN_DEEP_SLEEP_OVERRIDE_SECONDS) {
+        od_log_warn("Override %us below %us floor - clamping", overrideSeconds, MIN_DEEP_SLEEP_OVERRIDE_SECONDS);
+        overrideSeconds = MIN_DEEP_SLEEP_OVERRIDE_SECONDS;
+    }
+    if (globalConfig.power_option.power_mode != 1) {
+        od_log_warn("Device not battery powered - 0x%04X rejected", CMD_DEEP_SLEEP);
+        uint8_t errorResponse[] = {RESP_NACK, RESP_DEEP_SLEEP, OD_ERR_DEEP_SLEEP_NOT_BATTERY, 0x00};
+        sendResponse(errorResponse, sizeof(errorResponse));
+        return;
+    }
+    if (globalConfig.power_option.deep_sleep_time_seconds == 0) {
+        od_log_warn("Deep sleep disabled in config - 0x%04X rejected", CMD_DEEP_SLEEP);
+        uint8_t errorResponse[] = {RESP_NACK, RESP_DEEP_SLEEP, OD_ERR_DEEP_SLEEP_DISABLED, 0x00};
+        sendResponse(errorResponse, sizeof(errorResponse));
+        return;
+    }
+    // Explicit host request: sleep even though the requesting client is connected.
+    enterDeepSleep(true, overrideSeconds);
+#else
+    // Non-ESP32 (nRF etc.) have no timer deep sleep. The protocol permits a NACK here
+    // ([0xFF][0x53][OD_ERR_DEEP_SLEEP_UNSUPPORTED][0x00]), but we intentionally stay
+    // silent to preserve existing behavior — leave as-is unless a caller needs the NACK.
+    (void)payload;
+    (void)payloadLen;
+    od_log_warn("Deep sleep command not supported on this target");
+#endif
+}
+
+void handlePowerOffCommand(const uint8_t* payload, uint16_t payloadLen) {
+    // Banner logged by the dispatcher (commandName() in communication.cpp).
+    // CMD_POWER_OFF request is bare [0x00][0x52]; any trailing payload is RESERVED
+    // and ignored (unlike CMD_DEEP_SLEEP 0x0053, this has no duration payload).
+    (void)payload;
+    (void)payloadLen;
+    // powerLatch* are defined on every target (no-op stubs off ESP32; the header
+    // guarantees callers need no guards), so no #ifdef TARGET_ESP32 is required here:
+    // powerLatchDffConfigured() returns false off-ESP32 -> falls through to the NACK.
+    if (powerLatchDffConfigured()) {
+        // Fire-and-forget hard rail-cut: queue the ACK, then release the D-FF latch.
+        // On latch HW the rail usually drops before the ACK is actually transmitted.
+        uint8_t ok[] = {RESP_ACK, RESP_POWER_OFF, 0x00, 0x00};
+        sendResponse(ok, sizeof(ok));
+        delay(100);
+        powerLatchPowerOff();
+        return;
+    }
+    // ANCHOR(power-off-no-latch-fallback): FUTURE WORK for a later agent/implementer.
+    // On non-latch BATTERY targets, implement "enter deep sleep with NO wake timer"
+    // (sleep indefinitely; wake only on button/reset) as the closest equivalent to a
+    // hard power-off, instead of the unsupported NACK below. Caveats before doing so:
+    //   1. This DEVIATES from the current protocol, which mandates
+    //      OD_ERR_POWER_OFF_UNSUPPORTED (0x00) for non-latch targets — update the
+    //      0x0052 @response contract in opendisplay-protocol/src/opendisplay_protocol.h
+    //      FIRST, then propagate the header and implement here.
+    //   2. enterDeepSleep(true, 0) currently means "use the configured duration", NOT
+    //      "no timer" — a genuinely timer-less deep-sleep entry path must be added.
+    //   3. Mains-powered targets (power_option.power_mode != 1) must STILL NACK — never
+    //      sleep a device that cannot self-repower.
+    // Until that lands: capability-gated NACK. Scope: OD_ERR_POWER_OFF_* only — do NOT
+    // conflate with 0x53 deep sleep (a device that refuses 0x52 may still accept 0x53).
+    od_log_warn("No power latch on this target - 0x%04X rejected", CMD_POWER_OFF);
+    uint8_t errorResponse[] = {RESP_NACK, RESP_POWER_OFF, OD_ERR_POWER_OFF_UNSUPPORTED, 0x00};
+    sendResponse(errorResponse, sizeof(errorResponse));
+}

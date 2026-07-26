@@ -299,8 +299,14 @@ Verified with `sync_protocol_header.py --check` and `git show`:
 1. Canonical is 2.2 + an unreleased `OD_BLE_MAX_FRAME` addition. The vendored **protocol**
    copies in NRF54 / Silabs / NRF are one push behind (missing `OD_BLE_MAX_FRAME`);
    `Firmware` local and `Firmware_Unified/shared/protocol/` match canonical.
-2. **`upstream/main` of `Firmware` — the true ESP32 import source — is at 2.1**, missing
-   all of 2.2 (SECTION 9 LAN) and the unreleased entries.
+2. ~~**`upstream/main` of `Firmware` — the true ESP32 import source — is at 2.1**, missing
+   all of 2.2 (SECTION 9 LAN) and the unreleased entries.~~ **WRONG — corrected 2026-07-25 at
+   the Phase A import.** `upstream/main` is at **2.2**, and necessarily so: `#124`
+   (`2e2131b`) *is* the LAN feature that SECTION 9 documents. Measured at import, its
+   `include/opendisplay_protocol.h` differs from canonical by **ten lines, all inside a
+   doc-only changelog entry** (the `0x43` trailing-patch-byte clarification), with no wire
+   difference and no version difference. The import therefore did not land a stale header and
+   nothing needed re-syncing. The migration risk built on this claim is void.
 3. `upstream/main` hand-edited `include/opendisplay_structs.h` in PR #120 — three
    comment-only Seeed_GFX→FastEPD wording changes (PanelIC `@external` note, ids 3000/3001
    doc strings, `dc_pin` doc). No wire change. **Canonical still carries the old wording**,

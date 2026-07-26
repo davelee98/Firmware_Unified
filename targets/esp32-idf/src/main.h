@@ -1,0 +1,394 @@
+#include <Arduino.h>
+#include "structs.h"
+#include "uzlib.h"
+#include <bb_epaper.h>
+#include <SPI.h>
+#include "encryption_state.h"
+#include "config_parser.h"
+#include "ble_init.h"
+#include "wifi_service.h"
+#include "display_service.h"
+
+#ifndef BUILD_VERSION
+#define BUILD_VERSION "1.0.0"
+#endif
+#ifndef SHA
+#define SHA ""
+#endif
+
+#define STRINGIFY(x) #x
+#define XSTRINGIFY(x) STRINGIFY(x)
+#define SHA_STRING XSTRINGIFY(SHA)
+
+#ifdef TARGET_NRF
+#include <Adafruit_LittleFS.h>
+#include <InternalFileSystem.h>
+using namespace Adafruit_LittleFS_Namespace;
+#endif
+
+#ifdef TARGET_ESP32
+#include <LittleFS.h>
+#endif
+
+#include <Wire.h>
+
+#define MAX_BLOCKS 64
+// Text rendering constants
+#define FONT_CHAR_WIDTH 16  // 7 font columns + 1 blank column, each doubled (8*2)
+#define FONT_CHAR_HEIGHT 16 // 8 pixels tall, doubled (8*2)
+#define FONT_BASE_WIDTH 8   // Base font width (7 columns + 1 spacing)
+#define FONT_BASE_HEIGHT 8  // Base font height (8 rows)
+#define FONT_SMALL_THRESHOLD 264  // Use 1x scale for displays narrower than this
+// Config chunked write constants (CONFIG_CHUNK_SIZE, CONFIG_CHUNK_SIZE_WITH_PREFIX,
+// MAX_CONFIG_CHUNKS), response buffer size (MAX_RESPONSE_DATA_SIZE), BLE response
+// codes (RESP_*), and PIPE_WRITE constants all come from the canonical
+// opendisplay_protocol.h (vendored, included via structs.h). Do not redefine here.
+
+// Communication mode bit definitions (for system_config.communication_modes)
+#define COMM_MODE_BLE           (1 << 0)  // Bit 0: BLE transfer supported
+#define COMM_MODE_OEPL          (1 << 1)  // Bit 1: OEPL based transfer supported
+#define COMM_MODE_WIFI          (1 << 2)  // Bit 2: WiFi transfer supported
+
+// Device flags bit definitions (for system_config.device_flags)
+#define DEVICE_FLAG_PWR_PIN      (1 << 0)  // Bit 0: Device has external power management pin
+#define DEVICE_FLAG_XIAOINIT     (1 << 1)  // Bit 1: Call xiaoinit() after config load (nRF52840 only)
+#define DEVICE_FLAG_WS_PP_INIT   (1 << 2)  // Bit 2: Call ws_pp_init() after config load (Waveshare Photo Printer)
+#define DEVICE_FLAG_BATTERY_LATCH (1 << 3) // Bit 3: Self-holding battery latch on pwr_pin_2; optional active-low long-press shutdown button on pwr_pin_3
+#define DEVICE_FLAG_PWR_LATCH_DFF (1 << 4) // Bit 4: 74AHC1G79 D-FF latch; pwr_pin_2=D, pwr_pin_3=CP; release via command 0x0052
+
+#ifdef TARGET_NRF
+#include <bluefruit.h>
+extern BLEDfu bledfu;
+extern BLEService imageService;
+extern BLECharacteristic imageCharacteristic;
+// Forward declaration for SoftDevice temperature API
+extern "C" uint32_t sd_temp_get(int32_t *p_temp);
+extern "C" {
+    #include "nrf_soc.h"   // for sd_app_evt_wait()
+  }
+#endif
+
+#ifdef TARGET_ESP32
+// BLE types come from ble_init.h (NimBLE-Arduino + BLE* aliases), included above.
+#include <esp_system.h>
+#include <esp_mac.h>
+#include <esp_timer.h>
+#include "esp_sleep.h"
+#include <WiFi.h>
+#include <ESPmDNS.h>
+
+extern BLEServer* pServer;
+extern BLEService* pService;
+extern BLECharacteristic* pTxCharacteristic;
+extern BLECharacteristic* pRxCharacteristic;
+extern BLEAdvertisementData* advertisementData;  // Pointer to global advertisementData object
+
+// RTC memory variables for deep sleep state tracking (declared in main.cpp)
+extern bool advertising_timeout_active;
+extern uint32_t advertising_start_time;
+#endif
+
+BBEPDISP bbep;
+
+// Forward declarations for bbep functions
+void bbepInitIO(BBEPDISP *pBBEP, uint8_t u8DC, uint8_t u8RST, uint8_t u8BUSY, uint8_t u8CS, uint8_t u8MOSI, uint8_t u8SCK, uint32_t u32Speed);
+int bbepSetPanelType(BBEPDISP *pBBEP, int iPanel);
+void bbepSetRotation(BBEPDISP *pBBEP, int iRotation);
+void bbepStartWrite(BBEPDISP *pBBEP, int iPlane);
+int bbepRefresh(BBEPDISP *pBBEP, int iMode);
+bool bbepIsBusy(BBEPDISP *pBBEP);
+void bbepWakeUp(BBEPDISP *pBBEP);
+void bbepSleep(BBEPDISP *pBBEP, int deepSleep);
+void bbepSendCMDSequence(BBEPDISP *pBBEP, const uint8_t *pSeq);
+void bbepSetAddrWindow(BBEPDISP *pBBEP, int x, int y, int cx, int cy);
+void bbepWriteData(BBEPDISP *pBBEP, uint8_t *pData, int iLen);
+
+uint8_t decompressionChunk[OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE];
+uint8_t bleResponseBuffer[94];
+#ifdef TARGET_ESP32
+// Rolling MSD sequence nibble; persists across deep sleep so advertisements
+// stay distinguishable across sleep/wake cycles.
+RTC_DATA_ATTR uint8_t mloopcounter = 0;
+#else
+uint8_t mloopcounter = 0;
+#endif
+#ifdef TARGET_ESP32
+// Persists across deep sleep so a wake is not mistaken for a reboot. Re-armed
+// on the boot-screen path in setup(), which is the only path a real reset takes.
+RTC_DATA_ATTR uint8_t rebootFlag = 1;  // Set to 1 after reboot, cleared to 0 after BLE connection
+#else
+uint8_t rebootFlag = 1;  // Set to 1 after reboot, cleared to 0 after BLE connection
+#endif
+uint8_t connectionRequested = 0;  // Reserved for future features (connection requested flag)
+uint8_t dynamicreturndata[11] = {0};  // Dynamic return data blocks (bytes 2-12 in advertising payload)
+uint8_t msd_payload[16] = {0};  // Manufacturer Specific Data payload (public, updated by updatemsdata())
+
+ButtonState buttonStates[MAX_BUTTONS] = {0};  // Button state tracking
+uint8_t buttonStateCount = 0;  // Number of initialized buttons
+volatile bool buttonEventPending = false;  // Flag set by ISR to indicate button event
+volatile uint8_t lastChangedButtonIndex = 0xFF;  // Index of button that last changed (set by ISR)
+uint8_t ledFlashPosition = 0;  // Current position in LED flash pattern group
+uint8_t activeLedInstance = 0xFF;  // LED instance index for flashing (0xFF = none configured)
+bool ledFlashActive = false;  // Flag to indicate if LED flashing is active (set by command)
+
+uint8_t staticRowBuffer[BOOT_ROW_BUFFER_SIZE];
+
+char wifiSsid[33] = {0};  // 32 bytes + null terminator
+char wifiPassword[33] = {0};  // 32 bytes + null terminator
+uint8_t wifiEncryptionType = 0;  // 0x00=none, 0x01=WEP, 0x02=WPA, 0x03=WPA2, 0x04=WPA3
+bool wifiConfigured = false;  // True if WiFi config packet (0x26) was received and parsed
+#ifdef TARGET_ESP32
+#include <WiFi.h>
+// Small config-storage / status globals: kept on all ESP32 targets (config_parser
+// and the config-dump report reference them regardless of whether the WiFi
+// transport is compiled in). Trivial RAM cost.
+bool wifiConnected = false;
+bool wifiInitialized = false;
+char wifiServerUrl[65] = {0};
+uint16_t wifiServerPort = 2446;
+// bool wifiServerConfigured = false;  // dead -- nothing reads it (config_parser.cpp)
+#endif
+#ifdef OPENDISPLAY_HAS_WIFI
+// Heavy WiFi-transport surface: the TCP server/client objects and the 16 KB RX
+// reassembly buffer exist ONLY when the WiFi transport is compiled in (S3/C6).
+// C3 / classic esp32-N4 reclaim this RAM.
+// 16 KB = four max wire frames (OD_LAN_MAX_FRAME 4096): headroom for the
+// streaming client to keep whole frames queued ahead of the parser.
+WiFiServer wifiServer;
+WiFiClient wifiClient;
+bool wifiServerConnected = false;
+uint8_t tcpReceiveBuffer[16384];
+uint32_t tcpReceiveBufferPos = 0;
+#endif
+
+// Direct write mode state (bufferless display writing)
+bool directWriteActive = false;  // True when direct write mode is active
+bool directWriteCompressed = false;  // True if using compressed direct write
+bool directWriteBitplanes = false;  // True if using bitplanes (BWR/BWY - 2 planes)
+bool directWritePlane2 = false;  // True when writing plane 2 (R/Y) for bitplanes
+uint32_t directWriteBytesWritten = 0;  // Total bytes written to current plane
+uint32_t directWriteDecompressedTotal = 0;  // Expected decompressed size
+uint16_t directWriteWidth = 0;  // Display width in pixels
+uint16_t directWriteHeight = 0;  // Display height in pixels
+uint32_t directWriteTotalBytes = 0;  // Total bytes expected per plane (for bitplanes) or total (for others)
+uint8_t directWriteRefreshMode = 0;  // 0 = FULL (default), 1 = FAST/PARTIAL (if supported)
+uint8_t directWriteDataKind = 0;  // none; display_service.cpp tracks full vs partial 0x71 streams
+uint32_t directWriteCompressedReceived = 0;  // Total compressed bytes received for diagnostics/overflow guard
+
+uint32_t directWriteStartTime = 0;  // Timestamp when direct write started (for timeout detection)
+bool displayPowerState = false;  // Track display power state (true = powered on, false = powered off)
+// EPD panel power state machine — single source of truth for panel power. The
+// legacy displayPowerState bool is kept synced: displayPowerState == (pwrmgmState != PWR_OFF).
+// enum PwrMgmState + EPD_KEEPALIVE_MAX_S are defined in display_service.h (shared header).
+volatile uint8_t pwrmgmState = PWR_OFF;  // PWR_OFF / PWR_WARM / PWR_ACTIVE
+uint32_t pwrmgmOffDeadlineMs = 0;        // keep-alive deadline (millis); valid only in PWR_WARM
+volatile uint8_t pwrmgmLock = 0;         // cross-task try-lock (nRF BLE task vs loop task)
+
+bool waitforrefresh(int timeout);
+void pwrmgm(bool onoff);
+bool powerDownExternalFlash(uint8_t mosiPin, uint8_t misoPin, uint8_t sckPin, uint8_t csPin, uint8_t wpPin, uint8_t holdPin);
+void powerDownExternalFlashFromConfig(void);
+void xiaoinit();
+void ws_pp_init();
+void connect_callback(uint16_t conn_handle);
+void disconnect_callback(uint16_t conn_handle, uint8_t reason);
+#ifdef TARGET_ESP32
+void fullSetupAfterConnection();
+// force: sleep even with a client connected (explicit host request 0x0053).
+// overrideSleepSeconds: nonzero replaces deep_sleep_time_seconds for this one
+// sleep cycle (0x0053 duration payload); never changes sleep eligibility.
+void enterDeepSleep(bool force = false, uint16_t overrideSleepSeconds = 0);
+extern bool advertising_timeout_active;
+extern uint32_t advertising_start_time;
+#endif
+String getChipIdHex();
+
+// Platform-specific type aliases for BLE callback
+#ifdef TARGET_NRF
+    typedef uint16_t BLEConnHandle;
+    typedef BLECharacteristic* BLECharPtr;
+#else
+    typedef void* BLEConnHandle;
+    typedef void* BLECharPtr;
+#endif
+
+void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uint16_t len);
+void sendResponse(uint8_t* response, uint16_t len);
+void sendResponseUnencrypted(uint8_t* response, uint16_t len);
+void secureEraseConfig();
+void checkResetPin();
+void reboot();
+void enterDFUMode();
+void initio();
+void initDataBuses();
+void initButtons();
+void processButtonEvents();  // Process button events and update BLE data
+void idleDelay(uint32_t delayMs);  // Non-blocking delay that processes buttons at 100ms intervals
+void flashLed(uint8_t color, uint8_t brightness);  // Flash LED with color and brightness
+void processLedFlash();  // Advance async LED flash state machine
+void handleLedActivate(uint8_t* data, uint16_t len);  // Handle LED activation command
+void handleLedStop(uint8_t* data, uint16_t len);  // Stop running LED flash sequence
+#ifdef TARGET_ESP32
+void handleButtonISR(uint8_t buttonIndex);  // Shared ISR handler (IRAM_ATTR in implementation)
+#else
+void handleButtonISR(uint8_t buttonIndex);  // Shared ISR handler
+#endif
+void scanI2CDevices();
+void initSensors();
+void initAXP2101(uint8_t busId);
+void updatemsdata();
+uint16_t calculateCRC16CCITT(uint8_t* data, uint32_t len);
+void handleReadConfig();
+void handleWriteConfig(uint8_t* data, uint16_t len);
+void handleWriteConfigChunk(uint8_t* data, uint16_t len);
+void handleFirmwareVersion();
+void handleReadMSD();  // Read Manufacturer Specific Data (MSD) payload
+const char* getFirmwareShaString();
+void cleanupDirectWriteState(bool refreshDisplay);
+void handleDirectWriteStart(uint8_t* data, uint16_t len);
+void handleDirectWriteData(uint8_t* data, uint16_t len);
+void handleDirectWriteEnd(uint8_t* data = nullptr, uint16_t len = 0);
+bool handleDirectWriteCompressedData(uint8_t* data, uint16_t len);
+void handlePipeWriteStart(uint8_t* data, uint16_t len);
+void handlePipeWriteData(uint8_t* data, uint16_t len);
+void handlePipeWriteEnd(uint8_t* data, uint16_t len);
+void resetPipeWriteState(void);
+void handlePartialWriteStart(uint8_t* data, uint16_t len);
+int mapEpd(int id);
+uint8_t getFirmwareMajor();
+uint8_t getFirmwareMinor();
+uint8_t getFirmwarePatch();
+uint32_t getDeepSleepCount();  // RTC-persisted wake cycle count on ESP32; always 0 on nRF52840
+float readBatteryVoltage();  // Returns battery voltage in volts, or -1.0 if not configured
+float readChipTemperature();  // Returns chip temperature in degrees Celsius
+int getplane();
+int getBitsPerPixel();
+
+// Encryption functions
+bool isEncryptionEnabled();
+bool isAuthenticated();
+void clearEncryptionSession();
+bool checkEncryptionSessionTimeout();
+void updateEncryptionSessionActivity();
+bool handleAuthenticate(uint8_t* data, uint16_t len);
+bool decryptCommand(uint8_t* ciphertext, uint16_t ciphertext_len, uint8_t* plaintext, uint16_t* plaintext_len, uint8_t* nonce, uint8_t* auth_tag, uint16_t command_header);
+bool encryptResponse(uint8_t* plaintext, uint16_t plaintext_len, uint8_t* ciphertext, uint16_t* ciphertext_len, uint8_t* nonce, uint8_t* auth_tag);
+bool verifyNonceReplay(uint8_t* nonce);
+void incrementNonceCounter();
+void getCurrentNonce(uint8_t* nonce);
+
+// chunked_write_state_t comes from config_parser.h so this file and
+// communication.cpp cannot drift apart on the buffer size.
+extern chunked_write_state_t chunkedWriteState;
+chunked_write_state_t chunkedWriteState = {false, 0, 0, {0}, 0, 0};
+struct GlobalConfig globalConfig = {0};
+uint8_t configReadResponseBuffer[128];
+
+// Security configuration
+struct SecurityConfig securityConfig = {0};
+EncryptionSession encryptionSession = {0};
+bool encryptionInitialized = false;
+
+#ifdef TARGET_ESP32
+// 0x00000000 = "not set". Persists across deep sleep on ESP32.
+RTC_DATA_ATTR uint32_t displayed_etag = 0;
+#else
+// 0x00000000 = "not set". Non-ESP32 targets reset this on boot.
+uint32_t displayed_etag = 0;
+#endif
+
+#ifdef TARGET_ESP32
+// RTC memory variables for deep sleep state tracking
+RTC_DATA_ATTR bool woke_from_deep_sleep = false;
+RTC_DATA_ATTR uint32_t deep_sleep_count = 0;
+
+// Advertising timeout state variables
+bool advertising_timeout_active = false;
+uint32_t advertising_start_time = 0;
+
+// Minimum awake window, armed in setup() on first boot or button wake (never
+// on timer wake). A floor layered under the quiet-window logic: sleep needs
+// both the idle/advertising quiet condition AND this hold expired.
+static constexpr uint16_t DEFAULT_MIN_WAKE_TIME_SECONDS = 120;
+bool minWakeWindowActive = false;
+uint32_t minWakeWindowStartMs = 0;
+
+// Stamped by pollActivity() at the top of every loop() pass. Both sleep paths
+// require a continuous quiet window since this stamp, so a dropped link, an
+// in-flight command, or a pending ack extends the window rather than racing a
+// single idle iteration.
+uint32_t lastActivityMs = 0;
+// Quiet window required before deep sleep when sleep_timeout_ms is unset.
+static constexpr uint32_t DEFAULT_IDLE_HOLD_MS = 10000;
+#endif
+
+#define AXP2101_SLAVE_ADDRESS 0x34
+#define AXP2101_REG_POWER_STATUS 0x00
+#define AXP2101_REG_POWER_ON_STATUS 0x01
+#define AXP2101_REG_POWER_OFF_STATUS 0x02
+#define AXP2101_REG_DC_ONOFF_DVM_CTRL 0x80
+#define AXP2101_REG_LDO_ONOFF_CTRL0 0x90
+#define AXP2101_REG_DC_VOL0_CTRL 0x82  // DCDC1 voltage
+#define AXP2101_REG_LDO_VOL2_CTRL 0x94  // ALDO3 voltage
+#define AXP2101_REG_LDO_VOL3_CTRL 0x95  // ALDO4 voltage
+#define AXP2101_REG_POWER_WAKEUP_CTL 0x26
+#define AXP2101_REG_ADC_CHANNEL_CTRL 0x30
+#define AXP2101_REG_ADC_DATA_BAT_VOL_H 0x34
+#define AXP2101_REG_ADC_DATA_BAT_VOL_L 0x35
+#define AXP2101_REG_ADC_DATA_VBUS_VOL_H 0x36
+#define AXP2101_REG_ADC_DATA_VBUS_VOL_L 0x37
+#define AXP2101_REG_ADC_DATA_SYS_VOL_H 0x38
+#define AXP2101_REG_ADC_DATA_SYS_VOL_L 0x39
+#define AXP2101_REG_BAT_PERCENT_DATA 0xA4
+#define AXP2101_REG_PWRON_STATUS 0x20
+#define AXP2101_REG_BAT_DETECTION_CTRL 0x68  // Battery detection control
+#define AXP2101_REG_IRQ_ENABLE1 0x40  // IRQ enable register 1
+#define AXP2101_REG_IRQ_ENABLE2 0x41  // IRQ enable register 2
+#define AXP2101_REG_IRQ_ENABLE3 0x42  // IRQ enable register 3
+#define AXP2101_REG_IRQ_ENABLE4 0x43  // IRQ enable register 4
+#define AXP2101_REG_IRQ_STATUS1 0x44  // IRQ status register 1
+#define AXP2101_REG_IRQ_STATUS2 0x45  // IRQ status register 2
+#define AXP2101_REG_IRQ_STATUS3 0x46  // IRQ status register 3
+#define AXP2101_REG_IRQ_STATUS4 0x47  // IRQ status register 4
+#define AXP2101_REG_LDO_ONOFF_CTRL1 0x91  // LDO control register 1 (BLDO1-2, CPUSLDO, DLDO1-2)
+
+#ifdef TARGET_NRF
+BLEDfu bledfu;
+BLEService imageService("2446");
+// max_len is a GATT-declared attribute length the SoftDevice reserves for real (vloc =
+// BLE_GATTS_VLOC_STACK), so 512 cost 512 B of attribute table while the link caps at
+// ATT MTU 247 (payload 244) -- half of it was unreachable.
+BLECharacteristic imageCharacteristic("2446", BLEWrite | BLEWriteWithoutResponse | BLENotify, OD_BLE_MAX_FRAME);
+#endif
+
+#ifdef TARGET_ESP32
+// RESPONSE_QUEUE_SIZE / MAX_RESPONSE_SIZE / ResponseQueueItem come from structs.h so
+// this file and communication.cpp cannot drift apart on the slot size.
+// PIPE_WRITE ingest sizing: 33 slots hold a full W=32 in-flight window + END across a
+// 60 s Spectra SPI stall (loop blocked in bbepWriteData). OD_BLE_MAX_FRAME (256) covers
+// pipe <=244, legacy <=232, HA <=244; the GATT layer now rejects anything larger with
+// ATT 0x0D rather than the app dropping it silently.
+#define COMMAND_QUEUE_SIZE 33
+#define MAX_COMMAND_SIZE OD_BLE_MAX_FRAME
+
+ResponseQueueItem responseQueue[RESPONSE_QUEUE_SIZE];
+uint8_t responseQueueHead = 0;
+uint8_t responseQueueTail = 0;
+
+#include "esp32_ble_callbacks.h"
+
+CommandQueueItem commandQueue[COMMAND_QUEUE_SIZE];
+volatile uint8_t commandQueueHead = 0;
+volatile uint8_t commandQueueTail = 0;
+
+BLEServer* pServer = nullptr;
+BLEService* pService = nullptr;
+BLECharacteristic* pTxCharacteristic = nullptr;
+BLECharacteristic* pRxCharacteristic = nullptr;
+BLEAdvertisementData globalAdvertisementData;  // Global object, not pointer
+BLEAdvertisementData* advertisementData = &globalAdvertisementData;  // Pointer to global object
+MyBLEServerCallbacks staticServerCallbacks;  // Static callback object (no dynamic allocation)
+MyBLECharacteristicCallbacks staticCharCallbacks;  // Static callback object (no dynamic allocation)
+#endif
+
+extern const uint8_t writelineFont[] PROGMEM;
