@@ -145,10 +145,41 @@ Ten variants from the source repo's `platformio.ini`:
 | `s3-n16r8-extuart` / `s3-n32r8-extuart` | ESP32-S3 | as above | console on CH343P UART (GPIO43/44), not USB-CDC |
 | `s3-e1004` | ESP32-S3 | 32 MB + 8 MB | Seeed reTerminal E1004; pinned bb_epaper for T133A01 |
 | `c3-n4` / `c3-n16` | ESP32-C3 | 4/16 MB, no PSRAM | `c3-n16` uses DIO flash to free GPIO12/13 |
-| `c6-n4` | ESP32-C6 | 4 MB, no PSRAM | requires IDF ≥ 5.1. **Shipped.** Partition: `default.csv` — see below |
+| `c6-n4` | ESP32-C6 | 4 MB, no PSRAM | requires IDF ≥ 5.1. **Shipped.** **Fragment exists and builds.** Partition: `min_spiffs_4MB.csv` — see below |
 | `esp32-n4` | classic ESP32 | 4 MB, no PSRAM | 320 KB RAM: needs the reduced PIPE reorder window |
 
-## Partitions — ESP32-C6 moves to `default.csv` (decided 2026-07-25)
+## Partitions — ESP32-C6 moves to `min_spiffs.csv` (gate measured 2026-07-26)
+
+**The gate below fired: the C6 image does NOT fit 1.25 MB.** Measured with ESP-IDF v5.5.4,
+`idf.py -DOD_BOARD=c6-n4 build`:
+
+| | bytes |
+|---|---|
+| C6 app image (`opendisplay.bin`) | **1 498 256** |
+| `default_4MB.csv` slot (0x140000) | 1 310 720 → **overflows by 187 536** (14.3% over) |
+| `min_spiffs_4MB.csv` slot (0x1E0000) | 1 966 080 → **fits, 467 824 spare** (24% free) |
+
+So the C6 keeps dual-slot A/B on 4 MB, but pays for it with the filesystem: `partitions/
+min_spiffs_4MB.csv`, 1.875 MB per slot and 128 KB of SPIFFS instead of 1.4 MB. Affordable
+because config moved to NVS in phase B and nothing else on this target needs bulk storage.
+`boards/c6-n4.cmake` points at it. The `default.csv` decision below is superseded.
+
+The expectation recorded below — "the IDF image is expected to be *smaller* than today's
+Arduino build" — was **not** borne out relative to the S3. The same tree builds to 1 241 056
+bytes on `s3-n16r8` and 1 498 256 on `c6-n4`, i.e. the C6 is **257 KB larger while compiling
+strictly less code** (no FastEPD, no PSRAM). Per-archive, the C6 pays:
+
+- `libble_app.a` 235 592 vs the S3's `libbtdm_app.a` 89 867 — **+146 KB** for the C6's
+  precompiled BLE controller. Single biggest item, and not something the app can shrink.
+- WiFi/lwip stack +110 KB across `libpp` (+46 KB), `libnet80211` (+44 KB), `liblwip` (+19 KB).
+- RISC-V code density: `libmain.a` is 129 756 on C6 vs 129 293 on S3 — *the same size despite
+  the C6 not compiling FastEPD at all.*
+
+(Ignore `libesp_app_format.a`'s ~105 KB in `esp-idf-size --archives`. It is the merged
+`.rodata` string pool attributed to whichever object lands first in `.flash.rodata`; the map
+shows `0xee (size before relaxing)` for it. Both chips show it. It is not that component.)
+
+### Original decision (2026-07-25), superseded above
 
 C6 units ship today on `huge_app.csv`: a single 3 MB app slot and **no OTA capability at all**.
 Since the deployed-fleet migration is flash-and-reconfigure (MIGRATION.md § Deployed fleet

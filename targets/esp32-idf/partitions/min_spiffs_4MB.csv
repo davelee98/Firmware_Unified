@@ -1,0 +1,21 @@
+# ESP32-C6 4 MB, dual app slots at 1.875 MB each. This is the FALLBACK layout named in
+# README.md § Partitions, and it is in use because the gate there fired against it.
+#
+# GATE RESULT (measured 2026-07-26, ESP-IDF v5.5.4, board c6-n4):
+#   app image  1 498 256 bytes
+#   default_4MB.csv slot  1 310 720 -> OVERFLOWS by 187 536 bytes (14.3% over)
+#   this layout's slot    1 966 080 -> fits, 467 824 bytes spare (23.8% headroom)
+#
+# So the C6 CAN do A/B on 4 MB, but not with a 1.4 MB filesystem. The cost is the filesystem:
+# 128 KB of SPIFFS remains instead of 1.4 MB. That is affordable because config moved to NVS
+# during phase B (hal/od_hal_nvs.c) and nothing else on this target needs bulk storage.
+#
+# Layout is Arduino's stock min_spiffs.csv, unchanged, so it is the one a C6 unit flashed by
+# the old toolchain would already recognise.
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xe000,   0x2000,
+app0,       app,  ota_0,    0x10000,  0x1E0000,
+app1,       app,  ota_1,    0x1F0000, 0x1E0000,
+spiffs,     data, spiffs,   0x3D0000, 0x20000,
+coredump,   data, coredump, 0x3F0000, 0x10000,
