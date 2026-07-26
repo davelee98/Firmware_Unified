@@ -7,6 +7,15 @@ behavioural divergence" risk asks for: every difference below must be resolved
 here is the proposed default. Citations are `repo-relative path:line` in the source repos;
 `Firmware` cites are the local checkout unless marked `upstream/main`.
 
+> **Currency: behavioural tables surveyed before `#124`; refreshed for `#124` on 2026-07-25.**
+> `Firmware` is now at `2e2131b` (PR #124 — WiFi/LAN transport + tinfl inflate, +2007/-198).
+> The §0 capability matrix, §3.1a/§3.1b (window and engine) and the new §9 (LAN transport)
+> reflect it. Rows not
+> marked `#124` were verified against the pre-#124 tree and are unaffected by that commit —
+> it touched transport, inflate, and logging, not dispatch or TLV semantics. **`Firmware` is
+> the reference implementation, so re-verify this file against it after every significant
+> merge**, not only before a promotion.
+
 Legacy `Firmware_NRF` is included only where it matters. Verified verdict: it is a **strict
 subset** — no compression, no 0x76, no PIPE, no NFC, no LED_STOP, no CONFIG_CLEAR, no
 READ_MSD handler, `ocrypto`-backed crypto, and its `CMD_DEEP_SLEEP` log string still says
@@ -62,8 +71,15 @@ Before proposing one, exhaust the cheaper options in this order:
    exactly this — a target that lacks `0x76` or PIPE needs a *code* meaning "unsupported", not
    a new opcode (see §1 opcode coverage, where `OD_ERR_PIPE_START_BAD_HEADER` is currently
    misused for it).
-4. **A new packet type in the config TLV**, which is versioned and skippable by design, so
-   unknown types degrade gracefully on old firmware. Far cheaper than a new opcode.
+4. **A new packet type in the config TLV** — cheaper than a new opcode *in principle*, but see
+   the caveat below before relying on it. Prefer reserved bits, then reserved bytes, in an
+   existing packet first (ARCHITECTURE.md § "The config binary is backward compatible").
+
+   > **Caveat: unknown-type skip is only safe on NRF54 today.** `Firmware` and `Firmware_Silabs`
+   > force skip-to-CRC on an unrecognised packet type, discarding everything after it —
+   > including `0x27` security config if the new type is ordered ahead of it (§2.2). Adding a
+   > packet type would therefore break deployed units on two of three targets. This option
+   > re-opens once NRF54's size-table parser is the one in `shared/core`.
 5. **A new opcode** — last resort.
 
 **But do propose one when it genuinely simplifies the structure.** This is not a prohibition.
@@ -104,7 +120,8 @@ coverage" below. `Firmware` is split where its two chip families differ, because
 |---|---|---|---|---|---|
 | BLE transport | NimBLE | Bluefruit | Zephyr BT host | Silabs BGAPI (`sl_bt_*`) | Nordic SoftDevice |
 | WiFi / LAN TLS transport | **yes** (`#124`) | no | no | no | no |
-| Inflate engine | uzlib + **tinfl ROM** (`#124`) | uzlib | uzlib | uzlib | **none** (uncompressed only) |
+| Inflate engine | **tinfl ROM** when `OPENDISPLAY_ENABLE_WIFI`, else uzlib (`#124`) | uzlib | uzlib | uzlib | **none** (uncompressed only) |
+| Inflate RAM cost | **~11 KB** tinfl tables + 4 KB dict (9-bit window) vs ~2.5 KB uzlib | ~2.5 KB | ~2.5 KB | 1676 B measured | n/a |
 | zlib window default | 512 B (32 KB on `esp32-s3-E1004` only) | 512 B | 512 B | 512 B | n/a |
 | Panel backend | bb_epaper SPI + **FastEPD parallel** (S3) | bb_epaper SPI | bb_epaper SPI | bb_epaper SPI | direct driver |
 | `MAX_CONFIG_SIZE` | 4096 | 4096 | 4096 | **2048** | — |
@@ -114,6 +131,7 @@ coverage" below. `Firmware` is split where its two chip families differ, because
 | NFC endpoint (TNB132M) | no | no | **yes** | **yes** | no |
 | Buzzer | yes | yes | yes | no (NACK) | no |
 | Channel Sounding / ranging | no | no | **yes** (`device_flags` bit 5, default off) | no | no |
+| Field OTA (host-driven) | **none** — `ENTER_DFU` only reboots | unverified (UF2 bootloader is USB, not field) | unverified | **yes** — `.gbl` via Silabs AppLoader, the only path wired into HA | library support exists (`perform_nrf_dfu`, legacy Nordic DFU `.zip`) but unused by HA |
 | Kernel | Arduino loop / FreeRTOS | Arduino loop | Zephyr | **none** (superloop) | none |
 | Config storage | LittleFS/NVS | NVS | Zephyr settings | NVM3 | flash |
 
@@ -182,6 +200,7 @@ Three parsers (`Firmware/src/config_parser.cpp` 919 C++, `Firmware_NRF54/src/ope
 |---|---|---|---|---|---|
 | 3.1 | Compressed START detection | `len >= 4` ⇒ compressed, `[uncompressed_size:4 LE]` validated against computed panel geometry (`display_service.cpp:2138-2148`). **No flag byte** — length is the only signal | same wire contract via `opendisplay_display_direct_write_start` (`.cpp:771`) | same (`opendisplay_display.cpp:788`) | identical — promote as-is, but document that "compressed" is inferred from payload length, not a flag. |
 | 3.1a | **zlib window (`OPENDISPLAY_ZLIB_WINDOW_BITS`)** | encoder must match | default **9 (512 B)**; only `env:esp32-s3-E1004` pins **15 (32 KB)** (`platformio.ini:152`); heap window on most envs | **9 static** (`zephyr/CMakeLists.txt:66` sets `USE_HEAP_WINDOW=0`) | **9 static** (`opendisplay-bg22.cmake:269-270`) | **The workspace-level "existing targets pin 32 KB for legacy-client compatibility" note is wrong for all but one board.** The real default is 512 B everywhere; exactly one ESP32-S3 board wants 32 KB. All targets *reject* a stream whose CMF declares a window larger than their limit (`od_zlib_stream.c:641-644`), so the encoder MUST cap `windowBits` at the smallest target it addresses — 9. `shared/compress` treats window as a per-target macro, floor 9; see MEMORY_CONSTRAINTS.md. |
+| 3.1b | **Inflate engine (`#124`)** | not a wire property | **tinfl (ROM miniz)** when `OPENDISPLAY_ENABLE_WIFI`, via an *unconditional* compile-time remap of the `od_zlib_stream_*` call sites — so it serves direct-write, 0x76 **and** PIPE, not just LAN (`src/od_inflate_tinfl.h:12-19`). Costs **~11 KB** DRAM for Huffman tables + a 4 KB dict at the 9-bit window, vs ~2.5 KB for uzlib | uzlib bit-serial | uzlib bit-serial, 1676 B measured | Engine choice is invisible on the wire **provided the window contract holds** — both engines reject an over-wide CMF. Two consequences for `shared/compress`: the engine is a target-selected backend behind one streaming API (reset/push/poll/error/count), which the tinfl adapter already proves by reusing uzlib's status enum; and **tinfl can never be the shared default** — its ~11 KB working set alone exceeds the BG22's entire 10.3 KB heap. The `OPENDISPLAY_ENABLE_WIFI` gate is a proxy for "can spare the RAM", *not* a transport filter — do not carry that conflation into `shared/`. |
 | 3.2 | Uncompressed auto-complete | when `bytes_written == total`, END runs implicitly without a 0x72 (`display_service.cpp:2331-2332`) | *unverified at line level* (delegated into `opendisplay_display.cpp`) | *unverified* | Spec does not document auto-complete. Keep it (clients rely on it for full-frame pushes) and document it; verify NRF54/Silabs parity during their subsystem swaps. |
 | 3.3 | END ack ordering | END-ack **before** the blocking refresh, then 0x73/0x74 (`display_service.cpp:2382-2385` comment + code) | same, explicitly, with a 20 ms TX drain gap (`opendisplay_pipe.c:796-799`) | **refresh happens first** — `opendisplay_display_direct_write_end` blocks through the ≤60 s refresh (`opendisplay_display.cpp:854-894`) and only then are `[00][72]` + `[00][73/74]` sent (`opendisplay_pipe.c:707-722`) | Spec and two of three say ack-then-refresh. **Silabs diverges**: its END ack can arrive a minute late; clients that time out on the END ack see false failures. Fix on adoption. |
 | 3.4 | Refresh-mode byte on END | partial session: 0 FULL / 1 FAST / else PARTIAL (`display_service.cpp:2362-2364`); full: 0/1 | same contract | `payload[0]==1` ⇒ FAST else FULL (`opendisplay_display.cpp:875-877`) — no partial mode exists | consistent given capability differences. |
@@ -293,3 +312,27 @@ behaviour, i.e. no-bump or MINOR under the header's own policy): 1.1 auth-requir
 1.2 decrypt-failure shape, 1.4 reserved ack padding, 0x43's `sha_len` byte, 6.1 the STEP-2
 server proof, 3.2 auto-complete, `RESP_PARTIAL_WRITE_START`, a PIPE-START "unsupported"
 error code, and the 0x45 `@targets` fix (or a Silabs implementation).
+
+## 9. LAN / WiFi transport — `Firmware`/ESP32 only (`#124`)
+
+New surface as of `2e2131b`. No other target has a second transport, so there is nothing to
+diverge *from* yet — these rows exist to stop the ESP32's choices being adopted as universal by
+default when `shared/core` gains an origin-aware dispatcher.
+
+| # | Behaviour | Firmware / ESP32 | Others | Resolution for `shared/core` |
+|---|---|---|---|---|
+| 9.1 | Connection model | **The device is the server; the host connects to it.** It binds `WifiConfig.server_port` (default `OD_LAN_TCP_PORT` 2446 when 0) and listens | n/a — but **BLE is the same shape**: device is the peripheral, host is the central and initiates | **This is consistent across transports, not a LAN peculiarity.** On both BLE and LAN the device is passive and the host initiates, so `od_hal_radio` is uniformly passive: the transport delivers frames, the core replies on the same origin, and the core never initiates a connection on any transport. Do not model LAN as an exception. |
+| 9.2 | `WifiConfig.server_host` | **DEPRECATED** (2026-07-25). Gates nothing and is not read. A leftover from an abandoned "tag pushes to an upload server" model that the device-as-server design never used; the name misleads, since `server_port` is the port *this device* binds | n/a | **Deprecated, not removed.** The 64 bytes stay in the `0x26` wire format at their current offset — deleting a field or shifting `server_port` would break the config-binary backward-compatibility rule (ARCHITECTURE.md) on shipped devices. Rules: firmware **must ignore** it; `py-opendisplay` and the HA config flow should stop writing it and must not surface it as a setting; new firmware must not repurpose the bytes (a deployed host may still send a non-zero value, so they are not free space — unlike `reserved[]`, which is contractually zero). Mark `@deprecated` in the canonical header when the freeze lifts. |
+| 9.3 | TLS-PSK port | **derived, not configured**: `server_port + 1`, with no config entry (`OD_LAN_TLS_PORT` in the header agrees) | n/a | Derived ports are a wire contract as much as a stored one. `shared/core` must expose the derivation, not re-invent it per target. |
+| 9.4 | PIPE over LAN | **not available** — "NO PIPE ON LAN" (`opendisplay_protocol.h`) | n/a | PIPE is BLE-only *by protocol*, not by capability. So `OD_PIPE_ENABLE` is necessary but not sufficient: the dispatcher must also refuse 0x80-0x82 on a LAN origin, on a target that supports both. |
+| 9.5 | Credential logging | deliberately never logs SSID or password verbatim — presence and length only (`config_parser.cpp`, `#124`) | *unverified elsewhere* | **Now a rule**, not a convention — ARCHITECTURE.md § "Secrets are never logged verbatim". Applies to `shared/` at every log level and covers `0x26`, `0x27`, keys, nonces, MACs and raw TLV payloads. `Firmware`'s practice is the model; audit the other targets during promotion, since none is verified. |
+
+**What generalises well:** the device is passive on every transport — BLE peripheral, LAN server
+— and the host always initiates. `od_hal_radio` can therefore be uniformly passive with no
+transport-specific initiation path, which is a simplification worth stating rather than
+rediscovering.
+
+**What generalises badly:** origin is already an explicit argument of frame RX in the proposed
+core API (§1.6, SHARED_API_DESIGN.md) — good. But 9.4 shows origin also gates *which opcodes are
+legal*, which the current design treats purely as a CCM-policy input. Extend it: origin selects
+the reply transport, the encryption policy, **and** the permitted opcode set.

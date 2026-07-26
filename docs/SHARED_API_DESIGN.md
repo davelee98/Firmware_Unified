@@ -28,6 +28,10 @@ Consequences, stated once and applied throughout:
    `struct` of pointers. This costs zero RAM and zero indirection, which the ESP32's
    two-existing-backends panel ladder already proves works. (A vtable is used in exactly one
    place — the panel ops — because a single target genuinely has 2-3 panel backends; see §3.)
+   Link-time binding is also what makes the core **host-testable**: a test binary links stub
+   HAL implementations and exercises every path without a board. Do not add a vtable "for
+   testability" — that trade is already paid for. See ARCHITECTURE.md § "Everything on the wire
+   is testable without hardware".
 2. **The core owns all protocol state as file-static singletons**, sized by target macros.
    Single-connection is a given on all four repos (Silabs `MAX_CONNECTIONS=0`, others
    single-`connection`), so no per-connection context is needed.
@@ -77,10 +81,19 @@ Two obligations follow, and both are easy to skip:
 
 1. **A disabled subsystem still answers.** It NACKs its opcode rather than dropping the frame,
    so a host can tell "this device does not do that" apart from "this device is broken."
+   Silence must never mean *unsupported* — a timeout is a transport failure and a host is right
+   to retry it. This is the prerequisite for capability discovery's secondary mechanism
+   (ARCHITECTURE.md § "Capabilities are discovered by interrogation, not assumed").
 2. **Capability differences the host must know about become host-visible**, not silent. The
    `MAX_CONFIG_SIZE` split (2048 on BG22, 4096 elsewhere — DIVERGENCE_MATRIX) is the live
    example: a config that fits nRF is truncated on BG22 today with no way for the sender to
    know. Divergence is fine; *undiscoverable* divergence is the bug.
+
+   Concretely, `od_config.c` must **clamp capability fields on read** — mask
+   `transmission_modes`, `communication_modes`, and `partial_update_support` against a
+   compile-time mask derived from this target's `OD_*_ENABLE` set, so `CONFIG_READ` reports
+   what the device *will do* rather than echoing what a host once wrote. That is the primary
+   discovery mechanism and it costs no wire surface.
 
 ## Layering
 
@@ -238,6 +251,13 @@ signature/type. Silabs uses RTT, NRF54 RTT/UART, ESP32 `esp_log`. One line-sink:
 ```c
 void od_hal_log(const char *line);   /* NUL-terminated, one line, no String */
 ```
+
+**Every call site is bound by the no-secrets rule** (ARCHITECTURE.md § "Secrets are never
+logged verbatim"): presence and length, never content — for SSID/password (`0x26`),
+`security_config` (`0x27`), session and derived keys, nonces, MACs, and raw config/TLV
+payloads. It applies at *all* levels, including `debug`, because debug logging is exactly what
+gets enabled in the field. `od_config.c` is the highest-risk unit here: a parser that dumps its
+input has logged a credential.
 
 ### `od_hal_panel` — the display-specific interface
 

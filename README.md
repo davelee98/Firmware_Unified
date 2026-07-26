@@ -103,3 +103,15 @@ Note that **neither toolchain is installed on the primary dev box today** — no
 - [docs/TOOLCHAINS.md](docs/TOOLCHAINS.md) — which toolchain each target uses and why
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the `shared`/`hal` boundary
 - [docs/MIGRATION.md](docs/MIGRATION.md) — migration order and per-target procedure
+
+## License
+
+**GPL-3.0** — see [LICENSE](LICENSE). Byte-identical to the licence carried by every source
+repo this one consolidates (`Firmware`, `Firmware_NRF54`, `Firmware_Silabs`, all GPLv3,
+29 June 2007), which is what makes importing their sources here lawful. Settled 2026-07-25,
+before the first import.
+
+Vendored third-party code keeps its own licence and its own notice; do not relicense it on the
+way in. That applies to `bb_epaper` and `FastEPD` (Larry Bank), `uzlib`, SEGGER RTT, and any SDK
+sources a target carries. Record the origin and licence of each vendored tree in the target
+README that pulls it in.
