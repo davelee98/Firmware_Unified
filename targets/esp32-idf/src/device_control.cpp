@@ -257,7 +257,12 @@ static void esp32_ble_deinit_before_restart() {
         if (pAdvertising != nullptr) pAdvertising->stop();
     }
     delay(200);
-    BLEDevice::deinit(true);      // clearAll: disables + releases the BT controller
+    /* Was BLEDevice::deinit(true). The C API's equivalent is stopping advertising and
+     * clearing handles; a full nimble_port_deinit() is deliberately NOT done here because
+     * this path runs immediately before a software reset, and tearing the host down under
+     * an active connection is a known source of hangs. The controller is released by the
+     * reset itself. */
+    od_ble_stop_advertising();
     esp32_ble_clear_handles();
     delay(100);
     od_log_info("BLE deinitialized before restart");

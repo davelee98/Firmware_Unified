@@ -104,17 +104,18 @@ static inline uint32_t micros(void)
     return (uint32_t)esp_timer_get_time();
 }
 
-static inline void delay(uint32_t ms)
+static inline void delay(long ms)
 {
     /* vTaskDelay rounds DOWN to whole ticks; at the default 100 Hz tick a delay(5) would
      * become 0 and busy-spin the caller's logic. Round up so a short delay is never a no-op. */
-    TickType_t ticks = (TickType_t)((ms + portTICK_PERIOD_MS - 1) / portTICK_PERIOD_MS);
+    if (ms < 0) ms = 0;
+    TickType_t ticks = (TickType_t)(((uint32_t)ms + portTICK_PERIOD_MS - 1) / portTICK_PERIOD_MS);
     vTaskDelay(ticks ? ticks : 1);
 }
 
-static inline void delayMicroseconds(uint32_t us)
+static inline void delayMicroseconds(long us)
 {
-    esp_rom_delay_us(us);
+    esp_rom_delay_us((uint32_t)(us < 0 ? 0 : us));
 }
 
 static inline void yield(void)
@@ -162,6 +163,34 @@ static inline void detachInterrupt(int pin)
  * which is NOT the same guarantee -- these call sites need auditing when the code they
  * guard moves to shared/core, which has no global-disable primitive at all and needs an
  * explicit od_hal irq-lock (flagged in DESIGN_REVIEW § "Big-picture soundness"). */
+/* Arduino ADC. analogRead returns 12-bit on ESP32 by default; oneshot ADC is the IDF
+ * replacement and these call sites move to it when device_control is touched. */
+#define ADC_11db 3
+#define ADC_0db  0
+static inline void analogSetPinAttenuation(int, int) {}
+static inline int  analogRead(int) { return 0; }
+static inline void analogReadResolution(int) {}
+
+/* attachInterruptArg passes a context pointer; IDF's handler takes void* natively. */
+static inline void attachInterruptArg(int pin, void (*fn)(void *), void *arg, int mode)
+{
+    static bool started = false;
+    if (!started) { gpio_install_isr_service(0); started = true; }
+    gpio_set_intr_type((gpio_num_t)pin, (gpio_int_type_t)mode);
+    gpio_isr_handler_remove((gpio_num_t)pin);
+    gpio_isr_handler_add((gpio_num_t)pin, fn, arg);
+    gpio_intr_enable((gpio_num_t)pin);
+}
+
+/* On ESP32 the Arduino pin number IS the GPIO number. */
+static inline int digitalPinToGPIONumber(int pin) { return pin; }
+
+/* Internal die-temperature sensor. Arduino exposes it as temperatureRead(); IDF has a
+ * driver (esp_driver_tsens) that needs explicit setup, so this returns a sentinel rather
+ * than a plausible-looking lie. The advert clamps temperature anyway, and a wrong reading
+ * there would be published to every scanning host. */
+static inline float temperatureRead(void) { return 0.0f; }
+
 static inline void noInterrupts(void) { portDISABLE_INTERRUPTS(); }
 static inline void interrupts(void)   { portENABLE_INTERRUPTS(); }
 

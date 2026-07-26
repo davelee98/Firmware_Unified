@@ -42,6 +42,11 @@ void touchResumeAfterEpdRefresh(void);
 extern volatile bool epdRefreshInProgress;
 extern bool directWriteActive;
 
+/* OD: the NimBLE-Arduino callback classes below are superseded by the native GAP/GATT
+ * event handlers in ble/od_ble_nimble.cpp, which set exactly the same flags for exactly
+ * the same reasons (see the threading note in ble/od_ble.h). Compiled out rather than
+ * deleted so the original logic stays readable next to the port until phase C. */
+#if 0
 class MyBLEServerCallbacks : public BLEServerCallbacks {
     void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
         (void)pServer;
@@ -138,3 +143,4 @@ public:
 #endif
 
 #endif
+#endif /* OD: superseded by ble/od_ble_nimble.cpp */

@@ -121,9 +121,9 @@ struct PartialStreamContext {
 };
 
 #ifdef TARGET_ESP32
-extern BLEAdvertisementData* advertisementData;
+/* OD: removed with the NimBLE-Arduino port */
 extern BLEServer* pServer;
-extern BLEService* pService;
+/* OD: removed with the NimBLE-Arduino port */
 #endif
 
 void pwrmgm(bool onoff);
@@ -1782,7 +1782,12 @@ void updatemsdata(){
     Bluefruit.Advertising.start(0);
 #endif
 #ifdef TARGET_ESP32
-    if (advertisementData != nullptr) {
+    {
+        /* Ported to the NimBLE C API. The MSD payload is handed to od_ble, which owns the
+         * advertisement build -- the piecemeal setName/setFlags/setManufacturerData dance
+         * and its ordering trap (setAdvertisementData had to be LAST or NimBLE-Arduino
+         * discarded the payload) do not exist in the C API: ble_gap_adv_set_fields takes the
+         * whole record at once. */
         static uint8_t prev_msd_payload[16] = {0xFF};
         if (memcmp(prev_msd_payload, msd_payload, 16) == 0) {
             mloopcounter++;
@@ -1790,31 +1795,14 @@ void updatemsdata(){
             return;
         }
         memcpy(prev_msd_payload, msd_payload, 16);
-        advertisementData->setManufacturerData(msd_payload, 16);
-        BLEAdvertising *pAdvertising = (pServer != nullptr) ? pServer->getAdvertising() : BLEDevice::getAdvertising();
-        // Only rebuild+restart advertising while disconnected. The former connected
-        // branch rebuilt *advertisementData but never pushed it via
-        // setAdvertisementData(), so it was dead work — dropped.
-        if (pAdvertising != nullptr && !(pServer != nullptr && pServer->getConnectedCount() > 0)) {
-            pAdvertising->stop();
-            BLEAdvertisementData freshAdvertisementData;
-            static String savedDeviceName = "";
-            if (savedDeviceName.length() == 0) savedDeviceName = "OD" + getChipIdHex();
-            freshAdvertisementData.setName(savedDeviceName.c_str());
-            freshAdvertisementData.setFlags(0x06);
-            freshAdvertisementData.setManufacturerData(msd_payload, 16);
-            *advertisementData = freshAdvertisementData;
-            // setAdvertisementData() must be the last data call before start():
-            // enableScanResponse()/setPreferredParams() reset NimBLE's custom-data
-            // flag and would make start() drop this manufacturer-data payload.
-            pAdvertising->setAdvertisementData(freshAdvertisementData);
-            delay(50);
-            pAdvertising->start();
+        od_ble_set_manufacturer_data(msd_payload, 16);
+
+        /* Only restart advertising while disconnected -- restarting under a live connection
+         * would drop it. Same condition the Arduino path used. */
+        if (od_ble_connected_count() == 0) {
+            od_ble_restart_advertising();
         }
     }
-#ifdef OPENDISPLAY_HAS_WIFI
-    opendisplay_mdns_update_msd_txt();
-#endif
 #endif
     mloopcounter++;
     mloopcounter &= 0x0F;

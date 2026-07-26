@@ -26,12 +26,12 @@ String getChipIdHex();
 
 extern struct GlobalConfig globalConfig;
 extern BLEServer* pServer;
-extern BLEService* pService;
+/* OD: removed with the NimBLE-Arduino port -- extern BLEService* pService; */
 extern BLECharacteristic* pTxCharacteristic;
 extern BLECharacteristic* pRxCharacteristic;
-extern BLEAdvertisementData* advertisementData;
-extern MyBLEServerCallbacks staticServerCallbacks;
-extern MyBLECharacteristicCallbacks staticCharCallbacks;
+/* OD: removed with the NimBLE-Arduino port -- extern BLEAdvertisementData* advertisementData; */
+/* OD: the NimBLE-Arduino callback objects are gone; GAP/GATT events are handled natively
+ * in ble/od_ble_nimble.cpp. */
 #endif
 
 #ifdef TARGET_NRF
@@ -208,111 +208,45 @@ volatile bool esp32BleNotifySubscribed = false;
 volatile bool bleDisconnectCleanupPending = false;
 volatile bool msdUpdatePending = false;
 
+/* Rewritten for the NimBLE C API (ble/od_ble.h). The GATT construction that used to live
+ * here -- createServer/createService/createCharacteristic/advertising -- is now in
+ * ble/od_ble_nimble.cpp, because the NimBLE-Arduino classes it was written against do not
+ * exist under ESP-IDF. The GATT layout it builds is byte-for-byte the same; see od_ble.h. */
+
 void esp32_ble_clear_handles(void) {
-    pServer = nullptr;
-    pService = nullptr;
-    pTxCharacteristic = nullptr;
-    pRxCharacteristic = nullptr;
-    esp32BleNotifySubscribed = false;
+    od_ble_clear_handles();
 }
 
 bool esp32_ble_notify_enabled(void) {
-    if (pTxCharacteristic == nullptr || pServer == nullptr || pServer->getConnectedCount() == 0) {
-        return false;
-    }
-    // NimBLE auto-creates the 0x2902 CCCD; onSubscribe tracks the client's toggle.
-    return esp32BleNotifySubscribed;
+    /* The CCCD is auto-created for NOTIFY and the subscribe event tracks the client's
+     * toggle -- same contract as before, now sourced from the C API. */
+    return od_ble_notify_enabled();
 }
 
 void esp32_restart_ble_advertising(void) {
-    if (pServer == nullptr) {
-        bleRestartAdvertisingPending = true;
-        return;
-    }
-    if (pServer->getConnectedCount() > 0) {
-        bleRestartAdvertisingPending = false;
-        return;
-    }
-    if (epdRefreshInProgress) {
-        bleRestartAdvertisingPending = true;
-        return;
-    }
     bleRestartAdvertisingPending = false;
-    delay(100);
-    BLEDevice::startAdvertising();
-    updatemsdata();
+    od_ble_restart_advertising();
     od_log_info("BLE advertising restarted");
 }
 
 void ble_init_esp32(bool update_manufacturer_data) {
-    esp32_ble_clear_handles();
     od_log_info("=== Initializing ESP32 BLE ===");
     String deviceName = "OD" + getChipIdHex();
     od_log_info("Device name will be: %s", deviceName.c_str());
-    BLEDevice::init(deviceName.c_str());
-    // Preferred only: the central drives the exchange and may settle lower.
+
+    /* Preferred only: the central drives the exchange and may settle lower. */
     od_log_info("Setting preferred BLE ATT MTU to %u...", (unsigned)OD_BLE_PREFERRED_ATT_MTU);
-    BLEDevice::setMTU(OD_BLE_PREFERRED_ATT_MTU);
-    pServer = BLEDevice::createServer();
-    if (pServer == nullptr) {
-        od_log_error("ERROR: Failed to create BLE server");
-        return;
-    }
-    // deleteCallbacks=false: staticServerCallbacks is a static object; NimBLE must
-    // not delete it on deinit()/replacement.
-    pServer->setCallbacks(&staticServerCallbacks, false);
-    od_log_info("Server callbacks configured");
-    BLEUUID serviceUUID("00002446-0000-1000-8000-00805F9B34FB");
-    pService = pServer->createService(serviceUUID);
-    if (pService == nullptr) {
-        od_log_error("ERROR: Failed to create BLE service");
-        return;
-    }
-    od_log_info("BLE service 0x2446 created successfully");
-    BLEUUID charUUID("00002446-0000-1000-8000-00805F9B34FB");
-    // Declaring max_len (rather than inheriting NimBLE's 512 default) makes the GATT
-    // layer reject an oversize write with ATT 0x0D instead of letting it reach onWrite()
-    // and be dropped silently by the MAX_COMMAND_SIZE check.
-    pTxCharacteristic = pService->createCharacteristic(
-        charUUID,
-        NIMBLE_PROPERTY::READ |
-        NIMBLE_PROPERTY::NOTIFY |
-        NIMBLE_PROPERTY::WRITE |
-        NIMBLE_PROPERTY::WRITE_NR,
-        OD_BLE_MAX_FRAME
-    );
-    if (pTxCharacteristic == nullptr) {
-        od_log_error("ERROR: Failed to create BLE characteristic");
-        return;
-    }
-    od_log_info("Characteristic created with properties: READ, NOTIFY, WRITE, WRITE_NR");
-    // NimBLE auto-adds the 0x2902 CCCD for NOTIFY characteristics; no BLE2902 needed.
-    pTxCharacteristic->setCallbacks(&staticCharCallbacks);
-    pRxCharacteristic = pTxCharacteristic;
-    // NimBLE starts services automatically when the server starts advertising; no
-    // explicit pService->start() (deprecated no-op in NimBLE 2.x).
-    BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
-    if (pAdvertising == nullptr) {
-        od_log_error("ERROR: Failed to get advertising object");
-        return;
-    }
-    pAdvertising->addServiceUUID(serviceUUID);
-    od_log_info("Service UUID added to advertising");
-    advertisementData->setName(deviceName.c_str());
-    advertisementData->setFlags(0x06);
-    od_log_info("Device name added to advertising");
+    od_ble_set_preferred_mtu(OD_BLE_PREFERRED_ATT_MTU);
+
     if (update_manufacturer_data) {
         updatemsdata();
     }
-    // setAdvertisementData() must be the LAST advertising-data call before start():
-    // NimBLE's enableScanResponse()/setPreferredParams()/etc. reset the internal
-    // "custom data set" flag, which would make start() discard this payload and
-    // re-advertise the piecemeal builder (no manufacturer data / no name). Scan
-    // response is off by default in NimBLE 2.x, so no enableScanResponse() needed.
-    pAdvertising->setAdvertisementData(*advertisementData);
-    pServer->getAdvertising()->start();
+
+    od_ble_init(deviceName.c_str());
+
     od_log_info("=== BLE advertising started successfully ===");
     od_log_info("Device ready: %s", deviceName.c_str());
     od_log_info("Waiting for BLE connections...");
 }
+
 #endif

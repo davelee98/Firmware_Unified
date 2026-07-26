@@ -26,9 +26,7 @@
 using namespace Adafruit_LittleFS_Namespace;
 #endif
 
-#ifdef TARGET_ESP32
-#include <LittleFS.h>
-#endif
+/* OD: config storage is NVS (hal/od_hal_nvs.h); LittleFS is gone from this target. */
 
 #include <Wire.h>
 

@@ -4,6 +4,7 @@
 #include "arduino_compat.h"
 #include "Wire.h"
 #include "SPI.h"
+#include "ESPmDNS.h"
 
 #include "esp_system.h"
 #include "esp_heap_caps.h"
@@ -14,6 +15,7 @@ SerialCompat Serial;
 TwoWire  Wire;
 SPIClass SPI;
 EspClass ESP;
+MDNSResponder MDNS;
 
 uint32_t EspClass::getFreeHeap() const    { return (uint32_t)esp_get_free_heap_size(); }
 uint32_t EspClass::getMinFreeHeap() const { return (uint32_t)esp_get_minimum_free_heap_size(); }

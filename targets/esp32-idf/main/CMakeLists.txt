@@ -28,7 +28,8 @@ list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../compat/arduino_compat.cp
 
 # Target HAL implementations. od_hal_nvs is the first: config storage moved off LittleFS onto
 # NVS (2026-07-25), written to the shared/hal signature so promotion is a repoint.
-list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_nvs.c)
+list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_nvs.c
+                           ${CMAKE_CURRENT_LIST_DIR}/../ble/od_ble_nimble.cpp)
 
 # ---------------------------------------------------------------------------------------
 # Panel libraries, vendored -- see ../../../third_party/NOTICE.md for origin and licence.
@@ -80,6 +81,7 @@ idf_component_register(
         ${OD_SRC_DIR}
         ${CMAKE_CURRENT_LIST_DIR}/../compat
         ${CMAKE_CURRENT_LIST_DIR}/../hal
+        ${CMAKE_CURRENT_LIST_DIR}/../ble
         ${OD_LIB_DIR}/uzlib/src
         ${CMAKE_CURRENT_LIST_DIR}/../../../third_party/bb_epaper/src
         ${CMAKE_CURRENT_LIST_DIR}/../../../third_party/FastEPD/src
