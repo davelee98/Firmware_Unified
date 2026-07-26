@@ -27,12 +27,95 @@ hardware.
    deployed-unit OTA/flash-layout compatibility before starting. It is last because it is the
    only step that is pure toolchain migration with no new capability — if priorities shift, this
    is the one to defer.
-5. **`nrf52-sdk`** (from `Firmware_NRF`) — **not planned.** Legacy bare-C Nordic SDK; treated as
-   end-of-life. Confirm it is no longer shipped, then delete the directory.
+5. **`nrf52-sdk`** (from `Firmware_NRF`) — **not migrated, but not gone either.** Legacy bare-C
+   Nordic SDK. **It is shipped** — a handful of low-capability devices (established 2026-07-25)
+   — so the earlier "confirm it is no longer shipped, then delete" instruction is answered, and
+   answered the other way. Lower priority for development, not absent from the fleet.
+
+   The plan: it stays in `Firmware_NRF`, in maintenance only, and never becomes a target here.
+   Delete `targets/nrf52-sdk/` from this repo so the layout does not imply a migration that will
+   not happen — but record in this file that the deployed units are served from the original
+   repo, or the deletion will later read as "that fleet was forgotten."
+
+   **It still binds the wire contract.** Those units cannot be updated in practice, so the host
+   must keep working with them, and DIVERGENCE_MATRIX records what that means: no compression,
+   no `0x76`, no PIPE, no NFC, no `LED_STOP`, no `CONFIG_CLEAR`, no `READ_MSD` handler. That is
+   the **backward-compatibility floor for `py-opendisplay`**, and a hard one — a host change that
+   assumes any of those features is present breaks a shipped device with no remedy. Being
+   low-priority for development does not make it low-priority for compatibility.
 
 Note what steps 1 and 4 have in common: the `Firmware` repo is the source for **two** different
 targets in this plan, because its ESP32 and nRF52840 halves go to different toolchains. It is
 not retired until step 4 completes.
+
+## Deployed fleet status — what the migration may and may not break
+
+Established 2026-07-25. This is the constraint that prices every step below, so it comes before
+the procedure.
+
+| Chip | Shipped? | Bootloader today | OTA-capable partitions? | Consequence |
+|---|---|---|---|---|
+| **ESP32-S3** | **yes** | IDF 2nd-stage | **yes** — `default_8/16/32MB.csv` carry `app0` + `app1` | OTA is *unimplemented*, not unavailable. Nothing structural blocks updating the fleet |
+| **ESP32-C6** | **yes** | IDF 2nd-stage | **no** — `huge_app.csv` has `app0` only | Cannot OTA without repartitioning, and repartitioning *is* a physical reflash. Field units are bench-update-only |
+| **nRF52840** | **yes** | Adafruit UF2 | n/a | Moving to MCUboot replaces the bootloader → physical reflash of every deployed unit |
+| **nRF54L15** | **no** | — | — | Greenfield. No compatibility burden of any kind |
+| **nRF52 (legacy, `Firmware_NRF`)** | **yes** — a handful of low-capability devices | Nordic SDK | not assessed | Not migrated; maintained in place. Sets the host's backward-compatibility floor (strict feature subset — see "Order and rationale" item 5) |
+
+Three consequences that change decisions already recorded:
+
+1. **ESP32-S3 is the cheapest place to gain OTA.** The partition layout already has two app
+   slots, so `esp_ota` needs no layout change and no physical access. If the answer to
+   ARCHITECTURE.md's "can OTA extend to more targets" is to be *yes* anywhere, it is here.
+2. **ESP32-C6 sets a hard ceiling on Phase B.** A shipped 4 MB fleet on a single-slot layout
+   cannot be updated in the field at all. Any Phase B change to partitioning, config storage
+   (the LittleFS→NVS question), or bootloader behaviour is a bench visit per C6 unit — so
+   either keep those unchanged for C6, or accept touching every one.
+3. **nRF54L15 carries no field risk whatsoever.** It is the only target where bootloader,
+   partitioning, storage format, and wire behaviour can all change freely. Combined with it
+   being the better structural donor for `shared/` (already C, already HAL-shaped), this is a
+   real argument for reconsidering migration order — see the risk of the same name below.
+
+**ESP32 deployed-unit migration, decided 2026-07-25: flash and reconfigure.** No
+LittleFS→NVS config migration path is built. A deployed S3 or C6 unit is physically reflashed
+with the IDF firmware and then reconfigured from the host; stored config is not preserved
+across the transition. This removes the Phase B storage-migration work entirely and frees the
+partition layout, since every unit is being touched anyway.
+
+Two things follow, and the second is the valuable one:
+
+- **The cost is operational, not engineering** — one physical visit plus one reconfigure per
+  deployed unit. That cost is now known and bounded, rather than being a migration hazard.
+- **It is the one chance to fix C6's partitioning, and the layout is decided: `default.csv`.**
+  ESP32-C6 ships on `huge_app.csv` — a single 3 MB app slot, so it can never be updated over
+  the air. While each unit is on the bench, reflash it to **`default.csv`** (dual-slot), so it
+  never needs a bench visit again:
+
+  | Layout | app0 | app1 | filesystem |
+  |---|---|---|---|
+  | `huge_app.csv` (today) | 3 MB | — none — | 896 KB |
+  | **`default.csv` (decided 2026-07-25)** | **1.25 MB** | **1.25 MB** | 1.4 MB |
+  | `min_spiffs.csv` (fallback) | 1.875 MB | 1.875 MB | 128 KB |
+
+  **The condition this decision rests on: the IDF image must fit in 1.25 MB.** That is the
+  tighter of the two dual-slot options — chosen for the 1.4 MB filesystem — and it is less
+  headroom than the app has today by a wide margin. Measure the C6 IDF binary before the
+  rollout, not during it. If it exceeds 1.25 MB, `min_spiffs.csv` buys another 625 KB per slot
+  at the cost of the filesystem; if it exceeds 1.875 MB, C6 is bench-only permanently and that
+  should be recorded as a fact rather than rediscovered.
+
+  Reflashing C6 back onto `huge_app.csv` is the one outcome to avoid — it forecloses OTA for
+  that fleet forever, by choice rather than by constraint.
+
+**Bootloaders, decided 2026-07-25:** MCUboot for the NCS targets going forward (nRF54L15 now,
+nRF52840 when it lands) — the configuration already exists in `Firmware_NRF54` and is adopted
+target-wide; see `targets/nordic-zephyr/README.md` § Bootloader. ESP32 keeps the IDF
+second-stage bootloader and EFR32BG22 keeps the Gecko Bootloader + AppLoader; on both, changing
+the bootloader would mean physically touching shipped units to gain capability the existing one
+already provides.
+
+The catch to carry forward: **MCUboot OTA is firmware-complete on nRF54L15 and undriveable** —
+`py-opendisplay` has no SMP/mcumgr client, only legacy Nordic DFU and Silabs `.gbl`. One new
+host backend covers both Nordic boards, and it is unbudgeted.
 
 ## Per-target procedure
 
@@ -142,20 +225,77 @@ call; do not make it silently because an install was awkward on one box.
 
 ## Verification bar per subsystem
 
-A subsystem is "migrated" only when, on real hardware for that target:
+Two gates, in order. **Host tests come first** — they are cheap, parallel, and exercise the
+error paths that hardware testing never reaches. Do not promote a subsystem into `shared/core`
+without them, because the promotion is exactly when its error handling gets rewritten.
+
+**Gate 1 — host, no hardware** (ARCHITECTURE.md § "Everything on the wire is testable without
+hardware"; owned by this repo under `tests/` — see TEST_OWNERSHIP.md):
+
+- unit tests for every function in the promoted subsystem, run in CI on every push,
+- fuzz coverage for anything reachable pre-authentication (config TLV parse, frame dispatch),
+- stress coverage for the transfer state machines: reordered, duplicated, truncated, and
+  interleaved chunks,
+- shared wire vectors passing against both the C core and `py-opendisplay`, and
+- the subsystem compiling under every `OD_*_ENABLE` permutation it participates in.
+
+**Gate 2 — real hardware for that target**, unchanged:
 
 - a full image push renders correctly (compressed and uncompressed),
 - a config read/write round-trips,
 - the encrypted/authenticated path works if the target supports it, and
 - an interrupted transfer recovers (disconnect mid-stream, then retry).
 
+Gate 1 does not replace Gate 2 — a passing host suite says the logic is right, not that it runs
+on the chip. But a subsystem that fails Gate 1 should never reach a board.
+
 ## Risks to watch
 
-- **Concurrent development on `Firmware` during the ESP32 port.** This is the risk most likely
-  to derail the migration, and it is a scheduling problem rather than a technical one. The IDF
-  port is a multi-week change to the most actively developed repo; feature work landing
-  alongside it produces brutal rebase conflicts. Either pause feature work on `Firmware` for the
-  duration or accept that the port gets re-done against a moving target. Decide up front.
+- **Concurrent development on `Firmware` during the ESP32 port.** ~~Decide up front.~~
+  **DECIDED 2026-07-25: features are frozen on `Firmware` for the duration of the port.** This
+  was the risk most likely to derail the migration — a multi-week IDF port against the most
+  actively developed repo, which put +2007 lines in on 2026-07-25 alone (`#124`). The freeze
+  removes it, and unblocks Phase A.
+
+  What the freeze does *not* cover, and should be stated so it is not assumed: security
+  hotfixes (deferred separately — see below), build breakages, and changes to targets the port
+  does not touch. If an exception is needed, land it on `Firmware` and rebase the port
+  deliberately rather than letting the port drift silently.
+
+  The freeze has a cost that starts accruing now: every week of it is a week `Firmware` does not
+  ship features. That argues for keeping Phase A→B short and for not letting the port stall on
+  decisions that could have been made before it started.
+- **Migration order was set before the fleet status was known.** Step 1 (`esp32-idf`) is a
+  multi-week framework change against **two shipped product lines**, one of which (ESP32-C6)
+  cannot be field-updated at all. Step 2 (`nRF54L15`) is **not shipped** — zero field risk, and
+  the docs' own preferred structural donor for `shared/` (already C, already HAL-shaped). The
+  ordering rationale in "Order and rationale" is about feature completeness and boundary stress,
+  both of which predate knowing this.
+
+  The case for swapping steps 1 and 2: promote `shared/core` first on the target where a mistake
+  cannot reach a customer, then bring the reference implementation to a boundary that has
+  already survived one consumer. The case against: `Firmware`/ESP32 defines the feature set, so
+  `shared/core` shaped by NRF54 first may need widening later — and features are frozen on
+  `Firmware` *now*, so a long NRF54 detour spends that freeze without reducing the ESP32 work.
+  **Not re-decided here; priced so it can be.**
+- **Security bugs found during the survey — hotfix DEFERRED (decided 2026-07-25).** Three
+  defects were found in shipping firmware while surveying for this migration. The decision is
+  **not** to hotfix them in the source repos now; they are fixed when their subsystem is
+  promoted to `shared/core`, on the shared implementation. Recorded here so the exposure is
+  deliberate and reviewable rather than forgotten:
+
+  | Defect | Where | Exposure while deferred |
+  |---|---|---|
+  | Plaintext bypass for frames < 31 bytes | `Firmware_Silabs/opendisplay_pipe.c:1236` | With `sec_enabled()`, short commands (REBOOT, DEEP_SLEEP) execute unauthenticated from any BLE peer — no session required |
+  | Session survives a key change | Silabs — no `clear_session()` on any config-save path | An old session keeps working after the encryption key is rotated |
+  | `diff == 0` replay | session/nonce handling | A replayed frame at the current counter is accepted |
+
+  These are BLE-proximity attacks on display devices, not remote ones, which is the reason the
+  deferral is defensible. Two consequences to accept along with it: the exposure lasts until the
+  session/dispatch subsystems are promoted — months, not weeks, and *after* Silabs is step 3 —
+  and the shared implementations must land with these closed, so they are Gate 1 test cases
+  (DIVERGENCE_MATRIX §1.5a, §2.4), not TODOs. If the timeline slips materially, revisit this
+  decision rather than inheriting it by default.
 - **Silent behavioural divergence.** The repos do not implement identical semantics today. When
   promoting logic to `shared/`, differences must be resolved deliberately and written down — not
   settled by whichever repo was copied first. Note the two donors pull in different directions
@@ -188,6 +328,20 @@ A subsystem is "migrated" only when, on real hardware for that target:
   machine today, and the Silabs target additionally needs a full Simplicity SDK for
   `slc generate`. Stand up a CI build matrix early — the `shared/` boundary grep is necessary
   and nowhere near sufficient.
+- **OTA exists for exactly one target, and the migration assumes more.** Field firmware update
+  works only on EFR32BG22 (`.gbl` via the Silabs AppLoader, the sole OTA extra pinned in
+  `Home_Assistant_Integration`'s `manifest.json`). ESP32 has none — `ENTER_DFU` merely reboots.
+  `py-opendisplay` carries a legacy Nordic DFU implementation (`ota.py: perform_nrf_dfu`) that
+  HA does not pin, so it is unshipped library capability.
+
+  The consequence is concrete: **a target with no field-update path cannot have its flash
+  layout or bootloader changed without a bench reflash of every deployed unit.** That is a hard
+  constraint on the ESP32 framework change (step 1) and on the nRF52840 port (step 4), whose
+  own entry already says "settle deployed-unit OTA/flash-layout compatibility before starting"
+  — this is why. **Open item for investigation: can OTA be extended to more targets?** Resolve
+  it before Phase B commits to a partition layout, and record the answer here. It may
+  legitimately conclude "no, and these units are bench-updated only" — but that must be a
+  decision, not a discovery made after the layout changed.
 - **Vendored binaries bloating history permanently.** The Silabs SDK is the large case (see "The
   Silabs SDK is not imported as-is"), but the rule is general: a binary committed once is
   carried forever, and every target here vendors *something*. Decide what a blob's pruned form
