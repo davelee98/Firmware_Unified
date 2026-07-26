@@ -111,6 +111,14 @@ option 1 **before** phase B, not during. That is what `targets/esp32-idf/main/CM
 does: on a FastEPD board it compiles `Group5.cpp` from FastEPD and excludes bb_epaper's; on a
 non-FastEPD board only bb_epaper's exists and the question does not arise.
 
+**Resolved 2026-07-26, and the collision was wider than Group5.cpp.** FastEPD and bb_epaper
+also both carry `bb_ep_gfx.inl`, defining `bbepUnicodeTo1252`, `bbepUnicodeString`,
+`RotateCharBox`, `bbepStretchAndSmooth` and `millis`. Excluding one copy does not work:
+each library's own wrappers call into its copy, even though the application calls none of
+them. **FastEPD's copy is therefore given internal linkage** (an anonymous namespace,
+`OD-PATCH` in `FastEPD.cpp`) so both libraries keep a private copy and there is no
+arbitrary linker winner. The duplicated text is mostly discarded as unreferenced.
+
 The premise this rests on, from MEMORY_CONSTRAINTS: *"confirm both drawing APIs are not
 simultaneously required on any single board first."* The `platformio.ini` comment asserts they
 are not — only FastEPD's buffer/update APIs are used on those boards. **That assertion has not

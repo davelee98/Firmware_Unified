@@ -54,10 +54,19 @@ unsigned long micros(void)
 {
     return (unsigned long)(esp_timer_get_time());
 }
+/* OD-PATCH: millis() is also defined by bb_epaper's esp_idf backend, and linking both
+ * is a duplicate symbol. bb_epaper provides it -- it is the cross-target library.
+ * The rest of this file is required by FastEPD.inl and stays. */
+#if 0
+#endif
+/* Declaration only -- the definition lives in bb_epaper's esp_idf backend. */
+extern uint32_t millis(void);
+#if 0
 unsigned long millis(void)
 {
     return micros() / 1000;
 }
+#endif
 
 void delayMicroseconds(uint32_t us)
 {
