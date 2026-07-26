@@ -63,6 +63,21 @@ shim_users() {
         | grep -v '^targets/esp32-idf/compat/' || true
 }
 
+# Vendored libraries include the shim too, and the grep above never saw them: it is scoped to
+# targets/esp32-idf, so third_party/ was a blind spot. bb_epaper and FastEPD ARE Arduino
+# libraries -- depending on Arduino.h/Wire.h/SPI.h is their normal state, not creeping shim
+# usage -- so they do NOT belong in the app-code budget, which measures OUR migration. But they
+# must not be invisible either: when the budget reaches 0 the instruction is to delete compat/,
+# and doing that with third_party still including those headers breaks the build.
+#
+# Reported separately and never enforced. The real fix for these is upstream IO backends
+# (see third_party/NOTICE.md), not a number that has to fall.
+third_party_shim_users() {
+    grep -rlE '#[[:space:]]*include[[:space:]]*[<"][[:space:]]*(arduino_compat|Arduino|Wire|SPI|WiFi|ledc_compat|esp32-hal-gpio)\.h' \
+         third_party --include='*.c' --include='*.cpp' --include='*.h' \
+         --include='*.hpp' --include='*.inl' 2>/dev/null || true
+}
+
 if [ -d targets/esp32-idf ]; then
     actual=$(shim_users | wc -l | tr -d '[:space:]')
 else
@@ -70,6 +85,17 @@ else
 fi
 
 echo "arduino_compat.h: $actual file(s) include it; budget is $budget"
+
+if [ -d third_party ]; then
+    tp_count=$(third_party_shim_users | wc -l | tr -d '[:space:]')
+    if [ "$tp_count" -gt 0 ]; then
+        echo
+        echo "note: $tp_count vendored file(s) under third_party/ also include shim headers."
+        third_party_shim_users | sed 's/^/    /'
+        echo "      Not counted in the budget (vendored Arduino libraries), but compat/ cannot"
+        echo "      be deleted until they have real ESP-IDF IO backends. See third_party/NOTICE.md."
+    fi
+fi
 
 if [ "$actual" -gt "$budget" ]; then
     echo
@@ -95,6 +121,11 @@ if [ "$actual" -eq 0 ]; then
     echo
     echo "Budget is 0. If targets/esp32-idf/compat/arduino_compat.h no longer exists, phase C"
     echo "is complete: delete $COMPAT_DIR and .github/workflows/esp32-shim-ratchet.yml together."
+    if [ -d third_party ] && [ "$(third_party_shim_users | wc -l | tr -d '[:space:]')" -gt 0 ]; then
+        echo
+        echo "NOT YET: the vendored files listed above still include shim headers. Deleting"
+        echo "$COMPAT_DIR now would break the build. Give them ESP-IDF IO backends first."
+    fi
 fi
 
 echo "OK: shim usage is at its recorded budget."

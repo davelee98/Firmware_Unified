@@ -101,6 +101,26 @@ idf_component_register(
 # Arduino/PlatformIO plumbing (ARDUINO_USB_*, board_build.*) which became sdkconfig instead.
 target_compile_definitions(${COMPONENT_LIB} PRIVATE ${OD_BOARD_DEFINES})
 
+# FastEPD selects its IO backend with `#ifdef ARDUINO / #elif defined(__LINUX__)`. Under IDF
+# NEITHER was defined, so every it8951 transport function in FastEPD.inl compiled to an EMPTY
+# BODY between two gpio_set_level() calls: commands sent nothing, pixel writes sent nothing,
+# and it8951ReadData() returned 0 -- while the GPIO reset/busy handshake still looked healthy.
+# It linked and it booted; the panel simply never received a byte.
+#
+# OD_FASTEPD_IDF_SPI selects a THIRD branch, added as an OD-PATCH in FastEPD.inl, that drives
+# the transport through compat/SPI.h. Defining ARDUINO instead was tried and rejected: it also
+# selects FastEPD's Arduino font/Print/PROGMEM surface (pgm_read_*, memcpy_P, ledcAttach,
+# TwoWire::setTimeout), which is a whole Arduino core rather than an IO backend, and bb_epaper
+# reads the same macro and must keep its esp_idf backend.
+#
+# Both this define and the patch disappear when FastEPD gains a real esp_idf IO backend
+# upstream. See third_party/NOTICE.md § "FastEPD has no ESP-IDF IO backend".
+if(OD_BOARD IN_LIST OD_FASTEPD_BOARDS)
+    set_source_files_properties(${OD_TP_DIR}/FastEPD/src/FastEPD.cpp
+        TARGET_DIRECTORY ${COMPONENT_LIB}
+        PROPERTIES COMPILE_DEFINITIONS "OD_FASTEPD_IDF_SPI=1")
+endif()
+
 # The imported sources are Arduino C++ and will not be warning-clean under IDF's defaults for
 # some time. Phase B's goal is to LINK AND BOOT, so warnings stay warnings here -- unlike
 # shared/, which is -Werror from its first line (tests/host/CMakeLists.txt). Tightening this

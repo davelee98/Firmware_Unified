@@ -1803,6 +1803,14 @@ void updatemsdata(){
             od_ble_restart_advertising();
         }
     }
+    /* The LAN peer reads the same MSD payload out of the mDNS TXT record, so it has to be
+     * refreshed on the same cadence as the advertisement. The NimBLE-C port dropped this
+     * call; the only remaining caller was restartLanService(), which meant the TXT record
+     * was written once at LAN start and then never again -- a host on LAN saw battery,
+     * sensor and touch data frozen at connect time while BLE clients saw it update. */
+#ifdef OPENDISPLAY_HAS_WIFI
+    opendisplay_mdns_update_msd_txt();
+#endif
 #endif
     mloopcounter++;
     mloopcounter &= 0x0F;

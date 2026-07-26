@@ -130,6 +130,57 @@ int od_hal_nvs_save(const uint8_t *buf, uint32_t len)
     return OD_HAL_NVS_OK;
 }
 
+int od_hal_nvs_secure_erase(void)
+{
+    if (od_hal_nvs_init() != OD_HAL_NVS_OK) {
+        return OD_HAL_NVS_EIO;
+    }
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(OD_NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return OD_HAL_NVS_OK;   /* nothing stored */
+    }
+    if (err != ESP_OK) {
+        return OD_HAL_NVS_EIO;
+    }
+
+    /* Same-size zero write before the erase. See the contract note in od_hal_nvs.h: this is
+     * best-effort on a log-structured store, not a guaranteed overwrite of the old bytes. */
+    size_t stored = 0;
+    err = nvs_get_blob(h, OD_NVS_KEY, NULL, &stored);
+    if (err == ESP_OK && stored > 0) {
+        /* Chunked so the wipe never needs a buffer the size of the record. */
+        uint8_t zeros[64];
+        memset(zeros, 0, sizeof(zeros));
+        if (stored <= sizeof(zeros)) {
+            (void)nvs_set_blob(h, OD_NVS_KEY, zeros, stored);
+        } else {
+            /* NVS has no partial-blob write, so build the zero record on the stack in one
+             * pass. MAX_CONFIG_SIZE-sized records make this the one place the wipe pays for
+             * the blob interface; it runs once, off the transfer path. */
+            static uint8_t zero_blob[OD_HAL_NVS_MAX_RECORD];
+            if (stored <= sizeof(zero_blob)) {
+                memset(zero_blob, 0, stored);
+                (void)nvs_set_blob(h, OD_NVS_KEY, zero_blob, stored);
+            }
+        }
+        (void)nvs_commit(h);
+    }
+
+    err = nvs_erase_key(h, OD_NVS_KEY);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+
+    ESP_LOGI(TAG, "config record zero-written and erased (%u B)", (unsigned)stored);
+    return (err == ESP_OK) ? OD_HAL_NVS_OK : OD_HAL_NVS_EIO;
+}
+
 int od_hal_nvs_erase(void)
 {
     if (od_hal_nvs_init() != OD_HAL_NVS_OK) {

@@ -1,5 +1,5 @@
 #include "wifi_service.h"
-#include "host/ble_hs.h"   /* OD: BLE identity address for the mDNS TXT record */
+#include "od_ble.h"        /* OD: BLE identity address for the mDNS TXT record */
 
 #ifdef OPENDISPLAY_HAS_WIFI
 
@@ -394,12 +394,15 @@ void opendisplay_mdns_update_msd_txt(void) {
 // VALIDATION REQUIRED: confirm NimBLEDevice::getAddress() == the advertised AdvA
 // HA sees (public vs static-random) on BOTH S3 and C6.
 static String advertisedBleMacLower(void) {
-    /* OD: was NimBLEDevice::getAddress(). The C API reads the identity address directly. */
+    /* OD: was NimBLEDevice::getAddress(). Sourced from od_ble, which knows which address type
+     * ble_hs_id_infer_auto() actually selected -- reading BLE_ADDR_PUBLIC unconditionally (as
+     * an earlier version of this did) publishes the wrong MAC on any unit that advertises a
+     * static-random address, and returns empty on one with no public address at all. That is
+     * exactly the mismatch the VALIDATION REQUIRED note above warns about. */
     uint8_t addr[6] = {0};
     uint8_t addr_type = 0;
     char buf[18] = {0};
-    if (ble_hs_id_copy_addr(BLE_ADDR_PUBLIC, addr, NULL) != 0) {
-        (void)addr_type;
+    if (!od_ble_get_identity_addr(addr, &addr_type)) {
         return String("");
     }
     /* NimBLE stores the address little-endian; print it MSB-first, lower-case, which is the

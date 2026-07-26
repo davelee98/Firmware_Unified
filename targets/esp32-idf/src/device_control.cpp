@@ -257,12 +257,11 @@ static void esp32_ble_deinit_before_restart() {
         if (pAdvertising != nullptr) pAdvertising->stop();
     }
     delay(200);
-    /* Was BLEDevice::deinit(true). The C API's equivalent is stopping advertising and
-     * clearing handles; a full nimble_port_deinit() is deliberately NOT done here because
-     * this path runs immediately before a software reset, and tearing the host down under
-     * an active connection is a known source of hangs. The controller is released by the
-     * reset itself. */
-    od_ble_stop_advertising();
+    /* Was BLEDevice::deinit(true); the port briefly replaced it with od_ble_stop_advertising(),
+     * which does not touch the controller at all -- contradicting the comment above, which is
+     * the whole reason this function exists. od_ble_deinit() stops the host AND releases the
+     * controller, which is what BLEDevice::deinit(true) did. */
+    od_ble_deinit();
     esp32_ble_clear_handles();
     delay(100);
     od_log_info("BLE deinitialized before restart");

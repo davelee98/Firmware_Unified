@@ -66,6 +66,25 @@ void od_ble_clear_handles(void);
 /* Preferred ATT MTU, requested at init. */
 void od_ble_set_preferred_mtu(uint16_t mtu);
 
+/* Stop the host and RELEASE THE BT CONTROLLER. Call before esp_restart().
+ *
+ * esp_restart() resets the CPU but not the controller, so without this the next
+ * (software-reset) boot re-enters od_ble_init() with a controller that is already enabled;
+ * nimble_port_init() then fails and BLE comes up dead for the rest of that boot, with only
+ * a log line to say so. Stopping advertising is NOT a substitute -- it does not touch the
+ * controller at all. Not needed before deep sleep: that powers the digital core down. */
+void od_ble_deinit(void);
+
+/* The identity address the stack actually advertises, and its type (BLE_ADDR_PUBLIC or
+ * BLE_ADDR_RANDOM), in NimBLE's little-endian byte order. Returns false before the host has
+ * synced, when there is no address to report.
+ *
+ * Exists because the LAN mDNS TXT record has to publish the SAME address the advertisement
+ * uses. Reading BLE_ADDR_PUBLIC directly is wrong: od_ble_init() resolves its type with
+ * ble_hs_id_infer_auto(), which selects a static-random address when no public one is
+ * available, and a host that matches on the MAC then cannot correlate BLE with LAN. */
+bool od_ble_get_identity_addr(uint8_t addr_out[6], uint8_t *addr_type_out);
+
 #ifdef __cplusplus
 }
 #endif

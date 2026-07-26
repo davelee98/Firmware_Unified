@@ -31,6 +31,11 @@ extern "C" {
 #define OD_HAL_NVS_EIO      -5
 #define OD_HAL_NVS_E2BIG    -7   /* stored record is larger than the caller's buffer */
 
+/* Largest record this HAL will handle: the config header plus MAX_CONFIG_SIZE (4096 on every
+ * target since 2026-07-25). Only od_hal_nvs_secure_erase() needs it, to size its zero buffer
+ * without including the config layer's headers. */
+#define OD_HAL_NVS_MAX_RECORD  4160u
+
 /* One-time init. Safe to call more than once. */
 int od_hal_nvs_init(void);
 
@@ -45,6 +50,22 @@ int od_hal_nvs_save(const uint8_t *buf, uint32_t len);
 
 /* Remove the stored record. Succeeds when there was nothing to remove. */
 int od_hal_nvs_erase(void);
+
+/* Overwrite the stored record with zeros, then remove it.
+ *
+ * For the security wipe (encryption.cpp's secureEraseConfig), which exists because the record
+ * contains the AES-128 master key from config packet 0x27. A plain erase is NOT sufficient:
+ * nvs_erase_key() marks the entry deleted but leaves its bytes in the flash sector until a
+ * garbage-collection pass happens to reclaim it, so the key stays recoverable from a raw dump.
+ *
+ * This is best-effort, and deliberately documented as such: NVS is log-structured, so the
+ * zero-write lands in a NEW entry rather than on top of the old bytes. What it does guarantee
+ * is that the erase is preceded by a same-size write, which is what forces NVS to consider the
+ * page full and makes reclamation of the old entry likely rather than incidental. A guaranteed
+ * wipe needs nvs_flash_erase() on the whole partition -- which also destroys the device's
+ * pairing and panel config, so it is the caller's decision, not this function's.
+ * See docs/FOLLOWUPS.md. */
+int od_hal_nvs_secure_erase(void);
 
 #ifdef __cplusplus
 }

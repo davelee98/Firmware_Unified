@@ -41,6 +41,7 @@ static const ble_uuid128_t od_chr_uuid =
 static uint16_t s_chr_val_handle = 0;
 static uint16_t s_conn_handle    = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t  s_own_addr_type  = 0;
+static bool     s_addr_resolved  = false;   /* s_own_addr_type is meaningful only after sync */
 static uint16_t s_preferred_mtu  = 0;
 static bool     s_inited         = false;
 
@@ -173,29 +174,27 @@ static void od_ble_advertise(void)
     memset(&fields, 0, sizeof fields);
 
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    fields.uuids128 = (ble_uuid128_t *)&od_svc_uuid;
-    fields.num_uuids128 = 1;
-    fields.uuids128_is_complete = 1;
 
+    /* The 31-byte advertisement cannot hold both: flags(3) + 128-bit UUID(18) + 16-byte
+     * MSD(18) = 39. The MSD wins -- it is what host discovery keys on (manufacturer id 9286)
+     * and it carries the live sensor payload; the service UUID is discoverable after connect.
+     *
+     * Chosen up front rather than by letting ble_gap_adv_set_fields() fail and retrying: the
+     * retry path fired on EVERY advertise, logging a warning each time for a condition that
+     * is fixed and known at compile time. The UUID is only included when there is no MSD. */
     if (s_msd_len) {
         fields.mfg_data = s_msd;
         fields.mfg_data_len = s_msd_len;
+    } else {
+        fields.uuids128 = (ble_uuid128_t *)&od_svc_uuid;
+        fields.num_uuids128 = 1;
+        fields.uuids128_is_complete = 1;
     }
 
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
-        /* The 31-byte advertisement is tight: a 128-bit UUID costs 18 bytes and the 16-byte
-         * MSD costs 18 more, which does not fit. Drop the UUID rather than the MSD -- the
-         * MSD is what host discovery keys on (manufacturer id 9286). */
-        ESP_LOGW(TAG, "adv fields too large (rc=%d); retrying without the service UUID", rc);
-        fields.num_uuids128 = 0;
-        fields.uuids128 = NULL;
-        fields.uuids128_is_complete = 0;
-        rc = ble_gap_adv_set_fields(&fields);
-        if (rc != 0) {
-            ESP_LOGE(TAG, "ble_gap_adv_set_fields failed: %d", rc);
-            return;
-        }
+        ESP_LOGE(TAG, "ble_gap_adv_set_fields failed: %d", rc);
+        return;
     }
 
     /* Name goes in the scan response, where there is room for it. */
@@ -226,6 +225,11 @@ static void od_on_sync(void)
         ESP_LOGE(TAG, "no usable BLE address");
         return;
     }
+    /* Published to the LAN mDNS TXT record via od_ble_get_identity_addr(); a host correlating
+     * BLE with LAN matches on it, so log which kind it is. */
+    s_addr_resolved = true;
+    ESP_LOGI(TAG, "BLE identity address type: %s",
+             (s_own_addr_type == BLE_OWN_ADDR_PUBLIC) ? "public" : "static-random");
     od_ble_advertise();
 }
 
@@ -346,4 +350,43 @@ void od_ble_set_preferred_mtu(uint16_t mtu)
     if (s_inited && mtu) {
         ble_att_set_preferred_mtu(mtu);
     }
+}
+
+bool od_ble_get_identity_addr(uint8_t addr_out[6], uint8_t *addr_type_out)
+{
+    if (!addr_out || !s_inited || !s_addr_resolved) {
+        return false;
+    }
+    /* s_own_addr_type is BLE_OWN_ADDR_* as ble_gap_adv_start() consumes it; ble_hs_id_copy_addr
+     * wants a BLE_ADDR_* identity type. The two low values coincide (PUBLIC=0, RANDOM=1) and
+     * only the RPA variants differ, which this build never selects. */
+    uint8_t id_type = (s_own_addr_type == BLE_OWN_ADDR_PUBLIC) ? BLE_ADDR_PUBLIC
+                                                               : BLE_ADDR_RANDOM;
+    if (ble_hs_id_copy_addr(id_type, addr_out, NULL) != 0) {
+        return false;
+    }
+    if (addr_type_out) {
+        *addr_type_out = id_type;
+    }
+    return true;
+}
+
+void od_ble_deinit(void)
+{
+    if (!s_inited) {
+        return;
+    }
+    ble_gap_adv_stop();
+    /* nimble_port_stop() unblocks nimble_port_run() in the host task; nimble_port_deinit()
+     * then tears the host down AND disables/releases the controller, which is the half that
+     * od_ble_stop_advertising() never did and that esp_restart() does not do for us. */
+    if (nimble_port_stop() == 0) {
+        nimble_port_deinit();
+    }
+    s_chr_val_handle = 0;
+    s_conn_handle    = BLE_HS_CONN_HANDLE_NONE;
+    s_addr_resolved  = false;
+    s_inited         = false;
+    esp32BleNotifySubscribed = false;
+    ESP_LOGI(TAG, "NimBLE host stopped and controller released");
 }
