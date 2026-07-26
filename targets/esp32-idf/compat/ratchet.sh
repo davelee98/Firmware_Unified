@@ -34,13 +34,25 @@ fi
 
 # Count FILES (not occurrences) that include the shim, anywhere under the target.
 # -l so a file including it twice still counts once; that is the unit the budget is in.
+# Counts users of EITHER arduino_compat.h OR Arduino.h.
+#
+# MIGRATION.md specifies "the number of files including arduino_compat.h". Taken literally
+# that would measure nothing: the imported sources write `#include <Arduino.h>`, and
+# compat/Arduino.h forwards to the real shim, so a literal count would sit at 1 forever
+# regardless of how many files actually depend on the Arduino surface. The forwarder would
+# launder every dependency past the ratchet.
+#
+# What the check is *for* is "how many files still need Arduino", so that is what it counts.
+# compat/ itself is excluded -- the shim including its own header is not a user of it.
+#
 # NOTE the `|| true`: grep exits 1 when it matches nothing, which under `set -e` + `pipefail`
 # aborts the script on the healthiest possible state -- zero shim users. Without it this check
 # fails hardest exactly when the port has succeeded.
 shim_users() {
-    grep -rlE '#[[:space:]]*include[[:space:]]*[<"][^">]*arduino_compat\.h' \
+    grep -rlE '#[[:space:]]*include[[:space:]]*[<"][[:space:]]*(arduino_compat|Arduino)\.h' \
          targets/esp32-idf --include='*.c' --include='*.cpp' --include='*.h' \
-         --include='*.hpp' --include='*.inl' 2>/dev/null || true
+         --include='*.hpp' --include='*.inl' 2>/dev/null \
+        | grep -v '^targets/esp32-idf/compat/' || true
 }
 
 if [ -d targets/esp32-idf ]; then

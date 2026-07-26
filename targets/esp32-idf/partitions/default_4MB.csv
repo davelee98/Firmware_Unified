@@ -1,0 +1,13 @@
+# ESP32-C6 4 MB, dual app slots -- the layout decided 2026-07-25 to replace huge_app.csv on
+# the shipped C6 fleet while each unit is on the bench. See README.md § Partitions and
+# ../../docs/MIGRATION.md § "Deployed fleet status".
+#
+# GATE: the C6 IDF image must fit in 1.25 MB. That is tighter than the 3 MB the Arduino build
+# enjoys today and is a phase-B measurement, not a rollout-time discovery. If it does not fit,
+# min_spiffs.csv buys 1.875 MB per slot at the cost of the filesystem.
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xe000,   0x2000,
+app0,       app,  ota_0,    0x10000,  0x140000,
+app1,       app,  ota_1,    0x150000, 0x140000,
+spiffs,     data, spiffs,   0x290000, 0x160000,

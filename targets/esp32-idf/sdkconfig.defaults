@@ -1,0 +1,20 @@
+# Common to every board. Per-chip settings go in sdkconfig.defaults.<idf_target>;
+# per-board settings go in boards/<board>.cmake.
+
+
+# NimBLE, not Bluedroid: the source uses NimBLE-Arduino, and the C API port keeps the same
+# stack rather than adding a second migration. See docs/TOOLCHAINS.md.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+
+# The source builds C++ with exceptions and RTTI off under Arduino; keep that, since shared/
+# is C and the target code gains nothing from either.
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_CXX_RTTI=n
+
+# platformio.ini set -DCONFIG_FREERTOS_WATCHDOG_TIMEOUT_S=120 as a define, which under IDF is
+# a real Kconfig symbol -- setting it here is the correct translation.
+# IDF caps this Kconfig at [1,60]; platformio.ini asked for 120 via -D, which the Arduino
+# core accepted. 60 is the closest legal value -- a real translation finding, not a typo.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=60

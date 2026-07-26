@@ -2,7 +2,72 @@
 
 Source repo: `Firmware` (https://github.com/OpenDisplay/Firmware.git)
 
-## Import status: **Phase A complete — does not build**
+## Import status: **Phase B in progress — configures, partially compiles, does not link**
+
+The IDF project is real: `idf.py -DOD_BOARD=s3-n16r8 build` **configures cleanly** against
+ESP-IDF v5.5.4 — board fragment, sdkconfig fragments, custom partition table and the `main`
+component all resolve. Compilation then stops on six missing third-party headers, below.
+
+Build it with `./build.sh <board>` once that script lands; today:
+
+```bash
+source ~/esp/esp-idf/export.sh
+idf.py -DOD_BOARD=s3-n16r8 build
+```
+
+### Measured blocker census (2026-07-25, s3-n16r8)
+
+Every remaining failure is a *missing third-party header*, not a language or API problem —
+the Arduino shim cleared `Arduino.h` from the census entirely:
+
+| Missing header | Files | Nature |
+|---|---|---|
+| `bb_epaper.h` | 3 (incl. `main.h`) | vendor `third_party/bb_epaper` — **blocks the most**, since `main.h` is included nearly everywhere |
+| `NimBLEDevice.h` | 3 | the ~450-line C-API rewrite; cannot be shimmed |
+| `Wire.h` | 3 | mechanical shim over `driver/i2c_master.h` |
+| `LittleFS.h` | 2 | storage decision — shim, or go straight to NVS |
+| `SPI.h` | 1 | mechanical shim |
+| `esp32-hal-gpio.h` | 1 | Arduino-ESP32 internal; fold into the shim |
+
+`od_log.cpp` and the uzlib sources compile. The "2 of 21 clean" headline understates progress:
+`bb_epaper.h` is pulled in via `main.h`, so one missing vendor tree accounts for most of the
+remaining failures rather than 19 independent problems.
+
+### What phase B still needs
+
+1. **`third_party/bb_epaper`, assembled — a decision, not a copy.** TOOLCHAINS.md § "Where
+   bb_epaper and uzlib live" establishes that **no existing copy is a superset**: upstream
+   `~/bb_epaper` has the `esp_idf/` backends but no `nrf54_zephyr_io.inl` or
+   `silabs_efr32_io.inl`; the `Firmware_NRF54` and `Firmware_Silabs` copies have those and no
+   `esp_idf/`. The single vendored copy has to be assembled from both, which makes it a fork
+   with no upstream-sync owner (DESIGN_REVIEW F9). Settle that before the first commit of it.
+2. **The NimBLE C-API port** — `ble_init.cpp` + `esp32_ble_callbacks.h`, ~450 lines. The one
+   genuine rewrite in this phase.
+3. **`Wire.h` / `SPI.h` / `esp32-hal-gpio.h`** — mechanical, and the I2C side must land on
+   `driver/i2c_master.h` (IDF ≥ 5.2), never the deprecated `driver/i2c.h`.
+4. **LittleFS: shim or replace?** Deployed ESP32 units keep config in LittleFS, but the fleet
+   decision is flash-and-reconfigure with no migration path (MIGRATION.md § "Deployed fleet
+   status"), and TOOLCHAINS recommends converging on NVS. So this can be a temporary
+   `esp_littlefs` shim now and NVS later, or NVS immediately. The second is cleaner and is a
+   subsystem change inside phase B, which cuts against "shim first, change later".
+5. **Measure the C6 image against the 1.25 MB slot** — a phase-B gate (see § Partitions).
+
+### Toolchain translation findings
+
+Recorded as they are found, since TOOLCHAINS.md's translation table was written from reading
+rather than building:
+
+- **`CONFIG_FREERTOS_WATCHDOG_TIMEOUT_S=120` does not translate.** `platformio.ini` passed it
+  as a `-D`, which the Arduino core accepted. Under IDF it is a real Kconfig symbol,
+  `CONFIG_ESP_TASK_WDT_TIMEOUT_S`, with an enforced range of **[1, 60]** — 120 is rejected and
+  silently falls back to the default. `sdkconfig.defaults` uses 60, the closest legal value.
+  Whether the original 120 was load-bearing is unverified; if it was, the watchdog must be
+  reconfigured at runtime instead.
+- **`ARDUINO_USB_MODE` / `ARDUINO_USB_CDC_ON_BOOT` have no define equivalent.** They become
+  the sdkconfig console choice (`CONFIG_ESP_CONSOLE_USB_CDC`), which is why they appear in
+  `sdkconfig.defaults.esp32s3` and not in the board fragment's define list.
+
+## Phase A (complete) — sources imported unchanged
 
 | | |
 |---|---|

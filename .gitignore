@@ -39,3 +39,8 @@ _build/
 *.key
 secrets.*
 factory_config*.hex
+
+# ESP-IDF build artefacts (targets/esp32-idf builds out-of-tree, but idf.py defaults to ./build)
+build/
+sdkconfig
+sdkconfig.old
