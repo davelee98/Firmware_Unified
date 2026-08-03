@@ -341,6 +341,49 @@ a fleet's addresses the way this one just did. The symbol cannot go in the commo
 `CONFIG_ESP_MAC_UNIVERSAL_MAC_ADDRESSES_*` is a bare bool with no prompt that the chip choice
 `select`s.
 
+### 7b. NimBLE host-stack log level — the same inherited-default trap
+
+Second instance of 7a's mechanism, found the same week. The stack logs
+`BLE_HS_LOG(INFO, ...)` from inside itself — `"GATT procedure initiated: notify"` plus
+`att_handle=` on **every notify** (`ble_gattc.c:629`), and a five-line block per
+advertise/stop-advertise (`ble_gap.c:3972`, `:4274`). A 414-chunk `PIPE_WRITE` emitted roughly
+800 extra UART lines.
+
+**It is not the NimBLE setting** — `CONFIG_BT_NIMBLE_LOG_LEVEL` is INFO in both builds. It is
+the global ceiling:
+
+| | pioarduino | ESP-IDF default | Ours before | Ours now |
+|---|---|---|---|---|
+| `CONFIG_LOG_DEFAULT_LEVEL` | 1 (ERROR) | 3 (INFO) | 3 | 3 |
+| `CONFIG_LOG_MAXIMUM_LEVEL` | 1 (ERROR) | 3 (INFO) | 3 | 3 |
+| `CONFIG_BT_NIMBLE_LOG_LEVEL` | 1 (INFO) | 1 (INFO) | 1 (INFO) | **2 (WARNING)** |
+
+`MAXIMUM_LEVEL` is a compile-time ceiling, so at ERROR the preprocessor strips every `ESP_LOGI`
+in the firmware — NimBLE's included. Arduino set it to ERROR; IDF defaults to INFO; this project
+never named the symbol.
+
+The cost that mattered was not noise. `od_log` takes a mutex and writes to UART0 while `ESP_LOG`
+writes to the same UART with **no shared lock**, so records interleaved mid-line:
+
+```
+ERX 0x0040 (31 B): 00 40 C8 19 ... 27 B6 00I (137013) NimBLE: GATT procedure initiated: notify;
+```
+
+Every hex dump in a capture taken that way is suspect, which cost real debugging time during the
+dark-panel investigation.
+
+**Resolution: `CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y`, and deliberately NOT matching Arduino's
+global ERROR ceiling.** Lowering the ceiling would also strip *our* useful `ESP_LOGI` lines —
+`od_ble`'s resolved identity-address type and GATT `val_handle`, and the `bbep` BUSY-wait timeout
+warning that made the dark-panel diagnosis possible. Silence the noisy component, not the whole
+log. Verified by symbol inspection rather than config: the three NimBLE format strings are absent
+from the linked image and the three of ours are present. 5 KB of flash reclaimed on the S3.
+
+**The two-writers-on-one-UART problem is NOT fixed** and is now the remaining cause of corrupted
+log lines. `od_log`'s mutex does not and cannot cover `ESP_LOG`. Either route both through one
+sink or accept that any `ESP_LOG` at a visible level can splice a line. Worth doing before the
+next hardware capture is trusted.
+
 **The general lesson, which applies to the whole migration.** `docs/TOOLCHAINS.md`'s
 PlatformIO-knob → sdkconfig translation table was built from `platformio.ini`'s `build_flags` —
 i.e. from what the project *set*. This is a wire-visible behaviour the project silently

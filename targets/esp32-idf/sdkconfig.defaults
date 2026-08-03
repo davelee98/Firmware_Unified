@@ -8,6 +8,37 @@ CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 
+# Silence NimBLE's own INFO chatter. THREE reasons, and the second is the one that matters.
+#
+# The stack logs BLE_HS_LOG(INFO, ...) from inside itself -- "GATT procedure initiated: notify"
+# plus "att_handle=16" on EVERY notify (ble_gattc.c:629), and a five-line block on every
+# advertise/stop-advertise (ble_gap.c:3972, :4274). A 414-chunk PIPE_WRITE emits roughly 800
+# extra UART lines.
+#
+# 1. Noise: it buries the firmware's own log at exactly the moments worth reading.
+# 2. LINE CORRUPTION. od_log takes a mutex and writes to UART0; ESP_LOG writes to the same UART
+#    with no shared lock. Two independent writers means records interleave MID-LINE, e.g.
+#      ERX 0x0040 (31 B): 00 40 C8 19 ... 27 B6 00I (137013) NimBLE: GATT procedure initiated...
+#    Every hex dump in a capture taken this way is suspect, which cost real debugging time.
+# 3. Throughput: ~2 UART lines per chunk is a fixed per-chunk cost paid on the loop task.
+#
+# WARNING, NOT NONE OR ERROR: a genuine host-stack warning or error is worth seeing, and this is
+# compile-time, so the format strings come out of flash too.
+#
+# WHY THIS WAS NEVER A PROBLEM UNDER ARDUINO, and it is not the NimBLE setting -- that is INFO
+# in both builds. pioarduino's precompiled sdkconfig sets CONFIG_LOG_DEFAULT_LEVEL=1 and
+# CONFIG_LOG_MAXIMUM_LEVEL=1 (ERROR), and MAXIMUM_LEVEL is a compile-time ceiling that strips
+# every ESP_LOGI in the firmware -- NimBLE's included. IDF defaults both to 3 (INFO) and this
+# project never named the symbol, so it inherited INFO. Same class of finding as the
+# universal-MAC count: a behaviour silently inherited from a framework sdkconfig nobody saw.
+# See docs/DIVERGENCE_MATRIX.md 7a.
+#
+# The global ceiling is deliberately NOT lowered to match Arduino. That would also strip OUR
+# useful ESP_LOGI lines -- od_ble's resolved identity-address type and GATT val_handle, and the
+# bbep BUSY-wait timeout warning that made the dark-panel diagnosis possible. Silence the noisy
+# component, not the whole log.
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
+
 # The source builds C++ with exceptions and RTTI off under Arduino; keep that, since shared/
 # is C and the target code gains nothing from either.
 CONFIG_COMPILER_CXX_EXCEPTIONS=n
