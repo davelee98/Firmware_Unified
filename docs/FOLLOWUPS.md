@@ -212,6 +212,46 @@ target's logic, there is no longer an untouched reference to capture from, and t
 becomes a description of what the unified firmware does rather than a regression baseline for
 what the fleet did. Bench time is the scarce input, not engineering effort.
 
+### 3.5 FastEPD writes no pixels to an IT8951 panel — *high severity, S3-only*
+
+All three `it8951WriteFramebuffer{1,2,4}Bit` functions in `third_party/FastEPD/src/FastEPD.inl`
+have `#ifdef ARDUINO` guards that fall through to **nothing** under ESP-IDF — 9 sites: `:2199`,
+`:2225`, `:2235`, `:2263`, `:2286`, `:2296`, `:2323`, `:2348`, `:2359`. The data preamble is
+never sent and the row loop builds each line into `d[]` and discards it. Commands,
+`LD_IMG_END` and `it8951DisplayArea*()` all still run, so the panel refreshes whatever was
+already in its controller RAM and every call reports success.
+
+`third_party/NOTICE.md` § "FastEPD has no ESP-IDF IO backend" claims **"Every affected guard
+becomes `#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)`"** — six were, these nine were
+not, and that claim is what let them persist. The census was taken against what
+`bbepInitIT8951`'s probe exercises; the framebuffer path needs a real panel attached.
+
+Fix is the same one-line substitution already applied six times. Correct the NOTICE.md claim in
+the same change. Lower-severity siblings, also unpatched and also silent: `bbepInitLights:1906`
+(front-light never initialised), `Inkplate10IOInit:1581` (`Wire.setClock(400000)` skipped),
+`bbepConvertPrevBuffer:3260` (unread).
+
+### 3.6 `bbepWaitBusy` blocks the loop task for the length of a refresh
+
+`bb_ep.inl:3995` polls BUSY with a bare `delay(20)`, so `serviceBleTx()` cannot run while a
+refresh is in flight and queued BLE responses sit in the TX ring. This was the mechanism behind
+acks arriving 16 s late while the panel was faulty (device log 2026-08-03: `ETX 0x0080` queued
+in 2 ms, notified 17 s later) and it **survives the panel fix** — a legitimate multi-second
+refresh has the same effect.
+
+It is the shape `shared/` is designed to forbid: SHARED_API_DESIGN § `od_hal_time` says
+`od_hal_delay_ms` "must never be used to wait out a panel refresh — that is the pump's job".
+`bbepLightSleep()` is the injection point. Note it is wrong on every target for a different
+reason — on the Silabs superloop there is no scheduler at all, so a blocking wait stops
+everything.
+
+### 3.7 `esp_generic.inl` is dead code carrying four patches
+
+`targets/esp32-idf/panel/od_bbep_idf_io.inl` replaced it (2026-08-03). Verified: zero symbols
+in the linked image, no compiled includer. The file and its four `OD-PATCH` sites remain in
+`third_party/`, as does NOTICE.md's "Third patch" section describing behaviour nothing compiles.
+Delete both, or state why a patched, uncompiled backend is kept.
+
 ### 3.4 Already tracked elsewhere — pointers only
 
 - **ESP32 does not parse `0x2A`**, and skip-to-CRC then discards the rest of the blob —

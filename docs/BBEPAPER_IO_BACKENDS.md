@@ -1,12 +1,18 @@
 # bb_epaper IO backends
 
 How `bb_epaper` is ported to a platform, what a backend must actually provide, which backend
-each OpenDisplay target uses, and what is wrong with the one the ESP32 target uses today.
+each OpenDisplay target uses, and what was wrong with the one the ESP32 target used.
 
-Written 2026-08-03, during the investigation of a panel that renders its boot screen and then
-never updates again. Every number below was measured from this tree and the built object, not
-read from upstream documentation. Call counts are comment-stripped. Paths are `third_party/` as
-vendored here unless stated otherwise.
+Written 2026-08-03 during the investigation of a panel that rendered its boot screen and then
+never updated again; **§8 records how that resolved, and the answer contradicts what §§6-7
+invite you to conclude** — the backend was replaced, and the backend was not the bug. Read §8
+before acting on anything here.
+
+Every number below was measured from this tree and the built object, not read from upstream
+documentation. Call counts are comment-stripped. Paths are `third_party/` as vendored here
+unless stated otherwise. §§1-7 describe the state as of the investigation and are left as
+written; the ESP32 target now uses `targets/esp32-idf/panel/od_bbep_idf_io.inl`, not
+`esp_generic.inl`.
 
 ---
 
@@ -120,8 +126,8 @@ Net accounting of the 17 definitions in `esp_generic.inl`:
 bit-banging, does not include the SPI driver, and does not define `bbepInitIO`. Swapping to it
 would not compile. The ULP files drive a panel from the coprocessor while the main CPU sleeps.
 
-For this target the options are: patch `esp_generic.inl`, or write our own. There is no third
-choice already in the tree.
+For this target the options were: patch `esp_generic.inl`, or write our own. There was no third
+choice in the tree. §8 records which was taken.
 
 ## 4. Every other OpenDisplay target already owns its backend
 
@@ -139,8 +145,8 @@ the `ARDUINO` branch:
 | EFR32BG22 | `silabs_efr32_io.inl` | 315 | written in-project | 0 |
 | ESP-IDF | `esp_generic.inl` | 295 → 367 | **upstream's** | **4** |
 
-Three for three: every target that owns its backend is patch-free; the one that borrowed
-upstream's carries the patches and the live bug. `nrf54_zephyr_io.inl` also bit-bangs SPI
+Three for three: every target that owned its backend was patch-free; the one that borrowed
+upstream's carried the patches. (This target now owns one too — §8.) `nrf54_zephyr_io.inl` also bit-bangs SPI
 (`bb_spi_bitbang`), so it has no peripheral lifecycle to get wrong — part of why Nordic never
 hit the defect class in §7.
 
@@ -302,24 +308,76 @@ Items 6 and 8 are why defects in this layer are hard to diagnose: it either pani
 nothing, so "commands are not reaching the panel" is indistinguishable from "the panel is slow".
 Items 7, 9, 10, 11, 13 are latent and independent of any current symptom.
 
-## 8. Open decision
+## 8. Decision: taken, and the hardware result that framed it
 
-**Replace `esp_generic.inl` with an in-project `od_bbep_idf_io.inl`, or keep patching it?**
+**Resolved 2026-08-03. The backend was replaced — and it was NOT the fix for the panel bug.**
+Both halves matter, because the temptation to remember only the first is obvious.
 
-For replacing: a small, well-defined surface (§2a, §2b, §5) — nine functions to write, six to
-delete; it removes four patch sites and the NOTICE.md "re-verify on every bump" burden; it
-resolves the duplicate-GPIO defect in §7(9) by making one implementation authoritative; and it
-matches what both other targets already did (§4). Panel logic in `bb_ep.inl` is untouched.
+### What the instrumented run measured
 
-Against replacing *now*: **§2b bounds what a rewrite can possibly fix.** The reset pulses and
-BUSY polling are in `bb_ep.inl`, shared by every platform, so a new backend cannot change reset
-timing or BUSY behaviour. If the live bug is panel rail, settle time or BUSY polarity, a rewrite
-provably fixes nothing — and doing it mid-investigation risks relocating the bug and losing the
-diagnosis. The instrumented run distinguishes the cases: time attributed to `bbepInitIO`
-implicates the backend; time in `bbepWakeUp`/`initSeq` burning BUSY timeouts does not.
+The stall this document was written during was 16.3 s and 21.4 s per cold panel bring-up, with
+the panel dark after the boot screen. Per-step timing on a working build:
 
-**Not on the table:** dropping bb_epaper and writing the panel driver against ESP-IDF directly.
-That means owning init sequences, LUTs, chip quirks and BUSY polarity for the whole fleet — the
-"Rewriting working drivers" non-goal in `CLAUDE.md`, and the boot screen proves that code works.
+```
+[EPD cold] pwrmgm(on)      898 ms
+[EPD cold] bbepInitIO      201 ms
+[EPD cold] bbepWakeUp       49 ms
+[EPD cold] initSeq (full)  250 ms
+[EPD cold] alignRamMode      0 ms
+acquire done: COLD,       1398 ms total      (898+201+49+250+0 = 1398, so nothing is hidden)
+```
 
-Status: deferred pending one instrumented hardware run. See `docs/FOLLOWUPS.md`.
+`bbepInitIO` is **201 ms, essentially all of it the two `delay(100)` reset pulses.** The SPI
+lifecycle — the entire subject of §7's fixed items — costs approximately zero. The old 16 s was
+**entirely BUSY-wait expiry** inside `bb_ep.inl` (5 s a time, §6), and no `BUSY wait TIMED OUT`
+warning appears now.
+
+So §2b's warning held exactly: the reset pulses and BUSY polling are panel logic in
+`bb_ep.inl`, shared by every platform, and a backend cannot touch them. **A backend rewrite was
+never capable of fixing this bug.** Two wrong diagnoses were published before the log settled
+it, both from static reading; the fix that mattered was releasing the SPI bus at power-down
+(`bbepDeInitIO()` from `epdSessionForceOffLocked()`) rather than at the following bring-up.
+
+### The replacement, and why it was still right
+
+`targets/esp32-idf/panel/od_bbep_idf_io.inl` replaces `esp_generic.inl`, selected without
+touching vendored code: `panel/od_bbep.cpp` includes `bb_epaper.h` -> our backend ->
+`bb_ep.inl` -> `bb_ep_gfx.inl`, and the build excludes `bb_epaper.cpp`. That replaces its 52
+lines of glue instead of patching an `#elif` into its `#ifdef` chain (Firmware_NRF54's method),
+so no fifth `OD-PATCH` joins NOTICE.md's re-verify list — and it drops the other 775 lines, the
+unused `BBEPAPER` C++ class, which was the only consumer of `pinMode()` and `millis()`.
+
+Justified on maintenance grounds, which the measurement does not undermine: three `assert()`s
+on ordinary runtime errors (one per transfer) became return values; a real teardown exists for
+the first time; the shared transaction struct became a local; DC/RST/CS gained pin-validity
+guards; GPIO semantics now match the compat shim; six dead functions are gone, verified absent
+from the linked image.
+
+`esp_generic.inl` is now **dead code in the tree** — zero symbols in the linked image, no
+compiled includer — while still carrying its four patches. Deleting it, and NOTICE.md's "Third
+patch" section describing it, is outstanding.
+
+One coupling bug surfaced during the swap and is worth recording: FastEPD's `arduino_io.inl`
+declared `millis()` extern and deferred the definition **to bb_epaper's backend**, so removing
+that backend turned FastEPD's 19 calls into undefined references — a link error naming FastEPD
+for a cause in bb_epaper. `millis()` now lives in `compat/arduino_compat.cpp` beside `delay()`,
+so neither vendored library depends on the other for it.
+
+### What was NOT done, and stays not done
+
+**Dropping bb_epaper and writing the panel driver against ESP-IDF directly.** That means owning
+init sequences, LUTs, chip quirks and BUSY polarity for the whole fleet — the "Rewriting working
+drivers" non-goal in `CLAUDE.md`. The boot screen worked throughout, which is the proof that
+code is fine.
+
+### Still open in this area
+
+1. **FastEPD's nine unpatched guards** (§7 is bb_epaper's list; this is FastEPD's). All three
+   `it8951WriteFramebuffer{1,2,4}Bit` functions fall through to nothing under IDF, so an IT8951
+   panel receives no pixel data while every call reports success. `NOTICE.md`'s "every affected
+   guard" claim is false.
+2. **`bbepWaitBusy` blocks the loop task** with a bare `delay(20)`, so `serviceBleTx()` stops
+   for the duration of a refresh and queued BLE responses stall. Independent of the panel bug
+   and unaffected by fixing it. `bbepLightSleep()` is where a pump belongs.
+3. **Delete `esp_generic.inl`** and its NOTICE.md section, or state why a patched, uncompiled
+   backend is being kept.

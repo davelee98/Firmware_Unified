@@ -6,23 +6,30 @@ Written 2026-07-26. Companion to [MIGRATION.md](MIGRATION.md) (the plan) and
 
 ## Where we are
 
-Migration **step 1 (esp32-idf), phase B is complete**: `idf.py -DOD_BOARD=s3-n16r8 build`
-produces a 1.18 MB image. Arduino is gone, BLE runs on NimBLE's native C API, config lives in
-NVS, LAN runs on lwip sockets, the panel libraries are vendored and pruned, and there are no
-linker workarounds.
+Migration **step 1 (esp32-idf) has run on hardware** (S3, 2026-08-03). Arduino is gone, BLE
+runs on NimBLE's native C API, config lives in NVS, LAN runs on lwip sockets, the panel
+libraries are vendored and pruned, the ESP-IDF bb_epaper backend is ours, and there are no
+linker workarounds. The target is also synced to Firmware `feat/psram-dram-reclaim`.
 
-**Nothing has run.** That is the single most important fact on this page.
+This page previously said **"Nothing has run — that is the single most important fact on this
+page."** That is no longer true, and item 1 below is retired accordingly.
 
 | | |
 |---|---|
 | `shared/` | still empty — by design |
-| Host tests | green, 1 test, against an empty `shared/` |
-| ESP32 target | compiles and links; **never flashed** |
+| Host tests | green: 1 shared/ test + link_owner under ASan and TSan |
+| ESP32 target | 10 boards build; **S3 flashed and exercised** — see targets/esp32-idf/README.md § Verified on hardware |
+| Gate 2 | *mostly* met: uncompressed push and interrupted-transfer recovery still unexercised |
 | Other three targets | not started |
 
 ---
 
-## 1. Flash it — Gate 2 (do this first)
+## 1. ~~Flash it — Gate 2~~ — DONE 2026-08-03, partially
+
+The S3 boots, renders, and completes encrypted compressed image pushes; deep-sleep button wake
+works. Two Gate 2 items remain unexercised (uncompressed push; an interrupted transfer that
+recovers), so this cannot yet license retiring the source repo. The original checklist and the
+highest-risk items follow, kept because the two open items are in it.
 
 Everything below is lower value than finding out whether the image boots. GATT registration,
 advertising, the CCCD subscribe path, notify-under-load, the NVS record round-trip and the LAN

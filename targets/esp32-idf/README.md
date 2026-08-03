@@ -2,55 +2,83 @@
 
 Source repo: `Firmware` (https://github.com/OpenDisplay/Firmware.git)
 
-## Import status: **Phase B in progress — configures, partially compiles, does not link**
+## Status: **runs on hardware** (ESP32-S3, 2026-08-03)
 
-The IDF project is real: `idf.py -DOD_BOARD=s3-n16r8 build` **configures cleanly** against
-ESP-IDF v5.5.4 — board fragment, sdkconfig fragments, custom partition table and the `main`
-component all resolve. Compilation then stops on six missing third-party headers, below.
-
-Build it with `./build.sh <board>` once that script lands; today:
+All ten boards build, and the S3 has been flashed and exercised. This section used to say
+"Phase B in progress — configures, partially compiles, does not link" and carried a census of
+six missing third-party headers; every one of those is resolved. The census is dropped rather
+than updated because a list of solved problems reads as a list of open ones.
 
 ```bash
-source ~/esp/esp-idf/export.sh
-idf.py -DOD_BOARD=s3-n16r8 build
+./build.sh                     # every board -> ../../release/, merged images
+./build.sh s3-n16r8 c6-n4      # some
+./build.sh --list --clean
 ```
 
-### Measured blocker census (2026-07-25, s3-n16r8)
+`build.sh` sources ESP-IDF itself if it is not on `PATH` (it never is — the install is
+activated per shell). Each board produces one merged image flashed at offset 0; see
+[docs/BBEPAPER_IO_BACKENDS.md](../../docs/BBEPAPER_IO_BACKENDS.md) for the panel layer and
+`release/MANIFEST.txt` for the per-board chip and flash command.
 
-Every remaining failure is a *missing third-party header*, not a language or API problem —
-the Arduino shim cleared `Arduino.h` from the census entirely:
+### Verified on hardware (S3, 2026-08-03)
 
-| Missing header | Files | Nature |
-|---|---|---|
-| `bb_epaper.h` | 3 (incl. `main.h`) | vendor `third_party/bb_epaper` — **blocks the most**, since `main.h` is included nearly everywhere |
-| `NimBLEDevice.h` | 3 | the ~450-line C-API rewrite; cannot be shimmed |
-| `Wire.h` | 3 | mechanical shim over `driver/i2c_master.h` |
-| `LittleFS.h` | 2 | storage decision — shim, or go straight to NVS |
-| `SPI.h` | 1 | mechanical shim |
-| `esp32-hal-gpio.h` | 1 | Arduino-ESP32 internal; fold into the shim |
+Measured, not inferred — from a device log:
 
-`od_log.cpp` and the uzlib sources compile. The "2 of 21 clean" headline understates progress:
-`bb_epaper.h` is pulled in via `main.h`, so one missing vendor tree accounts for most of the
-remaining failures rather than 19 independent problems.
+| | |
+|---|---|
+| Compressed image push | 4x 96 000 B, zlib 1.52–43.8x, 15–35 KB/s |
+| Config read round-trip | `0x0040`, 805 B in 9 chunks |
+| Config write round-trip | `0x0041` + `0x0042`, reloaded from storage |
+| Encrypted path | `0x0050` challenge/response, session established, all traffic encrypted |
+| Panel power cycle | 4 cold bring-ups, **1398 ms** each, no BUSY timeouts |
+| Panel refresh | 0.71 s, full |
+| Reboot (`0x000F`) | BLE deinit + controller release, clean `RTC_SW_CPU_RST` |
+| Deep-sleep button wake | works |
 
-### What phase B still needs
+Cold bring-up breakdown, which is worth keeping because the parts sum exactly to the total
+(898 + 201 + 49 + 250 + 0 = 1398) — so there is no unaccounted time on this path:
 
-1. **`third_party/bb_epaper`, assembled — a decision, not a copy.** TOOLCHAINS.md § "Where
-   bb_epaper and uzlib live" establishes that **no existing copy is a superset**: upstream
-   `~/bb_epaper` has the `esp_idf/` backends but no `nrf54_zephyr_io.inl` or
-   `silabs_efr32_io.inl`; the `Firmware_NRF54` and `Firmware_Silabs` copies have those and no
-   `esp_idf/`. The single vendored copy has to be assembled from both, which makes it a fork
-   with no upstream-sync owner (DESIGN_REVIEW F9). Settle that before the first commit of it.
-2. **The NimBLE C-API port** — `ble_init.cpp` + `esp32_ble_callbacks.h`, ~450 lines. The one
-   genuine rewrite in this phase.
-3. **`Wire.h` / `SPI.h` / `esp32-hal-gpio.h`** — mechanical, and the I2C side must land on
-   `driver/i2c_master.h` (IDF ≥ 5.2), never the deprecated `driver/i2c.h`.
-4. **LittleFS: shim or replace?** Deployed ESP32 units keep config in LittleFS, but the fleet
-   decision is flash-and-reconfigure with no migration path (MIGRATION.md § "Deployed fleet
-   status"), and TOOLCHAINS recommends converging on NVS. So this can be a temporary
-   `esp_littlefs` shim now and NVS later, or NVS immediately. The second is cleaner and is a
-   subsystem change inside phase B, which cuts against "shim first, change later".
-5. **Measure the C6 image against the 1.25 MB slot** — a phase-B gate (see § Partitions).
+```
+[EPD cold] pwrmgm(on)      898 ms   <- 800 ms of it a hardcoded delay(800)
+[EPD cold] bbepInitIO      201 ms   <- almost entirely the two delay(100) reset pulses
+[EPD cold] bbepWakeUp       49 ms
+[EPD cold] initSeq (full)  250 ms
+[EPD cold] alignRamMode      0 ms
+```
+
+**Still unexercised**, so MIGRATION.md Gate 2 is *mostly* met rather than met — and Gate 2 is
+what licenses retiring the source repo:
+
+- an **uncompressed** full image push
+- an **interrupted transfer that recovers**. One `[DROP: 1]` was observed mid-transfer (the
+  transfer completed, 337/337 chunks), so this is worth testing deliberately rather than
+  assumed.
+
+### Known defects, measured on hardware
+
+1. **FastEPD writes no pixels to an IT8951 panel.** All three
+   `it8951WriteFramebuffer{1,2,4}Bit` functions have unpatched `#ifdef ARDUINO` guards (9
+   sites) that fall through to nothing under IDF: no data preamble, and the row loop builds
+   each line and discards it. Commands, `LD_IMG_END` and `DisplayArea` all still run, so the
+   panel refreshes whatever was already in its RAM and every call reports success.
+   `third_party/NOTICE.md` claims "every affected guard" was patched — that claim is wrong.
+   S3-only (FastEPD is S3-only and PSRAM-mandatory), and only on IT8951/parallel panels.
+2. **`bbepWaitBusy` blocks the loop task.** It polls with a bare `delay(20)` inside
+   `bb_ep.inl`, so `serviceBleTx()` cannot run for the duration. A legitimate multi-second
+   refresh therefore holds queued BLE responses in the TX ring until it finishes; this was the
+   mechanism behind acks arriving 16 s late while the panel was faulty, and it survives the
+   panel fix. `bbepLightSleep()` is the injection point for a pump.
+3. **Every transfer pays a full cold bring-up** (1.4 s) because this unit has
+   `Screen Timeout: 0 s`, i.e. keep-alive disabled. 800 ms of that is an unconditional
+   `delay(800)` rail settle in `pwrmgm()`.
+4. **`s3-e1004` still has no board fragment** — see § `s3-e1004` is blocked, not forgotten.
+
+### Phase C, still owed
+
+The Arduino shim is **not** gone: `compat/` is at 21 files by `compat/ratchet.sh`, and two
+vendored libraries (bb_epaper via `bb_epaper.h`, FastEPD via `arduino_io.inl`) still depend on
+it, so it cannot be deleted even when the imported sources stop needing it. `protocol_pending.h`
+is also outstanding — two panel-IC wire values that belong in the canonical protocol header.
 
 ### Toolchain translation findings
 
