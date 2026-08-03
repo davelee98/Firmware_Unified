@@ -77,9 +77,29 @@ no IO teardown at all. Every project-side alternative was worse:
 | Define `ARDUINO` so `arduino_io.inl` is selected | Drags in bb_epaper's whole Arduino surface (`Print`, `PROGMEM`, `pgm_read_*`). The same move on FastEPD produced 117 errors. It also moves the panel *onto* the compat shim, the opposite of phase C. |
 | Call `bbepInitIO()` once from `epdSessionAcquire()` and do the RST pulse in project code | Duplicates the vendor reset sequence into `display_service.cpp` — a file destined for `shared/core`, where vendor knowledge is forbidden — and drifts silently if the library's init changes. |
 
-The patch guards bus init **and** device add together behind one static flag, recreating the
-device only if the requested clock changes. Guarding only the bus init would leave the slot
-leak above.
+The patch **tears the bus down and rebuilds it** on each cold bring-up: remove the device,
+`spi_bus_free()`, then the original init sequence. That is what the upstream code effectively
+did by calling `spi_bus_initialize()` every time — except it never released anything first,
+which is where the assert came from.
+
+**The first version of this patch got it wrong, and the failure is worth recording.** It
+guarded the whole block behind a static "already initialised" flag and returned early on later
+calls. That silenced the assert and killed the panel: nothing rendered after the boot screen,
+while SPI reported success at every step.
+
+The pads do not survive the power-down. `main.cpp`'s `configureDisplayPinsLowPower()` parks the
+panel pins with `pinMode(clk_pin, OUTPUT)` / `pinMode(data_pin, OUTPUT)`, and the shim's
+`pinMode()` is `gpio_config()` — which routes those pads back to plain GPIO, detaching SCLK and
+MOSI from the SPI peripheral. `spi_bus_initialize()` is the **only** call that re-attaches them.
+Skip it and the peripheral stays perfectly healthy while connected to nothing:
+`spi_device_polling_transmit()` returns `ESP_OK`, the pixel data and the refresh command both go
+nowhere, BUSY never asserts, and the screen simply never changes.
+
+Two lessons for anyone re-applying this: *(a)* an idempotent-init guard is wrong here
+specifically because pin routing is owned by the bus and revoked by project code between calls;
+*(b)* the symptom is indistinguishable from a dead panel or a wiring fault, because every
+software-visible return code is success. The `ERROR: Epaper not busy after refresh command`
+line in `waitforrefresh()` is the only signal.
 
 **This is an upstream bug.** The right end state is a `bbepDeInitIO()` in bb_epaper that frees
 the device and bus, or an idempotent init. Report it; until then this patch must survive every

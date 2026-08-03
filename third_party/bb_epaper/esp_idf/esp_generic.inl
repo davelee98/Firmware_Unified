@@ -7,6 +7,7 @@
 #define __ESP_IDF_IO__
 
 #include "esp_timer.h"
+#include "esp_log.h"   /* OD-PATCH: ESP_LOGW in bbepInitIO */
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 
@@ -275,54 +276,82 @@ void bbepInitIO(BBEPDISP *pBBEP, uint8_t u8DC, uint8_t u8RST, uint8_t u8BUSY, ui
      * SPI.begin() is idempotent and whose teardown (SPI.end(), main.cpp) matched it. The IDF
      * port switched this file in, and it has a begin with no end.
      *
-     * Setting up the bus and device exactly once is the fix. Re-adding the device on each
-     * call would also leak a device slot (three per host), so both are guarded together.
-     * The device is re-created only if the requested clock actually changes, since IDF fixes
-     * clock per device. Pins cannot change at runtime -- they come from the config read at
-     * boot -- so they are not re-checked. */
-    static bool     s_spi_ready = false;
-    static uint32_t s_spi_speed = 0;
+     * TEARDOWN-THEN-REINIT, not skip-if-ready. The first version of this patch guarded the
+     * whole block behind a static "already done" flag and returned early on later calls. That
+     * fixed the assert and broke the panel: nothing rendered after the boot screen, with SPI
+     * reporting success the whole way.
+     *
+     * The reason is that the pads do not survive the power-down. main.cpp's
+     * configureDisplayPinsLowPower() does pinMode(clk_pin, OUTPUT) / pinMode(data_pin, OUTPUT)
+     * to park the panel rail's pins low, and the shim's pinMode() is gpio_config(), which
+     * routes those pads back to plain GPIO -- detaching SCLK and MOSI from the SPI peripheral.
+     * spi_bus_initialize() is the ONLY call that re-attaches them. Skipping it left the
+     * peripheral perfectly healthy and no longer connected to anything: every
+     * spi_device_polling_transmit() returned ESP_OK, the pixel data and the refresh command
+     * both went nowhere, BUSY never asserted, and the screen simply never changed.
+     *
+     * So the bus is torn down and rebuilt on each cold bring-up, which is what the original
+     * upstream code effectively did by calling spi_bus_initialize() every time -- except that
+     * it never released anything first, which is where the assert came from. Freeing first
+     * makes the re-init legal, re-attaches the pins, and leaks neither a bus nor one of the
+     * host's three device slots.
+     *
+     * Cost is one free/init pair per cold acquire (not per transfer), against a panel refresh
+     * measured in seconds. */
+    static bool s_spi_ready = false;
 
-    if (s_spi_ready && s_spi_speed != u32Speed) {
-        spi_bus_remove_device(spi);
-        spi = NULL;
+    if (s_spi_ready) {
+        if (spi != NULL) {
+            spi_bus_remove_device(spi);
+            spi = NULL;
+        }
+        /* Fails with ESP_ERR_INVALID_STATE if another driver still holds a device on this
+         * host -- the E1004 dual-CS path in display_service.cpp opens one through compat/SPI.h.
+         * Not fatal, and not silent: the re-init below then returns INVALID_STATE too and the
+         * pins stay detached, so this warning is the only warning that the panel is about to
+         * go quiet. */
+        esp_err_t free_ret = spi_bus_free(ESP32_SPI_HOST);
+        if (free_ret != ESP_OK) {
+            ESP_LOGW("bbep", "spi_bus_free failed (%d); another device is still attached, "
+                             "SCLK/MOSI will not be re-attached to the SPI peripheral",
+                     (int)free_ret);
+        }
         s_spi_ready = false;
     }
 
-    if (!s_spi_ready) {
-        memset(&buscfg, 0, sizeof(buscfg));
-        buscfg.miso_io_num = -1; //u8MISO;
-        buscfg.mosi_io_num = u8MOSI;
-        buscfg.sclk_io_num = u8SCK;
-        buscfg.max_transfer_sz=4096;
-        buscfg.quadwp_io_num=-1;
-        buscfg.quadhd_io_num=-1;
-        //Initialize the SPI bus
-        ret=spi_bus_initialize(ESP32_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
-        /* Already initialised is a valid state, not a failure: either a previous bring-up
-         * did it, or another driver on this host got there first. Only a real error asserts. */
-        if (ret == ESP_ERR_INVALID_STATE) {
-            ret = ESP_OK;
-        }
-        assert(ret==ESP_OK);
+    memset(&buscfg, 0, sizeof(buscfg));
+    buscfg.miso_io_num = -1; //u8MISO;
+    buscfg.mosi_io_num = u8MOSI;
+    buscfg.sclk_io_num = u8SCK;
+    buscfg.max_transfer_sz=4096;
+    buscfg.quadwp_io_num=-1;
+    buscfg.quadhd_io_num=-1;
+    //Initialize the SPI bus
+    ret=spi_bus_initialize(ESP32_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    /* Already initialised means the free above did not happen or did not take. Tolerated so a
+     * co-tenant driver cannot panic the device, but it is a degraded state, not a normal one:
+     * the pins are whatever the last owner left them as. */
+    if (ret == ESP_ERR_INVALID_STATE) {
+        ESP_LOGW("bbep", "SPI bus already initialised; pin routing not refreshed");
+        ret = ESP_OK;
+    }
+    assert(ret==ESP_OK);
 
-        memset(&devcfg, 0, sizeof(devcfg));
-        devcfg.clock_speed_hz = u32Speed;
-        devcfg.mode = 0;
-        devcfg.spics_io_num = -1; // we control the CS pin
-        devcfg.queue_size = 2;                          //We want to be able to queue 2 transactions at a time
+    memset(&devcfg, 0, sizeof(devcfg));
+    devcfg.clock_speed_hz = u32Speed;
+    devcfg.mode = 0;
+    devcfg.spics_io_num = -1; // we control the CS pin
+    devcfg.queue_size = 2;                          //We want to be able to queue 2 transactions at a time
 // These callbacks currently don't do anything
 //    devcfg.pre_cb = spi_pre_transfer_callback;  //Specify pre-transfer callback to handle D/C line
 //    devcfg.post_cb = spi_post_transfer_callback;
 //    devcfg.flags = SPI_DEVICE_NO_DUMMY; // allow speeds > 26Mhz
-        devcfg.flags = SPI_DEVICE_HALFDUPLEX; // this disables SD card access
-        ret=spi_bus_add_device(ESP32_SPI_HOST, &devcfg, &spi); // attach to bus
-        assert(ret==ESP_OK);
+    devcfg.flags = SPI_DEVICE_HALFDUPLEX; // this disables SD card access
+    ret=spi_bus_add_device(ESP32_SPI_HOST, &devcfg, &spi); // attach to bus
+    assert(ret==ESP_OK);
 
-        s_spi_ready = true;
-        s_spi_speed = u32Speed;
-    }
-    
+    s_spi_ready = true;
+
     if (pBBEP->iFlags & BBEP_7COLOR) { // need to send before you can send it data
         pBBEP->is_awake = 1;
         bbepSendCMDSequence(pBBEP, pBBEP->pInitFull);
