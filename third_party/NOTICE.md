@@ -16,6 +16,13 @@ a per-target fork. Do not "fix" this by moving it into `shared/`.
 
 ## bb_epaper
 
+> **Backend analysis:** [docs/BBEPAPER_IO_BACKENDS.md](../docs/BBEPAPER_IO_BACKENDS.md) covers how
+> bb_epaper selects an IO backend, the five-function contract a backend must satisfy, a
+> function-by-function comparison of `esp_generic.inl` against `arduino_io.inl` (the backend the
+> shipped fleet runs), the full defect inventory for `esp_generic.inl`, and the open decision on
+> replacing it with an in-project backend as the other two targets already did. Read it before
+> adding a fifth patch below.
+
 | | |
 |---|---|
 | Author | Larry Bank (BitBank Software, Inc.) |

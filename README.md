@@ -193,6 +193,8 @@ cmake -S tests/host -B build -G Ninja && cmake --build build && ctest --test-dir
 - [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) — where the migration stands and what to do next, in order
 - [docs/FOLLOWUPS.md](docs/FOLLOWUPS.md) — known defects and open items awaiting action,
   including host-side bugs the wire corpus found
+- [docs/BBEPAPER_IO_BACKENDS.md](docs/BBEPAPER_IO_BACKENDS.md) — how `bb_epaper` is ported to a
+  platform, which backend each target uses, and the open decision on owning the ESP-IDF one
 
 ## License
 
