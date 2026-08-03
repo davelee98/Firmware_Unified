@@ -476,14 +476,34 @@ static void epdSessionForceOffLocked(void) {
     epdPlanesPrepared = false;
 }
 
+/* Whether pwrmgm() will drive an AXP2101 PMIC on this board, i.e. whether its timing includes
+ * initAXP2101() over I2C on top of the rail assert and the 800 ms settle. Same scan pwrmgm()
+ * itself does -- duplicated rather than exported because it exists only to label a log line,
+ * and a second caller of a one-line predicate is cheaper than a new cross-file dependency. */
+static bool epdRailUsesAxp2101(void) {
+    for (uint8_t i = 0; i < globalConfig.sensor_count; i++) {
+        if (globalConfig.sensors[i].sensor_type == OD_SENSOR_TYPE_AXP2101) return true;
+    }
+    return false;
+}
+
 // Bring the panel up for a transfer/refresh. Returns true iff it was COLD (rail
 // was off) — callers may need to (re)open the address window regardless.
 static bool epdSessionAcquire(bool partialInit) {
     pwrmgmLockTake();
     bool cold;
+    const uint32_t tAcquire = millis();
     if (pwrmgmState == PWR_OFF) {
         od_log_info("[EPD session] acquire: COLD bring-up");
+        /* pwrmgm(true) FIRST, and timed: it asserts the panel rail, waits 800 ms for it to
+         * settle, and -- when an AXP2101 PMIC is configured -- runs initAXP2101() over I2C.
+         * That is the largest unattributed block on this path and it runs before any panel
+         * byte moves, so a stall here must not be misread as a panel that will not answer. */
+        uint32_t tRail = millis();
         pwrmgm(true);   // -> PWR_ACTIVE (guarded; real transition)
+        od_log_debug("[EPD cold] pwrmgm(on) %u ms (rail + 800 ms settle%s)",
+                     (unsigned)(millis() - tRail),
+                     epdRailUsesAxp2101() ? " + AXP2101 I2C" : "");
         if (!epdSessionUsesFastepd()) {
             const DisplayConfig& d = globalConfig.displays[0];
 #ifdef BBEP_T133A01
@@ -515,7 +535,9 @@ static bool epdSessionAcquire(bool partialInit) {
                 bbepSendCMDSequence(&bbep, initSeq);
                 od_log_debug("[EPD cold] initSeq (%s) %u ms",
                              partialInit ? "partial" : "full", (unsigned)(millis() - tStep));
+                tStep = millis();
                 epdAlignCustomPartialRamMode();
+                od_log_debug("[EPD cold] alignRamMode %u ms", (unsigned)(millis() - tStep));
                 epdSessionInitWasPartial = partialInit;
             }
         }
@@ -535,16 +557,29 @@ static bool epdSessionAcquire(bool partialInit) {
             } else
 #endif
             {
+                /* Same breakdown as the cold path. A WARM re-acquire skips the rail and the
+                 * SPI bring-up, so if it ALSO stalls then the panel is not answering for a
+                 * reason unrelated to power -- which is worth being able to tell apart. */
+                uint32_t tStep = millis();
                 bbepWakeUp(&bbep);
+                od_log_debug("[EPD warm] bbepWakeUp %u ms", (unsigned)(millis() - tStep));
                 const uint8_t* initSeq = partialInit ? (bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull)
                                                      : bbep.pInitFull;
+                tStep = millis();
                 bbepSendCMDSequence(&bbep, initSeq);
+                od_log_debug("[EPD warm] initSeq (%s) %u ms",
+                             partialInit ? "partial" : "full", (unsigned)(millis() - tStep));
                 epdAlignCustomPartialRamMode();
                 epdSessionInitWasPartial = partialInit;
             }
         }
         cold = false;
     }
+    /* The total, so the per-step lines above can be checked to add up. A large total with
+     * small parts means the time is somewhere still uninstrumented -- which is exactly the
+     * ambiguity the first instrumented build left, and the reason this line exists. */
+    od_log_info("[EPD session] acquire done: %s, %u ms total",
+                cold ? "COLD" : "WARM", (unsigned)(millis() - tAcquire));
     pwrmgmLockGive();
     return cold;
 }
