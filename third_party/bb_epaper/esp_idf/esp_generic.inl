@@ -67,9 +67,6 @@ long millis(void)
     return (long)(esp_timer_get_time() / 1000L);
 } /* millis() */
 
-/* OD-PATCH: the application shim owns these; two providers made every internal
- * delay(uint32_t) call ambiguous. */
-#if 0
 void delayMicroseconds(long l)
 {
     l *= 40;
@@ -155,7 +152,6 @@ int i2str(char *pDest, int iVal)
         *d++ = 0; // terminator
         return (int)(d - pDest - 1); // string length
 } /* i2str() */
-#endif /* OD-PATCH */
 void delayCycles(int i)
 {
     while (i > 3) {

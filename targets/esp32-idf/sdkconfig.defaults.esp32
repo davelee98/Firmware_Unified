@@ -5,3 +5,43 @@
 # env:esp32-N4 is the ONE env that does not set OPENDISPLAY_ENABLE_WIFI. That is a code
 # decision (see the board fragment), not an sdkconfig one.
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+
+# ---------------------------------------------------------------------------------------
+# Universal MAC address count -- A WIRE-VISIBLE FLEET CONTRACT, NOT A PREFERENCE.
+# ---------------------------------------------------------------------------------------
+# This setting decides how the Bluetooth MAC is derived from the factory base MAC, and the
+# BLE address IS the device's identity in Home Assistant (its Bluetooth integration keys
+# devices on the address). Change it and every deployed unit becomes a NEW device, losing its
+# entity history. Nothing errors; the device simply reappears as a stranger.
+#
+#   FOUR: STA = base+0, AP = base+1, BT = base+2, ETH = base+3   (all universal)
+#   TWO:  STA = base+0, BT = base+1                              (universal)
+#         AP and ETH become LOCAL, derived by setting the U/L bit 0x02 in octet 0
+#
+# THE VALUE IS PINNED PER CHIP TO MATCH WHAT THE ARDUINO BUILD SHIPPED, because that is what
+# the fleet actually advertises -- not because a rationale was found for it. pioarduino's
+# precompiled sdkconfigs set FOUR for esp32/C3/C6 and TWO for the S3, and no rule explains the
+# S3 being different: the one distinction that correlates (only the classic ESP32 has an
+# internal EMAC) does not, since the C3 has the same profile as the S3 and got FOUR. Most
+# likely an inconsistency in arduino-esp32's packaging. Fleet compatibility means matching what
+# shipped, correct or not.
+#
+# Ruled out while investigating (2026-08-03): IDF drift -- `git log -p` on the chip Kconfig.mac
+# files shows FOUR as the only default ever set, so arduino's value is not a stale capture; and
+# a smaller Espressif allocation for the S3 -- IDF's docs state every chip ships "enough valid
+# Espressif universally administered MAC addresses for all internal interfaces", and the
+# TWO/FOUR knob is documented as being for CUSTOM MAC ranges. With a factory base MAC either
+# value is safe on any chip, which is why this is purely about fleet identity.
+#
+# PINNED even where it equals IDF's current default: on the S3 this shifted BT from base+1 to
+# base+2 purely because the project never named the symbol and inherited a default that
+# differed from Arduino's. An unpinned default is a fleet-identity change waiting for an IDF
+# upgrade. Do not move these values without a fleet migration plan.
+#
+# It cannot live in the common sdkconfig.defaults: the symbol is chip-prefixed, and the generic
+# CONFIG_ESP_MAC_UNIVERSAL_MAC_ADDRESSES_* is a bare bool with no prompt that this choice
+# selects. See docs/DIVERGENCE_MATRIX.md.
+# FOUR matches pioarduino's esp32 sdkconfig AND IDF's default, so this is a pin, not a
+# change. The classic ESP32 is also the one chip here with an internal Ethernet MAC
+# (CONFIG_ETH_USE_ESP32_EMAC), so a fourth universal address has a real consumer.
+CONFIG_ESP32_UNIVERSAL_MAC_ADDRESSES_FOUR=y

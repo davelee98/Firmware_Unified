@@ -76,3 +76,41 @@ endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 project(opendisplay)
+
+# ---------------------------------------------------------------------------------------
+# The merged single-file image, built automatically with everything else.
+# ---------------------------------------------------------------------------------------
+# One file, flashed at offset 0, containing bootloader + partition table + OTA data + app.
+# Produced on EVERY build rather than by a separate `idf.py merge-bin` step, because the
+# four-image form is the one people get wrong: the offsets differ per chip (the classic
+# ESP32 puts its bootloader at 0x1000, every other variant here at 0x0), and a merged image
+# that is only generated on request is reliably stale by the time someone reaches for it --
+# which is exactly what happened to the old dist/ image this replaces.
+#
+# `@flash_args` rather than a hand-written offset list, deliberately. That file is IDF's own
+# record of what this board flashes where; spelling the offsets out here would be a second
+# copy of the layout that could disagree with the partition table, and the 0x1000/0x0
+# bootloader split makes that a live hazard rather than a theoretical one.
+#
+# The output stays in the build directory. Delivery to release/ is build.sh's job -- keeping
+# the two separate means a plain `idf.py build` never writes outside its own build tree.
+set(OD_MERGED_BIN "${CMAKE_BINARY_DIR}/opendisplay-${OD_BOARD}-merged.bin")
+
+add_custom_target(od_merged_bin ALL
+    BYPRODUCTS "${OD_MERGED_BIN}"
+    COMMAND ${CMAKE_COMMAND} -E env python -m esptool
+            --chip ${OD_IDF_TARGET} merge_bin -o "${OD_MERGED_BIN}" "@flash_args"
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    COMMENT "od: merging bootloader + partition table + app -> opendisplay-${OD_BOARD}-merged.bin"
+    VERBATIM)
+
+# Every input the merge consumes. add_dependencies, not the DEPENDS argument above: for
+# add_custom_target, DEPENDS names FILES, and three of these four are produced in other
+# directory scopes where this one cannot see them as files. Naming the targets is what
+# actually orders the build -- without it the merge races its own inputs and intermittently
+# reads a partly-written or absent bootloader.
+add_dependencies(od_merged_bin
+    gen_project_binary      # the app .bin (not `app`, which is the phony umbrella)
+    bootloader
+    partition_table_bin
+    blank_ota_data)

@@ -124,7 +124,11 @@ an explicit call.
   window buffer (see the divergence below).
 - **The bare-metal constraint is the useful one.** This target has no threads, no
   scheduler, and no blocking `k_sleep`. Any `shared/core` API that assumes it can block, own
-  a task, or be re-entered from another context excludes this target.
+  a task, or be re-entered from another context excludes this target. This is why there is
+  **one** execution model rather than a threaded and a single-threaded variant — see
+  ../../docs/ARCHITECTURE.md § "One execution model". The rules there are derived from this
+  chip; the ESP32 target already satisfies them by accident (it creates no FreeRTOS tasks of
+  its own) and must not lose that during the IDF port.
 
 ## Divergences to resolve deliberately
 

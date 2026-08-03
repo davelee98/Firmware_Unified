@@ -3997,6 +3997,26 @@ void bbepWaitBusy(BBEPDISP *pBBEP)
         bbepLightSleep(20, pBBEP->bLightSleep); // save battery power by checking every 20ms
         iTimeout += 20;
     }
+    /* OD-PATCH: say so when the wait EXPIRES rather than completes.
+     *
+     * This function returns void and falls out of the loop on timeout, so the caller
+     * continues as though the panel were ready. That silence is how a panel receiving no
+     * commands at all presents as a slow but successful write: every call still "succeeds",
+     * and the only visible symptom is that a bring-up takes 5 s or 30 s per wait instead of
+     * milliseconds. It cost a full debugging session, and the firmware's own detector
+     * (waitforrefresh()'s "Epaper not busy after refresh command") never fires because this
+     * absorbs the failure upstream of it.
+     *
+     * Log-only: the signature is unchanged and no caller behaviour changes, so this cannot
+     * itself break a working panel. Returning a status and making every call site handle it
+     * is the real fix and belongs upstream. */
+#ifdef ESP_PLATFORM
+    if (iTimeout >= iMaxTime) {
+        ESP_LOGW("bbep", "BUSY wait TIMED OUT after %d ms (pin %d never read %s) -- "
+                         "the panel is not responding; commands may not be reaching it",
+                 iMaxTime, (int)pBBEP->iBUSYPin, busy_idle ? "HIGH" : "LOW");
+    }
+#endif
 } /* bbepWaitBusy() */
 //
 // Return if panel is busy

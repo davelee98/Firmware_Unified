@@ -23,6 +23,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <limits.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -111,11 +112,11 @@ static inline int digitalRead(int pin)
  * millis() wraps at 2^32 ms just as Arduino's does. esp_timer_get_time() is int64 microseconds
  * since boot, so the truncation is deliberate and matches the semantics the callers were
  * written against -- they compare with subtraction, which is wrap-safe.
+ *
+ * NOT static inline, unlike micros() below: two VENDORED libraries need it with EXTERNAL
+ * linkage. It is declared with the delay() pair at the bottom of this header and defined in
+ * arduino_compat.cpp. See the note there.
  */
-static inline uint32_t millis(void)
-{
-    return (uint32_t)(esp_timer_get_time() / 1000);
-}
 
 static inline uint32_t micros(void)
 {
@@ -238,6 +239,21 @@ static inline void interrupts(void)   { portENABLE_INTERRUPTS(); }
 void delay(long ms);
 void delayMicroseconds(long us);
 
+/* millis() joins them, for the same linkage reason and one more.
+ *
+ * It used to be `static inline` above, which was fine while every caller was project code.
+ * Two vendored libraries need it externally: FastEPD.inl calls it 19 times and its
+ * arduino_io.inl carries an OD-PATCH reading `extern uint32_t millis(void);`, deferring the
+ * definition to whoever else provides one. For a while that was bb_epaper's esp_generic.inl.
+ *
+ * When panel/od_bbep.cpp replaced bb_epaper.cpp and dropped that backend, FastEPD's 19 calls
+ * became undefined references -- a link error whose message named FastEPD while the cause was
+ * a bb_epaper change. Owning the primitive here removes the coupling: neither vendored library
+ * defines it, one place does, and the return type matches FastEPD's extern declaration
+ * exactly (uint32_t, not esp_generic.inl's `long`).
+ */
+uint32_t millis(void);
+
 /* ---------------------------------------------------------------- String
  *
  * The single largest item in the census: 575 call sites. This is a minimal std::string
@@ -320,6 +336,18 @@ class Stream {
 public:
     virtual ~Stream() {}
     virtual size_t write(const uint8_t *b, size_t n) { return fwrite(b, 1, n, stdout); }
+    /* Free space in the port's TX buffer, non-blocking. od_log's off-loop producers poll this
+     * (od_port_room) and DISCARD the record rather than block when it stays below what they
+     * need, so the number has to mean something: reporting a constant would turn the backoff
+     * into either a permanent stall or a permanent no-op.
+     *
+     * This base implementation is the stdout sink, which has no inspectable queue -- the IDF
+     * console driver's own buffering is not exposed -- so it reports "always room". That is
+     * the honest answer for it: writes to stdout are bounded by the driver, never by a queue
+     * this could measure, so od_log's wait loop should short-circuit rather than spin against
+     * a number it cannot influence. HardwareSerial, the port that actually has a ring buffer,
+     * overrides this with the real figure. */
+    virtual int availableForWrite() { return INT_MAX; }
     size_t print(const char *s)   { return s ? write((const uint8_t *)s, strlen(s)) : 0; }
     size_t print(const String &s) { return print(s.c_str()); }
     size_t println(const char *s) { size_t n = print(s); n += print("\n"); return n; }
@@ -353,8 +381,12 @@ extern SerialCompat Serial;
 /* ESP.* -- three accessors, mapped onto their IDF equivalents. */
 class EspClass {
 public:
+    /* Both are INTERNAL DRAM ONLY (MALLOC_CAP_INTERNAL), matching Arduino-ESP32. On a PSRAM
+     * part these are the DRAM-pressure question, not "how much memory is left" -- see the note
+     * on the definitions. PSRAM is a separate accessor, as it is in Arduino. */
     uint32_t getFreeHeap() const;
     uint32_t getMinFreeHeap() const;
+    uint32_t getFreePsram() const;
     uint64_t getEfuseMac() const;
 };
 

@@ -16,6 +16,13 @@ a per-target fork. Do not "fix" this by moving it into `shared/`.
 
 ## bb_epaper
 
+> **Backend analysis:** [docs/BBEPAPER_IO_BACKENDS.md](../docs/BBEPAPER_IO_BACKENDS.md) covers how
+> bb_epaper selects an IO backend, the five-function contract a backend must satisfy, a
+> function-by-function comparison of `esp_generic.inl` against `arduino_io.inl` (the backend the
+> shipped fleet runs), the full defect inventory for `esp_generic.inl`, and the open decision on
+> replacing it with an in-project backend as the other two targets already did. Read it before
+> adding a fifth patch below.
+
 | | |
 |---|---|
 | Author | Larry Bank (BitBank Software, Inc.) |
@@ -47,21 +54,43 @@ Both are bugs in the library itself, not incompatibilities with this repo — wo
 upstream, and worth checking against `bitbank2/bb_epaper` to see whether the fork introduced
 them. Re-apply or re-verify on every bump.
 
-**Two things to know before bumping it.**
+### `esp_idf/esp_generic.inl` is UNPATCHED and UNUSED (reverted 2026-08-03)
 
-*It is vendored from a fork.* `Firmware`'s `platformio.ini` pulls `bitbank2/bb_epaper.git`
-(upstream) while the checkout used here is `davelee98-creator/bb_epaper`. Whether the fork
-carries local changes has **not** been established — establish it before the next bump, because
-"vendored from a fork of unknown divergence" is how a local fix becomes permanently invisible.
+This file is byte-identical to upstream `~/bb_epaper/esp_idf/esp_generic.inl` (295 lines) and
+**is not compiled.** Do not patch it. Do not read it to understand how this target drives a
+panel — it does not.
 
-*No copy is a superset, and this one is not either.* TOOLCHAINS.md § "Where bb_epaper and uzlib
-live" records the problem: upstream has the `esp_idf/` backends but no `nrf54_zephyr_io.inl` or
-`silabs_efr32_io.inl`, while the `Firmware_NRF54` and `Firmware_Silabs` copies have those and no
-`esp_idf/`. **This vendored tree currently has only the ESP-IDF side**, which is correct for
-migration step 1 and insufficient from step 2 onward. When the Nordic and Silabs targets land,
-their backends must be merged in here rather than each target re-vendoring — that merge is what
-makes this an assembled fork, and DESIGN_REVIEW F9 flags it as a fork with no upstream-sync
-owner. Assign one before step 2.
+The ESP32 target uses its own backend, `targets/esp32-idf/panel/od_bbep_idf_io.inl`, selected by
+`targets/esp32-idf/panel/od_bbep.cpp` replacing `bb_epaper.cpp`'s 52 lines of glue rather than
+by patching its `#ifdef` chain. That is why nothing here needs an `OD-PATCH` any more, and why
+`bb_epaper.cpp` is excluded in `main/CMakeLists.txt`.
+
+**It carried four `OD-PATCH` sites and they are all gone.** Kept for the record, because the
+history is the argument for owning the backend rather than patching upstream's:
+
+1. **`bbepInitIO()` was not re-entrant** — it called `spi_bus_initialize()` on every cold panel
+   bring-up while the file contained no `spi_bus_free()` anywhere, so bring-up #2 could only
+   `assert()`. `epdSessionAcquire()` re-acquires the panel per transfer, making the panic
+   guaranteed on the first image upload after the boot screen. Invisible under Arduino, which
+   used `src/arduino_io.inl` and shared the application's global `SPI` object, so
+   `SPI.begin()`/`SPI.end()` happened to pair across the library boundary.
+2. **The first fix for (1) was wrong**, and instructively so: guarding the block behind an
+   "already initialised" flag stranded SCLK/MOSI, because project code revokes the pad routing
+   between bring-ups (`configureDisplayPinsLowPower()` → `pinMode()` → `gpio_config()`) and
+   `spi_bus_initialize()` is the only call that restores it. The peripheral stayed healthy and
+   connected to nothing: every transfer returned `ESP_OK` and the screen never changed.
+3. Two supporting edits — an `esp_log.h` include so the file could warn at all, and `#if 0`
+   around its Arduino-core/libc reimplementation (`delay`, `millis`, `mymemset`, `i2str`, …)
+   which collided with `compat/arduino_compat.h`.
+
+None of that was the cause of the 16–21 s cold bring-up it was chased for; that was BUSY-wait
+expiry inside `bb_ep.inl`, measured at 5 s a time. See
+[docs/BBEPAPER_IO_BACKENDS.md](../docs/BBEPAPER_IO_BACKENDS.md) § 8.
+
+**Why the file is reverted rather than deleted.** A re-vendor would restore it, so deleting it
+makes the vendored tree diverge from upstream by omission — harder to verify than a file that
+matches. Pristine and unused is a state a `diff` against upstream confirms in one command;
+absent is not.
 
 ## FastEPD
 

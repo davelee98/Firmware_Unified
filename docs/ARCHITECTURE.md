@@ -479,6 +479,72 @@ corpus:
 - **Compile-time invariants.** The `_Static_assert`s coupling `PIPE_MAX_W`, the replay window,
   and reorder-slot count.
 
+## One execution model: run-to-completion, for threaded and single-threaded alike
+
+**There is no separate architecture for RTOS targets and bare-metal targets.** `shared/core` is
+written once, to the bare-metal contract, and the threaded targets wrap it. This is not a
+compromise between the two — it is the only design that serves both.
+
+**The asymmetry is the whole argument.** A non-blocking, run-to-completion core drops into a
+FreeRTOS or Zephyr task without modification. A core that blocks, owns a thread, or expects to
+be resumed cannot run on a superloop at all. One direction is free; the other is impossible. So
+there is exactly one design available, and writing two would reintroduce the duplication this
+repo exists to remove — two transfer state machines, two config parsers, two sets of bugs.
+
+**Both existing implementations already converged on this shape, independently.** This is
+observed, not aspirational:
+
+| | Bare-metal (EFR32BG22) | "Threaded" (ESP32) |
+|---|---|---|
+| Arrival | `sl_bt_on_event()` → `opendisplay_ble_on_event()` | GATT write callback → `bleRxQueuePush()` (`ble_transport_esp32.cpp:305`) |
+| Drain | `app_process_action()` → `opendisplay_ble_process()` | `loop()` → `bleRxQueuePeek()` (`main.cpp:756`) |
+| Own tasks | none — no kernel component in the `.slcp` | **none** — no `xTaskCreate` anywhere in `Firmware/src/` |
+| Synchronisation | none needed | one mutex, and it is only for the log TX buffer |
+
+The ESP32 firmware is a single-flow queue-drain loop that happens to run inside Arduino's
+`loopTask`. It is already a bare-metal architecture wearing an RTOS hat. Adopting the
+bare-metal contract costs the ESP32 target nothing it is not already doing — it only stops it
+from *acquiring* a dependence on threads during the IDF port, which is the realistic risk.
+
+### The rules
+
+1. **Nothing in `shared/core` blocks.** Long operations are resumable state machines that
+   return a status and yield to the caller. `shared/compress`'s `od_zlib_stream.c` already is
+   one (`OD_ZLIB_STATUS_NEEDS_INPUT` / `_OUTPUT_READY` / `_DONE` / `_ERROR`) — treat that as the
+   house style for transfers and dispatch, not as a peculiarity of inflate.
+2. **`shared/core` owns no thread, task, timer, or work queue.** The target's loop calls in;
+   core never calls out to wait. There is no `od_core_task()`.
+3. **`shared/core` is not thread-safe, by contract.** The target guarantees single-flow entry:
+   ISR and stack-callback context does nothing but enqueue. Both targets already honour this.
+   Stating it as a contract is far cheaper than putting locks in `shared/` — the BG22 would pay
+   RAM and code for mutual exclusion it does not need, and locks in shared code are exactly the
+   kind of thing that is correct on the target it was written for.
+4. **State is caller-owned and statically sized.** No hidden singletons assuming one instance,
+   no allocation. This is the memory-sensitivity note seen from the concurrency side.
+5. **`delay()` is not part of the core API.** Core asks `od_hal_time` whether a deadline has
+   passed; it never asks to be put to sleep. `od_hal_delay_ms()` exists for *targets* and maps
+   to `vTaskDelay` / `k_sleep` / `sl_udelay` + `sl_power_manager` — same signature, three
+   implementations, and zero `#if` in `shared/`.
+
+Rule 1 is already a stated test obligation ("non-blocking behaviour… a property of the C
+implementation and meaningless in Python", § "Shared vectors"). It is listed there as something
+to verify; this section is where it is decided.
+
+### Where the difference genuinely lives
+
+Not in `shared/core` — in the HAL and in each target's outer loop. That is precisely what the
+HAL is for, and it is a good check on whether a proposed HAL entry is behavioural or a thin
+vendor wrapper: `od_hal_delay_ms()` means three different things on three targets and the core
+never needs to know which.
+
+**The one hard case is the panel, and it is not a threading problem.** `bbepWaitBusy()` spins on
+the BUSY pin with a 5 s (30 s for multi-colour) timeout — a hard block that stalls the superloop
+and starves BLE. That behaviour is identical on every target and lives in
+`third_party/bb_epaper` + `od_hal_panel`, not in `shared/core`. Whether refresh-wait becomes a
+poll (`od_hal_panel_busy()`) or stays blocking is a decision to make once, at the HAL, when the
+panel subsystem is swapped — and it is the one place where the bare-metal target's needs might
+change a shared interface rather than just its implementation.
+
 ## What belongs in `shared/core`
 
 Target-agnostic logic that today exists in near-duplicate across the four repos:

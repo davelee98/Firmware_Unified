@@ -100,23 +100,74 @@ public:
      * a clean error. IDF's repeated-START primitive is i2c_master_transmit_receive(), so
      * sendStop == false defers the write and lets the next requestFrom() issue both halves
      * as one transaction. */
+    /* Arduino return codes, which callers DO distinguish:
+     *   0 success, 1 data too long, 2 NACK on address, 3 NACK on data, 4 other error. */
     uint8_t endTransmission(bool sendStop = true)
     {
-        if (!attach(_addr)) {
-            _txLen = 0;
-            _pendingTx = false;
-            return 4;   /* Arduino: 4 == other error */
-        }
         if (!sendStop) {
             /* Hold the bytes; requestFrom() emits them with a repeated START. Arduino
-             * reports success here because nothing has been transmitted yet to fail. */
+             * reports success here because nothing has been transmitted yet to fail.
+             * Checked before attach() so a staged write needs no device handle yet. */
+            if (!_bus) {
+                _txLen = 0;
+                return 4;
+            }
             _pendingTx = true;
             return 0;
         }
         _pendingTx = false;
+
+        /* ZERO-LENGTH WRITE == A PRESENCE PROBE, and it must not go to
+         * i2c_master_transmit().
+         *
+         * `beginTransmission(addr); endTransmission();` with no write() in between is the
+         * universal Arduino way to ask "is anything at this address?" -- sensor_sht40.cpp's
+         * bus scan is exactly that. Under Arduino it emitted START + address + STOP and
+         * reported the address ACK.
+         *
+         * IDF's i2c_master_transmit() REJECTS size 0 outright:
+         *
+         *     ESP_RETURN_ON_FALSE((write_buffer != NULL) && (write_size > 0),
+         *                         ESP_ERR_INVALID_ARG, TAG,
+         *                         "i2c transmit buffer or size invalid");   i2c_master.c:1302
+         *
+         * so nothing reached the bus at all -- no START, no address byte, no ACK to observe --
+         * and the old code then mapped that refusal to 2 ("NACK on address"). Every probe of
+         * every address on every bus therefore reported "no device present", identically
+         * whether or not hardware was there, while the driver logged five
+         * "i2c transmit buffer or size invalid" errors that read as unrelated noise. A
+         * connected SHT40 was undetectable.
+         *
+         * i2c_master_probe() is IDF's primitive for precisely this: bus-level, address-only,
+         * no data phase. It takes the BUS handle, so the probe path needs no device
+         * registration -- which also stops the scan creating and tearing down a device handle
+         * per candidate address. */
+        if (_txLen == 0) {
+            if (!_bus) {
+                return 4;
+            }
+            esp_err_t err = i2c_master_probe(_bus, _addr, kTimeoutMs);
+            if (err == ESP_OK) {
+                return 0;
+            }
+            /* ESP_ERR_NOT_FOUND is the real "nobody answered" and is the only thing that may
+             * report 2. Anything else (a bad argument, a bus fault, a timeout on a stuck bus)
+             * is 4 -- the distinction the old blanket `return 2` destroyed. */
+            return (err == ESP_ERR_NOT_FOUND) ? 2 : 4;
+        }
+
+        if (!attach(_addr)) {
+            _txLen = 0;
+            return 4;
+        }
         esp_err_t err = i2c_master_transmit(_dev, _tx, _txLen, kTimeoutMs);
         _txLen = 0;
-        return (err == ESP_OK) ? 0 : 2;   /* 2 == NACK on address */
+        if (err == ESP_OK) {
+            return 0;
+        }
+        /* A real transfer that failed: the peer NACKed, or the bus misbehaved. Only report
+         * "NACK on address" for the errors that actually mean it. */
+        return (err == ESP_ERR_INVALID_ARG) ? 4 : 2;
     }
 
     /* Arduino's 3-arg form; its bool is "send a stop AFTER the read", which IDF's transaction

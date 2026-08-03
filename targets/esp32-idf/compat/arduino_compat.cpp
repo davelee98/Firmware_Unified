@@ -24,8 +24,38 @@ SPIClass SPI;
 EspClass ESP;
 MDNSResponder MDNS;
 
-uint32_t EspClass::getFreeHeap() const    { return (uint32_t)esp_get_free_heap_size(); }
-uint32_t EspClass::getMinFreeHeap() const { return (uint32_t)esp_get_minimum_free_heap_size(); }
+/* INTERNAL DRAM ONLY -- MALLOC_CAP_INTERNAL, matching Arduino-ESP32's EspClass exactly:
+ *
+ *     uint32_t EspClass::getFreeHeap()    { return heap_caps_get_free_size(MALLOC_CAP_INTERNAL); }
+ *     uint32_t EspClass::getMinFreeHeap() { return heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL); }
+ *
+ * These were esp_get_free_heap_size() / esp_get_minimum_free_heap_size(), i.e. MALLOC_CAP_DEFAULT.
+ * With CONFIG_SPIRAM_USE_MALLOC=y that INCLUDES PSRAM, so on an 8 MB-PSRAM S3 the log read
+ *
+ *     Heap: free=8437776 min=8437724
+ *
+ * -- 8.4 MB, with the minimum barely below the current free, because 8 MB of PSRAM swamps a
+ * DRAM figure that upstream measured bottoming out at 48-264 BYTES on a wake cycle running a
+ * BLE pipe-write.
+ *
+ * That is not a cosmetic difference. Internal-DRAM exhaustion is the exact failure
+ * Firmware's dc60c8a ("reclaim internal DRAM -- PSRAM LAN RX buffer, PSRAM-only WiFi/tinfl")
+ * was written to fix, and its own open item is "not yet verified on hardware: the min-heap
+ * figure on a wake cycle with a BLE pipe-write (expect ~16 KB where it was 48-264 B)". With
+ * PSRAM folded in, that number is unreadable and the fix unverifiable -- the heap log would
+ * have looked healthy through the six PANIC resets that started the investigation.
+ *
+ * ESP.getFreeHeap() is NOT a general "how much memory is left" question on a PSRAM part. It is
+ * specifically the DRAM-pressure question, which is why Arduino scoped it this way and why
+ * getFreePsram() is a separate accessor. Do not "improve" these to MALLOC_CAP_DEFAULT. */
+uint32_t EspClass::getFreeHeap() const    { return (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL); }
+uint32_t EspClass::getMinFreeHeap() const { return (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL); }
+
+/* PSRAM free, reported separately exactly as Arduino does. Added because the heap log is now
+ * internal-only and a reader still needs to see that PSRAM exists and is being used -- the LAN
+ * RX buffer relocation in dc60c8a depends on it. Returns 0 with no PSRAM, which is also what
+ * Arduino's psramFound() guard produces. */
+uint32_t EspClass::getFreePsram() const   { return (uint32_t)heap_caps_get_free_size(MALLOC_CAP_SPIRAM); }
 
 uint64_t EspClass::getEfuseMac() const
 {
@@ -55,6 +85,14 @@ void delay(long ms)
 void delayMicroseconds(long us)
 {
     esp_rom_delay_us((uint32_t)(us < 0 ? 0 : us));
+}
+
+/* External linkage because two vendored libraries need it -- see the note in
+ * arduino_compat.h. The truncation to 32 bits is deliberate: callers compare with
+ * subtraction, which is wrap-safe, and Arduino's millis() wraps the same way. */
+uint32_t millis(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
 /* ------------------------------------------------------------------ ADC
@@ -136,7 +174,21 @@ int analogRead(int pin)
 {
     adc_channel_t chan;
     if (!adc_channel_for_pin(pin, &chan) || (int)chan >= (int)SOC_ADC_CHANNEL_NUM(0)) {
-        ESP_LOGW(ADC_TAG, "GPIO %d is not an ADC1 input", pin);
+        /* Once per pin, not once per sample. readBatteryVoltageUncached() averages ten
+         * samples per call and updatemsdata() drives it, so an unconfigured pin produced ten
+         * identical warnings every refresh -- enough to bury the rest of the log.
+         *
+         * An unprovisioned device lands here with pin 0: globalConfig is memset to zero, so
+         * battery_sense_pin reads 0 rather than the 0xFF "unset" sentinel the caller checks,
+         * and GPIO0 is not an ADC1 input on any variant here. That is worth saying once. */
+        static uint64_t s_warned = 0;   /* bitmap, one bit per GPIO */
+        if (pin >= 0 && pin < 64) {
+            if (!(s_warned & (1ULL << pin))) {
+                s_warned |= (1ULL << pin);
+                ESP_LOGW(ADC_TAG, "GPIO %d is not an ADC1 input; analogRead returns 0 "
+                                  "(pin 0 usually means no battery_sense_pin is configured)", pin);
+            }
+        }
         return 0;
     }
     if (!adc_unit_ready()) {
