@@ -478,11 +478,28 @@ static bool epdSessionAcquire(bool partialInit) {
             } else
 #endif
             {
+                /* Per-step timing. A cold bring-up is three vendor calls and, when the panel
+                 * is not answering, each one silently burns a full BUSY timeout (5 s B/W,
+                 * 30 s multi-colour) inside bb_epaper and returns success. From the outside
+                 * that is one opaque 16-30 s stall between "COLD bring-up" and the next line
+                 * -- which blocks loop(), so queued BLE responses cannot be notified and the
+                 * host times out. Naming the step that costs the time is the difference
+                 * between reading a log and guessing. Cheap: four log lines per cold acquire,
+                 * not per transfer. */
+                uint32_t tStep = millis();
                 bbepInitIO(&bbep, d.dc_pin, d.reset_pin, d.busy_pin, d.cs_pin, d.data_pin, d.clk_pin, 8000000);
+                od_log_debug("[EPD cold] bbepInitIO %u ms", (unsigned)(millis() - tStep));
+
+                tStep = millis();
                 bbepWakeUp(&bbep);
+                od_log_debug("[EPD cold] bbepWakeUp %u ms", (unsigned)(millis() - tStep));
+
                 const uint8_t* initSeq = partialInit ? (bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull)
                                                      : bbep.pInitFull;
+                tStep = millis();
                 bbepSendCMDSequence(&bbep, initSeq);
+                od_log_debug("[EPD cold] initSeq (%s) %u ms",
+                             partialInit ? "partial" : "full", (unsigned)(millis() - tStep));
                 epdAlignCustomPartialRamMode();
                 epdSessionInitWasPartial = partialInit;
             }
