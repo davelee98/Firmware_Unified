@@ -83,7 +83,45 @@ if ! command -v idf.py >/dev/null 2>&1; then
     # shellcheck disable=SC1090
     source "$IDF_EXPORT" >/dev/null
 fi
-echo "ESP-IDF: $(idf.py --version 2>&1 | head -1)"
+IDF_ACTUAL="$(idf.py --version 2>&1 | head -1 | sed 's/^ESP-IDF //')"
+echo "ESP-IDF: $IDF_ACTUAL"
+
+# --- version pin ----------------------------------------------------------------------------
+# .idf_version is the checked-in pin. Without it build.sh takes whatever IDF happens to live at
+# $IDF_PATH, so "works on my machine" and a CI failure are indistinguishable from a code change
+# -- the same reproducibility hole as globbing for an NCS version. The pin is enforced, not
+# advisory: an IDF minor bump changes generated startup code, the bootloader, and sdkconfig
+# defaults, and those land in a merged image nobody diffs.
+#
+# Override deliberately (testing a new IDF, bisecting a toolchain regression):
+#   OD_IDF_VERSION_CHECK=warn ./build.sh     # note the mismatch, build anyway
+#   OD_IDF_VERSION_CHECK=off  ./build.sh     # say nothing
+# If a new IDF is adopted, edit .idf_version in the same commit as whatever the bump requires.
+IDF_PIN_FILE="$TARGET_DIR/.idf_version"
+IDF_PIN=""
+# Guarded: under `set -e` + pipefail a missing pin file would abort the script on sed's exit
+# status instead of reaching the "no pin" warning below -- i.e. deleting the pin would look
+# like a broken build script rather than an unpinned build.
+if [ -f "$IDF_PIN_FILE" ]; then
+    IDF_PIN="$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$IDF_PIN_FILE" | head -1 | tr -d '[:space:]')"
+fi
+case "${OD_IDF_VERSION_CHECK:-enforce}" in
+    off) ;;
+    *)
+        if [ -z "$IDF_PIN" ]; then
+            echo "!! no version pin found at $IDF_PIN_FILE -- build is not reproducible" >&2
+        elif [ "$IDF_PIN" != "$IDF_ACTUAL" ]; then
+            echo "ESP-IDF version mismatch: pinned $IDF_PIN, active $IDF_ACTUAL" >&2
+            if [ "${OD_IDF_VERSION_CHECK:-enforce}" = "warn" ]; then
+                echo "   continuing anyway (OD_IDF_VERSION_CHECK=warn)" >&2
+            else
+                echo "   Pin lives in $IDF_PIN_FILE." >&2
+                echo "   Build with the pinned IDF, or OD_IDF_VERSION_CHECK=warn ./build.sh" >&2
+                exit 1
+            fi
+        fi
+        ;;
+esac
 
 mkdir -p "$RELEASE_DIR"
 
@@ -126,6 +164,9 @@ MANIFEST="$RELEASE_DIR/MANIFEST.txt"
     echo "built    $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
     echo "commit   ${COMMIT}${DIRTY}"
     echo "idf      $(idf.py --version 2>&1 | head -1)"
+    # Both, not just the active one: under OD_IDF_VERSION_CHECK=warn these can differ, and an
+    # image built off-pin has to be identifiable as such after the fact.
+    echo "idf pin  ${IDF_PIN:-(none)}"
     echo
     printf '%-28s %-10s %10s  %s\n' BOARD CHIP BYTES FLASH-WITH
 } > "$MANIFEST"

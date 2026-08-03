@@ -225,11 +225,32 @@ usual** because no single dev box builds everything.
 
 ### ESP32 (all variants) → ESP-IDF
 
-**Version.** Pin one explicit IDF release in a checked-in file and use it everywhere
-(`.idf_version` or a `tools/idf-env.sh` wrapper). Floors: **≥ 5.1** for ESP32-C6 support,
-**≥ 5.2** for the new `driver/i2c_master.h` API that the 246 `Wire` sites should land on
-(the legacy `driver/i2c.h` is deprecated — do not port onto it). Confirm what the current
-stable release is at import time rather than trusting this doc.
+**Version — done: pinned to `v5.5.4`.** The pin is
+[`targets/esp32-idf/.idf_version`](../targets/esp32-idf/.idf_version), a one-line checked-in
+file, and `build.sh` **enforces** it: it compares the pin against `idf.py --version` after
+activation and refuses to build on a mismatch. Both the pin and the active version are recorded
+in `release/MANIFEST.txt`, so an image built off-pin is identifiable after the fact.
+
+```bash
+./build.sh                              # enforce (default): mismatch is a hard failure
+OD_IDF_VERSION_CHECK=warn ./build.sh    # note the mismatch, build anyway
+OD_IDF_VERSION_CHECK=off  ./build.sh    # say nothing
+```
+
+Enforced rather than advisory because an IDF minor bump changes generated startup code, the
+bootloader, and sdkconfig defaults — all of which land inside a merged image that nobody diffs.
+Before this existed, `build.sh` took whatever IDF happened to live at `$IDF_PATH`, which made
+"works on my machine" and a CI failure indistinguishable from a source change. **Adopting a new
+IDF means editing `.idf_version` in the same commit as whatever the bump requires** — that is
+the point of the file, not an obstacle to routing around.
+
+The same hole is still open on the Nordic side: `Firmware_NRF54`'s `ncs-env.sh` globs
+`~/ncs/v3.*` then `~/ncs/v2.*` and takes the first hit. Close it the same way when that target
+is imported.
+
+Floors the pin clears: **≥ 5.1** for ESP32-C6 support, **≥ 5.2** for the new
+`driver/i2c_master.h` API that the 246 `Wire` sites should land on (the legacy `driver/i2c.h`
+is deprecated — do not port onto it).
 
 **Board matrix.** The ten PlatformIO envs are the real ergonomic loss — PIO's `extends =
 env:...` inheritance (already used by `esp32-s3-E1004`) has no direct IDF equivalent. Replace

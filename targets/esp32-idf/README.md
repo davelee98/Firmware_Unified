@@ -277,7 +277,23 @@ compat/arduino_compat.h         TEMPORARY import shim; deleted during phase C
 ESP-IDF, pinned to one explicit release. Floors: **≥ 5.1** for ESP32-C6, **≥ 5.2** for
 `driver/i2c_master.h` (do not port onto the deprecated `driver/i2c.h`).
 
-**Installed on the primary dev box: ESP-IDF v5.5.4** at `~/esp/esp-idf`, activated with
-`source ~/esp/esp-idf/export.sh` (it is not on `PATH`). That clears both floors and is the
-obvious pin — adopt it explicitly in Phase B rather than depending on whatever a given machine
-has exported.
+**Pinned to ESP-IDF `v5.5.4`** in [`.idf_version`](.idf_version) — one line, checked in, and
+enforced by `build.sh`, which compares it against `idf.py --version` after activation and
+refuses to build on a mismatch. `release/MANIFEST.txt` records both the pin and the active
+version, so an image built off-pin is identifiable later.
+
+```bash
+./build.sh                              # enforce (default)
+OD_IDF_VERSION_CHECK=warn ./build.sh    # build anyway, but say so
+OD_IDF_VERSION_CHECK=off  ./build.sh    # silence the check
+```
+
+Installed on the primary dev box at `~/esp/esp-idf`, activated with
+`source ~/esp/esp-idf/export.sh` — it is **not** on `PATH`, so `which idf.py` finding nothing is
+the normal state, not a missing install. `build.sh` sources the export script itself unless the
+caller already did.
+
+**Adopting a newer IDF means editing `.idf_version` in the same commit** as whatever the bump
+requires (sdkconfig defaults, bootloader, startup code all move with it). The override exists
+for testing a candidate release or bisecting a toolchain regression — not for getting past a
+red build.
