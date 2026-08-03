@@ -7,7 +7,6 @@
 #define __ESP_IDF_IO__
 
 #include "esp_timer.h"
-#include "esp_log.h"   /* OD-PATCH: ESP_LOGW in bbepInitIO */
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 
@@ -68,9 +67,6 @@ long millis(void)
     return (long)(esp_timer_get_time() / 1000L);
 } /* millis() */
 
-/* OD-PATCH: the application shim owns these; two providers made every internal
- * delay(uint32_t) call ambiguous. */
-#if 0
 void delayMicroseconds(long l)
 {
     l *= 40;
@@ -156,7 +152,6 @@ int i2str(char *pDest, int iVal)
         *d++ = 0; // terminator
         return (int)(d - pDest - 1); // string length
 } /* i2str() */
-#endif /* OD-PATCH */
 void delayCycles(int i)
 {
     while (i > 3) {
@@ -261,64 +256,6 @@ void bbepInitIO(BBEPDISP *pBBEP, uint8_t u8DC, uint8_t u8RST, uint8_t u8BUSY, ui
     pinMode(pBBEP->iCSPin, OUTPUT);
     digitalWrite(pBBEP->iCSPin, HIGH); // manually control the CS pin
 
-    /* OD-PATCH: bbepInitIO() is called on EVERY cold panel bring-up, not once at boot.
-     * epdSessionAcquire() powers the panel down when idle and re-acquires it for the next
-     * transfer, so the second and every later call landed here with the bus already up:
-     *
-     *   E (26228) spi: spi_bus_initialize(816): SPI bus already initialized.
-     *   assert failed: bbepInitIO ... esp_generic.inl:272 (ret==ESP_OK)
-     *
-     * -- a guaranteed panic on the first image upload after the boot screen. There is no
-     * spi_bus_free() anywhere in this backend, so the bus is never released and the assert
-     * was unavoidable rather than unlucky.
-     *
-     * It did not show under Arduino because bb_epaper used arduino_io.inl there, whose
-     * SPI.begin() is idempotent and whose teardown (SPI.end(), main.cpp) matched it. The IDF
-     * port switched this file in, and it has a begin with no end.
-     *
-     * TEARDOWN-THEN-REINIT, not skip-if-ready. The first version of this patch guarded the
-     * whole block behind a static "already done" flag and returned early on later calls. That
-     * fixed the assert and broke the panel: nothing rendered after the boot screen, with SPI
-     * reporting success the whole way.
-     *
-     * The reason is that the pads do not survive the power-down. main.cpp's
-     * configureDisplayPinsLowPower() does pinMode(clk_pin, OUTPUT) / pinMode(data_pin, OUTPUT)
-     * to park the panel rail's pins low, and the shim's pinMode() is gpio_config(), which
-     * routes those pads back to plain GPIO -- detaching SCLK and MOSI from the SPI peripheral.
-     * spi_bus_initialize() is the ONLY call that re-attaches them. Skipping it left the
-     * peripheral perfectly healthy and no longer connected to anything: every
-     * spi_device_polling_transmit() returned ESP_OK, the pixel data and the refresh command
-     * both went nowhere, BUSY never asserted, and the screen simply never changed.
-     *
-     * So the bus is torn down and rebuilt on each cold bring-up, which is what the original
-     * upstream code effectively did by calling spi_bus_initialize() every time -- except that
-     * it never released anything first, which is where the assert came from. Freeing first
-     * makes the re-init legal, re-attaches the pins, and leaks neither a bus nor one of the
-     * host's three device slots.
-     *
-     * Cost is one free/init pair per cold acquire (not per transfer), against a panel refresh
-     * measured in seconds. */
-    static bool s_spi_ready = false;
-
-    if (s_spi_ready) {
-        if (spi != NULL) {
-            spi_bus_remove_device(spi);
-            spi = NULL;
-        }
-        /* Fails with ESP_ERR_INVALID_STATE if another driver still holds a device on this
-         * host -- the E1004 dual-CS path in display_service.cpp opens one through compat/SPI.h.
-         * Not fatal, and not silent: the re-init below then returns INVALID_STATE too and the
-         * pins stay detached, so this warning is the only warning that the panel is about to
-         * go quiet. */
-        esp_err_t free_ret = spi_bus_free(ESP32_SPI_HOST);
-        if (free_ret != ESP_OK) {
-            ESP_LOGW("bbep", "spi_bus_free failed (%d); another device is still attached, "
-                             "SCLK/MOSI will not be re-attached to the SPI peripheral",
-                     (int)free_ret);
-        }
-        s_spi_ready = false;
-    }
-
     memset(&buscfg, 0, sizeof(buscfg));
     buscfg.miso_io_num = -1; //u8MISO;
     buscfg.mosi_io_num = u8MOSI;
@@ -328,13 +265,6 @@ void bbepInitIO(BBEPDISP *pBBEP, uint8_t u8DC, uint8_t u8RST, uint8_t u8BUSY, ui
     buscfg.quadhd_io_num=-1;
     //Initialize the SPI bus
     ret=spi_bus_initialize(ESP32_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
-    /* Already initialised means the free above did not happen or did not take. Tolerated so a
-     * co-tenant driver cannot panic the device, but it is a degraded state, not a normal one:
-     * the pins are whatever the last owner left them as. */
-    if (ret == ESP_ERR_INVALID_STATE) {
-        ESP_LOGW("bbep", "SPI bus already initialised; pin routing not refreshed");
-        ret = ESP_OK;
-    }
     assert(ret==ESP_OK);
 
     memset(&devcfg, 0, sizeof(devcfg));
@@ -349,9 +279,7 @@ void bbepInitIO(BBEPDISP *pBBEP, uint8_t u8DC, uint8_t u8RST, uint8_t u8BUSY, ui
     devcfg.flags = SPI_DEVICE_HALFDUPLEX; // this disables SD card access
     ret=spi_bus_add_device(ESP32_SPI_HOST, &devcfg, &spi); // attach to bus
     assert(ret==ESP_OK);
-
-    s_spi_ready = true;
-
+    
     if (pBBEP->iFlags & BBEP_7COLOR) { // need to send before you can send it data
         pBBEP->is_awake = 1;
         bbepSendCMDSequence(pBBEP, pBBEP->pInitFull);

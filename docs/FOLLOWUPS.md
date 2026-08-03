@@ -245,12 +245,17 @@ It is the shape `shared/` is designed to forbid: SHARED_API_DESIGN § `od_hal_ti
 reason — on the Silabs superloop there is no scheduler at all, so a blocking wait stops
 everything.
 
-### 3.7 `esp_generic.inl` is dead code carrying four patches
+### 3.7 ~~`esp_generic.inl` is dead code carrying four patches~~ — resolved 2026-08-03
 
-`targets/esp32-idf/panel/od_bbep_idf_io.inl` replaced it (2026-08-03). Verified: zero symbols
-in the linked image, no compiled includer. The file and its four `OD-PATCH` sites remain in
-`third_party/`, as does NOTICE.md's "Third patch" section describing behaviour nothing compiles.
-Delete both, or state why a patched, uncompiled backend is kept.
+Reverted to pristine upstream: byte-identical to `~/bb_epaper/esp_idf/esp_generic.inl`, 295
+lines, zero `OD-PATCH` sites. Still present in the tree and still not compiled — reverted rather
+than deleted, because a re-vendor would restore it and deleting makes the vendored copy diverge
+from upstream *by omission*, which a `diff` cannot confirm the way "pristine and unused" can.
+
+`third_party/NOTICE.md` now says so, and records what the four patches were, since that history
+is the argument for owning the backend. bb_epaper is down to 3 `OD-PATCH` sites, both remaining
+files genuinely compiled: `bb_ep.inl` (the `epd42yr2_init_full` duplicate-symbol fix, and the
+BUSY-wait timeout warning from 3.6) and `bb_epaper.h` (`delay(int)` → `delay(long)`).
 
 ### 3.4 Already tracked elsewhere — pointers only
 

@@ -54,79 +54,43 @@ Both are bugs in the library itself, not incompatibilities with this repo — wo
 upstream, and worth checking against `bitbank2/bb_epaper` to see whether the fork introduced
 them. Re-apply or re-verify on every bump.
 
-### Third patch (2026-07-26) — `esp_generic.inl` SPI init is not re-entrant
+### `esp_idf/esp_generic.inl` is UNPATCHED and UNUSED (reverted 2026-08-03)
 
-**Symptom:** guaranteed panic on the first image upload after the boot screen.
+This file is byte-identical to upstream `~/bb_epaper/esp_idf/esp_generic.inl` (295 lines) and
+**is not compiled.** Do not patch it. Do not read it to understand how this target drives a
+panel — it does not.
 
-```
-E (26228) spi: spi_bus_initialize(816): SPI bus already initialized.
-assert failed: bbepInitIO ... esp_generic.inl:272 (ret==ESP_OK)
-```
+The ESP32 target uses its own backend, `targets/esp32-idf/panel/od_bbep_idf_io.inl`, selected by
+`targets/esp32-idf/panel/od_bbep.cpp` replacing `bb_epaper.cpp`'s 52 lines of glue rather than
+by patching its `#ifdef` chain. That is why nothing here needs an `OD-PATCH` any more, and why
+`bb_epaper.cpp` is excluded in `main/CMakeLists.txt`.
 
-`bbepInitIO()` runs on every **cold panel bring-up**, not once at boot — `epdSessionAcquire()`
-powers the panel down when idle and re-acquires it per transfer. It calls
-`spi_bus_initialize()` and asserts on the result, and there is **no `spi_bus_free()` anywhere
-in this backend**, so the bus is never released. Bring-up #1 (boot screen) succeeds; #2 can
-only assert.
+**It carried four `OD-PATCH` sites and they are all gone.** Kept for the record, because the
+history is the argument for owning the backend rather than patching upstream's:
 
-Invisible under Arduino, because bb_epaper used `src/arduino_io.inl` there: `SPI.begin()` is
-idempotent and `SPI.end()` (main.cpp, panel power-down) was its matching teardown. The IDF port
-selects `esp_idf/esp_generic.inl`, which has a begin and no end.
+1. **`bbepInitIO()` was not re-entrant** — it called `spi_bus_initialize()` on every cold panel
+   bring-up while the file contained no `spi_bus_free()` anywhere, so bring-up #2 could only
+   `assert()`. `epdSessionAcquire()` re-acquires the panel per transfer, making the panic
+   guaranteed on the first image upload after the boot screen. Invisible under Arduino, which
+   used `src/arduino_io.inl` and shared the application's global `SPI` object, so
+   `SPI.begin()`/`SPI.end()` happened to pair across the library boundary.
+2. **The first fix for (1) was wrong**, and instructively so: guarding the block behind an
+   "already initialised" flag stranded SCLK/MOSI, because project code revokes the pad routing
+   between bring-ups (`configureDisplayPinsLowPower()` → `pinMode()` → `gpio_config()`) and
+   `spi_bus_initialize()` is the only call that restores it. The peripheral stayed healthy and
+   connected to nothing: every transfer returned `ESP_OK` and the screen never changed.
+3. Two supporting edits — an `esp_log.h` include so the file could warn at all, and `#if 0`
+   around its Arduino-core/libc reimplementation (`delay`, `millis`, `mymemset`, `i2str`, …)
+   which collided with `compat/arduino_compat.h`.
 
-**Fixed here rather than project-side, deliberately.** The state that has to be guarded is
-`static spi_device_handle_t spi` at line 28 — file-scope static, so project code cannot see the
-device it would need to remove before `spi_bus_free()` would succeed, and the library exposes
-no IO teardown at all. Every project-side alternative was worse:
+None of that was the cause of the 16–21 s cold bring-up it was chased for; that was BUSY-wait
+expiry inside `bb_ep.inl`, measured at 5 s a time. See
+[docs/BBEPAPER_IO_BACKENDS.md](../docs/BBEPAPER_IO_BACKENDS.md) § 8.
 
-| Alternative | Why not |
-|---|---|
-| `-Wl,--wrap=spi_bus_initialize` returning OK on `INVALID_STATE` | Silences the assert but not the leak: `spi_bus_add_device` still runs per bring-up, overwriting `spi` and leaking a slot. Three devices per host — it panics on the third cold acquire instead of the first. Fixing that means wrapping `spi_bus_add_device` too, i.e. reimplementing the library's state machine through the linker, globally. |
-| Define `ARDUINO` so `arduino_io.inl` is selected | Drags in bb_epaper's whole Arduino surface (`Print`, `PROGMEM`, `pgm_read_*`). The same move on FastEPD produced 117 errors. It also moves the panel *onto* the compat shim, the opposite of phase C. |
-| Call `bbepInitIO()` once from `epdSessionAcquire()` and do the RST pulse in project code | Duplicates the vendor reset sequence into `display_service.cpp` — a file destined for `shared/core`, where vendor knowledge is forbidden — and drifts silently if the library's init changes. |
-
-The patch **tears the bus down and rebuilds it** on each cold bring-up: remove the device,
-`spi_bus_free()`, then the original init sequence. That is what the upstream code effectively
-did by calling `spi_bus_initialize()` every time — except it never released anything first,
-which is where the assert came from.
-
-**The first version of this patch got it wrong, and the failure is worth recording.** It
-guarded the whole block behind a static "already initialised" flag and returned early on later
-calls. That silenced the assert and killed the panel: nothing rendered after the boot screen,
-while SPI reported success at every step.
-
-The pads do not survive the power-down. `main.cpp`'s `configureDisplayPinsLowPower()` parks the
-panel pins with `pinMode(clk_pin, OUTPUT)` / `pinMode(data_pin, OUTPUT)`, and the shim's
-`pinMode()` is `gpio_config()` — which routes those pads back to plain GPIO, detaching SCLK and
-MOSI from the SPI peripheral. `spi_bus_initialize()` is the **only** call that re-attaches them.
-Skip it and the peripheral stays perfectly healthy while connected to nothing:
-`spi_device_polling_transmit()` returns `ESP_OK`, the pixel data and the refresh command both go
-nowhere, BUSY never asserts, and the screen simply never changes.
-
-Two lessons for anyone re-applying this: *(a)* an idempotent-init guard is wrong here
-specifically because pin routing is owned by the bus and revoked by project code between calls;
-*(b)* the symptom is indistinguishable from a dead panel or a wiring fault, because every
-software-visible return code is success. The `ERROR: Epaper not busy after refresh command`
-line in `waitforrefresh()` is the only signal.
-
-**This is an upstream bug.** The right end state is a `bbepDeInitIO()` in bb_epaper that frees
-the device and bus, or an idempotent init. Report it; until then this patch must survive every
-re-vendor.
-
-**Two things to know before bumping it.**
-
-*It is vendored from a fork.* `Firmware`'s `platformio.ini` pulls `bitbank2/bb_epaper.git`
-(upstream) while the checkout used here is `davelee98-creator/bb_epaper`. Whether the fork
-carries local changes has **not** been established — establish it before the next bump, because
-"vendored from a fork of unknown divergence" is how a local fix becomes permanently invisible.
-
-*No copy is a superset, and this one is not either.* TOOLCHAINS.md § "Where bb_epaper and uzlib
-live" records the problem: upstream has the `esp_idf/` backends but no `nrf54_zephyr_io.inl` or
-`silabs_efr32_io.inl`, while the `Firmware_NRF54` and `Firmware_Silabs` copies have those and no
-`esp_idf/`. **This vendored tree currently has only the ESP-IDF side**, which is correct for
-migration step 1 and insufficient from step 2 onward. When the Nordic and Silabs targets land,
-their backends must be merged in here rather than each target re-vendoring — that merge is what
-makes this an assembled fork, and DESIGN_REVIEW F9 flags it as a fork with no upstream-sync
-owner. Assign one before step 2.
+**Why the file is reverted rather than deleted.** A re-vendor would restore it, so deleting it
+makes the vendored tree diverge from upstream by omission — harder to verify than a file that
+matches. Pristine and unused is a state a `diff` against upstream confirms in one command;
+absent is not.
 
 ## FastEPD
 

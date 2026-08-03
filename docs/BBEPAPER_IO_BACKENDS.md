@@ -353,9 +353,10 @@ the first time; the shared transaction struct became a local; DC/RST/CS gained p
 guards; GPIO semantics now match the compat shim; six dead functions are gone, verified absent
 from the linked image.
 
-`esp_generic.inl` is now **dead code in the tree** — zero symbols in the linked image, no
-compiled includer — while still carrying its four patches. Deleting it, and NOTICE.md's "Third
-patch" section describing it, is outstanding.
+`esp_generic.inl` was left in the tree as dead code carrying its four patches; **reverted to
+pristine upstream on 2026-08-03** — byte-identical to `~/bb_epaper/esp_idf/esp_generic.inl`, zero
+`OD-PATCH` sites, still uncompiled. Reverted rather than deleted so a `diff` against upstream
+confirms its state in one command; NOTICE.md records what the patches were and why.
 
 One coupling bug surfaced during the swap and is worth recording: FastEPD's `arduino_io.inl`
 declared `millis()` extern and deferred the definition **to bb_epaper's backend**, so removing
@@ -379,5 +380,4 @@ code is fine.
 2. **`bbepWaitBusy` blocks the loop task** with a bare `delay(20)`, so `serviceBleTx()` stops
    for the duration of a refresh and queued BLE responses stall. Independent of the panel bug
    and unaffected by fixing it. `bbepLightSleep()` is where a pump belongs.
-3. **Delete `esp_generic.inl`** and its NOTICE.md section, or state why a patched, uncompiled
-   backend is being kept.
+3. ~~Delete `esp_generic.inl`~~ — done differently: reverted to pristine and kept. See above.

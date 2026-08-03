@@ -44,7 +44,10 @@
 #define INPUT_PULLUP 2
 #define HIGH 1
 #define LOW 0
-void delay(long); /* OD-PATCH: was delay(int); esp_idf/esp_generic.inl defines delay(long) */
+void delay(long); /* OD-PATCH: was delay(int), which made every delay(uint32_t) call inside
+                   * the library ambiguous against the long-taking definition. The definition
+                   * now lives in targets/esp32-idf/compat/arduino_compat.cpp, NOT in
+                   * esp_idf/esp_generic.inl -- that backend is no longer compiled. */
 void pinMode(int pin, int mode);
 void digitalWrite(int pin, int value);
 int digitalRead(int pin);
