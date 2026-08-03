@@ -19,7 +19,21 @@
 #ifndef OPENDISPLAY_LOG_UART_TX
 #define OPENDISPLAY_LOG_UART_TX 43
 #endif
-static HardwareSerial LogSerialPort(1);
+/* OD: UART 0, not UART 1 as the Arduino source had it.
+ *
+ * OPENDISPLAY_LOG_UART_TX/RX are 43/44, which ARE UART0's default pins on the ESP32-S3, and
+ * IDF's console is UART0 (CONFIG_ESP_CONSOLE_UART_NUM=0). Opening UART1 and remapping it onto
+ * those pads makes the GPIO matrix override UART0's IO_MUX function, so from setup() onward
+ * the pad belongs to UART1 and EVERY ESP_LOGx line -- the BLE, NVS, SPI and ADC diagnostics --
+ * goes to a UART that is no longer connected to anything. You get boot logs, then od_log only.
+ *
+ * Under Arduino this was harmless because nothing wrote to Serial; the IDF port introduced a
+ * real second log stream, so the two have to share one UART. Overridable for a board that
+ * genuinely wires its debug UART somewhere other than UART0's pins. */
+#ifndef OPENDISPLAY_LOG_UART_NUM
+#define OPENDISPLAY_LOG_UART_NUM 0
+#endif
+static HardwareSerial LogSerialPort(OPENDISPLAY_LOG_UART_NUM);
 #endif
 
 #ifdef TARGET_ESP32

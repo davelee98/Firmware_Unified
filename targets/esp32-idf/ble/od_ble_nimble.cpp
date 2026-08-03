@@ -5,6 +5,9 @@
 
 #include <string.h>
 
+/* OD_BLE_MAX_FRAME -- the declared GATT value length, enforced in od_gatt_access(). */
+#include "opendisplay_protocol.h"
+
 #include "esp_log.h"
 #include "nvs_flash.h"
 
@@ -30,13 +33,65 @@ extern void od_ble_on_write(const uint8_t *data, uint16_t len);
 static const char *TAG = "od_ble";
 
 /* 00002446-0000-1000-8000-00805F9B34FB, little-endian as NimBLE wants it. Service and
- * characteristic deliberately share this UUID -- see od_ble.h. */
-static const ble_uuid128_t od_svc_uuid =
-    BLE_UUID128_INIT(0xFB, 0x34, 0x9B, 0x9F, 0x80, 0x00, 0x00, 0x80,
-                     0x00, 0x10, 0x00, 0x00, 0x46, 0x24, 0x00, 0x00);
-static const ble_uuid128_t od_chr_uuid =
-    BLE_UUID128_INIT(0xFB, 0x34, 0x9B, 0x9F, 0x80, 0x00, 0x00, 0x80,
-                     0x00, 0x10, 0x00, 0x00, 0x46, 0x24, 0x00, 0x00);
+ * characteristic deliberately share this UUID -- see od_ble.h.
+ *
+ * Spelled ONCE, and checked against the canonical big-endian form at compile time.
+ *
+ * This was wrong in the first port: byte 3 read 0x9F instead of 0x5F, so the firmware
+ * registered 00002446-0000-1000-8000-0080_9F_9B34FB. Nothing could detect it. The service
+ * registered, reported a valid handle, advertised, and accepted connections -- every log line
+ * looked healthy -- and clients simply got NotFoundError on getPrimaryService() because that
+ * service genuinely was not present. A hand-transcribed byte-reversed constant has no
+ * redundancy, so the assert below supplies it: the LE array reversed must equal the Bluetooth
+ * Base UUID with 0x2446 in the 16-bit slot. */
+/* The Bluetooth Base UUID 00000000-0000-1000-8000-00805F9B34FB, little-endian, with the
+ * 16-bit slot left to the caller. This is a fixed, well-known constant -- it is the same in
+ * every Bluetooth product ever shipped -- so it is written once and never edited.
+ *
+ * Splicing rather than transcribing is the point. The ONLY project-specific number below is
+ * 0x2446, which is the number a reader can check against the wire contract; the byte-reversal
+ * is done by the compiler, not by me. The reference firmware gets the same property for free
+ * by passing a string to NimBLE-Arduino's parser (and NimBLE's own C API offers
+ * ble_uuid_from_str() for that, at runtime cost). */
+#define OD_BT_BASE_UUID_LE_TAIL  0xFB, 0x34, 0x9B, 0x5F, 0x80, 0x00, 0x00, 0x80, \
+                                 0x00, 0x10, 0x00, 0x00
+#define OD_UUID128_FROM_16(u16)  OD_BT_BASE_UUID_LE_TAIL,                 \
+                                 (uint8_t)((u16) & 0xFFu),                \
+                                 (uint8_t)(((u16) >> 8) & 0xFFu),         \
+                                 0x00, 0x00
+
+/* The OpenDisplay GATT service/characteristic, 0x2446. NOT currently a named constant in
+ * shared/protocol/opendisplay_protocol.h -- the header carries OD_LAN_TCP_PORT 2446u, which is
+ * the same number for an unrelated reason (the TCP port), not this UUID. The BLE service UUID
+ * is wire contract and belongs in the canonical header; adding it is blocked on the header
+ * freeze, so it is flagged here rather than duplicated silently. */
+#define OD_BLE_SERVICE_UUID16  0x2446u
+
+#define OD_UUID_LE_BYTES  OD_UUID128_FROM_16(OD_BLE_SERVICE_UUID16)
+
+static constexpr uint8_t od_uuid_le[16] = { OD_UUID_LE_BYTES };
+
+/* 00002446-0000-1000-8000-00805F9B34FB, MSB first -- read straight off the wire contract. */
+static constexpr uint8_t od_uuid_be[16] = {
+    0x00, 0x00, 0x24, 0x46,  0x00, 0x00,  0x10, 0x00,
+    0x80, 0x00,  0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB
+};
+
+static constexpr bool od_uuid_le_is_be_reversed()
+{
+    for (int i = 0; i < 16; i++) {
+        if (od_uuid_le[i] != od_uuid_be[15 - i]) {
+            return false;
+        }
+    }
+    return true;
+}
+static_assert(od_uuid_le_is_be_reversed(),
+              "the little-endian GATT UUID does not reverse to "
+              "00002446-0000-1000-8000-00805F9B34FB -- clients will not find the service");
+
+static const ble_uuid128_t od_svc_uuid = BLE_UUID128_INIT(OD_UUID_LE_BYTES);
+static const ble_uuid128_t od_chr_uuid = BLE_UUID128_INIT(OD_UUID_LE_BYTES);
 
 static uint16_t s_chr_val_handle = 0;
 static uint16_t s_conn_handle    = BLE_HS_CONN_HANDLE_NONE;
@@ -65,7 +120,16 @@ static int od_gatt_access(uint16_t conn_handle, uint16_t attr_handle,
          * and note the reason its comment gave for not converting to String: pipe-write
          * frames begin with 0x00, so any C-string conversion truncates to length 0. Same trap
          * here: this payload is binary, never a string. */
-        static uint8_t buf[512];
+        /* Enforce the declared value length at the GATT layer, returning ATT 0x0D
+         * (Invalid Attribute Value Length). The Arduino characteristic declared max_len =
+         * OD_BLE_MAX_FRAME for exactly this reason -- "makes the GATT layer reject an
+         * oversize write with ATT 0x0D instead of letting it reach onWrite() and be dropped
+         * silently". ble_gatt_chr_def has no max_len field, so the check has to be here;
+         * without it the port answered "success" to writes it then discarded. */
+        if (OS_MBUF_PKTLEN(ctxt->om) > OD_BLE_MAX_FRAME) {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        static uint8_t buf[OD_BLE_MAX_FRAME];
         uint16_t len = 0;
         int rc = ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof(buf), &len);
         if (rc != 0) {
@@ -173,36 +237,53 @@ static void od_ble_advertise(void)
     struct ble_hs_adv_fields fields;
     memset(&fields, 0, sizeof fields);
 
-    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-
-    /* The 31-byte advertisement cannot hold both: flags(3) + 128-bit UUID(18) + 16-byte
-     * MSD(18) = 39. The MSD wins -- it is what host discovery keys on (manufacturer id 9286)
-     * and it carries the live sensor payload; the service UUID is discoverable after connect.
+    /* ADVERTISEMENT = flags + NAME + MSD. This is the Arduino payload byte-for-byte:
+     * updatemsdata() built setName + setFlags(0x06) + setManufacturerData and pushed the whole
+     * record with setAdvertisementData(). It fits 31 bytes EXACTLY --
+     *   flags 3 + name (2 + 8, "OD" + 6 hex chars) + MSD (2 + 16) = 31
+     * -- which is why the name length is not free to grow. A longer device name overflows and
+     * ble_gap_adv_set_fields() will reject the record; the fallback below is what catches that.
      *
-     * Chosen up front rather than by letting ble_gap_adv_set_fields() fail and retrying: the
-     * retry path fired on EVERY advertise, logging a warning each time for a condition that
-     * is fixed and known at compile time. The UUID is only included when there is no MSD. */
+     * An earlier version of this port put the name in the SCAN RESPONSE instead. That is not
+     * what the fleet advertises: a passive scanner (and any host that filters on name without
+     * issuing a scan request) sees an unnamed device. */
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    fields.name = (uint8_t *)s_name;
+    fields.name_len = (uint8_t)strlen(s_name);
+    fields.name_is_complete = 1;
     if (s_msd_len) {
         fields.mfg_data = s_msd;
         fields.mfg_data_len = s_msd_len;
-    } else {
-        fields.uuids128 = (ble_uuid128_t *)&od_svc_uuid;
-        fields.num_uuids128 = 1;
-        fields.uuids128_is_complete = 1;
     }
 
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
-        ESP_LOGE(TAG, "ble_gap_adv_set_fields failed: %d", rc);
-        return;
+        /* Only reachable with a device name longer than the stock 8 characters. Shorten the
+         * name rather than drop the MSD: the MSD is what host discovery keys on
+         * (manufacturer id 9286) and it carries the live sensor payload. */
+        ESP_LOGW(TAG, "adv record too large (rc=%d, name=%u B); advertising without the name",
+                 rc, (unsigned)fields.name_len);
+        fields.name = NULL;
+        fields.name_len = 0;
+        fields.name_is_complete = 0;
+        rc = ble_gap_adv_set_fields(&fields);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "ble_gap_adv_set_fields failed: %d", rc);
+            return;
+        }
     }
 
-    /* Name goes in the scan response, where there is room for it. */
+    /* SCAN RESPONSE = the 128-bit service UUID (18 B). The Arduino build had no scan response
+     * at all and its advertisement had no room for the UUID either, so 0x2446 was not
+     * discoverable by scanning on any shipped unit -- a client had to connect to find it.
+     * Putting it here costs nothing on air (scan responses are only sent when requested) and
+     * makes "filter by service UUID" work in a scanner. It is additive: no byte of the
+     * advertisement above changes. */
     struct ble_hs_adv_fields rsp;
     memset(&rsp, 0, sizeof rsp);
-    rsp.name = (uint8_t *)s_name;
-    rsp.name_len = (uint8_t)strlen(s_name);
-    rsp.name_is_complete = 1;
+    rsp.uuids128 = (ble_uuid128_t *)&od_svc_uuid;
+    rsp.num_uuids128 = 1;
+    rsp.uuids128_is_complete = 1;
     ble_gap_adv_rsp_set_fields(&rsp);
 
     struct ble_gap_adv_params adv;

@@ -47,6 +47,44 @@ Both are bugs in the library itself, not incompatibilities with this repo — wo
 upstream, and worth checking against `bitbank2/bb_epaper` to see whether the fork introduced
 them. Re-apply or re-verify on every bump.
 
+### Third patch (2026-07-26) — `esp_generic.inl` SPI init is not re-entrant
+
+**Symptom:** guaranteed panic on the first image upload after the boot screen.
+
+```
+E (26228) spi: spi_bus_initialize(816): SPI bus already initialized.
+assert failed: bbepInitIO ... esp_generic.inl:272 (ret==ESP_OK)
+```
+
+`bbepInitIO()` runs on every **cold panel bring-up**, not once at boot — `epdSessionAcquire()`
+powers the panel down when idle and re-acquires it per transfer. It calls
+`spi_bus_initialize()` and asserts on the result, and there is **no `spi_bus_free()` anywhere
+in this backend**, so the bus is never released. Bring-up #1 (boot screen) succeeds; #2 can
+only assert.
+
+Invisible under Arduino, because bb_epaper used `src/arduino_io.inl` there: `SPI.begin()` is
+idempotent and `SPI.end()` (main.cpp, panel power-down) was its matching teardown. The IDF port
+selects `esp_idf/esp_generic.inl`, which has a begin and no end.
+
+**Fixed here rather than project-side, deliberately.** The state that has to be guarded is
+`static spi_device_handle_t spi` at line 28 — file-scope static, so project code cannot see the
+device it would need to remove before `spi_bus_free()` would succeed, and the library exposes
+no IO teardown at all. Every project-side alternative was worse:
+
+| Alternative | Why not |
+|---|---|
+| `-Wl,--wrap=spi_bus_initialize` returning OK on `INVALID_STATE` | Silences the assert but not the leak: `spi_bus_add_device` still runs per bring-up, overwriting `spi` and leaking a slot. Three devices per host — it panics on the third cold acquire instead of the first. Fixing that means wrapping `spi_bus_add_device` too, i.e. reimplementing the library's state machine through the linker, globally. |
+| Define `ARDUINO` so `arduino_io.inl` is selected | Drags in bb_epaper's whole Arduino surface (`Print`, `PROGMEM`, `pgm_read_*`). The same move on FastEPD produced 117 errors. It also moves the panel *onto* the compat shim, the opposite of phase C. |
+| Call `bbepInitIO()` once from `epdSessionAcquire()` and do the RST pulse in project code | Duplicates the vendor reset sequence into `display_service.cpp` — a file destined for `shared/core`, where vendor knowledge is forbidden — and drifts silently if the library's init changes. |
+
+The patch guards bus init **and** device add together behind one static flag, recreating the
+device only if the requested clock changes. Guarding only the bus init would leave the slot
+leak above.
+
+**This is an upstream bug.** The right end state is a `bbepDeInitIO()` in bb_epaper that frees
+the device and bus, or an idempotent init. Report it; until then this patch must survive every
+re-vendor.
+
 **Two things to know before bumping it.**
 
 *It is vendored from a fork.* `Firmware`'s `platformio.ini` pulls `bitbank2/bb_epaper.git`

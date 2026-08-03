@@ -136,7 +136,21 @@ int analogRead(int pin)
 {
     adc_channel_t chan;
     if (!adc_channel_for_pin(pin, &chan) || (int)chan >= (int)SOC_ADC_CHANNEL_NUM(0)) {
-        ESP_LOGW(ADC_TAG, "GPIO %d is not an ADC1 input", pin);
+        /* Once per pin, not once per sample. readBatteryVoltageUncached() averages ten
+         * samples per call and updatemsdata() drives it, so an unconfigured pin produced ten
+         * identical warnings every refresh -- enough to bury the rest of the log.
+         *
+         * An unprovisioned device lands here with pin 0: globalConfig is memset to zero, so
+         * battery_sense_pin reads 0 rather than the 0xFF "unset" sentinel the caller checks,
+         * and GPIO0 is not an ADC1 input on any variant here. That is worth saying once. */
+        static uint64_t s_warned = 0;   /* bitmap, one bit per GPIO */
+        if (pin >= 0 && pin < 64) {
+            if (!(s_warned & (1ULL << pin))) {
+                s_warned |= (1ULL << pin);
+                ESP_LOGW(ADC_TAG, "GPIO %d is not an ADC1 input; analogRead returns 0 "
+                                  "(pin 0 usually means no battery_sense_pin is configured)", pin);
+            }
+        }
         return 0;
     }
     if (!adc_unit_ready()) {

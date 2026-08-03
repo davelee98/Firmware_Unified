@@ -260,29 +260,68 @@ void bbepInitIO(BBEPDISP *pBBEP, uint8_t u8DC, uint8_t u8RST, uint8_t u8BUSY, ui
     pinMode(pBBEP->iCSPin, OUTPUT);
     digitalWrite(pBBEP->iCSPin, HIGH); // manually control the CS pin
 
-    memset(&buscfg, 0, sizeof(buscfg));
-    buscfg.miso_io_num = -1; //u8MISO;
-    buscfg.mosi_io_num = u8MOSI;
-    buscfg.sclk_io_num = u8SCK;
-    buscfg.max_transfer_sz=4096;
-    buscfg.quadwp_io_num=-1;
-    buscfg.quadhd_io_num=-1;
-    //Initialize the SPI bus
-    ret=spi_bus_initialize(ESP32_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
-    assert(ret==ESP_OK);
+    /* OD-PATCH: bbepInitIO() is called on EVERY cold panel bring-up, not once at boot.
+     * epdSessionAcquire() powers the panel down when idle and re-acquires it for the next
+     * transfer, so the second and every later call landed here with the bus already up:
+     *
+     *   E (26228) spi: spi_bus_initialize(816): SPI bus already initialized.
+     *   assert failed: bbepInitIO ... esp_generic.inl:272 (ret==ESP_OK)
+     *
+     * -- a guaranteed panic on the first image upload after the boot screen. There is no
+     * spi_bus_free() anywhere in this backend, so the bus is never released and the assert
+     * was unavoidable rather than unlucky.
+     *
+     * It did not show under Arduino because bb_epaper used arduino_io.inl there, whose
+     * SPI.begin() is idempotent and whose teardown (SPI.end(), main.cpp) matched it. The IDF
+     * port switched this file in, and it has a begin with no end.
+     *
+     * Setting up the bus and device exactly once is the fix. Re-adding the device on each
+     * call would also leak a device slot (three per host), so both are guarded together.
+     * The device is re-created only if the requested clock actually changes, since IDF fixes
+     * clock per device. Pins cannot change at runtime -- they come from the config read at
+     * boot -- so they are not re-checked. */
+    static bool     s_spi_ready = false;
+    static uint32_t s_spi_speed = 0;
 
-    memset(&devcfg, 0, sizeof(devcfg));
-    devcfg.clock_speed_hz = u32Speed;
-    devcfg.mode = 0;
-    devcfg.spics_io_num = -1; // we control the CS pin
-    devcfg.queue_size = 2;                          //We want to be able to queue 2 transactions at a time
+    if (s_spi_ready && s_spi_speed != u32Speed) {
+        spi_bus_remove_device(spi);
+        spi = NULL;
+        s_spi_ready = false;
+    }
+
+    if (!s_spi_ready) {
+        memset(&buscfg, 0, sizeof(buscfg));
+        buscfg.miso_io_num = -1; //u8MISO;
+        buscfg.mosi_io_num = u8MOSI;
+        buscfg.sclk_io_num = u8SCK;
+        buscfg.max_transfer_sz=4096;
+        buscfg.quadwp_io_num=-1;
+        buscfg.quadhd_io_num=-1;
+        //Initialize the SPI bus
+        ret=spi_bus_initialize(ESP32_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
+        /* Already initialised is a valid state, not a failure: either a previous bring-up
+         * did it, or another driver on this host got there first. Only a real error asserts. */
+        if (ret == ESP_ERR_INVALID_STATE) {
+            ret = ESP_OK;
+        }
+        assert(ret==ESP_OK);
+
+        memset(&devcfg, 0, sizeof(devcfg));
+        devcfg.clock_speed_hz = u32Speed;
+        devcfg.mode = 0;
+        devcfg.spics_io_num = -1; // we control the CS pin
+        devcfg.queue_size = 2;                          //We want to be able to queue 2 transactions at a time
 // These callbacks currently don't do anything
 //    devcfg.pre_cb = spi_pre_transfer_callback;  //Specify pre-transfer callback to handle D/C line
 //    devcfg.post_cb = spi_post_transfer_callback;
 //    devcfg.flags = SPI_DEVICE_NO_DUMMY; // allow speeds > 26Mhz
-    devcfg.flags = SPI_DEVICE_HALFDUPLEX; // this disables SD card access
-    ret=spi_bus_add_device(ESP32_SPI_HOST, &devcfg, &spi); // attach to bus
-    assert(ret==ESP_OK);
+        devcfg.flags = SPI_DEVICE_HALFDUPLEX; // this disables SD card access
+        ret=spi_bus_add_device(ESP32_SPI_HOST, &devcfg, &spi); // attach to bus
+        assert(ret==ESP_OK);
+
+        s_spi_ready = true;
+        s_spi_speed = u32Speed;
+    }
     
     if (pBBEP->iFlags & BBEP_7COLOR) { // need to send before you can send it data
         pBBEP->is_awake = 1;
