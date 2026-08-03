@@ -28,6 +28,13 @@ _build/
 *.map
 *.gbl
 
+# Release output. `targets/esp32-idf/build.sh` delivers merged, ready-to-flash images here.
+# The *.bin rule above already covers the images; this also catches MANIFEST.txt, which is
+# generated alongside them and is build output, not a checked-in record. Ignoring the whole
+# directory keeps `git status` quiet after a build -- and release artefacts belong on a
+# release, not in history.
+/release/
+
 # Editors / OS
 .vscode/
 .idea/

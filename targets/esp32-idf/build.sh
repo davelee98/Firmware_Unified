@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+#
+# Build ESP32 boards and deliver merged, ready-to-flash images to <repo>/release/.
+#
+#   ./build.sh                     # every board in boards/
+#   ./build.sh s3-n16r8 c6-n4      # just these
+#   ./build.sh --list              # what boards exist
+#   ./build.sh --clean             # wipe each board's build dir first
+#
+# Each board produces ONE file, release/opendisplay-<board>-merged.bin, flashed at offset 0:
+#
+#   python -m esptool --chip <chip> write_flash 0x0 release/opendisplay-<board>-merged.bin
+#
+# The chip is not guessable from the filename, so release/MANIFEST.txt records it per image
+# along with the size and the source commit. Do not infer it -- flashing an esp32c3 image to
+# an esp32c6 is a soft brick that reads as a bad cable.
+#
+# WHY MERGED IMAGES. The four-image form (bootloader / partition table / OTA data / app) has
+# per-chip offsets: the classic ESP32 puts its bootloader at 0x1000, every other variant here
+# at 0x0. That is the single most common flashing mistake, and it fails as "boots to a
+# bootloop" rather than as an error. The merge is done by CMakeLists.txt on every build from
+# IDF's own flash_args, so the offsets are never transcribed by hand and the image can never
+# be stale relative to the build.
+#
+# This script does NOT flash. Attaching a board is a separate, deliberate act; see the
+# per-image command in the manifest.
+set -euo pipefail
+
+cd "$(dirname "$0")"
+TARGET_DIR="$PWD"
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "$TARGET_DIR/../..")"
+RELEASE_DIR="$REPO_ROOT/release"
+
+# --- board list ---------------------------------------------------------------------------
+# boards/*.cmake is the registry. *.panel.cmake is excluded: those are panel fragments
+# included BY a board fragment, not boards -- building one would configure a nonexistent
+# target, and the glob catching them is an easy mistake to make here.
+all_boards() {
+    local f b
+    for f in boards/*.cmake; do
+        b="$(basename "$f" .cmake)"
+        [[ "$b" == *.panel ]] && continue
+        echo "$b"
+    done
+}
+
+CLEAN=0
+BOARDS=()
+for arg in "$@"; do
+    case "$arg" in
+        --list)  all_boards; exit 0 ;;
+        --clean) CLEAN=1 ;;
+        -h|--help) sed -n '2,30p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -*) echo "unknown option: $arg" >&2; exit 2 ;;
+        *)  BOARDS+=("$arg") ;;
+    esac
+done
+if [ ${#BOARDS[@]} -eq 0 ]; then
+    mapfile -t BOARDS < <(all_boards)
+fi
+
+# Validate up front rather than failing on board 7 of 10 after ten minutes of building.
+for b in "${BOARDS[@]}"; do
+    if [ ! -f "boards/$b.cmake" ]; then
+        echo "no such board: $b" >&2
+        echo "known boards:" >&2
+        all_boards | sed 's/^/  /' >&2
+        exit 2
+    fi
+done
+
+# --- toolchain ------------------------------------------------------------------------------
+# ESP-IDF is installed but never on PATH (CLAUDE.md § Toolchains), so `which idf.py` finding
+# nothing is the normal state, not a missing install. Source the export script unless the
+# caller already did.
+if ! command -v idf.py >/dev/null 2>&1; then
+    IDF_EXPORT="${IDF_PATH:-$HOME/esp/esp-idf}/export.sh"
+    if [ ! -f "$IDF_EXPORT" ]; then
+        echo "ESP-IDF not found. Expected $IDF_EXPORT" >&2
+        echo "Set IDF_PATH, or run: source ~/esp/esp-idf/export.sh" >&2
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    source "$IDF_EXPORT" >/dev/null
+fi
+echo "ESP-IDF: $(idf.py --version 2>&1 | head -1)"
+
+mkdir -p "$RELEASE_DIR"
+
+# --- build ------------------------------------------------------------------------------
+# -DSDKCONFIG per board is NOT optional. Without it every board writes the project-root
+# sdkconfig, and the second board fails with "Target 'esp32s3' in sdkconfig does not match
+# currently selected IDF_TARGET 'esp32c3'" -- a confusing way to discover that the builds
+# share state. Keeping it inside the build dir also makes --clean actually clean.
+FAILED=()
+BUILT=()
+for b in "${BOARDS[@]}"; do
+    echo
+    echo "=============================================================="
+    echo "  $b"
+    echo "=============================================================="
+    [ "$CLEAN" = 1 ] && rm -rf "build/$b"
+    if idf.py -B "build/$b" -DSDKCONFIG="build/$b/sdkconfig" -DOD_BOARD="$b" build; then
+        BUILT+=("$b")
+    else
+        FAILED+=("$b")
+        echo "!! $b FAILED" >&2
+    fi
+done
+
+# --- deliver ------------------------------------------------------------------------------
+# Only boards that actually built. Copying whatever happens to be on disk would silently
+# ship the previous run's image for a board that just failed, which is worse than shipping
+# nothing for it.
+echo
+echo "=============================================================="
+echo "  release -> $RELEASE_DIR"
+echo "=============================================================="
+COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+DIRTY=""
+git -C "$REPO_ROOT" diff --quiet HEAD 2>/dev/null || DIRTY=" (working tree DIRTY)"
+
+MANIFEST="$RELEASE_DIR/MANIFEST.txt"
+{
+    echo "OpenDisplay ESP32 firmware -- merged images, flash at offset 0x0"
+    echo "built    $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    echo "commit   ${COMMIT}${DIRTY}"
+    echo "idf      $(idf.py --version 2>&1 | head -1)"
+    echo
+    printf '%-28s %-10s %10s  %s\n' BOARD CHIP BYTES FLASH-WITH
+} > "$MANIFEST"
+
+for b in "${BUILT[@]}"; do
+    src="build/$b/opendisplay-$b-merged.bin"
+    if [ ! -f "$src" ]; then
+        echo "!! $b built but produced no merged image ($src)" >&2
+        FAILED+=("$b (no image)")
+        continue
+    fi
+    cp "$src" "$RELEASE_DIR/"
+    # The chip comes from the build's own sdkconfig, not from a table here: a second mapping
+    # of board -> chip is a thing that can disagree with the board fragment.
+    chip="$(sed -n 's/^CONFIG_IDF_TARGET="\(.*\)"$/\1/p' "build/$b/sdkconfig" | head -1)"
+    size="$(stat -c %s "$src")"
+    printf '%-28s %-10s %10s  python -m esptool --chip %s write_flash 0x0 opendisplay-%s-merged.bin\n' \
+        "$b" "$chip" "$size" "$chip" "$b" >> "$MANIFEST"
+    printf '  %-28s %-10s %10s bytes\n' "$b" "$chip" "$size"
+done
+
+echo
+cat "$MANIFEST"
+
+if [ ${#FAILED[@]} -gt 0 ]; then
+    echo
+    echo "FAILED: ${FAILED[*]}" >&2
+    exit 1
+fi
+echo
+echo "OK: ${#BUILT[@]} board(s) delivered to $RELEASE_DIR"
