@@ -112,11 +112,11 @@ static inline int digitalRead(int pin)
  * millis() wraps at 2^32 ms just as Arduino's does. esp_timer_get_time() is int64 microseconds
  * since boot, so the truncation is deliberate and matches the semantics the callers were
  * written against -- they compare with subtraction, which is wrap-safe.
+ *
+ * NOT static inline, unlike micros() below: two VENDORED libraries need it with EXTERNAL
+ * linkage. It is declared with the delay() pair at the bottom of this header and defined in
+ * arduino_compat.cpp. See the note there.
  */
-static inline uint32_t millis(void)
-{
-    return (uint32_t)(esp_timer_get_time() / 1000);
-}
 
 static inline uint32_t micros(void)
 {
@@ -238,6 +238,21 @@ static inline void interrupts(void)   { portENABLE_INTERRUPTS(); }
  * produced an unmangled symbol and left every bb_epaper delay() call unresolved. */
 void delay(long ms);
 void delayMicroseconds(long us);
+
+/* millis() joins them, for the same linkage reason and one more.
+ *
+ * It used to be `static inline` above, which was fine while every caller was project code.
+ * Two vendored libraries need it externally: FastEPD.inl calls it 19 times and its
+ * arduino_io.inl carries an OD-PATCH reading `extern uint32_t millis(void);`, deferring the
+ * definition to whoever else provides one. For a while that was bb_epaper's esp_generic.inl.
+ *
+ * When panel/od_bbep.cpp replaced bb_epaper.cpp and dropped that backend, FastEPD's 19 calls
+ * became undefined references -- a link error whose message named FastEPD while the cause was
+ * a bb_epaper change. Owning the primitive here removes the coupling: neither vendored library
+ * defines it, one place does, and the return type matches FastEPD's extern declaration
+ * exactly (uint32_t, not esp_generic.inl's `long`).
+ */
+uint32_t millis(void);
 
 /* ---------------------------------------------------------------- String
  *

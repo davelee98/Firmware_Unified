@@ -56,6 +56,24 @@ set(OD_TP_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../third_party)
 # is compiled and the question does not arise. No --allow-multiple-definition anywhere.
 file(GLOB OD_BBEP_SOURCES ${OD_TP_DIR}/bb_epaper/src/*.cpp)
 
+# bb_epaper.cpp is EXCLUDED and replaced by ../panel/od_bbep.cpp.
+#
+# That file is 827 lines: 52 of glue (includes, the *_io.inl selection #ifdef chain, then
+# bb_ep.inl + bb_ep_gfx.inl) and 775 of the BBEPAPER C++ class, which this project never
+# references -- display_service.cpp drives a raw BBEPDISP through the bare C functions.
+#
+# Replacing the glue rather than patching its #ifdef chain (how Firmware_NRF54 selects its
+# backend) means ZERO edits to vendored files to use our own IO backend, so nothing new joins
+# third_party/NOTICE.md's re-verify-on-every-bump list. Dropping the class also removes the only
+# consumer of pinMode() and millis(), which is why panel/od_bbep_idf_io.inl defines neither.
+#
+# Group5.cpp stays: it is a separate TU providing the G5 codec, and the FastEPD collision
+# handling below still applies to it.
+#
+# See docs/BBEPAPER_IO_BACKENDS.md and panel/od_bbep.cpp.
+list(FILTER OD_BBEP_SOURCES EXCLUDE REGEX "/bb_epaper\\.cpp$")
+list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../panel/od_bbep.cpp)
+
 # Which boards use FastEPD, keyed on OD_BOARD alone.
 #
 # This mapping would sit more naturally in boards/<board>.cmake, and it is here for a reason
@@ -104,6 +122,7 @@ idf_component_register(
         ${CMAKE_CURRENT_LIST_DIR}/../ble
         ${OD_LIB_DIR}/uzlib/src
         ${CMAKE_CURRENT_LIST_DIR}/../../../third_party/bb_epaper/src
+        ${CMAKE_CURRENT_LIST_DIR}/../panel
         ${CMAKE_CURRENT_LIST_DIR}/../../../third_party/FastEPD/src
         # The wire contract, consumed directly from shared/ -- NOT copied into this target.
         # This is the whole reason phase A left include/opendisplay_protocol.h behind.

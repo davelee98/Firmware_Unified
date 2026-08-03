@@ -57,6 +57,14 @@ void delayMicroseconds(long us)
     esp_rom_delay_us((uint32_t)(us < 0 ? 0 : us));
 }
 
+/* External linkage because two vendored libraries need it -- see the note in
+ * arduino_compat.h. The truncation to 32 bits is deliberate: callers compare with
+ * subtraction, which is wrap-safe, and Arduino's millis() wraps the same way. */
+uint32_t millis(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
 /* ------------------------------------------------------------------ ADC
  *
  * Arduino's analogRead over IDF's oneshot driver. Replaces a `return 0` stub whose two

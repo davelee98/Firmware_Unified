@@ -160,6 +160,11 @@ void bbepFill(BBEPDISP *pBBEP, unsigned char ucColor, int iPlane);
 void bbepWriteCmd(BBEPDISP *pBBEP, uint8_t cmd);
 void bbepCMD2(BBEPDISP *pBBEP, uint8_t cmd1, uint8_t cmd2);
 void bbepWaitBusy(BBEPDISP *pBBEP);
+/* NOT an upstream bb_epaper function -- provided by panel/od_bbep_idf_io.inl, this target's own
+ * IO backend. Upstream has no teardown at all, which is what made every re-init a workaround:
+ * the bus was never released, so a second spi_bus_initialize() could only fail. See
+ * docs/BBEPAPER_IO_BACKENDS.md. */
+void bbepDeInitIO(void);
 bool bbepIsBusy(BBEPDISP *pBBEP);
 #ifdef BBEP_T133A01
 void bbepSetCS2(BBEPDISP *pBBEP, uint8_t cs);
@@ -456,6 +461,16 @@ static void epdSessionForceOffLocked(void) {
     } else {
         bbepSleep(&bbep, 1);
         delay(50);
+        /* Release the SPI bus and device now that the controller is asleep and no further
+         * bytes are going out. Must be AFTER bbepSleep(), which still needs the bus to send
+         * the sleep command, and BEFORE pwrmgm(false), which cuts the rail and parks the pins.
+         *
+         * This is what makes the next cold bring-up a clean spi_bus_initialize() rather than a
+         * re-init of a bus nobody owns -- and re-initialising is not optional, because
+         * configureDisplayPinsLowPower() inside pwrmgm(false) takes SCLK/MOSI back as plain
+         * GPIO and only spi_bus_initialize() re-attaches them to the peripheral. Idempotent,
+         * so the abort paths that reach here twice cost nothing. */
+        bbepDeInitIO();
     }
     pwrmgm(false);   // -> PWR_OFF, clears deadline
     epdPlanesPrepared = false;
