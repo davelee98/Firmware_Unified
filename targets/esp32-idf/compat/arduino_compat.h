@@ -381,8 +381,12 @@ extern SerialCompat Serial;
 /* ESP.* -- three accessors, mapped onto their IDF equivalents. */
 class EspClass {
 public:
+    /* Both are INTERNAL DRAM ONLY (MALLOC_CAP_INTERNAL), matching Arduino-ESP32. On a PSRAM
+     * part these are the DRAM-pressure question, not "how much memory is left" -- see the note
+     * on the definitions. PSRAM is a separate accessor, as it is in Arduino. */
     uint32_t getFreeHeap() const;
     uint32_t getMinFreeHeap() const;
+    uint32_t getFreePsram() const;
     uint64_t getEfuseMac() const;
 };
 

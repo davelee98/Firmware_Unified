@@ -63,6 +63,50 @@ static const char* resetReasonName(esp_reset_reason_t reason) {
 static uint32_t minWakeTimeMs();
 #endif
 
+/* Both call sites are inside #ifdef TARGET_ESP32, and so is this: it uses ESP.* and
+ * heap_caps_*, neither of which exists on the Nordic half of this still-shared main.cpp.
+ * Guarded at the definition rather than relying on the callers, so the nRF52840 import at
+ * migration step 4 gets a compile error only if it tries to CALL it, not merely by including
+ * the file.
+ *
+ * One heap report, two lines, DRAM and PSRAM measured identically.
+ *
+ * THE TWO POOLS MUST NOT BE SUMMED. Internal DRAM is the scarce one -- ~170 KB free at boot on
+ * an S3 against 8 MB of PSRAM -- so any combined figure is a PSRAM figure with the interesting
+ * number rounded away. Before this was split, the log read "free=8437776 min=8437724", which is
+ * how internal exhaustion measured at 48-264 B upstream stayed invisible for a week.
+ *
+ * FOUR FIELDS PER POOL, because "free" alone does not say whether an allocation will succeed:
+ *   free     currently available
+ *   min      low-water mark since boot -- the only field that survives a transient squeeze,
+ *            and the one dc60c8a's open item asks about ("expect ~16 KB where it was 48-264 B")
+ *   largest  largest CONTIGUOUS block; exhaustion shows up here as fragmentation first, so a
+ *            healthy `free` with a small `largest` still fails a big malloc
+ *   total    pool capacity, so the other three are interpretable without knowing the variant
+ *
+ * The PSRAM line is SUPPRESSED where there is no PSRAM (C3, C6, classic ESP32 here) rather than
+ * printed as zeros: a line of zeros reads as "PSRAM is broken" on a part that never had any. */
+#ifdef TARGET_ESP32
+static void logHeapUsage(const char *when)
+{
+    od_log_info("Heap %s DRAM : free=%u min=%u largest=%u of %u", when,
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)ESP.getMinFreeHeap(),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_total_size(MALLOC_CAP_INTERNAL));
+
+    const size_t psram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    if (psram_total == 0) {
+        return;   /* no PSRAM on this part -- see above */
+    }
+    od_log_info("Heap %s PSRAM: free=%u min=%u largest=%u of %u", when,
+                (unsigned)ESP.getFreePsram(),
+                (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+                (unsigned)psram_total);
+}
+#endif  /* TARGET_ESP32 */
+
 void setup() {
     #if defined(TARGET_ESP32) && defined(OPENDISPLAY_LOG_UART)
     LogSerialPort.begin(115200, SERIAL_8N1, OPENDISPLAY_LOG_UART_RX, OPENDISPLAY_LOG_UART_TX);
@@ -286,7 +330,7 @@ void setup() {
     #endif
     od_log_info("=== Setup completed successfully ===");
 #ifdef TARGET_ESP32
-    od_log_info("Heap: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+    logHeapUsage("(setup done)");
 #endif
 }
 
@@ -1198,7 +1242,7 @@ void enterDeepSleep(bool force, uint16_t overrideSleepSeconds) {
     armButtonWakeSources();
     od_log_info("Entering deep sleep for %u seconds%s", sleepSeconds,
                 overrideSleepSeconds ? " (host override, one cycle)" : " (config)");
-    od_log_info("Heap: free=%u min=%u", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap());
+    logHeapUsage("(pre-sleep)");
     od_log_flush(); // drain UART/Serial prior to deep sleep
     delay(100); // Brief delay to ensure serial output is sent
     powerLatchHoldForSleep();
