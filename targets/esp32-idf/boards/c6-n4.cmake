@@ -18,6 +18,16 @@ set(OD_SDKCONFIG_FRAGMENTS sdkconfig.defaults.esp32c6 boards/c6-n4.sdkconfig)
 # ARDUINO_USB_* become a console choice in sdkconfig.defaults.esp32c6, not a define.
 set(OD_BOARD_DEFINES
     TARGET_ESP32
-    OPENDISPLAY_ENABLE_WIFI
+    # -DOPENDISPLAY_ENABLE_WIFI deliberately absent: no PSRAM here. BLE-only (no LAN push,
+    # mDNS or TLS-PSK), and the inflate engine falls back to uzlib.
+    #
+    # The flag has exactly two consumers -- OPENDISPLAY_HAS_WIFI (src/wifi_service.h) and
+    # OPENDISPLAY_USE_TINFL (src/od_inflate_tinfl.h) -- so dropping it here drops both the LAN
+    # transport and tinfl's ~11 KB of .data tables from a part with no PSRAM to relocate them
+    # into. Set it ONLY on boards that also set BOARD_HAS_PSRAM; nothing in code enforces that.
+    #
+    # This is the boards/*.cmake half of Firmware's dc60c8a, whose own half was three
+    # per-env edits to platformio.ini -- a file this repo deliberately does not carry, so the
+    # change could not arrive with the source sync and had to be re-expressed here.
     OPENDISPLAY_ZLIB_USE_HEAP_WINDOW=1
 )

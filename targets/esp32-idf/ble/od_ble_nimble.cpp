@@ -1,5 +1,12 @@
-/* NimBLE C-API implementation of od_ble. See od_ble.h for the contract and the GATT layout,
- * which is a wire contract and must not drift. */
+/* NimBLE C-API implementation of od_ble. See od_ble.h for the contract, the layering split
+ * against src/ble_transport_esp32.cpp, and the GATT layout -- which is a wire contract and
+ * must not drift.
+ *
+ * There is no application state in this file. It knows about connections, not about sessions,
+ * owners or transfers; everything it learns it reports through the od_ble_evt_* hooks and
+ * then forgets. The one piece of bookkeeping it does keep, s_conn_count, exists only because
+ * NimBLE's C API has no equivalent of NimBLEServer::getConnectedCount().
+ */
 
 #include "od_ble.h"
 
@@ -19,18 +26,12 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
-/* Flags the imported code owns; callbacks here only ever set them. */
-extern volatile bool bleRestartAdvertisingPending;
-extern volatile bool esp32BleNotifySubscribed;
-extern volatile bool bleDisconnectCleanupPending;
-extern volatile bool msdUpdatePending;
-extern uint8_t rebootFlag;
-
-/* The command sink in communication.cpp -- the RX half of the characteristic. Declared here
- * rather than included, so this file depends on the app only through one symbol. */
-extern void od_ble_on_write(const uint8_t *data, uint16_t len);
-
 static const char *TAG = "od_ble";
+
+/* od_ble.h spells the sentinel without including a NimBLE header. Keep them the same value
+ * rather than trusting a comment to stay true. */
+static_assert(OD_BLE_CONN_NONE == BLE_HS_CONN_HANDLE_NONE,
+              "OD_BLE_CONN_NONE must equal BLE_HS_CONN_HANDLE_NONE");
 
 /* 00002446-0000-1000-8000-00805F9B34FB, little-endian as NimBLE wants it. Service and
  * characteristic deliberately share this UUID -- see od_ble.h.
@@ -94,15 +95,37 @@ static const ble_uuid128_t od_svc_uuid = BLE_UUID128_INIT(OD_UUID_LE_BYTES);
 static const ble_uuid128_t od_chr_uuid = BLE_UUID128_INIT(OD_UUID_LE_BYTES);
 
 static uint16_t s_chr_val_handle = 0;
-static uint16_t s_conn_handle    = BLE_HS_CONN_HANDLE_NONE;
 static uint8_t  s_own_addr_type  = 0;
 static bool     s_addr_resolved  = false;   /* s_own_addr_type is meaningful only after sync */
 static uint16_t s_preferred_mtu  = 0;
 static bool     s_inited         = false;
 
+/* The stack's peer count. Maintained here because NimBLE's C API offers no accessor for it;
+ * written only from GAP events (host task), read from the loop task, hence atomic. It is a
+ * COUNT, never a test for whether one particular link is up -- the transport's instance table
+ * answers that per handle. */
+static volatile uint8_t s_conn_count = 0;
+
 static char    s_name[32]  = "OpenDisplay";
 static uint8_t s_msd[32]   = {0};
 static uint8_t s_msd_len   = 0;
+
+/* Whether the application WANTS to be advertising, as distinct from whether the stack
+ * currently is.
+ *
+ * Needed because the two events race in a way the caller cannot see. Host sync is
+ * asynchronous -- there is no identity address, and therefore no possible advertisement,
+ * until od_on_sync() runs some milliseconds after od_ble_init() returns -- while
+ * BleTransport::begin() and startAdvertising() are consecutive statements on the loop task.
+ * Without this flag, whichever happened second won: a startAdvertising() that landed before
+ * sync did nothing at all and returned success, and the device stayed silent until something
+ * else happened to restart it.
+ *
+ * It also keeps stop() honest. od_ble_advertise() is re-entered from BLE_GAP_EVENT_CONNECT
+ * (failed attempt) and BLE_GAP_EVENT_ADV_COMPLETE, both on the host task, so a stop requested
+ * from the loop task would otherwise be undone by the next stack event -- and the deep-sleep
+ * path depends on stop meaning stop. */
+static bool s_adv_wanted = false;
 
 static void od_ble_advertise(void);
 
@@ -111,7 +134,7 @@ static void od_ble_advertise(void);
 static int od_gatt_access(uint16_t conn_handle, uint16_t attr_handle,
                           struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    (void)conn_handle; (void)attr_handle; (void)arg;
+    (void)attr_handle; (void)arg;
 
     switch (ctxt->op) {
     case BLE_GATT_ACCESS_OP_WRITE_CHR: {
@@ -129,13 +152,22 @@ static int od_gatt_access(uint16_t conn_handle, uint16_t attr_handle,
         if (OS_MBUF_PKTLEN(ctxt->om) > OD_BLE_MAX_FRAME) {
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         }
+        /* Function-static rather than a stack array: this runs on the NimBLE host task, whose
+         * stack is sized by CONFIG_BT_NIMBLE_TASK_STACK_SIZE and has no room to spare for a
+         * 256-byte frame buffer. Safe because NimBLE serialises host callbacks -- there is
+         * never a second access in flight -- and because od_ble_evt_write() is contractually
+         * required to copy before returning. */
         static uint8_t buf[OD_BLE_MAX_FRAME];
         uint16_t len = 0;
         int rc = ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof(buf), &len);
         if (rc != 0) {
             return BLE_ATT_ERR_INSUFFICIENT_RES;
         }
-        od_ble_on_write(buf, len);
+        /* The handle travels with the frame. Without it the transport cannot tell an owner's
+         * write from a gatecrasher's, and the non-owner filter -- which must run HERE, before
+         * the bytes reach the RX ring, because during a ~16 s refresh no loop-side decision
+         * runs at all -- would have nothing to decide on. */
+        od_ble_evt_write(conn_handle, buf, len);
         return 0;
     }
     case BLE_GATT_ACCESS_OP_READ_CHR:
@@ -184,41 +216,54 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
-            s_conn_handle = event->connect.conn_handle;
-            ESP_LOGI(TAG, "=== BLE CLIENT CONNECTED (ESP32) ===");
-            rebootFlag = 0;
-            esp32BleNotifySubscribed = false;
-            /* Flag-only. updatemsdata() polls I2C and mutates the shared advertisement
-             * vector that loop() also drives; running it on the host task corrupts the heap. */
-            msdUpdatePending = true;
+            if (s_conn_count < 0xFF) {
+                __atomic_fetch_add(&s_conn_count, (uint8_t)1, __ATOMIC_RELEASE);
+            }
             if (s_preferred_mtu) {
                 ble_att_set_preferred_mtu(s_preferred_mtu);
             }
+            od_ble_evt_connect(event->connect.conn_handle);
         } else {
-            od_ble_advertise();   /* connection failed -- resume advertising */
+            /* The connection attempt failed, so no link exists and no hook fires. Resuming
+             * advertising is stack housekeeping, not policy -- without it the device goes
+             * quiet after a failed connect and only a reboot brings it back. */
+            od_ble_advertise();
         }
         return 0;
 
-    case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(TAG, "=== BLE CLIENT DISCONNECTED (ESP32) ===");
-        s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-        esp32BleNotifySubscribed = false;
-        /* Flag-only for the same reason: the teardown cuts the panel rail and touches SPI,
-         * which races loop()'s streaming. serviceBleDisconnectCleanup() does it. */
-        bleDisconnectCleanupPending  = true;
-        bleRestartAdvertisingPending = true;
+    case BLE_GAP_EVENT_DISCONNECT: {
+        const uint8_t n = __atomic_load_n(&s_conn_count, __ATOMIC_ACQUIRE);
+        if (n > 0) {
+            __atomic_store_n(&s_conn_count, (uint8_t)(n - 1), __ATOMIC_RELEASE);
+        }
+        /* Full width, unmodified. NimBLE's reason spans two ranges and truncation aliases
+         * them -- see od_ble_evt_disconnect()'s declaration. */
+        od_ble_evt_disconnect(event->disconnect.conn.conn_handle,
+                              (uint16_t)event->disconnect.reason);
+        /* Advertising is NOT restarted here. BleTransport::restartsAdvertisingOnDisconnect()
+         * reports false for this target precisely so the application can hold the restart off
+         * while an EPD refresh is mid-flight; re-arming it from the host task would take that
+         * decision away and do it on the wrong task. */
         return 0;
+    }
 
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == s_chr_val_handle) {
-            esp32BleNotifySubscribed = event->subscribe.cur_notify != 0;
-            ESP_LOGI(TAG, "BLE notify subscription: %s",
-                     esp32BleNotifySubscribed ? "enabled" : "disabled");
+            od_ble_evt_subscribe(event->subscribe.conn_handle,
+                                 event->subscribe.cur_notify != 0);
         }
         return 0;
 
     case BLE_GAP_EVENT_MTU:
-        ESP_LOGI(TAG, "ATT MTU negotiated: %u", (unsigned)event->mtu.value);
+        od_ble_evt_link_negotiated(event->mtu.conn_handle, "MTU exchange");
+        return 0;
+
+    case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE:
+        /* Fires whether or not the request was granted, and it is the only point at which the
+         * granted PHY is knowable -- od_ble_request_fast_link() returns long before the
+         * controller has finished. The hook re-reads both directions rather than trusting the
+         * event's fields, so one log line describes the whole link. */
+        od_ble_evt_link_negotiated(event->phy_updated.conn_handle, "PHY update");
         return 0;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -234,6 +279,16 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
 
 static void od_ble_advertise(void)
 {
+    if (!s_adv_wanted) {
+        return;
+    }
+    if (!s_addr_resolved) {
+        /* Before sync there is no identity address to advertise from, and ble_gap_adv_start()
+         * would fail with a log line on every call. od_on_sync() retries once it has one --
+         * which is the whole reason the request is remembered rather than acted on. */
+        return;
+    }
+
     struct ble_hs_adv_fields fields;
     memset(&fields, 0, sizeof fields);
 
@@ -328,10 +383,10 @@ static void od_host_task(void *param)
 
 /* ------------------------------------------------------------------ public API */
 
-void od_ble_init(const char *device_name)
+bool od_ble_init(const char *device_name)
 {
     if (s_inited) {
-        return;
+        return true;
     }
     if (device_name && *device_name) {
         strncpy(s_name, device_name, sizeof(s_name) - 1);
@@ -340,7 +395,7 @@ void od_ble_init(const char *device_name)
 
     if (nimble_port_init() != ESP_OK) {
         ESP_LOGE(TAG, "nimble_port_init failed");
-        return;
+        return false;
     }
 
     ble_hs_cfg.sync_cb  = od_on_sync;
@@ -355,7 +410,7 @@ void od_ble_init(const char *device_name)
     }
     if (rc != 0) {
         ESP_LOGE(TAG, "GATT registration failed: %d", rc);
-        return;
+        return false;
     }
 
     ble_svc_gap_device_name_set(s_name);
@@ -367,31 +422,106 @@ void od_ble_init(const char *device_name)
     s_inited = true;
     ESP_LOGI(TAG, "NimBLE up; GATT service registered, val_handle=%u",
              (unsigned)s_chr_val_handle);
+    return true;
 }
 
-bool od_ble_notify(const uint8_t *data, uint16_t len)
+bool od_ble_is_ready(void)
 {
-    if (!data || len == 0) {
+    return s_inited;
+}
+
+bool od_ble_notify_handle(uint16_t conn_handle, const uint8_t *data, uint16_t len)
+{
+    if (!s_inited || !data || len == 0 || conn_handle == OD_BLE_CONN_NONE) {
         return false;
     }
-    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE || !esp32BleNotifySubscribed) {
+    if (s_chr_val_handle == 0) {
         return false;
     }
     struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
     if (!om) {
-        return false;   /* mbuf exhaustion -- caller retries from its response queue */
+        return false;   /* mbuf exhaustion -- backpressure; caller retries from its queue */
     }
-    return ble_gatts_notify_custom(s_conn_handle, s_chr_val_handle, om) == 0;
+    /* Copies the payload into the mbuf above before this returns, so a concurrent client
+     * WRITE_NR on this shared RX/TX characteristic cannot corrupt the outgoing frame.
+     * ble_gatts_notify_custom() takes ownership of the mbuf on every path, success or not --
+     * do not free it here. It fails when conn_handle is not connected or has not subscribed,
+     * which is what makes a stale handle a false return rather than a misdelivery. */
+    return ble_gatts_notify_custom(conn_handle, s_chr_val_handle, om) == 0;
 }
 
 uint8_t od_ble_connected_count(void)
 {
-    return (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) ? 0 : 1;
+    return __atomic_load_n(&s_conn_count, __ATOMIC_ACQUIRE);
 }
 
-bool od_ble_notify_enabled(void)
+bool od_ble_disconnect(uint16_t conn_handle)
 {
-    return od_ble_connected_count() > 0 && esp32BleNotifySubscribed;
+    if (!s_inited || conn_handle == OD_BLE_CONN_NONE) {
+        return false;
+    }
+    const int rc = ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    /* "Already gone" is success, matching NimBLE-Arduino's NimBLEServer::disconnect(): a
+     * client that left between the caller's decision and this call is a benign race, not a
+     * failure to ask. Anything else is a genuine failure and the caller logs it. */
+    return rc == 0 || rc == BLE_HS_ENOTCONN || rc == BLE_HS_EALREADY;
+}
+
+uint16_t od_ble_conn_interval_units(uint16_t conn_handle)
+{
+    struct ble_gap_conn_desc desc;
+    if (!s_inited || conn_handle == OD_BLE_CONN_NONE) {
+        return 0;
+    }
+    if (ble_gap_conn_find(conn_handle, &desc) != 0) {
+        return 0;
+    }
+    return desc.conn_itvl;   /* 1.25 ms units */
+}
+
+void od_ble_request_fast_link(uint16_t conn_handle)
+{
+    if (!s_inited || conn_handle == OD_BLE_CONN_NONE) {
+        return;
+    }
+    /* 2 Mbps both directions. The third argument is the CODED-PHY option and applies only
+     * when the coded mask is set, so 0. The peer may decline and stay at 1M -- not an error,
+     * and the grant (or refusal) surfaces via BLE_GAP_EVENT_PHY_UPDATE_COMPLETE. */
+    int rc = ble_gap_set_prefered_le_phy(conn_handle,
+                                         BLE_GAP_LE_PHY_2M_MASK, BLE_GAP_LE_PHY_2M_MASK, 0);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "2M PHY request rejected (rc=%d, staying at 1M)", rc);
+    }
+    /* 251-octet Link-Layer PDUs (max DLE). Unlike NimBLE-Arduino's setDataLen(handle, octets),
+     * the C API takes the on-air time too and does not derive it: 251 payload octets plus the
+     * 14 bytes of LL overhead at 8 us/byte on the 1M PHY is 2120 us. Passing the range
+     * maximum instead would be rejected by controllers that validate the pair. */
+    const uint16_t tx_time = (uint16_t)((251 + 14) * 8);   /* 2120 us, within 0x0148..0x4290 */
+    rc = ble_gap_set_data_len(conn_handle, 251, tx_time);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "DLE 251 request rejected (rc=%d)", rc);
+    }
+    ESP_LOGD(TAG, "Requested fast link: 2M PHY + 251-octet DLE");
+}
+
+void od_ble_link_params(uint16_t conn_handle, uint8_t *tx_phy_out, uint8_t *rx_phy_out,
+                        uint16_t *att_mtu_out, uint16_t *interval_units_out)
+{
+    uint8_t tx_phy = 0;
+    uint8_t rx_phy = 0;
+    if (s_inited && conn_handle != OD_BLE_CONN_NONE) {
+        if (ble_gap_read_le_phy(conn_handle, &tx_phy, &rx_phy) != 0) {
+            tx_phy = 0;
+            rx_phy = 0;
+        }
+    }
+    if (tx_phy_out) *tx_phy_out = tx_phy;
+    if (rx_phy_out) *rx_phy_out = rx_phy;
+    if (att_mtu_out) {
+        *att_mtu_out = (s_inited && conn_handle != OD_BLE_CONN_NONE)
+                           ? ble_att_mtu(conn_handle) : 0;
+    }
+    if (interval_units_out) *interval_units_out = od_ble_conn_interval_units(conn_handle);
 }
 
 void od_ble_set_manufacturer_data(const uint8_t *msd, uint8_t len)
@@ -409,20 +539,17 @@ void od_ble_restart_advertising(void)
     if (!s_inited) {
         return;
     }
+    /* Recorded BEFORE the attempt, so a call made before host sync is honoured by od_on_sync()
+     * rather than lost. This is also the only way advertising ever starts. */
+    s_adv_wanted = true;
     ble_gap_adv_stop();
     od_ble_advertise();
 }
 
 void od_ble_stop_advertising(void)
 {
+    s_adv_wanted = false;
     ble_gap_adv_stop();
-}
-
-void od_ble_clear_handles(void)
-{
-    s_chr_val_handle = 0;
-    s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-    esp32BleNotifySubscribed = false;
 }
 
 void od_ble_set_preferred_mtu(uint16_t mtu)
@@ -465,9 +592,9 @@ void od_ble_deinit(void)
         nimble_port_deinit();
     }
     s_chr_val_handle = 0;
-    s_conn_handle    = BLE_HS_CONN_HANDLE_NONE;
     s_addr_resolved  = false;
     s_inited         = false;
-    esp32BleNotifySubscribed = false;
+    s_adv_wanted     = false;
+    __atomic_store_n(&s_conn_count, (uint8_t)0, __ATOMIC_RELEASE);
     ESP_LOGI(TAG, "NimBLE host stopped and controller released");
 }

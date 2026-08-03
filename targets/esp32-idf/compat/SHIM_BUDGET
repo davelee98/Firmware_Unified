@@ -24,4 +24,32 @@
 # "we let it grow" are indistinguishable from the number alone -- and a ratchet that cannot
 # tell them apart is not a ratchet. Any future bump needs the same paragraph, or it is the
 # failure this file exists to prevent.
-22
+#
+# 21 = the first REAL decrease, 2026-08-02, during the sync to Firmware
+# feat/psram-dram-reclaim. The sync deleted three shim users (ble_init.cpp, ble_init.h and
+# esp32_ble_callbacks.h, replaced by the BleTransport seam, plus ble/od_ble_rx.cpp whose job
+# moved into the shared command_queue.cpp) and brought in four new ones. Left alone that would
+# have been 22 -> 25 and the first genuine growth. It was fixed rather than bumped, which is
+# what this file is for:
+#
+#   * src/ble_transport_esp32.cpp  -- written for this target during the sync, so there was
+#                                     never a reason for it to be on the shim. One delay()
+#                                     -> vTaskDelay().
+#   * src/link_owner.cpp           -- <Arduino.h> for millis() ALONE. It is also the clearest
+#                                     promotion candidate in the target (pure arbitration
+#                                     logic, no vendor surface, already has a host test), and
+#                                     shared/ forbids Arduino outright -- so the dependency had
+#                                     to go before the promotion, not after it.
+#   * src/session_guard.cpp        -- <Arduino.h> for millis() and one delay().
+#   * src/utilities/nrf52840_reformat/ -- an nRF52840 standalone flash-recovery program with
+#                                     its own setup()/loop(), pulling in Adafruit_TinyUSB and
+#                                     nrf.h. It is not compiled by this target and never will
+#                                     be; it arrived only because the sync copies src/
+#                                     wholesale. Dropped rather than counted: CLAUDE.md is
+#                                     explicit that the Nordic half leaves at step 4 for
+#                                     targets/nordic-zephyr/, and a directory under
+#                                     targets/esp32-idf/ means "this target builds it".
+#
+# The first three are marked OD-PORT at the call sites so the next sync from Firmware can see
+# why those lines differ from the reference tree.
+21

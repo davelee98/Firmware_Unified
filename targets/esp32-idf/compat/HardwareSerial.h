@@ -77,6 +77,19 @@ public:
         return w > 0 ? (size_t)w : 0;
     }
 
+    /* Real free space in the TX ring, non-blocking -- od_log's off-loop backoff polls this and
+     * drops the record when it does not come up, so a made-up constant would either stall the
+     * producer forever or defeat the backoff entirely. A closed port reports 0, which is
+     * correct: nothing can be written to it, and od_log then discards rather than spins. */
+    int availableForWrite() override
+    {
+        size_t free_bytes = 0;
+        if (!_open || uart_get_tx_buffer_free_size(_uart, &free_bytes) != ESP_OK) {
+            return 0;
+        }
+        return (int)free_bytes;
+    }
+
     void flush()
     {
         if (_open) {

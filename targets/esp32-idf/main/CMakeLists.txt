@@ -30,8 +30,12 @@ list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../compat/arduino_compat.cp
 # Target HAL implementations. od_hal_nvs is the first: config storage moved off LittleFS onto
 # NVS (2026-07-25), written to the shared/hal signature so promotion is a repoint.
 list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_nvs.c
-                           ${CMAKE_CURRENT_LIST_DIR}/../ble/od_ble_nimble.cpp
-                           ${CMAKE_CURRENT_LIST_DIR}/../ble/od_ble_rx.cpp)
+                           ${CMAKE_CURRENT_LIST_DIR}/../ble/od_ble_nimble.cpp)
+
+# ble/od_ble_rx.cpp is GONE, not forgotten. It held od_ble_on_write(): the bounds check,
+# the RX hex log and the enqueue. All three now live in src/command_queue.cpp's
+# bleRxQueuePush(), which both targets share -- keeping a second copy here is what let the
+# two transports report the same malformed frame differently.
 
 # ---------------------------------------------------------------------------------------
 # Panel libraries, vendored -- see ../../../third_party/NOTICE.md for origin and licence.

@@ -10,16 +10,18 @@
 #include <Arduino.h>
 #include <string.h>
 
+#include "ble_transport.h"
+#include "command_queue.h"
+
 #ifdef TARGET_ESP32
-#include "ble_init.h"   // NimBLE-Arduino + BLE* aliases
-#include <WiFi.h>
+// wifi_service.h only, deliberately: this file talks to the LAN transport
+// through opendisplay_lan_send_frame() and needs no WiFi stack types. <WiFi.h>
+// was here solely for two extern declarations that nothing used.
 #include "wifi_service.h"
-extern BLEServer* pServer;
 #endif
 
-#ifdef TARGET_NRF
-#include <bluefruit.h>
-#endif
+#include "link_owner.h"
+#include "session_guard.h"
 
 bool isAuthenticated();
 extern struct GlobalConfig globalConfig;
@@ -36,6 +38,18 @@ extern struct GlobalConfig globalConfig;
 // name the values instead of comparing against a bare 0.
 volatile uint8_t g_commandOrigin = ORIGIN_BLE;
 
+// Instance identity of the frame currently being dispatched -- the packed owner
+// word (link_owner.h) of the connection that WROTE it, not merely its transport.
+//
+// g_commandOrigin says BLE-or-LAN and nothing more, which is not enough to decide
+// whether a frame still belongs to the live session: BLE conn handles are reused,
+// so a frame queued by a dead instance is indistinguishable from the new owner's by
+// transport alone. serviceBleRx() sets this from the frame's own tag (which
+// CommandQueueItem carries from the write callback) and the LAN listener sets it
+// from the LAN owner's identity, both immediately before dispatch. Same
+// single-loop-task argument as g_commandOrigin, so no locking.
+volatile uint32_t g_commandInstance = 0;
+
 // Transport tag for the RX banner and TX dump. Three transports share this
 // dispatcher (nRF BLE, ESP32 BLE via commandQueue, ESP32 LAN), and without a tag
 // the log cannot show which one a frame took -- in particular whether a frame used
@@ -50,6 +64,141 @@ static const char* originTag(void) {
         case ORIGIN_LAN_PLAIN: return "LAN";
         default:               return "BLE";
     }
+}
+
+// --- auth-abuse drop (CONNECTION_POLICY R3 / freeze-hardening Phase 4) ---------
+//
+// Count CONSECUTIVE commands answered RESP_AUTH_REQUIRED and drop the link at the
+// threshold, so a session that cannot authenticate stops holding the exclusive slot
+// while it retries.
+//
+// This is an OPTIMISATION, not a hole-closer -- the distinction matters for how
+// hard it should try. Phase 3 narrowed the activity clock so handshake/discovery
+// opcodes and pre-auth commands no longer stamp it, which means such a peer already
+// ages normally and the idle timeout reclaims the slot at OD_BLE_IDLE_TIMEOUT_MS.
+// What this adds is speed and a reason: roughly one exchange instead of 120 s, and
+// an explicit final RESP_AUTH_REQUIRED before a deliberate drop rather than a
+// silent timeout. So it may fail safe (never dropping) without reopening anything.
+#ifndef OD_AUTH_ABUSE_THRESHOLD
+// CLIENT BEHAVIOUR THIS ASSUMES: py-opendisplay authenticates in ONE exchange, so a
+// legitimate client never reaches 2, let alone 10.
+//
+// Chosen deliberately BELOW py-opendisplay's 16-frame pipe window, which is the one
+// case where a well-behaved client trips it: if its session dies mid-upload, every
+// in-flight frame bounces. Dropping at 10 rather than waiting out all 16 is the
+// right outcome -- the session is already dead, every one of those frames is doomed,
+// and the drop tells the client immediately instead of after a full window of
+// pointless round trips. Recorded because an earlier prototype inherited this
+// threshold by accident rather than deciding it.
+#define OD_AUTH_ABUSE_THRESHOLD 10
+#endif
+#ifndef OD_AUTH_ABUSE_FLUSH_MS
+// Hard bound on the whole best-effort delivery attempt below. On expiry the drop
+// happens regardless, so a client that has stopped reading cannot keep the abuser
+// attached by refusing to drain.
+#define OD_AUTH_ABUSE_FLUSH_MS 500
+#endif
+#ifndef OD_AUTH_ABUSE_DWELL_FALLBACK_MS
+// Used when the negotiated connection interval is not yet known. The central
+// chooses that interval and this firmware requests none, so there is no constant to
+// hard-code -- see BleTransport::connIntervalMs().
+#define OD_AUTH_ABUSE_DWELL_FALLBACK_MS 50
+#endif
+
+// Set by any RESP_AUTH_REQUIRED answer for the frame being dispatched, on EVERY
+// transport. Read once after the dispatch switch to decide whether the frame was
+// activity. Loop-task-only, like g_commandOrigin.
+static bool     s_frameRejected = false;
+static uint8_t  s_authRejectRun = 0;        // consecutive RESP_AUTH_REQUIRED answers
+static bool     s_authAbuseDropPending = false;
+static uint32_t s_authAbuseDeadlineMs = 0;  // hard bound on the delivery attempt
+static uint32_t s_authAbuseDwellUntil = 0;  // set once TX has drained; 0 = not yet
+
+// Called at every site that answers RESP_AUTH_REQUIRED.
+//
+// BLE ONLY, and the origin gate is not decoration: the same auth gate is reachable
+// from plaintext LAN, and counting those would let LAN traffic drop a BLE client.
+// TLS-LAN never reaches the gate at all (the transport is the authentication).
+static void noteAuthRejected(void) {
+    // Mark the frame first, for every origin. The COUNTER is BLE-only (see below),
+    // but "this frame was refused, so it is not activity" is transport-independent
+    // -- and getting that wrong on LAN is exactly how a TLS client could hold the
+    // slot forever.
+    s_frameRejected = true;
+    if (g_commandOrigin != ORIGIN_BLE) return;
+    if (s_authAbuseDropPending) return;              // already decided
+    if (s_authRejectRun < 255) s_authRejectRun++;
+    if (s_authRejectRun < OD_AUTH_ABUSE_THRESHOLD) return;
+    // The offender is the frame's own instance, taken from its queue tag -- not
+    // "whichever peer the stack lists first", which is how an earlier prototype
+    // misidentified it before frames carried identity.
+    if (!linkIsOwnerWord(g_commandInstance)) return; // not the owner: nothing to drop
+    od_log_warn("Auth abuse: %u consecutive unauthenticated commands - dropping link",
+                (unsigned)s_authRejectRun);
+    s_authAbuseDropPending = true;
+    s_authAbuseDeadlineMs = millis() + OD_AUTH_ABUSE_FLUSH_MS;
+    s_authAbuseDwellUntil = 0;
+}
+
+void resetAuthAbuseCounter(void) {
+    s_authRejectRun = 0;
+    s_authAbuseDropPending = false;
+    s_authAbuseDeadlineMs = 0;
+    s_authAbuseDwellUntil = 0;
+}
+
+void serviceBleAuthAbuseDisconnect(void) {
+    if (!s_authAbuseDropPending) return;
+    // Never mid-refresh: loop() is blocked throughout one, and the abort is
+    // loop-task-only by contract.
+    if (epdRefreshInProgress) return;
+
+    const LinkId owner = linkOwnerId();
+    if (owner.who != OWNER_BLE) {
+        // The link went away, or LAN took the slot, while we were draining. Nothing
+        // to drop -- and dropping on a stale identity is exactly what the epoch
+        // exists to prevent.
+        resetAuthAbuseCounter();
+        return;
+    }
+
+    // BEST EFFORT, and deliberately not more than that. An empty TX ring proves the
+    // stack ACCEPTED the notification, not that it went on air: the ring advances
+    // when notify() returns true, and a BLE notification is unacknowledged. Without
+    // an indication -- a wire change this plan forbids -- there is no delivery
+    // signal to wait on, so this drains, dwells about one connection interval to
+    // give the radio a chance to send, and then drops.
+    serviceBleTx();
+    const bool expired = (int32_t)(millis() - s_authAbuseDeadlineMs) >= 0;
+    if (!bleTxQueuePending() && s_authAbuseDwellUntil == 0) {
+        uint16_t intervalMs = ble.connIntervalMs(owner.handle);
+        if (intervalMs == 0) intervalMs = OD_AUTH_ABUSE_DWELL_FALLBACK_MS;
+        const uint32_t dwellEnd = millis() + intervalMs + 5u;   // +margin
+        // Never past the hard deadline: a drain landing just before it yields a
+        // short or zero dwell, which is the expiry case behaving as specified
+        // rather than a contradiction.
+        s_authAbuseDwellUntil =
+            ((int32_t)(dwellEnd - s_authAbuseDeadlineMs) > 0) ? s_authAbuseDeadlineMs : dwellEnd;
+    }
+    const bool dwelled = (s_authAbuseDwellUntil != 0) &&
+                         ((int32_t)(millis() - s_authAbuseDwellUntil) >= 0);
+    if (!expired && !dwelled) return;   // keep draining next pass
+
+    // One more pass if RX still holds frames. serviceBleRx() drains once per pass,
+    // early, while this runs late -- so a frame that arrived on the callback task in
+    // between is still queued, and the abort's ring reset would discard it unread.
+    // That frame may be the client's authentication, which would cancel this drop
+    // entirely. Bounded by the same hard deadline, so a client that keeps the ring
+    // permanently non-empty cannot defer the drop indefinitely.
+    if (!expired && bleRxQueuePending()) return;
+
+    resetAuthAbuseCounter();
+    // dropLink=true. The abort's own step 10 is the R3a bounded wait for link-down
+    // before its step 11 releases -- two bounded waits in sequence, composing rather
+    // than conflicting: this one runs BEFORE the abort precisely because the abort
+    // deliberately skips the client NACK when dropping, and asking one routine to
+    // both hold the link open for a response and tear it down is contradictory.
+    abortToKnownState("auth abuse", true, owner);
 }
 
 static void reloadConfigAfterSave(void) {
@@ -86,50 +235,19 @@ extern uint8_t msd_payload[16];
 String getChipIdHex();
 float readBatteryVoltage();
 
-#ifdef TARGET_ESP32
-// ResponseQueueItem / RESPONSE_QUEUE_SIZE / MAX_RESPONSE_SIZE come from structs.h.
-// This file previously redeclared the struct with a hardcoded 512 and kept private
-// *_LOCAL copies of both sizes, so the guard in esp32_queue_ble_notify_copy() and the
-// slot it protects were sized in two different files and had to be edited in lockstep.
-extern WiFiClient wifiClient;
-extern bool wifiServerConnected;
-extern ResponseQueueItem responseQueue[RESPONSE_QUEUE_SIZE];
-extern uint8_t responseQueueHead;
-extern uint8_t responseQueueTail;
-// Drains the response ring to BLE (defined in main.cpp). handleReadConfig() calls
-// this between chunks so a multi-chunk config read never overflows the ring.
-extern void flushResponseQueueToBle();
-
 /** Mirror responses to BLE only when a central is connected; LAN responses go via opendisplay_lan_send_frame. */
-static void esp32_queue_ble_notify_copy(const uint8_t* response, uint16_t len, bool quiet = false) {
-    if (len > MAX_RESPONSE_SIZE) {
-        od_log_error("ERROR: Response too large for queue (%u > %u)", len, MAX_RESPONSE_SIZE);
+static void queueBleNotifyCopy(const uint8_t* response, uint16_t len) {
+    // Nothing to queue against with no central attached; serviceBleTx() would
+    // discard it on the next pass anyway.
+    if (!ble.isConnected()) {
         return;
     }
-    if (pServer == nullptr || pServer->getConnectedCount() == 0) {
-        return;
-    }
-    uint8_t nextHead = (responseQueueHead + 1) % RESPONSE_QUEUE_SIZE;
-    if (nextHead == responseQueueTail) {
-        od_log_error("ERROR: Response queue full, dropping response");
-        return;
-    }
-    memcpy(responseQueue[responseQueueHead].data, response, len);
-    responseQueue[responseQueueHead].len = len;
-    responseQueue[responseQueueHead].pending = true;
-    responseQueueHead = nextHead;
-    // The "[BLE][Q:n] TX ..." line above already reports every response and its
-    // queue depth, so the nominal enqueue (depth 1, drained next loop pass) is
-    // pure noise. Log only when a backlog is forming and the 10-slot ring is at
-    // risk of dropping responses.
-    const uint8_t depth = (responseQueueHead - responseQueueTail + RESPONSE_QUEUE_SIZE) % RESPONSE_QUEUE_SIZE;
-    if (!quiet && depth >= 2) od_log_debug("BLE: response queue backlog (queue size: %u)", depth);
+    // No log here. logTxFrame() reports every response with its PRE-enqueue depth,
+    // so the backlog this used to announce at "depth >= 2 after push" is the same
+    // event as "[Q:1] or higher" on the line immediately above -- it only ever
+    // restated the number. bleTxQueuePush logs the failures (oversize / ring full).
+    (void)bleTxQueuePush(response, len);
 }
-#endif
-
-#ifdef TARGET_NRF
-extern BLECharacteristic imageCharacteristic;
-#endif
 
 #ifndef BUILD_VERSION
 #define BUILD_VERSION "1.0.0"
@@ -186,56 +304,58 @@ static uint8_t parseFirmwareVersionComponent(unsigned index) {
     return (uint8_t)n;
 }
 
-// Builds "<label><space-separated %02X bytes, up to 32><' ...' if truncated>" into buf.
-static void buildHexDump(char* buf, size_t bufSize, const char* label, const uint8_t* data, uint16_t len) {
-    int pos = snprintf(buf, bufSize, "%s", label);
-    if (pos < 0) {
-        pos = 0;
-        buf[0] = '\0';
+// The single TX log line. Every response leaving this file goes through here, so a
+// response can never reach the drain side without having been logged at its source
+// -- sendResponseUnencrypted() previously had no TX line at all, which is why its
+// responses showed up only as an anonymous queue depth from serviceBleTx().
+//
+// The depth is read BEFORE the response is enqueued, so a healthy path reads
+// [BLE][Q:0] and a rising Q flags the drain falling behind the producer. LAN
+// responses bypass the ring entirely (opendisplay_lan_send_frame), so they carry
+// no depth -- the ORIGIN_BLE test below is deliberately the SAME predicate that
+// routes the frame in both senders, so [Q:n] appears exactly when the frame really
+// enters the ring. Keep the two in step or the depth becomes a lie.
+//
+// Not gated on TARGET_ESP32: both targets have queued their BLE responses through
+// this ring since Phase 3 (see the de-fan-out comment in sendResponse). nRF needs
+// the number more than ESP32 does -- loop() runs there at TASK_PRIO_LOW and is
+// starved by the Bluefruit tasks, which is exactly when the drain falls behind.
+// `encrypted` selects ETX vs UTX, replacing the former three-line "Sending encrypted
+// response: / Original length: / Encrypted length:" block -- on the line that already
+// names the opcode, the length and the bytes. Both states are spelled out rather than
+// letting absence mean plaintext, so a frame that should have been wrapped and was
+// not is visible instead of merely unremarked. Mirrors ERX/URX on the receive side.
+static void logTxFrame(const uint8_t* frame, uint16_t len, bool encrypted = false) {
+    const uint16_t cmd = (len >= 2) ? (uint16_t)((frame[0] << 8) | frame[1]) : frame[0];
+    char label[64];
+    // Folded into the direction token rather than trailing after the length: ETX/UTX
+    // is fixed-width and sits up front where a capture is scanned, whereas a token
+    // after a variable-width byte count never lands in the same column twice.
+    const char* dir = encrypted ? "ETX" : "UTX";
+    if (g_commandOrigin == ORIGIN_BLE) {
+        snprintf(label, sizeof(label), "[%s][Q:%u] %s 0x%04X (%u B): ",
+                 originTag(), (unsigned)bleTxQueueDepth(), dir, cmd, (unsigned)len);
+    } else {
+        snprintf(label, sizeof(label), "[%s] %s 0x%04X (%u B): ", originTag(), dir, cmd, (unsigned)len);
     }
-    int dumpLen = (len < 32) ? len : 32;
-    for (int i = 0; i < dumpLen && pos < (int)bufSize; i++) {
-        int n = snprintf(buf + pos, bufSize - pos, i > 0 ? " %02X" : "%02X", data[i]);
-        if (n < 0) {
-            break;
-        }
-        pos += n;
-    }
-    if (len > 32 && pos >= 0 && pos < (int)bufSize) {
-        snprintf(buf + pos, bufSize - pos, " ...");
-    }
+    // Label (~50 B) plus 32 bytes of hex (96 B) plus the truncation marker; the old
+    // 160-byte buffer here was close enough to truncating to be worth the margin.
+    char line[192];
+    od_log_hex_line(line, sizeof(line), label, frame, len);
+    od_log_debug("%s", line);
 }
 
 void sendResponseUnencrypted(uint8_t* response, uint16_t len) {
-    od_log_debug("Sending unencrypted response (error/status):");
-    od_log_debug("  Length: %u bytes", len);
-    od_log_debug("  Command: 0x%02X%02X", response[0], response[1]);
-    char hexDump[160];
-    buildHexDump(hexDump, sizeof(hexDump), "  Full command: ", response, len);
-    od_log_debug("%s", hexDump);
-#ifdef TARGET_ESP32
-    // F4 de-fan-out: reply over the origin transport only.
+    logTxFrame(response, len);
+    // F4 de-fan-out: reply over the origin transport only. One path for both
+    // targets as of Phase 3 (see sendResponse).
     if (g_commandOrigin == ORIGIN_BLE) {
-        esp32_queue_ble_notify_copy(response, len);
+        queueBleNotifyCopy(response, len);
     } else {
 #ifdef OPENDISPLAY_HAS_WIFI
         opendisplay_lan_send_frame(response, len);
 #endif
     }
-#endif
-#ifdef TARGET_NRF
-    if (Bluefruit.connected() && imageCharacteristic.notifyEnabled()) {
-        char nrfHexDump[160] = {0};
-        buildHexDump(nrfHexDump, sizeof(nrfHexDump), "NRF: Sending unencrypted response: ", response, len);
-        od_log_debug("%s", nrfHexDump);
-        od_log_debug("NRF: BLE notification sent (%u bytes)", len);
-        imageCharacteristic.notify(response, len);
-    } else {
-        od_log_error("ERROR: Cannot send BLE response - not connected or notifications not enabled");
-        od_log_error("  Connected: %s", Bluefruit.connected() ? "yes" : "no");
-        od_log_error("  Notify enabled: %s", imageCharacteristic.notifyEnabled() ? "yes" : "no");
-    }
-#endif
 }
 
 void sendResponse(uint8_t* response, uint16_t len) {
@@ -249,6 +369,11 @@ void sendResponse(uint8_t* response, uint16_t len) {
     // Length test uses the plaintext ACK (encryption happens after this check).
     const bool quietAck = (len == 2 && response[0] == 0x00 && response[1] == 0x71 && imageWriteLogQuietAck())
                        || (len == 7 && response[0] == 0x00 && response[1] == 0x81 && imageWriteLogQuietAck());
+    // Set only where the CCM envelope is actually applied below, so the log reports
+    // what left the device rather than what policy intended. Every skip path -- TLS
+    // origin, unauthenticated, handshake opcode, FE/FF status, and encryptResponse()
+    // itself failing -- leaves it false and the frame is reported "plain".
+    bool wasEncrypted = false;
     // TLS-origin responses are already secured by the TLS record layer; never wrap
     // them in the app-layer CCM envelope (no double-encrypt; SECTION 9 rule 4).
     if (isAuthenticated() && len >= 2 && g_commandOrigin != ORIGIN_LAN_TLS) {
@@ -268,13 +393,9 @@ void sendResponse(uint8_t* response, uint16_t len) {
             uint8_t auth_tag[ENCRYPTION_TAG_SIZE];
             uint16_t encrypted_len = 0;
             if (encryptResponse(response, len, encrypted_response, &encrypted_len, nonce, auth_tag)) {
-                if (!quietAck) {
-                    od_log_debug("[%s] Sending encrypted response:", originTag());
-                    od_log_debug("  Original length: %u bytes", len);
-                    od_log_debug("  Encrypted length: %u bytes", encrypted_len);
-                }
                 response = encrypted_response;
                 len = encrypted_len;
+                wasEncrypted = true;
             } else {
                 od_log_warn("WARNING: Failed to encrypt response, sending unencrypted error response");
                 errorResponse[0] = RESP_NACK;
@@ -283,76 +404,25 @@ void sendResponse(uint8_t* response, uint16_t len) {
                 response = errorResponse;
                 len = sizeof(errorResponse);
             }
-        } else if (!quietAck) {
-            od_log_debug("[%s] Sending unencrypted response (authentication/firmware version/error)", originTag());
         }
     }
 
-    if (!quietAck) {
-        // One-line TX log: opcode, length, and up to 32 payload bytes (the opcode
-        // is also the first two bytes of the dump). Replaces the old 4-line block.
-        uint16_t cmd = (response[0] << 8) | response[1];
-        char line[160];
-        int pos;
-#ifdef TARGET_ESP32
-        // Queue depth *before* this response is enqueued, so a healthy path reads
-        // [BLE][Q:0] and a rising Q flags the drain falling behind the producer.
-        if (g_commandOrigin == ORIGIN_BLE) {
-            const uint8_t qdepth = (responseQueueHead - responseQueueTail + RESPONSE_QUEUE_SIZE) % RESPONSE_QUEUE_SIZE;
-            pos = snprintf(line, sizeof(line), "[%s][Q:%u] TX 0x%04X (%u B):",
-                           originTag(), (unsigned)qdepth, cmd, (unsigned)len);
-        } else
-#endif
-        pos = snprintf(line, sizeof(line), "[%s] TX 0x%04X (%u B):", originTag(), cmd, (unsigned)len);
-        if (pos < 0) {
-            pos = 0;
-            line[0] = '\0';
-        }
-        int dumpLen = (len < 32) ? len : 32;
-        for (int i = 0; i < dumpLen && pos < (int)sizeof(line); i++) {
-            int n = snprintf(line + pos, sizeof(line) - pos, " %02X", response[i]);
-            if (n < 0) {
-                break;
-            }
-            pos += n;
-        }
-        if (len > 32 && pos >= 0 && pos < (int)sizeof(line)) {
-            snprintf(line + pos, sizeof(line) - pos, " ...");
-        }
-        od_log_debug("%s", line);
-    }
-#ifdef TARGET_ESP32
-    // F4 de-fan-out: reply over the origin transport only.
+    // Logged here, after the encryption swap, so the dump is the bytes actually sent,
+    // the depth is the pre-enqueue one, and the enc/plain token is the outcome rather
+    // than the intent.
+    if (!quietAck) logTxFrame(response, len, wasEncrypted);
+    // F4 de-fan-out: reply over the origin transport only. One path for both
+    // targets as of Phase 3: nRF used to notify() inline here with a blocking
+    // delay(5) x 4 retry, which was only safe because it ran on the same task as
+    // dispatch. Now that both targets dispatch from loop(), both queue and let
+    // serviceBleTx() apply the non-blocking "retry next pass" backpressure rule.
     if (g_commandOrigin == ORIGIN_BLE) {
-        esp32_queue_ble_notify_copy(response, len, quietAck);
+        queueBleNotifyCopy(response, len);
     } else {
 #ifdef OPENDISPLAY_HAS_WIFI
         opendisplay_lan_send_frame(response, len);
 #endif
     }
-#endif
-#ifdef TARGET_NRF
-    if (Bluefruit.connected() && imageCharacteristic.notifyEnabled()) {
-        if (!quietAck) {
-            char nrfHexDump[160] = {0};
-            buildHexDump(nrfHexDump, sizeof(nrfHexDump), "NRF: Sending response: ", response, len);
-            od_log_debug("%s", nrfHexDump);
-            od_log_debug("NRF: BLE notification sent (%u bytes)", len);
-        }
-        // Bounded retry only when the SoftDevice TX queue is full (notify()==false).
-        // Replaces an unconditional delay(20): pays latency only on backpressure and
-        // speeds the legacy per-chunk path ~20 ms/chunk.
-        bool notified = imageCharacteristic.notify(response, len);
-        for (uint8_t attempt = 0; !notified && attempt < 4; ++attempt) {
-            delay(5);
-            notified = imageCharacteristic.notify(response, len);
-        }
-    } else {
-        od_log_error("ERROR: Cannot send BLE response - not connected or notifications not enabled");
-        od_log_error("  Connected: %s", Bluefruit.connected() ? "yes" : "no");
-        od_log_error("  Notify enabled: %s", imageCharacteristic.notifyEnabled() ? "yes" : "no");
-    }
-#endif
 }
 
 void handleReadMSD() {
@@ -465,15 +535,16 @@ void handleReadConfig() {
             offset += chunkSize;
             remaining -= chunkSize;
             chunkNumber++;
-#ifdef TARGET_ESP32
             // Drain THIS chunk to BLE before enqueuing the next: this handler runs
             // synchronously on the loop task, so the ring's only drainer cannot run
             // until we return. Without this, chunk 9+ overflows the 10-slot ring and
             // is silently dropped, truncating configs > ~864 B on read-back.
-            flushResponseQueueToBle();
-#else
-            delay(50);
-#endif
+            //
+            // nRF used to sit in delay(50) here instead, because it notified
+            // inline from the BLE callback task and only needed to pace the
+            // SoftDevice. It now shares the ring, so it needs the same flush --
+            // and drops 50 ms per chunk.
+            serviceBleTx();
         }
     } else {
         uint8_t errorResponse[] = {RESP_NACK, RESP_CONFIG_READ, 0x00, 0x00};
@@ -486,6 +557,7 @@ void handleWriteConfig(uint8_t* data, uint16_t len) {
     if (isEncryptionEnabled() && !isAuthenticated()) {
         bool rewriteAllowed = (securityConfig.flags & (1 << 0)) != 0;
         if (!rewriteAllowed) {
+            noteAuthRejected();
             uint8_t response[] = {RESP_ACK, (uint8_t)(CMD_CONFIG_WRITE & 0xFF), RESP_AUTH_REQUIRED};
             sendResponseUnencrypted(response, sizeof(response));
             return;
@@ -547,7 +619,8 @@ void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
     if (chunkedWriteState.receivedChunks == 1 && isEncryptionEnabled() && !isAuthenticated()) {
         bool rewriteAllowed = (securityConfig.flags & (1 << 0)) != 0;
         if (!rewriteAllowed) {
-            chunkedWriteState.active = false;
+            resetChunkedWriteState();
+            noteAuthRejected();
             uint8_t response[] = {RESP_ACK, (uint8_t)(CMD_CONFIG_CHUNK & 0xFF), RESP_AUTH_REQUIRED};
             sendResponseUnencrypted(response, sizeof(response));
             return;
@@ -555,7 +628,7 @@ void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
         secureEraseConfig();
     }
     if (len == 0 || len > CONFIG_CHUNK_SIZE || chunkedWriteState.receivedSize + len > MAX_CONFIG_SIZE || chunkedWriteState.receivedChunks >= MAX_CONFIG_CHUNKS) {
-        chunkedWriteState.active = false;
+        resetChunkedWriteState();
         uint8_t errorResponse[] = {RESP_NACK, RESP_CONFIG_CHUNK, 0x00, 0x00};
         sendResponse(errorResponse, sizeof(errorResponse));
         return;
@@ -571,22 +644,15 @@ void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
             reloadConfigAfterSave();
         }
         sendResponse(saved ? ok : err, 4);
-        chunkedWriteState.active = false;
-        chunkedWriteState.receivedSize = 0;
-        chunkedWriteState.receivedChunks = 0;
+        resetChunkedWriteState();
     } else {
         uint8_t ackResponse[] = {RESP_ACK, RESP_CONFIG_CHUNK, 0x00, 0x00};
         sendResponse(ackResponse, sizeof(ackResponse));
     }
 }
 
-#ifdef TARGET_NRF
-typedef uint16_t BLEConnHandle;
-typedef BLECharacteristic* BLECharPtr;
-#else
-typedef void* BLEConnHandle;
-typedef void* BLECharPtr;
-#endif
+// BLEConnHandle / BLECharPtr and the imageDataWritten declaration come from
+// communication.h -- one declaration shared by all three callers.
 
 // Human-readable name for a command opcode, used for the single dispatch banner
 // emitted by imageDataWritten() (the shared command handler for nRF, ESP32 BLE,
@@ -631,12 +697,16 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
     }
 
     uint16_t command = (data[0] << 8) | data[1];
+
+
     // Silence the per-frame command spam for image-write data (0x0071) once the
     // stream is past its first chunk; the display handler's 5% meter reports it.
     const bool quietCmd = (command == CMD_DIRECT_WRITE_DATA || command == CMD_PIPE_WRITE_DATA) && imageWriteLogQuietCmd();
     // Single per-command banner for the whole dispatch. Named via commandName();
     // unknown opcodes (nullptr) get no banner here and fall to the switch default's
     // "Unknown command" error. Cases and handlers must not log their own banner.
+    // Carries no encryption token: the ERX/URX line from bleRxQueuePush() already
+    // reports it for this frame, and stating it twice is how the two spellings drift.
     if (!quietCmd) {
         const char* name = commandName(command);
         if (name != nullptr) {
@@ -663,6 +733,7 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
     if (isEncryptionEnabled() && g_commandOrigin != ORIGIN_LAN_TLS) {
         if (!isAuthenticated()) {
             od_log_error("ERROR: [%s] Command requires authentication (encryption enabled)", originTag());
+            noteAuthRejected();
             uint8_t response[] = {RESP_ACK, (uint8_t)(command & 0xFF), RESP_AUTH_REQUIRED};
             sendResponseUnencrypted(response, sizeof(response));
             return;
@@ -670,6 +741,7 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
 
         if (len < BLE_CMD_HEADER_SIZE + ENCRYPTION_NONCE_SIZE + ENCRYPTION_TAG_SIZE) {
             od_log_error("ERROR: [%s] Unencrypted command received when encryption is enabled", originTag());
+            noteAuthRejected();
             uint8_t response[] = {RESP_ACK, (uint8_t)(command & 0xFF), RESP_AUTH_REQUIRED};
             sendResponseUnencrypted(response, sizeof(response));
             return;
@@ -685,18 +757,19 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
 
         uint16_t encrypted_data_len = len - BLE_CMD_HEADER_SIZE - ENCRYPTION_NONCE_SIZE - ENCRYPTION_TAG_SIZE;
 
-        if (!quietCmd) {
-            od_log_debug("Encrypted command: len=%u, command=0x%04X, encrypted_data_len=%u",
-                         (unsigned int)len, (unsigned int)command, (unsigned int)encrypted_data_len);
-            od_log_debug("Full nonce: %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
-                         nonce_full[0], nonce_full[1], nonce_full[2], nonce_full[3],
-                         nonce_full[4], nonce_full[5], nonce_full[6], nonce_full[7],
-                         nonce_full[8], nonce_full[9], nonce_full[10], nonce_full[11],
-                         nonce_full[12], nonce_full[13], nonce_full[14], nonce_full[15]);
-        }
-
+        // The nonce is no longer dumped per frame: the banner above already reports
+        // this frame as "enc", and on ESP32 the transport's RX line dumps the first
+        // 32 bytes -- of which 2..17 ARE the nonce -- so it restated bytes already on
+        // screen. It moves to the failure path below, where it is the only thing that
+        // separates a replay-window jump from nonce reuse from a wrong session key,
+        // and where nRF (which has no RX hex line at all) would otherwise be blind.
         if (!decryptCommand(data + BLE_CMD_HEADER_SIZE + ENCRYPTION_NONCE_SIZE, encrypted_data_len, plaintext, &plaintext_len, nonce_full, auth_tag, command)) {
-            od_log_error("ERROR: Decryption failed");
+            // 16 bytes render as 47 chars + NUL, an exact fit in 48; sized past that
+            // so a future ENCRYPTION_NONCE_SIZE bump truncates nothing.
+            char nonceHex[64];
+            od_log_hex_line(nonceHex, sizeof(nonceHex), "", nonce_full, ENCRYPTION_NONCE_SIZE);
+            od_log_error("ERROR: Decryption failed (0x%04X, %u B payload, nonce %s)",
+                         (unsigned)command, (unsigned)encrypted_data_len, nonceHex);
             uint8_t response[] = {RESP_ACK, (uint8_t)(command & 0xFF), RESP_NACK};
             sendResponseUnencrypted(response, sizeof(response));
             return;
@@ -709,6 +782,10 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
         len = 2 + plaintext_len;
         data = decrypted_data;
     }
+
+    // Cleared before dispatch, inspected after it: the handlers themselves can
+    // still refuse this frame, so acceptance is not knowable until they return.
+    s_frameRejected = false;
 
     // The per-command banner is logged once above (commandName()); cases below do
     // NOT log their own "=== ... COMMAND ... ===". CMD_AUTHENTICATE and
@@ -781,5 +858,38 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
         default:
             od_log_error("ERROR: Unknown command: 0x%04X", command);
             break;
+    }
+
+    // R4 ACTIVITY, decided HERE -- after dispatch, on the OUTCOME rather than on a
+    // prediction of it. This is the third and final position for this test, and the
+    // two earlier ones were both wrong in the same way:
+    //
+    //  - At the top, gated on isAuthenticated(): an authenticated client sending a
+    //    too-short plaintext frame stamped here, then got RESP_AUTH_REQUIRED from
+    //    the length check below it.
+    //  - Just before the switch: TLS-LAN frames bypass the CCM gate and reach
+    //    dispatch, but handleWriteConfig() and the chunk handler apply their OWN
+    //    app-layer auth check and can still answer RESP_AUTH_REQUIRED -- so a TLS
+    //    client repeating CMD_CONFIG_WRITE stamped the clock on every rejected
+    //    attempt and held the slot indefinitely.
+    //
+    // Both are the same mistake at different depths: anything that predicts
+    // acceptance is wrong at whatever layer rejects next. Reading s_frameRejected
+    // after the handler has run is the only position with nothing below it.
+    //
+    // Unknown opcodes do not stamp (commandName() is null for them), and the two
+    // handshake/discovery opcodes return from their own early branches and never
+    // reach here -- so "handshake and discovery are not activity" holds
+    // structurally rather than by a test that could drift.
+    if (!s_frameRejected && commandName(command) != nullptr &&
+        linkIsOwnerWord(g_commandInstance)) {
+        linkStampOwnerCommand();
+        // A fully accepted command means this client is working normally, so it
+        // clears the auth-abuse state ENTIRELY -- including a drop already pending.
+        // Clearing only the run would let a client that recovered mid-flush (say it
+        // re-authenticated after its session expired under a 16-frame pipe burst)
+        // still be dropped by a decision taken moments earlier, which is the worst
+        // outcome for a mechanism whose whole value is reacting quickly.
+        resetAuthAbuseCounter();
     }
 }

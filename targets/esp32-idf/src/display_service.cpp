@@ -5,6 +5,11 @@
 #include <string.h>
 #include <Wire.h>
 #include "structs.h"
+/* OD-PORT: two panel IC values this file compares against are missing from
+ * shared/protocol/ -- they were added to Firmware's VENDORED copy of the wire contract
+ * and never propagated to canonical. See protocol_pending.h; it is a debt with a
+ * documented removal sequence, not a second home for wire constants. */
+#include "protocol_pending.h"
 #include "od_log.h"
 #include "buzzer_control.h"
 #include "sensor_sht40.h"
@@ -12,6 +17,8 @@
 #include "communication.h"
 #include "encryption.h"
 #include "boot_screen.h"
+#include "link_owner.h"
+#include "session_guard.h"
 #include "touch_input.h"
 #include "uzlib.h"
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
@@ -30,8 +37,9 @@
 // region (0x76), and PIPE_WRITE (0x80-0x82). PIPE_WRITE is BLE-only, so BLE transfers
 // decode through tinfl here too. The WiFi keying of OPENDISPLAY_USE_TINFL selects
 // which builds opt in (the LAN wire is what makes software inflate the bottleneck and
-// justifies tinfl's ~11 KB of DRAM tables); it does NOT restrict the engine to LAN
-// traffic. See od_inflate_tinfl.h for the full rationale and RAM cost.
+// justifies tinfl's ~11 KB of DRAM tables, and that flag is now set only on PSRAM
+// envs, so a part without the DRAM budget never opts in); it does NOT restrict the
+// engine to LAN traffic. See od_inflate_tinfl.h for the full rationale and RAM cost.
 #include "od_inflate_tinfl.h"
 #if OPENDISPLAY_USE_TINFL
 #define od_zlib_stream_reset  od_inflate_tinfl_reset
@@ -44,16 +52,16 @@
 extern "C" {
 #include "nrf_soc.h"
 }
-#include <bluefruit.h>
-#include "ble_init.h"
 #include "nrf.h"
 #endif
 
 #ifdef TARGET_ESP32
-#include "ble_init.h"   // NimBLE-Arduino + BLE* aliases
 #include "wifi_service.h"
 #include <SPI.h>
 #endif
+
+#include "ble_transport.h"
+#include "command_queue.h"
 
 extern BBEPDISP bbep;
 extern struct GlobalConfig globalConfig;
@@ -83,6 +91,24 @@ extern bool directWriteCompressed;
 extern bool directWriteActive;
 extern uint8_t decompressionChunk[OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE];
 volatile bool epdRefreshInProgress = false;
+
+// The ONE place the refresh bracket is closed, on every path.
+//
+// Both bracket sites used to assign epdRefreshInProgress = false inline. Routing
+// them through a helper is what makes the R4 refresh exclusion implementable: a
+// loop-side edge detector cannot see this transition, because loop() does not run
+// for the refresh's whole duration -- both edges happen inside the blocking
+// handler while wall-clock time passes. The activity clock has to be re-stamped AT
+// the transition or a naive millis()-lastStamp accrues the entire refresh and drops
+// an actively engaged client the instant loop() resumes.
+//
+// Re-stamping can only ever DELAY a drop, never cause a spurious one, which is why
+// it is safe to apply unconditionally here. A future third refresh path gets the
+// exclusion by calling this instead of remembering a second statement.
+void endRefresh(void) {
+    epdRefreshInProgress = false;
+    linkStampRefreshEnd();
+}
 
 extern uint32_t displayed_etag;
 
@@ -119,12 +145,6 @@ struct PartialStreamContext {
     uint8_t current_plane;
     uint32_t start_time;
 };
-
-#ifdef TARGET_ESP32
-/* OD: removed with the NimBLE-Arduino port */
-extern BLEServer* pServer;
-/* OD: removed with the NimBLE-Arduino port */
-#endif
 
 void pwrmgm(bool onoff);
 String getChipIdHex();
@@ -394,16 +414,24 @@ static uint32_t epdKeepAliveWindowMs(void) {
     return (uint32_t)s * 1000;
 }
 
-// Cross-task try-lock. On nRF the Bluefruit write-callback task and the loop()
-// task can both touch the session (a transfer begins Acquire on one while the
-// keep-alive tick fires ForceOff on the other). Acquire/Release/ForceOff take it;
-// the tick TRY-locks and skips its pass if held, so it can never rail-cut mid-init.
+// Session try-lock, now UNCONTENDED on both targets and kept as defence in depth.
+//
+// It existed because nRF dispatched commands on the Bluefruit write-callback
+// task while the keep-alive tick ran on loop(): a transfer could Acquire on one
+// task while ForceOff rail-cut on the other. Phase 3 moved nRF dispatch to
+// loop(), so every Acquire/Release/ForceOff/tick caller is now that single task
+// (see docs/PLAN_BLE_TRANSPORT_ABSTRACTION_2026-07-27.md).
+//
+// Kept rather than deleted: it is nearly free, it still guards against a future
+// caller arriving from an ISR or another task, and the try-lock in the tick is
+// what keeps a rail-cut from landing mid-init regardless of who calls it.
 static void pwrmgmLockTake(void) {
-    // MUST yield while waiting: on nRF this runs on the Bluefruit callback task,
-    // which outranks the loop task holding the lock during the tick's ForceOff
-    // (SPI ops + delay(50)). A bare busy-spin starves the lower-priority holder
-    // forever on the single core (priority-inversion livelock); delay(1) is
-    // vTaskDelay, which blocks the spinner so the holder can finish and release.
+    // The yield here is now belt-and-braces. It was load-bearing under the old
+    // model: this ran on the Bluefruit callback task, which outranks the loop
+    // task holding the lock during the tick's ForceOff (SPI ops + delay(50)), so
+    // a bare busy-spin starved the lower-priority holder forever on the single
+    // core (priority-inversion livelock). With one task there is nothing to spin
+    // against, but delay(1) is vTaskDelay and stays correct if that ever changes.
     while (__atomic_exchange_n(&pwrmgmLock, 1, __ATOMIC_ACQUIRE)) { delay(1); }
 }
 static bool pwrmgmLockTryTake(void) {
@@ -561,13 +589,12 @@ static PartialStreamContext partialCtx = {};
 static void directWriteComputeGeometry(bool compressed);
 static void directWriteActivatePanel(void);
 static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t endOpcode);
+static bool imageWriteFramesMayStillArrive(void);
 
-#ifdef TARGET_ESP32
-// Defined in main.cpp. The response ring's only drainer is the loop task, which is
-// the same task running these handlers — so anything queued here stays queued until
-// we return. Call it before any multi-second blocking work (see the refresh tail).
-extern void flushResponseQueueToBle();
-#endif
+// serviceBleTx() comes from command_queue.h. The response ring's only drainer is
+// the loop task, which is the same task running these handlers -- so anything
+// queued here stays queued until we return. Call it before any multi-second
+// blocking work (see the refresh tail).
 
 // PIPE_WRITE (0x0080-0x0082) sliding-window receive state + reorder queue. Declared
 // early so the quiet-logging predicates below can consult pipeState.active. The
@@ -575,14 +602,85 @@ extern void flushResponseQueueToBle();
 static PipeWriteState pipeState = {};
 static PipeReorderSlot pipeReorder[PIPE_REORDER_SLOTS];
 
-void checkPartialWriteTimeout(void) {
-    if (partialCtx.active && partialCtx.start_time > 0 &&
-        (millis() - partialCtx.start_time) > 900000UL) {
-        od_log_error("ERROR: Partial write timeout - cleaning up stuck state");
-        cleanup_partial_write_state();
-        // A pipe-partial transfer shares partialCtx: also clear pipeState so a zombie
-        // pipeState.active can't misroute later 0x0081 frames into the dead partialCtx.
-        if (pipeState.partial) resetPipeWriteState();
+// Shared by both watchdogs below. Measured from START, not from the last accepted
+// frame, so it bounds the whole transfer rather than a stall -- see the residual
+// note in docs/PLAN_WORK_GATE_TRANSFER_TERMS_2026-07-29.md before changing that.
+static const uint32_t TRANSFER_WATCHDOG_MS = 900000UL;   // 15 min (upload + refresh window)
+
+void checkTransferTimeouts(void) {
+    // No "&& startTime > 0" sentinel on either watchdog: each START sets the active
+    // flag and its millis() stamp in straight-line setup with no return between, so
+    // the flag already implies a valid stamp. Zero is a legitimate stamp -- treating
+    // it as "unset" would permanently disable the watchdog for a transfer that began
+    // in the ~1 ms window where millis() wraps through zero. Of order one in 10^9
+    // transfers, so this is removing a special case from the invariant rather than
+    // fixing a live risk.
+    // Both branches route through the ONE teardown routine (CONNECTION_POLICY R6's
+    // teardown extended to a non-disconnect trigger). This function is cited in the
+    // freeze-hardening plan as the very reason a shared routine is needed -- it is
+    // where a watchdog once tore down a panel while leaving its pipe session live --
+    // so exempting it would have argued for the routine while leaving the original
+    // drift source untouched.
+    //
+    // Three deliberate behaviour changes come with it: crypto is now cleared (it
+    // used to survive), the link is now dropped, and teardown is no longer selective
+    // (each branch used to clean one transfer half). Dropping follows from clearing:
+    // a retained link whose session is gone draws RESP_AUTH_REQUIRED with no event
+    // to explain it. The client must restart the transfer either way, since the
+    // transfer state is gone regardless.
+    //
+    // dropLink=true dispatches on the OWNER'S transport inside the abort -- this
+    // watchdog is origin-agnostic (both tests below read transfer state, not
+    // origin), so a timed-out LAN transfer must lose its socket, not some unrelated
+    // BLE handle.
+    // Drop the link only when the slot's owner is the transport that OWNS THIS
+    // TRANSFER. Under the claim CAS the two agree in every sequence I can construct
+    // -- a session that does not hold the slot is refused rather than admitted, and
+    // every abort clears transfer state BEFORE releasing -- so this comparison is
+    // defensive rather than load-bearing. It is kept because the cost is one test
+    // and the failure it guards against (dropping an innocent client's link over
+    // another transport's stuck transfer) is invisible from the log.
+    const LinkId owner = linkOwnerId();
+    const bool lanOwnsTransfer = (transferSessionOrigin() != 0);   // != ORIGIN_BLE
+    const bool dropOwnersLink =
+        (lanOwnsTransfer && owner.who == OWNER_LAN) ||
+        (!lanOwnsTransfer && owner.who == OWNER_BLE);
+
+    if (directWriteActive) {
+        uint32_t directWriteDuration = millis() - directWriteStartTime;
+        if (directWriteDuration > TRANSFER_WATCHDOG_MS) {
+            od_log_error("ERROR: Direct write timeout (%u ms) - aborting session", (unsigned)directWriteDuration);
+            abortToKnownState("direct-write transfer watchdog", dropOwnersLink, owner);
+            return;   // the abort cleared every branch below
+        }
+    }
+
+    if (partialCtx.active &&
+        (millis() - partialCtx.start_time) > TRANSFER_WATCHDOG_MS) {
+        od_log_error("ERROR: Partial write timeout - aborting session");
+        abortToKnownState("partial transfer watchdog", dropOwnersLink, owner);
+        return;
+    }
+
+    // Postcondition over both branches above: a live, non-errored pipe session
+    // always has a hardware half. 77c2226 proved that and closed the one path that
+    // broke it; this asserts it at runtime rather than resting on the proof, and
+    // heals it rather than merely reporting it. Placed last deliberately -- run
+    // first it would only inspect entry state, and could leave an inconsistency
+    // either watchdog had just created until the next pass.
+    //
+    // What a recurrence costs: the 0x0081 handler gates on pipeState alone, so
+    // frames are accepted into torn-down state, and with the byte counters zeroed by
+    // cleanup the uncompressed auto-complete reads 0 >= 0 and drives a full refresh
+    // at an unpowered panel.
+    //
+    // Deliberately NOT a workInFlight term. A transfer whose transport is gone
+    // cannot progress, so holding the loop awake for it burns power for work that
+    // will never happen -- on nRF a delay(1) gate is below the tickless threshold
+    // and spins rather than sleeping. Remove the state; do not idle on it.
+    if (pipeState.active && !pipeState.error && !directWriteActive && !partialCtx.active) {
+        od_log_error("ERROR: orphaned pipe session (no hardware half) - resetting");
+        resetPipeWriteState();
     }
 }
 
@@ -721,8 +819,13 @@ bool fastepd_driver_used(void) {
 #else
     if (globalConfig.display_count < 1) return false;
     const struct DisplayConfig& d = globalConfig.displays[0];
-    if (d.panel_ic_type != OD_PANEL_IC_ED103TC2_1872X1404 &&
-        d.panel_ic_type != OD_PANEL_IC_ED103TC2_1872X1404_4GRAY) return false;
+    // FastEPD IT8951 (SPI) path: E Ink ED103TC2 (Seeed reTerminal).
+    const bool it8951 = (d.panel_ic_type == OD_PANEL_IC_ED103TC2_1872X1404 ||
+                         d.panel_ic_type == OD_PANEL_IC_ED103TC2_1872X1404_4GRAY);
+    // FastEPD native parallel path: Soldered Inkplate 5V2 / 10.
+    const bool inkplate = (d.panel_ic_type == OD_PANEL_IC_INKPLATE5V2_1280X720 ||
+                           d.panel_ic_type == OD_PANEL_IC_INKPLATE10_1200X825);
+    if (!it8951 && !inkplate) return false;
     if (d.display_technology != 0 && d.display_technology != 1) return false;
     return true;
 #endif
@@ -1571,7 +1674,7 @@ void initDisplay(){
     if (fastepd_driver_used()) {
         pwrmgm(true);
         int bitsPerPixel = getBitsPerPixel();
-        od_log_info("Display: FastEPD IT8951 (panel_ic %u, %ux%u, %d bpp)",
+        od_log_info("Display: FastEPD (panel_ic %u, %ux%u, %d bpp)",
                     globalConfig.displays[0].panel_ic_type,
                     globalConfig.displays[0].pixel_width, globalConfig.displays[0].pixel_height,
                     bitsPerPixel);
@@ -1668,6 +1771,7 @@ int getBitsPerPixel() {
 #endif
     if (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_BWGBRY ||
         globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_BWGBRY_SPLIT) return 4;
+    if (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_GRAY16) return 4;
     if (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_BWRY) return 2;
     if (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_GRAY4) return 2;
     return 1;
@@ -1764,53 +1868,30 @@ void updatemsdata(){
     m.battery_voltage_low = batteryVoltageLowByte;
     m.status = statusByte;
     memcpy(msd_payload, &m, sizeof m);
-#ifdef TARGET_NRF
-    static uint8_t prev_msd_payload_nrf[16] = {0xFF};
-    if (memcmp(prev_msd_payload_nrf, msd_payload, 16) == 0) {
+    // Skip the (relatively expensive) advertisement rebuild when nothing changed;
+    // the loop counter still advances so successive advertisements stay
+    // distinguishable. Both targets used to keep their own copy of this check
+    // inside their own #ifdef -- it is transport-independent, so it lives once
+    // here and only the push below is platform-specific.
+    static uint8_t prev_msd_payload[16] = {0xFF};
+    if (memcmp(prev_msd_payload, msd_payload, 16) == 0) {
         mloopcounter++;
         mloopcounter &= 0x0F;
         return;
     }
-    memcpy(prev_msd_payload_nrf, msd_payload, 16);
-    Bluefruit.Advertising.clearData();
-    Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
-    Bluefruit.Advertising.addName();
-    Bluefruit.Advertising.addData(BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA, msd_payload, 16);
-    ble_nrf_apply_adv_interval();
-    Bluefruit.Advertising.setFastTimeout(1);
-    Bluefruit.Advertising.stop();
-    Bluefruit.Advertising.start(0);
-#endif
-#ifdef TARGET_ESP32
+    memcpy(prev_msd_payload, msd_payload, 16);
+    // The only record of what actually reaches the air. Without it, "the button
+    // event is logged but the host never sees it" cannot be split into a firmware
+    // publish failure vs a host-side one without a BLE sniffer.
     {
-        /* Ported to the NimBLE C API. The MSD payload is handed to od_ble, which owns the
-         * advertisement build -- the piecemeal setName/setFlags/setManufacturerData dance
-         * and its ordering trap (setAdvertisementData had to be LAST or NimBLE-Arduino
-         * discarded the payload) do not exist in the C API: ble_gap_adv_set_fields takes the
-         * whole record at once. */
-        static uint8_t prev_msd_payload[16] = {0xFF};
-        if (memcmp(prev_msd_payload, msd_payload, 16) == 0) {
-            mloopcounter++;
-            mloopcounter &= 0x0F;
-            return;
-        }
-        memcpy(prev_msd_payload, msd_payload, 16);
-        od_ble_set_manufacturer_data(msd_payload, 16);
-
-        /* Only restart advertising while disconnected -- restarting under a live connection
-         * would drop it. Same condition the Arduino path used. */
-        if (od_ble_connected_count() == 0) {
-            od_ble_restart_advertising();
-        }
+        char line[96];
+        od_log_hex_line(line, sizeof(line), "MSD publish: ", msd_payload, 16);
+        od_log_debug("%s", line);
     }
-    /* The LAN peer reads the same MSD payload out of the mDNS TXT record, so it has to be
-     * refreshed on the same cadence as the advertisement. The NimBLE-C port dropped this
-     * call; the only remaining caller was restartLanService(), which meant the TXT record
-     * was written once at LAN start and then never again -- a host on LAN saw battery,
-     * sensor and touch data frozen at connect time while BLE clients saw it update. */
+    ble.setManufacturerData(msd_payload, 16);
 #ifdef OPENDISPLAY_HAS_WIFI
+    // (Implies TARGET_ESP32; the enclosing target guard is gone with the split.)
     opendisplay_mdns_update_msd_txt();
-#endif
 #endif
     mloopcounter++;
     mloopcounter &= 0x0F;
@@ -1919,11 +2000,11 @@ static void imageWriteLogFinish(uint32_t written, uint32_t total) {
 }
 
 bool imageWriteLogQuietCmd(void) {
-    return transferActive() && imgLogChunks >= 1;
+    return imageWriteFramesMayStillArrive() && imgLogChunks >= 1;
 }
 
 bool imageWriteLogQuietAck(void) {
-    return transferActive() && imgLogChunks >= 2;
+    return imageWriteFramesMayStillArrive() && imgLogChunks >= 2;
 }
 
 // True when this raw frame is a mid-stream image-write data chunk (command
@@ -2399,14 +2480,15 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
     }
     uint8_t ackResponse[] = {0x00, endOpcode};
     sendResponse(ackResponse, sizeof(ackResponse));
-#ifdef TARGET_ESP32
     // Push the END ack — and the final tail ACK the auto-complete path queued just
     // before calling us — onto the air BEFORE the blocking refresh below. bbepRefresh
     // + waitforrefresh occupy the loop task for seconds on a big panel, and the loop
     // task is the response ring's only drainer, so without this the client sits in its
     // tail-flush probe loop and aborts the (already complete) transfer on PTO.
-    flushResponseQueueToBle();
-#endif
+    //
+    // Portable as of Phase 3: nRF used to notify() inline from the BLE callback
+    // task and so never needed this, but it now shares the ring and the loop task.
+    serviceBleTx();
     delay(20);
     epdRefreshInProgress = true;
     bool refreshSuccess = false;
@@ -2429,11 +2511,14 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
         // No bbepSleep here: cleanupDirectWriteState(false) releases the session,
         // keeping the controller awake + rail up when keep-alive holds it warm.
     }
-    epdRefreshInProgress = false;
+    endRefresh();
     cleanupDirectWriteState(false);
-#ifdef TARGET_ESP32
-    esp32_restart_ble_advertising();
-#endif
+    // Request rather than re-arm inline: main.cpp owns the deferral policy and
+    // runs it later in this same loop() pass (the refresh above is reached from
+    // the command drain), so the radio comes back up on the same pass as before.
+    // No target guard needed -- the request is a no-op where the stack re-arms
+    // advertising itself.
+    requestAdvertisingRestart();
     if (refreshSuccess) {
         // A successful refresh changed the panel image. Commit the new etag
         // when the client supplied a valid one; otherwise clear the stale etag
@@ -2485,18 +2570,40 @@ void resetPipeWriteState(void) {
 
 bool pipeWriteActive(void) { return pipeState.active; }
 
-// True while ANY of the three transfer types is streaming. The three flags live in
-// three different places (directWriteActive is a global; pipeState/partialCtx are
-// file-static here), so every caller that just means "a transfer is in flight" used
-// to spell the disjunction out itself -- and drifted: the WiFi roam gate checked
-// direct+pipe but not partial, so a BLE-origin partial write with no LAN client
-// attached could be interrupted by a full-channel scan. Add a fourth transfer type
-// here, not in each caller.
+// Two predicates, because the callers ask two different questions of the same three
+// flags. The flags live in three different places (directWriteActive is a global;
+// pipeState/partialCtx are file-static here), so every caller that just meant "a
+// transfer is in flight" used to spell the disjunction out itself -- and drifted:
+// the WiFi roam gate checked direct+pipe but not partial, so a BLE-origin partial
+// write with no LAN client attached could be interrupted by a full-channel scan.
+// Add a fourth transfer type to BOTH of these, not to each caller.
 //
 // Callers wanting ONE specific transfer keep testing that flag directly (the
 // direct-write watchdog and its teardown, the 0x0072 session-ownership check).
+//
+// transferActive() -- "is viable work in flight?" Excludes a fatally NACKed pipe,
+// whose panel sendPipeNack() has already released: touch I2C polling and a
+// full-channel WiFi scan are safe again the moment that happens, and suspending
+// them until the client next says something is protecting nothing.
+//
+// imageWriteFramesMayStillArrive() -- "would logging this frame spam?" Keeps the
+// errored pipe, because frames keep arriving after a fatal NACK: a compliant client
+// may already have a full window in flight, one that ignores the NACK streams until
+// END. At ~90 frames/s and two lines each (bleRxQueuePush() arrival plus the
+// dispatch banner) un-suppressing those would evict the NACK itself from the log
+// ring -- losing exactly the line worth keeping.
+//
+// The split also keeps the new pipeState.error read off the logging path, which
+// imageWriteLogQuietFrame() reaches from bleRxQueuePush() on the stack callback
+// task. That predicate is read cross-task; it keeps precisely the field reads it
+// has always made.
 bool transferActive(void) {
-    return directWriteActive || pipeState.active || partialCtx.active;
+    return directWriteActive || partialCtx.active ||
+           (pipeState.active && !pipeState.error);
+}
+
+static bool imageWriteFramesMayStillArrive(void) {
+    return directWriteActive || partialCtx.active || pipeState.active;
 }
 
 // A chunk c is "received" for ACK purposes if it was accepted in-order (lies just
@@ -3287,7 +3394,7 @@ static bool partial_write_to_panel(int refreshMode) {
     {
         refreshSuccess = partial_trigger_refresh(refreshMode);
     }
-    epdRefreshInProgress = false;
+    endRefresh();
     // A successful partial refresh leaves both controller planes consistent.
     if (refreshSuccess) epdPlanesPrepared = true;
     // Release keeps the panel warm (rail/SPI up, controller awake) on success;

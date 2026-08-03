@@ -23,6 +23,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <limits.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -320,6 +321,18 @@ class Stream {
 public:
     virtual ~Stream() {}
     virtual size_t write(const uint8_t *b, size_t n) { return fwrite(b, 1, n, stdout); }
+    /* Free space in the port's TX buffer, non-blocking. od_log's off-loop producers poll this
+     * (od_port_room) and DISCARD the record rather than block when it stays below what they
+     * need, so the number has to mean something: reporting a constant would turn the backoff
+     * into either a permanent stall or a permanent no-op.
+     *
+     * This base implementation is the stdout sink, which has no inspectable queue -- the IDF
+     * console driver's own buffering is not exposed -- so it reports "always room". That is
+     * the honest answer for it: writes to stdout are bounded by the driver, never by a queue
+     * this could measure, so od_log's wait loop should short-circuit rather than spin against
+     * a number it cannot influence. HardwareSerial, the port that actually has a ring buffer,
+     * overrides this with the real figure. */
+    virtual int availableForWrite() { return INT_MAX; }
     size_t print(const char *s)   { return s ? write((const uint8_t *)s, strlen(s)) : 0; }
     size_t print(const String &s) { return print(s.c_str()); }
     size_t println(const char *s) { size_t n = print(s); n += print("\n"); return n; }
