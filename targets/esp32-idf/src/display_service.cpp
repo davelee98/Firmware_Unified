@@ -3487,3 +3487,13 @@ static void send_direct_write_nack(uint8_t opcode, uint8_t error, bool cleanupSt
     uint8_t errResponse[] = {RESP_NACK, opcode, error, 0x00};
     sendResponse(errResponse, sizeof(errResponse));
 }
+
+// See display_service.h for why this lives here rather than in main.cpp's teardown.
+void displayReleaseSpiBus(void) {
+#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+    if (fastepd_driver_used()) {
+        return;   // parallel driver: the SPI bus was never taken
+    }
+#endif
+    SPI.end();
+}

@@ -90,6 +90,18 @@ void handlePartialWriteStart(uint8_t* data, uint16_t len);
 // panel and leave its enclosing PIPE session running.
 void checkTransferTimeouts(void);
 void cleanupPartialWriteOnDisconnect(void);
+
+/* Release the panel SPI bus. Called from main.cpp's deep-sleep teardown, which used to reach
+ * for SPI.end() itself -- the last thing keeping <SPI.h> in that file (phase C step 12).
+ *
+ * It belongs here rather than there on ownership grounds: compat/SPI.h's end() releases the
+ * device AND frees the bus using ownership state (_owns_bus) that only this layer sets up, and
+ * whether the bus is owned at all depends on the FastEPD driver selection this layer makes.
+ * main.cpp asking the display to release its own bus is the same shape as it asking
+ * wifi_service for the link state rather than reaching into esp_wifi (step 9b-ii).
+ *
+ * No-op when the FastEPD parallel driver owns the pins -- that path never took the SPI bus. */
+void displayReleaseSpiBus(void);
 // Origin (see commandOrigin()) of the transport that opened the in-flight transfer.
 // A disconnect must only tear down a session its own transport owns.
 uint8_t transferSessionOrigin(void);

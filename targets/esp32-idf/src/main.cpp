@@ -1,17 +1,20 @@
-/* Explicit, and deliberately not removable yet. main.cpp still calls Serial.*, delay(),
- * pinMode() and digitalWrite() directly, and has always got them transitively through main.h.
- * Dropping <HardwareSerial.h> from this file without naming that dependency would have taken
- * main.cpp off the ratchet's list while it is still one of the most Arduino-dependent files in
- * the target -- a laundered decrement, which is exactly the failure compat/SHIM_BUDGET says a
- * ratchet must be able to tell apart from real progress. It leaves for real when main.h does. */
+/* THE ESP32 HALF OF THIS FILE IS OFF THE SHIM (phase C step 12). GPIO went to od_hal_gpio,
+ * millis/delay/delayMicroseconds to od_hal_time, the panel SPI teardown to
+ * displayReleaseSpiBus(), and the one Arduino String to a fixed buffer.
+ *
+ * <Arduino.h> STAYS, guarded, and the file stays on the ratchet's list -- because its
+ * TARGET_NRF arms still need it. 78 of this file's Arduino call sites are nRF-only: the
+ * OPENDISPLAY_BOOT_DIAG Serial.* tracing, the LED_GREEN/LED_BLUE CDC-wait loop, and
+ * powerDownExternalFlash()'s bit-banged SPI. None of them compiles on this target, so none of
+ * them can be verified here; converting them blind is exactly the unverifiable edit
+ * docs/MIGRATION.md warns against. They leave with the nRF target at MIGRATION step 4, which is
+ * the same rule buzzer_hw.cpp, device_control.cpp and encryption.cpp are counted under.
+ *
+ * Do NOT drop this include to make the number go down. That is the laundered decrement
+ * compat/SHIM_BUDGET exists to catch. */
+#ifdef TARGET_NRF
 #include <Arduino.h>
-/* Named explicitly as of phase C step 11, because main.h no longer supplies them. Only
- * SPI.end() is left here, and it is not a one-line HAL call: compat/SPI.h's end() releases the
- * device AND frees the bus, using ownership state (_owns_bus) that only the shim holds. There
- * is no od_hal_spi yet, so this is the honest form of the dependency until the vendor-adapter
- * boundary is settled -- see compat/SHIM_BUDGET. <Wire.h> is NOT here: its two call sites
- * became od_hal_i2c_deinit() in this same step. */
-#include <SPI.h>
+#endif
 
 #include "main.h"
 #include "boot_screen.h"
@@ -36,6 +39,8 @@
 #include "od_hal_log.h"
 #endif
 #include "od_hal_i2c.h"
+#include "od_hal_gpio.h"
+#include "od_hal_time.h"
 
 #ifdef TARGET_ESP32
 // Distinguishes a hidden mid-cycle reset (PANIC/WDT/BROWNOUT/SW) from a real
@@ -85,12 +90,17 @@ static uint32_t minWakeTimeMs();
  *
  * The PSRAM line is SUPPRESSED where there is no PSRAM (C3, C6, classic ESP32 here) rather than
  * printed as zeros: a line of zeros reads as "PSRAM is broken" on a part that never had any. */
+/* heap_caps_* directly rather than ESP.getFreeHeap()/getMinFreeHeap()/getFreePsram(): those
+ * shim accessors were DEFINED as exactly these three calls (see compat/arduino_compat.cpp,
+ * which documents why they are MALLOC_CAP_INTERNAL and not MALLOC_CAP_DEFAULT). Two of the four
+ * fields on each line already called heap_caps_* directly, so this also stops one log line
+ * sourcing the same pool through two different spellings. */
 #ifdef TARGET_ESP32
 static void logHeapUsage(const char *when)
 {
     od_log_info("Heap %s DRAM : free=%u min=%u largest=%u of %u", when,
-                (unsigned)ESP.getFreeHeap(),
-                (unsigned)ESP.getMinFreeHeap(),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                 (unsigned)heap_caps_get_total_size(MALLOC_CAP_INTERNAL));
 
@@ -99,7 +109,7 @@ static void logHeapUsage(const char *when)
         return;   /* no PSRAM on this part -- see above */
     }
     od_log_info("Heap %s PSRAM: free=%u min=%u largest=%u of %u", when,
-                (unsigned)ESP.getFreePsram(),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
                 (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
                 (unsigned)psram_total);
@@ -109,9 +119,15 @@ static void logHeapUsage(const char *when)
 void setup() {
     #if defined(TARGET_ESP32) && defined(OPENDISPLAY_LOG_UART)
     od_hal_log_open();
-    delay(100);
+    od_hal_delay_ms(100);
     #elif !defined(DISABLE_USB_SERIAL)
+    #ifndef TARGET_ESP32
+    /* nRF only. On ESP32 this was already a NO-OP -- the IDF console driver is up before
+     * setup() runs -- and the comment below has said so since phase B. Making that structural
+     * rather than a remark is what takes the last ESP32-reachable Serial call out of this file;
+     * every remaining Serial.* here is inside a TARGET_NRF && OPENDISPLAY_BOOT_DIAG block. */
     Serial.begin(115200);
+    #endif
     #if defined(TARGET_NRF) && defined(OPENDISPLAY_BOOT_DIAG)
     // Full-firmware boot diagnostic. Reaching this LED proves that reset,
     // application handoff, C/C++ runtime initialization, global constructors,
@@ -179,13 +195,22 @@ void setup() {
     uint8_t fwMinor = getFirmwareMinor();
     uint8_t fwPatch = getFirmwarePatch();
     od_log_info("Firmware Version: %u.%u.%u", fwMajor, fwMinor, fwPatch);
+    /* SHA_STRING is a build stamp of at most 40 hex characters, arriving with or without
+     * surrounding quotes depending on how -DSHA was passed. Two heap-allocating String
+     * operations (construct, substring) to strip at most two quote characters bought nothing;
+     * the same job on a fixed buffer cannot fail or allocate. Same rewrite communication.cpp's
+     * handleFirmwareVersion() got in step 9a, and for the same reason. */
     const char* shaCStr = SHA_STRING;
-    String shaStr = String(shaCStr);
-    if (shaStr.length() >= 2 && shaStr.charAt(0) == '"' && shaStr.charAt(shaStr.length() - 1) == '"') {
-        shaStr = shaStr.substring(1, shaStr.length() - 1);
+    char shaStr[48];
+    snprintf(shaStr, sizeof(shaStr), "%s", shaCStr ? shaCStr : "");
+    size_t shaLen = strlen(shaStr);
+    if (shaLen >= 2 && shaStr[0] == '"' && shaStr[shaLen - 1] == '"') {
+        memmove(shaStr, shaStr + 1, shaLen - 2);
+        shaStr[shaLen - 2] = '\0';
+        shaLen -= 2;
     }
-    if (shaStr.length() > 0 && shaStr != "\"\"" && shaStr != "") {
-        od_log_info("Git SHA: %s", shaStr.c_str());
+    if (shaLen > 0) {
+        od_log_info("Git SHA: %s", shaStr);
     } else {
         od_log_info("Git SHA: (not set)");
     }
@@ -317,12 +342,12 @@ void setup() {
         // branch and re-enters deep sleep almost immediately.
         od_log_info("Advertising for %u ms (sleep_timeout_ms), waiting for connection...", globalConfig.power_option.sleep_timeout_ms);
         advertising_timeout_active = true;
-        advertising_start_time = millis();
+        advertising_start_time = od_hal_uptime_ms();
         if (woke_by_button) {
             // A button press means a user is present: hold awake for at least
             // the minimum window so they (or a host) get time to interact.
             minWakeWindowActive = true;
-            minWakeWindowStartMs = millis();
+            minWakeWindowStartMs = od_hal_uptime_ms();
             uint32_t minWakeMs = minWakeTimeMs();
             od_log_info("Button wake: holding awake >= %u ms", (unsigned)minWakeMs);
         }
@@ -331,10 +356,10 @@ void setup() {
         // to 0 (see the NORMAL BOOT comment above). Inert on wired devices:
         // every consumer of the hold is power_mode/deep-sleep gated.
         minWakeWindowActive = true;
-        minWakeWindowStartMs = millis();
+        minWakeWindowStartMs = od_hal_uptime_ms();
     }
     // Both sleep paths measure quiet time from here, not from power-on.
-    lastActivityMs = millis();
+    lastActivityMs = od_hal_uptime_ms();
     #endif
     od_log_info("=== Setup completed successfully ===");
 #ifdef TARGET_ESP32
@@ -402,7 +427,7 @@ static uint32_t minWakeTimeMs() {
 
 static bool minWakeHoldActive() {
     if (!minWakeWindowActive) return false;
-    if (millis() - minWakeWindowStartMs >= minWakeTimeMs()) {
+    if (od_hal_uptime_ms() - minWakeWindowStartMs >= minWakeTimeMs()) {
         minWakeWindowActive = false;
         od_log_info("Minimum wake window elapsed, deep sleep permitted");
         return false;
@@ -455,7 +480,7 @@ static void pollActivity() {
                // A live link or unfinished work is activity in itself, not just its edges.
                connCount > 0 || lanSession ||
                bleRxQueuePending() || bleTxQueuePending()) {
-        lastActivityMs = millis();
+        lastActivityMs = od_hal_uptime_ms();
     }
 
     prevCommandHead = commandHead;
@@ -895,11 +920,11 @@ static bool platformLoopPrologue() {
         }
         // Measured from the last activity, not from window start: a client that
         // connects and drops re-arms the full window instead of inheriting it.
-        uint32_t idle_duration = millis() - lastActivityMs;
+        uint32_t idle_duration = od_hal_uptime_ms() - lastActivityMs;
         // On a button wake the min-wake hold keeps this window open past the
         // quiet timeout; idleDelay(50) below services buttons/touch throughout.
         if (idle_duration >= advertising_timeout_ms && !minWakeHoldActive()) {
-            uint32_t advertisingElapsedMs = millis() - advertising_start_time;
+            uint32_t advertisingElapsedMs = od_hal_uptime_ms() - advertising_start_time;
             od_log_info("BLE advertising timeout (idle %u ms of %u ms window) - no connection, returning to deep sleep",
                         (unsigned)idle_duration, (unsigned)advertisingElapsedMs);
             advertising_timeout_active = false;
@@ -910,7 +935,7 @@ static bool platformLoopPrologue() {
         // wake-time touch is polled during this window even though the branch returns
         // on every pass until a client connects. It lands in dynamicreturndata, reaches
         // a mid-window client, and pollActivity picks it up next pass to hold the window
-        // open — none of which happens if we just delay() here without servicing input.
+        // open — none of which happens if we just od_hal_delay_ms() here without servicing input.
         idleDelay(50); // idleDelay() polls touch and buttons while waiting
         return true;
     }
@@ -928,7 +953,7 @@ static void platformIdle() {
         if (idleHoldMs == 0) {
             idleHoldMs = DEFAULT_IDLE_HOLD_MS;
         }
-        uint32_t idleMs = millis() - lastActivityMs;
+        uint32_t idleMs = od_hal_uptime_ms() - lastActivityMs;
         // The min-wake hold covers first boot and connect-then-drop during a
         // button-wake window (woke_from_deep_sleep cleared on connect above).
         if (idleMs < idleHoldMs || minWakeHoldActive()) {
@@ -946,8 +971,8 @@ static void platformIdle() {
         idleDelay(5);
     }
     static uint32_t lastMsdUpdate = 0;
-    if (millis() - lastMsdUpdate >= 60000) {
-        lastMsdUpdate = millis();
+    if (od_hal_uptime_ms() - lastMsdUpdate >= 60000) {
+        lastMsdUpdate = od_hal_uptime_ms();
         updatemsdata();
     }
 #else
@@ -965,7 +990,7 @@ static void platformIdle() {
 void loop() {
     serviceBleEvents();
     processLedFlash();
-    epdSessionTick();   // millis()-poll: power the panel down screen_timeout_seconds after last release
+    epdSessionTick();   // od_hal_uptime_ms()-poll: power the panel down screen_timeout_seconds after last release
     buzzerService();
 
     if (platformLoopPrologue()) return;
@@ -1025,8 +1050,8 @@ void loop() {
     // BLE command responses (moved from top of loop in v1.6 fix).
     handleWiFiServer();
     static uint32_t lastWiFiCheck = 0;
-    if (wifiInitialized && (millis() - lastWiFiCheck > 10000)) {
-        lastWiFiCheck = millis();
+    if (wifiInitialized && (od_hal_uptime_ms() - lastWiFiCheck > 10000)) {
+        lastWiFiCheck = od_hal_uptime_ms();
         /* OD: was WiFi.status() != WL_CONNECTED through the Arduino shim. The WiFi stack is
          * wifi_service.cpp's business; this file only needs the boolean. */
         const bool linkUp = wifiLinkIsUp();
@@ -1085,7 +1110,7 @@ void loop() {
                               epdRefreshInProgress ||
                               wifiLanSession;
     if (workInFlight) {
-        delay(1);
+        od_hal_delay_ms(1);
     } else {
         platformIdle();
     }
@@ -1135,7 +1160,7 @@ void idleDelay(uint32_t delayMs) {
         // so none can change while loop() is sitting inside this function.
         if (bleRxQueuePending() || ble.eventPending()) return;
         uint32_t chunkDelay = (remainingDelay > CHECK_INTERVAL_MS) ? CHECK_INTERVAL_MS : remainingDelay;
-        delay(chunkDelay);
+        od_hal_delay_ms(chunkDelay);
         remainingDelay -= chunkDelay;
     }
 }
@@ -1177,7 +1202,7 @@ void enterDeepSleep(bool force, uint16_t overrideSleepSeconds) {
     // that gap. Re-check so we never tear down the stack on a live link.
     if (!force && ble.isConnected()) {
         od_log_debug("Skipping deep sleep - BLE client connected");
-        lastActivityMs = millis();
+        lastActivityMs = od_hal_uptime_ms();
         return;
     }
     // Defense in depth for the min-wake hold (first boot / button wake). MUST
@@ -1237,9 +1262,9 @@ void enterDeepSleep(bool force, uint16_t overrideSleepSeconds) {
     ledStopForSleep();
     woke_from_deep_sleep = true; // Will be true on next boot
     ble.stopAdvertising();
-    delay(200);
+    od_hal_delay_ms(200);
     ble.end();
-    delay(100);
+    od_hal_delay_ms(100);
     od_log_info("BLE deinitialized");
     // Host override (0x0053 payload) applies to this one cycle only: it is a
     // parameter, never stored, so an aborted or later sleep reverts to config.
@@ -1255,7 +1280,7 @@ void enterDeepSleep(bool force, uint16_t overrideSleepSeconds) {
                 overrideSleepSeconds ? " (host override, one cycle)" : " (config)");
     logHeapUsage("(pre-sleep)");
     od_log_flush(); // drain UART/Serial prior to deep sleep
-    delay(100); // Brief delay to ensure serial output is sent
+    od_hal_delay_ms(100); // Brief delay to ensure serial output is sent
     powerLatchHoldForSleep();
     esp_deep_sleep_start();
 }
@@ -1269,11 +1294,10 @@ static void configureDisplayPinsLowPower() {
     };
     for (uint8_t pin : pins) {
         if (pin == 0xFF) continue;
-        pinMode(pin, OUTPUT);
-        digitalWrite(pin, LOW);
+        od_hal_gpio_config_output(pin, false);
     }
     if (d.busy_pin != 0xFF) {
-        pinMode(d.busy_pin, INPUT);
+        od_hal_gpio_config_input(d.busy_pin, false, false);
     }
 
     if (!(globalConfig.system_config.device_flags &
@@ -1284,8 +1308,7 @@ static void configureDisplayPinsLowPower() {
         };
         for (uint8_t pin : auxPins) {
             if (pin == 0xFF || pin == 0) continue;
-            pinMode(pin, OUTPUT);
-            digitalWrite(pin, LOW);
+            od_hal_gpio_config_output(pin, false);
         }
     }
 }
@@ -1324,10 +1347,8 @@ void pwrmgm(bool onoff){
             powerDownAXP2101();
             od_hal_i2c_deinit();
             invalidateOpenDisplayWire();
-            pinMode(47, OUTPUT);
-            digitalWrite(47, HIGH);
-            pinMode(48, OUTPUT);
-            digitalWrite(48, HIGH);
+            od_hal_gpio_config_output(47, true);
+            od_hal_gpio_config_output(48, true);
         }
     }
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
@@ -1338,48 +1359,40 @@ void pwrmgm(bool onoff){
     const DisplayConfig& disp = globalConfig.displays[0];
     if (onoff) {
         if (globalConfig.system_config.pwr_pin != 0xFF) {
-            digitalWrite(globalConfig.system_config.pwr_pin, HIGH);
-            delay(800);
+            od_hal_gpio_write(globalConfig.system_config.pwr_pin, true);
+            od_hal_delay_ms(800);
         } else {
             od_log_warn("Power pin not set");
         }
         if (!fastepd_driver_spi) {
             if (disp.reset_pin != 0xFF) {
-                pinMode(disp.reset_pin, OUTPUT);
-                digitalWrite(disp.reset_pin, HIGH);
+                od_hal_gpio_config_output(disp.reset_pin, true);
             }
             if (disp.cs_pin != 0xFF) {
-                pinMode(disp.cs_pin, OUTPUT);
-                digitalWrite(disp.cs_pin, HIGH);
+                od_hal_gpio_config_output(disp.cs_pin, true);
             }
             if (disp.dc_pin != 0xFF) {
-                pinMode(disp.dc_pin, OUTPUT);
-                digitalWrite(disp.dc_pin, LOW);
+                od_hal_gpio_config_output(disp.dc_pin, false);
             }
             if (disp.clk_pin != 0xFF) {
-                pinMode(disp.clk_pin, OUTPUT);
-                digitalWrite(disp.clk_pin, LOW);
+                od_hal_gpio_config_output(disp.clk_pin, false);
             }
             if (disp.data_pin != 0xFF) {
-                pinMode(disp.data_pin, OUTPUT);
-                digitalWrite(disp.data_pin, LOW);
+                od_hal_gpio_config_output(disp.data_pin, false);
             }
             if (disp.busy_pin != 0xFF) {
-                pinMode(disp.busy_pin, INPUT);
+                od_hal_gpio_config_input(disp.busy_pin, false, false);
             }
-            delay(100);
+            od_hal_delay_ms(100);
         } else {
             if (disp.reset_pin != 0xFF) {
-                pinMode(disp.reset_pin, OUTPUT);
-                digitalWrite(disp.reset_pin, HIGH);
+                od_hal_gpio_config_output(disp.reset_pin, true);
             }
-            delay(200);
+            od_hal_delay_ms(200);
         }
         initOrRestoreWireForOpenDisplay();
     } else {
-        if (!fastepd_driver_spi) {
-            SPI.end();
-        }
+        displayReleaseSpiBus();
         // Keep I2C alive when sensors/touch use data_bus[0] (e.g. reTerminal MISC_I2C on GPIO0/1).
         if (!openDisplayI2cBusConfigured()) {
             od_hal_i2c_deinit();
@@ -1387,50 +1400,52 @@ void pwrmgm(bool onoff){
         }
         if (globalConfig.system_config.pwr_pin != 0xFF) {
             configureDisplayPinsLowPower();
-            digitalWrite(globalConfig.system_config.pwr_pin, LOW);
+            od_hal_gpio_write(globalConfig.system_config.pwr_pin, false);
         }
     }
 }
 
 void xiaoinit(){
     powerDownExternalFlash(20,24,21,25,22,23);
-    //pinMode(31, INPUT);
-    //pinMode(14, INPUT);
-    pinMode(13, OUTPUT);  //that actually does something
-    digitalWrite(13, LOW);
-    //pinMode(17, INPUT);
+    //od_hal_gpio_config_input(31, false, false);
+    //od_hal_gpio_config_input(14, false, false);
+    od_hal_gpio_config_output(13, false); //that actually does something
+    //od_hal_gpio_config_input(17, false, false);
 }
 
 void ws_pp_init(){
     od_log_info("===  Photo Printer Initialization ===");
-    pinMode(21, OUTPUT);
-    digitalWrite(21, HIGH);
-    pinMode(1, INPUT);
-    pinMode(2, INPUT);
-    pinMode(3, INPUT);
-    pinMode(4, INPUT);
-    pinMode(5, OUTPUT);
-    digitalWrite(5, HIGH);
-    pinMode(6, INPUT);
-    pinMode(7, LOW);
-    digitalWrite(7, LOW);
-    pinMode(14, INPUT);
-    pinMode(15, INPUT);
-    pinMode(16, INPUT);
-    pinMode(17, INPUT);
-    pinMode(18, INPUT);
-    pinMode(38, OUTPUT);
-    digitalWrite(38, HIGH);
-    pinMode(39, OUTPUT);
-    digitalWrite(39, HIGH);
-    pinMode(40, OUTPUT);
-    digitalWrite(40, HIGH);
-    pinMode(41, OUTPUT);
-    digitalWrite(41, HIGH);
-    pinMode(42, OUTPUT);
-    digitalWrite(42, HIGH);
-    pinMode(45, OUTPUT);
-    digitalWrite(45, HIGH);
+    od_hal_gpio_config_output(21, true);
+    od_hal_gpio_config_input(1, false, false);
+    od_hal_gpio_config_input(2, false, false);
+    od_hal_gpio_config_input(3, false, false);
+    od_hal_gpio_config_input(4, false, false);
+    od_hal_gpio_config_output(5, true);
+    od_hal_gpio_config_input(6, false, false);
+    /* WAS `pinMode(7, LOW)` -- a LEVEL passed where a MODE belongs, and a pre-existing bug.
+     * LOW is 0, and the shim's pinMode() treats anything that is not OUTPUT as input, so pin 7
+     * has been configured as an INPUT on shipped firmware, not driven low as the surrounding
+     * code and the write on the next line plainly intend.
+     *
+     * TRANSLATED FAITHFULLY, NOT FIXED. This is the deep-sleep low-power pin pass: flipping a
+     * pin from input to output changes what it does to the rail it is attached to, and on the
+     * wrong pin that is backfeed or extra current draw, not a tidier line of code. Whether it
+     * should be config_output(7, false) is a HARDWARE question for whoever owns this board.
+     * The following write is left in place for the same reason -- on an input pin it only sets
+     * the output latch, which is what it did before. */
+    od_hal_gpio_config_input(7, false, false);
+    od_hal_gpio_write(7, false);
+    od_hal_gpio_config_input(14, false, false);
+    od_hal_gpio_config_input(15, false, false);
+    od_hal_gpio_config_input(16, false, false);
+    od_hal_gpio_config_input(17, false, false);
+    od_hal_gpio_config_input(18, false, false);
+    od_hal_gpio_config_output(38, true);
+    od_hal_gpio_config_output(39, true);
+    od_hal_gpio_config_output(40, true);
+    od_hal_gpio_config_output(41, true);
+    od_hal_gpio_config_output(42, true);
+    od_hal_gpio_config_output(45, true);
     od_log_info("Photo Printer initialized");
 }
 

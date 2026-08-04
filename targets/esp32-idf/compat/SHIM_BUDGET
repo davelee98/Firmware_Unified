@@ -493,4 +493,53 @@
 # All 10 images BYTE-IDENTICAL to the previous commit. Nothing to verify on hardware -- there is
 # no behaviour here to change. -Os and the -Wmaybe-uninitialized fixes this file needed are
 # earlier work and unaffected.
+
+# 6 (UNCHANGED) = phase C step 12, 2026-08-04: src/main.cpp's ESP32 half off the shim.
+#
+# THE COUNT DOES NOT MOVE, AND THE FLOOR JUST WENT UP FROM 3 TO 4. main.cpp keeps a GUARDED
+# <Arduino.h> because 78 of its Arduino call sites are TARGET_NRF-only: the OPENDISPLAY_BOOT_DIAG
+# Serial.* tracing, the LED_GREEN/LED_BLUE CDC-wait loop, and powerDownExternalFlash()'s
+# bit-banged SPI. None compiles on this target, so none can be VERIFIED here, and converting
+# them blind is the unverifiable edit MIGRATION.md warns against. Same rule buzzer_hw.cpp,
+# device_control.cpp and encryption.cpp are counted under; main.cpp now joins them, and all four
+# leave at MIGRATION step 4. Earlier notes in this file said the floor was 3 -- that was written
+# before this file's nRF arms had been counted. It is 4.
+#
+# What actually moved, all of it ESP32-live (~82 sites):
+#   pinMode/digitalWrite/digitalRead -> od_hal_gpio      (100 calls)
+#   millis/delay/delayMicroseconds   -> od_hal_time      (40 calls)
+#   ESP.getFreeHeap/getMinFreeHeap/getFreePsram -> heap_caps_* directly. The shim accessors were
+#     DEFINED as exactly those calls, and two of four fields on each log line already used
+#     heap_caps_*, so one line was sourcing one pool through two spellings.
+#   One Arduino String (the git-SHA stamp) -> fixed buffer, as communication.cpp got in 9a.
+#   SPI.end() -> displayReleaseSpiBus() in display_service.cpp. It belongs there on OWNERSHIP
+#     grounds: compat/SPI.h's end() frees the bus using _owns_bus state only that layer sets up,
+#     and whether the bus is owned at all depends on its FastEPD driver selection. Same shape as
+#     main.cpp asking wifi_service for the link state instead of reaching into esp_wifi (9b-ii).
+#   Serial.begin(115200) -> #ifndef TARGET_ESP32. It was ALREADY a no-op here (the IDF console
+#     driver is up before setup()); making that structural rather than a comment is what removed
+#     the last ESP32-reachable Serial call.
+#
+# 19 pinMode(X,OUTPUT)+digitalWrite(X,V) PAIRS BECAME ONE CALL, and that is a deliberate
+# BEHAVIOUR CHANGE. The Arduino pair drives the pin low before driving it to the wanted level;
+# od_hal_gpio_config_output(pin, level) sets the level with the mode, which is the glitch the
+# HAL was written to avoid. These are display reset/CS/power pins, so the glitch was real. It is
+# strictly safer to remove, but it IS a change and it is why this step needs hardware.
+#
+# ONE PRE-EXISTING BUG FOUND AND DELIBERATELY NOT FIXED: ws_pp_init() contains
+# `pinMode(7, LOW)` -- a LEVEL where a MODE belongs. LOW is 0, and the shim treats anything not
+# OUTPUT as input, so pin 7 has shipped as an INPUT while the surrounding code and the very next
+# line intend it driven low. Translated faithfully to config_input(7,false,false). This is the
+# deep-sleep low-power pin pass; flipping input to output changes what the pin does to the rail
+# it is attached to. Whether it should be config_output(7,false) is a HARDWARE question for
+# whoever owns that board, not a tidy-up.
+#
+# Flash: every board SHRANK 3.5-4 KB (the merged pairs and the dropped shim inlines).
+#
+# PROOF THAT NOTHING ESP32-REACHABLE WAS MISSED: <Arduino.h> is now behind #ifdef TARGET_NRF and
+# main.h no longer supplies it, so any remaining ESP32-reachable Arduino call in this file is an
+# UNDECLARED-IDENTIFIER ERROR, not a silent fallback. All 10 boards compile.
+#
+# NOT hardware-verified, and this one needs it: 19 glitch removals on panel power/reset/CS pins
+# and a full deep-sleep pin pass. Wake from deep sleep, refresh a panel, and check current draw.
 6
