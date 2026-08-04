@@ -72,7 +72,6 @@ extern "C" {
 #include <esp_mac.h>
 #include <esp_timer.h>
 #include "esp_sleep.h"
-#include <WiFi.h>
 #include <ESPmDNS.h>
 
 // RTC memory variables for deep sleep state tracking (declared in main.cpp)
@@ -130,7 +129,6 @@ char wifiPassword[33] = {0};  // 32 bytes + null terminator
 uint8_t wifiEncryptionType = 0;  // 0x00=none, 0x01=WEP, 0x02=WPA, 0x03=WPA2, 0x04=WPA3
 bool wifiConfigured = false;  // True if WiFi config packet (0x26) was received and parsed
 #ifdef TARGET_ESP32
-#include <WiFi.h>
 // Small config-storage / status globals: kept on all ESP32 targets (config_parser
 // and the config-dump report reference them regardless of whether the WiFi
 // transport is compiled in). Trivial RAM cost.
@@ -150,8 +148,12 @@ uint16_t wifiServerPort = 2446;
 // (included above); its storage is reserved at boot by odLanReserveRxBuffer(),
 // in PSRAM where there is any. Size lives with the declaration as
 // OD_LAN_RX_BUFFER_SIZE -- do not reintroduce a literal here.
-WiFiServer wifiServer;
-WiFiClient wifiClient;
+//
+// The WiFiServer/WiFiClient objects that used to live here are GONE (phase C step
+// 9b-iii). They were globals only because main.h is where this firmware's globals
+// go; nothing outside wifi_service.cpp ever touched them, and they are now two
+// file-static lwIP descriptors there. wifiServerConnected stays public because
+// communication.cpp and the config-dump report do read it.
 bool wifiServerConnected = false;
 uint8_t* tcpReceiveBuffer = nullptr;
 uint32_t tcpReceiveBufferPos = 0;

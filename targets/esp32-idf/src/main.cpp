@@ -427,7 +427,7 @@ static void pollActivity() {
     // window so a dropped client gets a full reconnect opportunity.
     const uint8_t connCount = ble.connectedCount();
 #ifdef OPENDISPLAY_HAS_WIFI
-    const bool lanSession = wifiInitialized && wifiServerConnected && wifiClient.connected();
+    const bool lanSession = wifiInitialized && wifiLanClientConnected();
 #else
     const bool lanSession = false;
 #endif
@@ -1036,7 +1036,7 @@ void loop() {
             restartWiFiLanAfterReconnect();
         }
     }
-    const bool wifiLanSession = wifiInitialized && wifiServerConnected && wifiClient.connected();
+    const bool wifiLanSession = wifiInitialized && wifiLanClientConnected();
     #else
     const bool wifiLanSession = false;
     #endif

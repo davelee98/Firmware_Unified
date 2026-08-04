@@ -367,4 +367,39 @@
 # under plain TARGET_ESP32. s3-n16r8 built fine; esp32-n4 -- the one board that compiles no WiFi
 # surface at all -- did not. The guard is now TARGET_ESP32, and the lookup simply returns NULL
 # on a board without WiFi, printing "?".
+
+# 9 (UNCHANGED) = phase C step 9b-iii, 2026-08-04: src/wifi_service.cpp's LAN data path off
+# WiFiServer/WiFiClient and onto lwIP descriptors, and src/main.h off <WiFi.h> entirely.
+#
+# THE COUNT DOES NOT MOVE AND THAT IS CORRECT. wifi_service.cpp still includes <Arduino.h> and
+# <ESPmDNS.h>, so it is still a shim user; it leaves at step 9b-iv. main.h was already counted
+# for its other shim includes. What this step does move is the SHIM ITSELF: compat/WiFi.h is
+# DELETED -- the first shim header to go rather than shrink. Nothing in targets/ or third_party/
+# includes it.
+#
+# Two file-static ints replace the two Arduino objects. WiFiServer/WiFiClient were already lwIP
+# sockets underneath; the classes added an object identity this file never needed, because there
+# is exactly one listener and at most one peer BY DESIGN (R3 refuses a second client rather than
+# evicting the incumbent). The globals lived in main.h only because that is where this
+# firmware's globals live -- nothing outside wifi_service.cpp ever touched them.
+#
+# ONE REAL DEFECT FOUND, in startLanServer(). Arduino's WiFiServer::begin() returns early when a
+# socket already exists, so restartWiFiLanAfterReconnect() -- which runs after a WiFi config
+# change and after a reconnect -- rebound nothing. Switching encryption on or off moves the LAN
+# port (plaintext base, TLS base+1), so the device went on listening on the OLD port while
+# logging the new one, until a reboot. startLanServer() now closes the listener before binding.
+#
+# The mbedTLS BIO ctx is still a POINTER (&s_lanClientFd), not the fd by value, for the reason
+# the old code passed &wifiClient: mbedTLS holds it for the life of the ssl context and the
+# descriptor changes when one session ends and another is admitted.
+#
+# WL_* / wl_status_t went too -- Arduino's names for values this file both produces and
+# consumes, and which nothing outside it ever saw. Now OD_WIFI_*, same numeric values so a log
+# line still compares the same against old firmware.
+#
+# NOT hardware-verified. This is the LAN DATA PATH: accept, TLS handshake BIO, frame reads and
+# frame writes all changed at once, and a LAN regression is invisible on a BLE-only bench --
+# every board here builds and advertises identically with LAN completely broken. Needs a real
+# host push over both plaintext and TLS-PSK, a second client refused while one is connected,
+# and a config change that flips encryption (to exercise the rebind above).
 9

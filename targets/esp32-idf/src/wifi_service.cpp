@@ -11,8 +11,10 @@
 #include "link_owner.h"
 #include <Arduino.h>
 #include <ESPmDNS.h>
-#include <WiFi.h>
+#include <errno.h>
+#include <lwip/sockets.h>
 #include <esp_wifi.h>
+#include <esp_netif.h>
 #include <esp_event.h>       // raw handler for WIFI_EVENT_STA_BSS_RSSI_LOW (no Arduino event id)
 #include <esp_heap_caps.h>
 #include <string.h>
@@ -36,16 +38,158 @@ extern bool wifiConfigured;
 extern bool wifiConnected;
 extern bool wifiInitialized;
 extern uint16_t wifiServerPort;
-extern WiFiServer wifiServer;
-extern WiFiClient wifiClient;
 extern bool wifiServerConnected;
 // tcpReceiveBuffer / tcpReceiveBufferPos are declared in wifi_service.h (included
 // above) so the pointer type is checked against its definition in main.h.
 extern uint8_t msd_payload[16];
 
+// Station status. Was compat/WiFi.h's wl_status_t and its WL_* macros, which were
+// Arduino's names for values this file both produces (odWifiStatus) and consumes --
+// nothing outside it ever saw them. The numeric values are Arduino's, kept only so a
+// log line comparing against old firmware still reads the same.
+typedef int od_wifi_status_t;
+#define OD_WIFI_IDLE          0
+#define OD_WIFI_NO_SSID       1
+#define OD_WIFI_CONNECTED     3
+#define OD_WIFI_CONNECT_FAIL  4
+#define OD_WIFI_DISCONNECTED  6
+
 // Defined further down with the rest of the WiFi station layer; used before that point.
 static int  odWifiStatus(void);
 static void odWifiIpStr(char* out, size_t n);
+
+// ------------------------------------------------------------- LAN sockets ---
+// Phase C step 9b-iii. This replaces compat/WiFi.h's WiFiServer/WiFiClient, which
+// were already lwIP sockets underneath -- what the Arduino classes added was an
+// object identity this file never needed. There is exactly ONE listener and AT MOST
+// ONE peer by design (R3: a second client is refused, never admitted), so the whole
+// of that identity is two file descriptors.
+//
+// -1 means "not open" everywhere below. The two are independent lifetimes: the
+// listener outlives any number of peer sessions and is closed only by
+// opendisplay_lan_teardown().
+static int s_lanListenFd = -1;
+static int s_lanClientFd = -1;
+
+static void lanSockClose(int* fd) {
+    if (*fd >= 0) {
+        lwip_close(*fd);
+        *fd = -1;
+    }
+}
+
+// Is the PEER still there? Deliberately not `s_lanClientFd >= 0`: on the plain-TCP
+// path lanClientAvailable() also returns 0 for a socket the peer has closed, so
+// holding an fd is not evidence of a live session and wifiServerConnected would stay
+// true until reboot. (The TLS path is unaffected -- it maps recv == 0 to
+// OD_LAN_READ_CLOSED itself.) MSG_PEEK|MSG_DONTWAIT answers the question without
+// consuming a byte or blocking the loop task.
+static bool lanClientConnected(void) {
+    if (s_lanClientFd < 0) {
+        return false;
+    }
+    uint8_t b;
+    int r = lwip_recv(s_lanClientFd, &b, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (r > 0) {
+        return true;    /* data waiting */
+    }
+    if (r == 0) {
+        return false;   /* orderly shutdown by the peer */
+    }
+    // Report DISCONNECTED only on an errno that definitely means it. Everything else
+    // -- including EWOULDBLOCK, the common "idle but healthy" case -- stays connected.
+    // Erring the other way tears down live sessions on a spurious error, which is
+    // worse than the leak this check exists to fix.
+    return !(errno == ECONNRESET || errno == ENOTCONN ||
+             errno == EPIPE      || errno == EBADF);
+}
+
+static int lanClientAvailable(void) {
+    if (s_lanClientFd < 0) return 0;
+    int n = 0;
+    return (lwip_ioctl(s_lanClientFd, FIONREAD, &n) == 0) ? n : 0;
+}
+
+static int lanClientRead(uint8_t* buf, size_t n) {
+    if (s_lanClientFd < 0) return -1;
+    return (int)lwip_recv(s_lanClientFd, buf, n, 0);
+}
+
+// Returns bytes accepted by the stack; 0 on failure. Callers compare against the
+// length they asked for, so a short write reads as incomplete rather than as success.
+static int lanClientWrite(const uint8_t* buf, size_t n) {
+    if (s_lanClientFd < 0) return 0;
+    int sent = (int)lwip_send(s_lanClientFd, buf, n, 0);
+    return (sent > 0) ? sent : 0;
+}
+
+static void lanSockSetNoDelay(int fd) {
+    int v = 1;
+    lwip_setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof v);
+}
+
+// Bounds a single recv(), not a whole frame read -- the framing loop keeps its own
+// budget. Kept because the accepted socket is otherwise blocking-by-default and a
+// half-open peer could park the loop task indefinitely.
+static void lanSockSetRcvTimeout(int fd, uint32_t ms) {
+    struct timeval tv;
+    tv.tv_sec  = (time_t)(ms / 1000);
+    tv.tv_usec = (suseconds_t)((ms % 1000) * 1000);
+    lwip_setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+}
+
+// Dotted-quad of the peer, into a caller buffer. Replaces
+// wifiClient.remoteIP().toString().c_str() -- an IPAddress plus an Arduino String
+// heap allocation, per connect, to format four bytes.
+static void lanSockPeerIpStr(int fd, char* out, size_t n) {
+    struct sockaddr_in a;
+    socklen_t len = sizeof a;
+    if (fd < 0 || lwip_getpeername(fd, (struct sockaddr*)&a, &len) != 0) {
+        snprintf(out, n, "?");
+        return;
+    }
+    uint32_t v = a.sin_addr.s_addr;   /* network order == big-endian bytes in memory */
+    snprintf(out, n, "%u.%u.%u.%u",
+             (unsigned)(v & 0xFF), (unsigned)((v >> 8) & 0xFF),
+             (unsigned)((v >> 16) & 0xFF), (unsigned)((v >> 24) & 0xFF));
+}
+
+// Open the listening socket, idempotent. Returns false if the port could not be
+// bound; the caller logs, and LAN simply does not come up.
+static bool lanListenBegin(uint16_t port) {
+    if (s_lanListenFd >= 0) return true;
+
+    s_lanListenFd = lwip_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s_lanListenFd < 0) return false;
+
+    int one = 1;
+    lwip_setsockopt(s_lanListenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+
+    struct sockaddr_in a = {};
+    a.sin_family      = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    a.sin_port        = htons(port);
+
+    // Backlog 4, not 1: the accept poll runs from the main loop, which can be parked
+    // in a panel refresh for tens of seconds, and a backlog of 1 refuses every
+    // connection attempt arriving in that window.
+    if (lwip_bind(s_lanListenFd, (struct sockaddr*)&a, sizeof a) != 0 ||
+        lwip_listen(s_lanListenFd, 4) != 0) {
+        lanSockClose(&s_lanListenFd);
+        return false;
+    }
+    // Non-blocking accept: this is polled from the main loop and must never park it
+    // in accept() while a BLE transfer is in flight.
+    int flags = lwip_fcntl(s_lanListenFd, F_GETFL, 0);
+    lwip_fcntl(s_lanListenFd, F_SETFL, flags | O_NONBLOCK);
+    return true;
+}
+
+// A new peer's fd, or -1 when none is waiting (the ordinary case every tick).
+static int lanAcceptOne(void) {
+    if (s_lanListenFd < 0) return -1;
+    return lwip_accept(s_lanListenFd, nullptr, nullptr);
+}
 
 
 // Command origin marker (F4): the shared dispatcher (imageDataWritten) reads this
@@ -78,7 +222,7 @@ static const int kTlsCiphersuites[] = { MBEDTLS_TLS_ECDHE_PSK_WITH_AES_128_CBC_S
 
 static bool tlsMode = false;            // true when the ACTIVE channel is TLS-PSK
 static bool tlsInited = false;          // mbedTLS config objects built once
-static bool tlsSessionActive = false;   // an mbedtls_ssl_context is live for wifiClient
+static bool tlsSessionActive = false;   // an mbedtls_ssl_context is live for s_lanClientFd
 static bool tlsHandshakeDone = false;
 static uint8_t tlsPsk[16];
 
@@ -112,19 +256,26 @@ uint16_t lanActivePort(void) {
 
 bool lanTlsEnabled(void) { return isEncryptionEnabled(); }
 
-// mbedTLS BIO shims over the accepted WiFiClient (non-blocking cooperative model).
+// mbedTLS BIO shims over the accepted socket (non-blocking cooperative model).
+// ctx is unused and deliberately so: these read s_lanClientFd through the same
+// accessors as the rest of the file, so they always see the CURRENT descriptor.
+// mbedTLS holds the bio ctx pointer for the life of the ssl context, and the
+// descriptor changes when one session ends and another is admitted -- passing the fd
+// by value would leave the BIO writing to a closed, or recycled, descriptor. The
+// pointer is still handed to set_bio (&s_lanClientFd) so a future caller who does
+// dereference ctx gets the live value rather than a stale copy.
 static int tls_bio_send(void* ctx, const unsigned char* buf, size_t len) {
-    WiFiClient* c = static_cast<WiFiClient*>(ctx);
-    if (c == nullptr || !c->connected()) return MBEDTLS_ERR_NET_CONN_RESET;
-    int w = c->write(buf, len);
+    (void)ctx;
+    if (!lanClientConnected()) return MBEDTLS_ERR_NET_CONN_RESET;
+    int w = lanClientWrite(buf, len);
     if (w <= 0) return MBEDTLS_ERR_SSL_WANT_WRITE;
     return w;
 }
 static int tls_bio_recv(void* ctx, unsigned char* buf, size_t len) {
-    WiFiClient* c = static_cast<WiFiClient*>(ctx);
-    if (c == nullptr || !c->connected()) return MBEDTLS_ERR_NET_CONN_RESET;
-    if (c->available() <= 0) return MBEDTLS_ERR_SSL_WANT_READ;
-    int r = c->read(buf, len);
+    (void)ctx;
+    if (!lanClientConnected()) return MBEDTLS_ERR_NET_CONN_RESET;
+    if (lanClientAvailable() <= 0) return MBEDTLS_ERR_SSL_WANT_READ;
+    int r = lanClientRead(buf, len);
     if (r <= 0) return MBEDTLS_ERR_SSL_WANT_READ;
     return r;
 }
@@ -342,7 +493,7 @@ static bool tlsBeginSession(void) {
         mbedtls_ssl_free(&tlsSsl);
         return false;
     }
-    mbedtls_ssl_set_bio(&tlsSsl, &wifiClient, tls_bio_send, tls_bio_recv, nullptr);
+    mbedtls_ssl_set_bio(&tlsSsl, &s_lanClientFd, tls_bio_send, tls_bio_recv, nullptr);
     tlsSessionActive = true;
     tlsHandshakeDone = false;
     return true;
@@ -359,7 +510,7 @@ static uint8_t lanTxFrame[2 + 640];
 // Write one [len:2 LE][payload] frame over the active LAN channel (TLS or plain).
 // Called by communication.cpp for LAN-origin responses (send_tls_lan_frame / plain).
 void opendisplay_lan_send_frame(const uint8_t* payload, uint16_t len) {
-    if (!wifiServerConnected || !wifiClient.connected() || len == 0) {
+    if (!wifiServerConnected || !lanClientConnected() || len == 0) {
         return;
     }
     if (tlsMode && (!tlsSessionActive || !tlsHandshakeDone)) return;
@@ -373,7 +524,7 @@ void opendisplay_lan_send_frame(const uint8_t* payload, uint16_t len) {
             if (mbedtls_ssl_write(&tlsSsl, lanTxFrame, total) < 0) {
                 od_log_error("TLS LAN response write failed");
             }
-        } else if (wifiClient.write(lanTxFrame, total) != total) {
+        } else if (lanClientWrite(lanTxFrame, total) != total) {
             od_log_error("LAN response write incomplete");
         }
         return;
@@ -389,13 +540,13 @@ void opendisplay_lan_send_frame(const uint8_t* payload, uint16_t len) {
         }
         return;
     }
-    if (wifiClient.write(hdr, 2) != 2 || wifiClient.write(payload, len) != len) {
+    if (lanClientWrite(hdr, 2) != 2 || lanClientWrite(payload, len) != len) {
         od_log_error("LAN response write incomplete");
     }
 }
 
 bool wifiLanClientConnected(void) {
-    return wifiServerConnected && wifiClient.connected();
+    return wifiServerConnected && lanClientConnected();
 }
 
 static void hex14_lower(const uint8_t* src, char* out29) {
@@ -408,7 +559,7 @@ static void hex14_lower(const uint8_t* src, char* out29) {
 }
 
 void opendisplay_mdns_update_msd_txt(void) {
-    if (!wifiConnected || odWifiStatus() != WL_CONNECTED) {
+    if (!wifiConnected || odWifiStatus() != OD_WIFI_CONNECTED) {
         return;
     }
     static uint8_t last_msd[14];
@@ -481,13 +632,22 @@ static void startLanServer(void) {
     }
     tlsMode = isEncryptionEnabled();
     uint16_t port = lanActivePort();
-    wifiServer.begin(port);
+    // A restart on a new port must rebind, not silently keep the old listener: the
+    // Arduino WiFiServer::begin() returned early when a socket already existed, so
+    // restartWiFiLanAfterReconnect() after a config change left the device listening
+    // on the PREVIOUS port while logging the new one. Closing first makes the log true.
+    lanSockClose(&s_lanListenFd);
+    if (!lanListenBegin(port)) {
+        od_log_error("LAN listener could not bind port %u -- LAN transport disabled",
+               (unsigned)port);
+        return;
+    }
     od_log_info("%s LAN server listening on port %u",
            tlsMode ? "TLS-PSK" : "Plaintext", (unsigned)port);
     restartLanService();
 }
 
-// odWifiStatus() collapses every association failure into WL_DISCONNECTED (6), which
+// odWifiStatus() collapses every association failure into OD_WIFI_DISCONNECTED (6), which
 // is useless for field diagnosis. Log the 802.11/ESP reason code instead: 201
 // (NO_AP_FOUND) means the SSID was never seen -- typically a 5 GHz-only or hidden
 // network; 15 (4WAY_HANDSHAKE_TIMEOUT) / 202 (AUTH_FAIL) mean a bad password; 200
@@ -617,7 +777,7 @@ static void odWifiEnsureStack(void) {
 // here rather than as separate "sticky" calls.
 static int odWifiBegin(const char* ssid, const char* pass,
                        const uint8_t* bssid, uint8_t channel) {
-    if (!ssid) return WL_CONNECT_FAILED;
+    if (!ssid) return OD_WIFI_CONNECT_FAIL;
     odWifiEnsureStack();
 
     wifi_config_t wc = {};
@@ -644,13 +804,13 @@ static int odWifiBegin(const char* ssid, const char* pass,
     esp_wifi_set_config(WIFI_IF_STA, &wc);
     esp_wifi_start();
     esp_wifi_connect();
-    return WL_IDLE_STATUS;
+    return OD_WIFI_IDLE;
 }
 
 static int odWifiStatus(void) {
-    if (!s_wifiStackUp) return WL_IDLE_STATUS;
+    if (!s_wifiStackUp) return OD_WIFI_IDLE;
     wifi_ap_record_t ap;
-    return (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? WL_CONNECTED : WL_DISCONNECTED;
+    return (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? OD_WIFI_CONNECTED : OD_WIFI_DISCONNECTED;
 }
 
 static int32_t odWifiRssi(void) {
@@ -903,7 +1063,7 @@ void serviceLanRoam(void) {
     // covers DIRECT/PIPE/PARTIAL -- the previous direct+pipe test let a BLE-origin partial
     // write (no LAN client attached, so the check above does not fire either) be
     // interrupted by the scan.
-    if (wifiClient.connected() || wifiServerConnected) return;
+    if (lanClientConnected() || wifiServerConnected) return;
     if (transferActive()) return;
 
     roamPending = false;
@@ -970,17 +1130,17 @@ void initWiFi(bool waitForConnection) {
     for (int retry = 0; retry < maxRetries && !connected; retry++) {
         unsigned long startAttempt = millis();
         bool abortCurrentRetry = false;
-        while (odWifiStatus() != WL_CONNECTED && (millis() - startAttempt < timeoutPerRetry)) {
+        while (odWifiStatus() != OD_WIFI_CONNECTED && (millis() - startAttempt < timeoutPerRetry)) {
             delay(500);
-            wl_status_t status = odWifiStatus();
+            od_wifi_status_t status = odWifiStatus();
             od_log_info("WiFi status: %d", (int)status);
-            if (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL) {
+            if (status == OD_WIFI_CONNECT_FAIL || status == OD_WIFI_NO_SSID) {
                 od_log_info("Connection failed immediately (Status: %d)", (int)status);
                 abortCurrentRetry = true;
                 break;
             }
         }
-        if (odWifiStatus() == WL_CONNECTED) {
+        if (odWifiStatus() == OD_WIFI_CONNECTED) {
             connected = true;
             break;
         }
@@ -991,7 +1151,7 @@ void initWiFi(bool waitForConnection) {
             delay(2000);
         }
     }
-    if (odWifiStatus() == WL_CONNECTED) {
+    if (odWifiStatus() == OD_WIFI_CONNECTED) {
         wifiConnected = true;
         od_log_info("=== WiFi connected ===");
         char ipStr[16];
@@ -1014,9 +1174,9 @@ void wifiLanDropOwnedSocket(void) {
     // clearEncryptionSession() or requestTransferSessionCleanup(), which are the
     // abort's own steps 8 and 3-5. Calling them here would nest the two teardowns.
     tlsCloseSession();
-    if (wifiClient.connected()) {
+    if (lanClientConnected()) {
         od_log_info("Closing LAN client (session abort)");
-        wifiClient.stop();
+        lanSockClose(&s_lanClientFd);
     }
     wifiServerConnected = false;
     tcpReceiveBufferPos = 0;
@@ -1028,10 +1188,10 @@ void wifiLanDropOwnedSocket(void) {
 
 void disconnectWiFiServer() {
     tlsCloseSession();
-    if (wifiClient.connected()) {
+    if (lanClientConnected()) {
         od_log_info("Closing LAN client");
         clearEncryptionSession();
-        wifiClient.stop();
+        lanSockClose(&s_lanClientFd);
     }
     wifiServerConnected = false;
     tcpReceiveBufferPos = 0;
@@ -1090,10 +1250,10 @@ static int lanReadIntoBuffer(void) {
         tcpReceiveBufferPos += (uint32_t)r;
         return r;
     }
-    int available = wifiClient.available();
+    int available = lanClientAvailable();
     if (available <= 0) return 0;
     int bytesToRead = (available > space) ? space : available;
-    int bytesRead = wifiClient.read(&tcpReceiveBuffer[tcpReceiveBufferPos], bytesToRead);
+    int bytesRead = lanClientRead(&tcpReceiveBuffer[tcpReceiveBufferPos], bytesToRead);
     if (bytesRead > 0) tcpReceiveBufferPos += (uint32_t)bytesRead;
     return (bytesRead > 0) ? bytesRead : 0;
 }
@@ -1104,7 +1264,7 @@ void wifiLanReapClosedSession(void) {
     // in the same pass. See the call site in loop() for why "early" is the whole
     // point: raising it from inside handleWiFiServer left the accept testing a
     // corpse's token and refusing an ordinary reconnect.
-    if (wifiServerConnected && !wifiClient.connected()) {
+    if (wifiServerConnected && !lanClientConnected()) {
         od_log_info("LAN: peer closed the socket, reaping the session");
         disconnectWiFiServer();
     }
@@ -1120,7 +1280,7 @@ void wifiLanReapClosedSession(void) {
 // eventually dropped it with valid commands still unread. Refusal must be inert
 // (R3), and inbound traffic must be parsed before the idle check (R7d step 3 before
 // step 4); an early return broke both.
-static void admitOrRefuseLanClient(WiFiClient& incoming) {
+static void admitOrRefuseLanClient(int incomingFd) {
     // REFUSE while the slot is held -- never evict. Two reasons, both concrete:
     //
     //  - The eviction path this replaces closed the previous socket without
@@ -1141,17 +1301,17 @@ static void admitOrRefuseLanClient(WiFiClient& incoming) {
     if (held.who != OWNER_NONE) {
         od_log_info("LAN: refusing new client, slot held by %s",
                held.who == OWNER_BLE ? "BLE" : "LAN");
-        incoming.stop();
+        lwip_close(incomingFd);
         return;
     }
 
-    wifiClient = incoming;
+    s_lanClientFd = incomingFd;
     // TCP_NODELAY: every LAN write is a complete, self-delimited frame, so there is
     // never a following write for Nagle to coalesce it with -- it can only hold a
     // small frame until the peer's delayed ACK fires (40-200 ms). With per-chunk
     // direct-write ACKs that lands on every frame of a transfer.
-    wifiClient.setNoDelay(true);
-    wifiClient.setTimeout(30000);
+    lanSockSetNoDelay(s_lanClientFd);
+    lanSockSetRcvTimeout(s_lanClientFd, 30000);
     tcpReceiveBufferPos = 0;
     wifiServerConnected = true;
 
@@ -1170,13 +1330,14 @@ static void admitOrRefuseLanClient(WiFiClient& incoming) {
     if (!linkClaim((LinkId){OWNER_LAN, 0, s_lanEpoch})) {
         od_log_info("LAN: refusing new client, slot claimed concurrently");
         s_lanEpoch = 0;
-        incoming.stop();
-        wifiClient = WiFiClient();
+        lanSockClose(&s_lanClientFd);
         wifiServerConnected = false;
         return;
     }
 
-    od_log_info("LAN client connected from %s", wifiClient.remoteIP().toString().c_str());
+    char peerIp[16];
+    lanSockPeerIpStr(s_lanClientFd, peerIp, sizeof(peerIp));
+    od_log_info("LAN client connected from %s", peerIp);
     if (tlsMode && !tlsBeginSession()) {
         od_log_info("LAN: TLS session start failed, dropping");
         disconnectWiFiServer();
@@ -1184,7 +1345,7 @@ static void admitOrRefuseLanClient(WiFiClient& incoming) {
 }
 
 bool wifiLinkIsUp(void) {
-    return odWifiStatus() == WL_CONNECTED;
+    return odWifiStatus() == OD_WIFI_CONNECTED;
 }
 
 void wifiLocalIpStr(char* out, size_t out_size) {
@@ -1196,7 +1357,7 @@ void handleWiFiServer() {
     // other work; it self-gates on idle, so this is a no-op mid-transfer.
     serviceLanRoam();
 
-    if (wifiInitialized && odWifiStatus() == WL_CONNECTED && !wifiConnected) {
+    if (wifiInitialized && odWifiStatus() == OD_WIFI_CONNECTED && !wifiConnected) {
         wifiConnected = true;
         od_log_info("=== WiFi connected ===");
         char ipStr[16];
@@ -1207,8 +1368,8 @@ void handleWiFiServer() {
                ipStr, (int)odWifiRssi(), (int)odWifiChannel(), bssidStr);
         startLanServer();
     }
-    if (!wifiConnected || odWifiStatus() != WL_CONNECTED) {
-        if (wifiServerConnected || wifiClient.connected()) {
+    if (!wifiConnected || odWifiStatus() != OD_WIFI_CONNECTED) {
+        if (wifiServerConnected || lanClientConnected()) {
             od_log_info("WiFi lost, closing LAN session");
             disconnectWiFiServer();
         }
@@ -1225,13 +1386,13 @@ void handleWiFiServer() {
     // socket. That is both an R3 violation (refusal must be inert) and an R7d one
     // (step 3 must precede step 4). So the refusal branch closes the contender and
     // falls through.
-    WiFiClient incoming = wifiServer.accept();
-    if (incoming) {
-        admitOrRefuseLanClient(incoming);
+    int incomingFd = lanAcceptOne();
+    if (incomingFd >= 0) {
+        admitOrRefuseLanClient(incomingFd);
         // Deliberately no return here on either outcome -- see the note above.
     }
 
-    if (!wifiServerConnected || !wifiClient.connected()) {
+    if (!wifiServerConnected || !lanClientConnected()) {
         if (wifiServerConnected) {
             od_log_info("LAN client disconnected");
             disconnectWiFiServer();
@@ -1343,14 +1504,14 @@ void handleWiFiServer() {
         }
         // A dispatched command may have torn the session down (reboot, power-off,
         // config-driven LAN restart). Never read from a dead client.
-        if (!wifiServerConnected || !wifiClient.connected()) {
+        if (!wifiServerConnected || !lanClientConnected()) {
             return;
         }
     } while (got > 0 && drainedBytes < OD_LAN_RX_BUFFER_SIZE);
 }
 
 void restartWiFiLanAfterReconnect() {
-    if (!wifiConnected || odWifiStatus() != WL_CONNECTED) {
+    if (!wifiConnected || odWifiStatus() != OD_WIFI_CONNECTED) {
         return;
     }
     disconnectWiFiServer();
@@ -1362,10 +1523,10 @@ void restartWiFiLanAfterReconnect() {
 // Extends PR #114's BLE-only teardown (device_control.cpp) to the WiFi surface.
 void opendisplay_lan_teardown(void) {
     tlsCloseSession();
-    if (wifiClient.connected()) {
-        wifiClient.stop();
+    if (lanClientConnected()) {
+        lanSockClose(&s_lanClientFd);
     }
-    wifiServer.end();
+    lanSockClose(&s_lanListenFd);
     wifiServerConnected = false;
     tcpReceiveBufferPos = 0;
     if (tlsInited) {
