@@ -16,6 +16,28 @@ a per-target fork. Do not "fix" this by moving it into `shared/`.
 
 ## bb_epaper
 
+> **RESOLVED 2026-08-04 -- bb_epaper needs NO Arduino surface on this target.** The open
+> decision below ("replacing `esp_generic.inl` with an in-project backend as the other two
+> targets already did") was taken: `targets/esp32-idf/panel/od_bbep.cpp` replaces the vendored
+> `bb_epaper.cpp` and supplies our own IDF backend, `panel/od_bbep_idf_io.inl`. Consequences
+> worth stating, because earlier notes across this repo assumed otherwise:
+>
+> * **Zero edits to vendored files.** The glue TU is replaced rather than its `#ifdef` chain
+>   patched, so there is no fifth `OD-PATCH` and nothing new joins the re-verify list.
+> * `arduino_io.inl` and `esphome_io.inl` are **never compiled**, and `bb_epaper.h`'s
+>   `#include <Arduino.h>` sits behind `#ifdef ARDUINO`, which this build does not define.
+> * Dropping the unused `BBEPAPER` C++ class removed the only consumer of `pinMode()` (13
+>   calls) and `millis()` (6), which is why the backend contract is nine functions, not eleven.
+>
+> **So the FastEPD vendor adapter is FastEPD's alone.** Any text claiming the permanent adapter
+> exists for both libraries, or that it must own `delay()`/`delayMicroseconds()`/`millis()`/
+> `ledc_compat.h`, predates this and is wrong.
+>
+> **`third_party/bb_epaper/src` is no longer on the component include path** (2026-08-04).
+> `main/CMakeLists.txt` grants it per-source; an unlisted file including `<bb_epaper.h>` fails
+> to compile. Same for `third_party/FastEPD/src`. This is containment, not abstraction -- the
+> destination is `od_hal_panel` / `od_panel_ops`.
+
 > **Backend analysis:** [docs/BBEPAPER_IO_BACKENDS.md](../docs/BBEPAPER_IO_BACKENDS.md) covers how
 > bb_epaper selects an IO backend, the five-function contract a backend must satisfy, a
 > function-by-function comparison of `esp_generic.inl` against `arduino_io.inl` (the backend the

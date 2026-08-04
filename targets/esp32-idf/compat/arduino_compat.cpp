@@ -3,7 +3,6 @@
  * standard level while the port is in flux. Dies with the shim. */
 #include "arduino_compat.h"
 #include "Wire.h"
-#include "SPI.h"
 
 #include "esp_system.h"
 #include "esp_heap_caps.h"
@@ -19,7 +18,10 @@
 SerialCompat Serial;
 
 TwoWire  Wire;
-SPIClass SPI;
+/* SPIClass SPI is GONE from here -- it moved to vendor/fastepd/fastepd_adapter.cpp
+ * (2026-08-04). It is the FastEPD vendor adapter's global, not the shim's, and while its
+ * definition lived in this file the adapter could not be taken off the component's global
+ * include path. compat/ dies; the adapter does not. */
 EspClass ESP;
 
 /* INTERNAL DRAM ONLY -- MALLOC_CAP_INTERNAL, matching Arduino-ESP32's EspClass exactly:

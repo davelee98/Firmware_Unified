@@ -542,4 +542,48 @@
 #
 # NOT hardware-verified, and this one needs it: 19 glitch removals on panel power/reset/CS pins
 # and a full deep-sleep pin pass. Wake from deep sleep, refresh a panel, and check current draw.
+
+# 6 (UNCHANGED) = 2026-08-04, not a step: the FastEPD VENDOR ADAPTER is created and contained,
+# and three documents that described a bb_epaper problem which no longer exists are corrected.
+#
+# THE CORRECTION FIRST, because it was actively misleading. Earlier text in this file, in
+# ratchet.sh and in third_party/NOTICE.md said the permanent adapter would have to own delay(),
+# delayMicroseconds(), millis() and ledc_compat.h "because the vendored libraries link against
+# them". That was written before panel/od_bbep.cpp landed. bb_epaper needs NOTHING from the
+# shim: od_bbep.cpp replaces the vendored bb_epaper.cpp with our own IDF backend, so
+# arduino_io.inl and esphome_io.inl are never compiled, bb_epaper.h's <Arduino.h> is behind an
+# #ifdef ARDUINO this build does not define, and dropping the unused BBEPAPER C++ class removed
+# the only consumer of pinMode() and millis(). ratchet.sh was also PRINTING that dead list and
+# calling it "the vendor adapter's specification" -- it specified nothing.
+#
+# THE ADAPTER IS ONE HEADER AND ITS STORAGE: vendor/fastepd/{SPI.h, fastepd_adapter.cpp}, for
+# FastEPD's IT8951 transport, which is written against the Arduino SPI object. It is OUTSIDE
+# compat/ on purpose, so that "delete compat/ at the floor" stays an unambiguous instruction
+# rather than a judgement call, and ratchet.sh now excludes vendor/ from the count -- counting
+# it would turn a ratchet on temporary code into a tax on permanent code.
+# SPIClass SPI moved out of compat/arduino_compat.cpp with it; while that definition lived in
+# the shim's TU, the adapter could not be taken off the global include path.
+#
+# CONTAINMENT, which is the substance. Three directories left the component include path:
+# third_party/bb_epaper/src, third_party/FastEPD/src, and vendor/fastepd. Each is now granted
+# per-source in main/CMakeLists.txt. Before this, ANY file in the component could reach a
+# vendor panel API or acquire an Arduino SPI dependency by typing one include.
+# VERIFIED, not assumed: adding <SPI.h>, <bb_epaper.h> or <FastEPD.h> to an unlisted file
+# (src/communication.cpp) fails to compile in all three cases.
+#
+# THIS IS CONTAINMENT, NOT ABSTRACTION. The vendor types still appear in the listed files:
+# display_service.cpp drives a raw BBEPDISP, display_fastepd.cpp drives a FASTEPD. The
+# destination is od_hal_panel with the od_panel_ops vtable -- the ONE deliberate function-
+# pointer exception CLAUDE.md allows, and it allows it for exactly this reason: this target
+# legitimately has two panel backends. Only then does the per-source list collapse to the two
+# backend files.
+#
+# ONE LEAK LEFT, and it is not FastEPD's: display_service.cpp is granted the ADAPTER because its
+# E1004 dual-CS pixel stream calls SPI.writeBytes(). That opens a second device on SPI2_HOST --
+# the host panel/od_bbep_idf_io.inl already owns -- which is why bbepDeInitIO() logs "another
+# device is still attached". TWO OWNERS OF ONE SPI HOST. It belongs on the bb_epaper backend;
+# moving it removes both the grant and the double ownership. That is phase C step 13.
+#
+# All 10 boards build; every image BYTE-IDENTICAL. Nothing to verify on hardware: this changes
+# only which files may SEE a header, plus one global's translation unit.
 6

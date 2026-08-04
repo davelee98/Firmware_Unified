@@ -10,26 +10,41 @@
 # The shim is scaffolding with a scheduled demolition, not a portability layer.
 #
 # THE ENDSTATE IS NOT AN EMPTY DIRECTORY (decided 2026-08-04). FastEPD needs a PERMANENT
-# compatibility layer -- it is a vendored Arduino library and there is no version of it that
-# does not want Arduino primitives -- so some of what currently lives here never leaves. That
-# surviving piece is the VENDOR ADAPTER, and it is deliberately not called a shim: "shim" in
-# this repo means scheduled demolition, and using the word for something permanent poisons it
-# for the thing this check actually polices.
+# compatibility layer -- it is a vendored Arduino library whose IT8951 transport is written
+# against the Arduino SPI object, and there is no version of it that is not. That surviving
+# piece is the VENDOR ADAPTER, and it is deliberately not called a shim: "shim" in this repo
+# means scheduled demolition, and using the word for something permanent poisons it for the
+# thing this check actually polices.
+#
+# THE ADAPTER IS SMALLER THAN THIS FILE USED TO CLAIM, AND IT NO LONGER LIVES HERE.
+# Corrected 2026-08-04, after panel/od_bbep_idf_io.inl landed:
+#
+#   - It is ONE header plus its storage: targets/esp32-idf/vendor/fastepd/{SPI.h,
+#     fastepd_adapter.cpp}. Earlier text here said the adapter would own delay(),
+#     delayMicroseconds(), millis() and ledc_compat.h. That was written when bb_epaper still
+#     used an Arduino IO backend. It does not: panel/od_bbep.cpp replaces the vendored
+#     bb_epaper.cpp with our own IDF backend, and it drops the unused BBEPAPER C++ class that
+#     was the only consumer of pinMode() and millis(). bb_epaper needs NOTHING from compat/.
+#   - FastEPD borrows exactly one loose symbol, millis(), for arduino_io.inl'"'"'s 19 call sites.
+#     It defines delay() and delayMicroseconds() itself against ets_delay_us. millis() is still
+#     in compat/ because app code also still calls it; it moves to the adapter when the last
+#     app caller goes to od_hal_uptime_ms().
+#   - vendor/fastepd/ IS NOT ON THE COMPONENT'"'"'S INCLUDE PATH. main/CMakeLists.txt grants it to
+#     a named list of translation units, so no new file can acquire an Arduino SPI dependency
+#     by typing one include. That containment is the reason the adapter can be permanent
+#     without being a leak.
 #
 # So the terminal state has two halves, and only the first is what this budget measures:
 #
-#   1. APP-CODE COUNT -> 0. Every file under targets/esp32-idf/ stops including a shim header.
-#      Reachable: the last three (buzzer_hw.cpp, device_control.cpp, encryption.cpp) are
-#      counted only for their TARGET_NRF arms, which leave at MIGRATION step 4.
-#   2. THIS DIRECTORY IS NOT DELETED. The Arduino primitives the vendored libraries link
-#      against -- delay(), delayMicroseconds(), millis() with C++ linkage, and ledc_compat.h --
-#      are extracted into the vendor adapter and OWNED there, rather than borrowed from a
-#      directory that was supposed to die.
+#   1. APP-CODE COUNT -> 4. Every file under targets/esp32-idf/ stops including a SHIM header.
+#      The floor is 4, not 0: main.cpp, buzzer_hw.cpp, device_control.cpp and encryption.cpp are
+#      counted only for their TARGET_NRF arms, which cannot be compiled or verified on this
+#      target and leave with MIGRATION step 4.
+#   2. compat/ IS DELETED, and vendor/fastepd/ IS NOT. They are separate directories precisely
+#      so that "delete compat/" is an unambiguous instruction rather than a judgement call.
 #
-# When the count reaches 0: extract the vendor adapter, delete what is left, and retire this
-# check with it. Do NOT read "budget is 0" as "delete compat/" -- the build needs what the
-# vendored libraries link against, and a passing check that tells you to break the build is
-# worse than no check.
+# When the count reaches 4: confirm the remainder is nRF-only, delete compat/, and retire this
+# check with it. vendor/fastepd/ stays.
 #
 #   ./targets/esp32-idf/compat/ratchet.sh
 #
@@ -65,6 +80,12 @@ fi
 # What the check is *for* is "how many files still need Arduino", so that is what it counts.
 # compat/ itself is excluded -- the shim including its own header is not a user of it.
 #
+# vendor/ is excluded for a DIFFERENT reason, and the distinction matters: compat/ is skipped
+# because it IS the thing being measured, while vendor/fastepd/ is skipped because it is not a
+# shim at all. It is the permanent FastEPD adapter, it owns <SPI.h> rather than borrowing it,
+# and counting it would make the budget rise every time the adapter gains a file -- turning a
+# ratchet on temporary code into a tax on permanent code.
+#
 # Widened 2026-07-25 to every shim header, not just arduino_compat.h/Arduino.h. Phase B added
 # Wire.h, SPI.h, WiFi.h, ledc_compat.h and esp32-hal-gpio.h, and a file that includes Wire.h
 # but not Arduino.h is just as much a shim user. Measured both ways at the time: 20 under the
@@ -80,18 +101,28 @@ shim_users() {
     grep -rlE '#[[:space:]]*include[[:space:]]*[<"][[:space:]]*(arduino_compat|Arduino|Wire|SPI|WiFi|ledc_compat|esp32-hal-gpio|HardwareSerial)\.h' \
          targets/esp32-idf --include='*.c' --include='*.cpp' --include='*.h' \
          --include='*.hpp' --include='*.inl' 2>/dev/null \
-        | grep -v '^targets/esp32-idf/compat/' || true
+        | grep -v '^targets/esp32-idf/compat/' \
+        | grep -v '^targets/esp32-idf/vendor/' || true
 }
 
-# Vendored libraries include the shim too, and the grep above never saw them: it is scoped to
-# targets/esp32-idf, so third_party/ was a blind spot. bb_epaper and FastEPD ARE Arduino
-# libraries -- depending on Arduino.h/Wire.h/SPI.h is their normal state, not creeping shim
-# usage -- so they do NOT belong in the app-code budget, which measures OUR migration.
+# Vendored libraries include shim headers too, and the grep above never saw them: it is scoped
+# to targets/esp32-idf, so third_party/ was a blind spot.
 #
-# This list is therefore not a backlog. It is the SPECIFICATION OF THE VENDOR ADAPTER: the set
-# of Arduino primitives that must still exist after phase C, because FastEPD needs a permanent
-# compatibility layer (decided 2026-08-04). Reported so the set is visible and reviewable, and
-# never enforced, because there is no number here that is supposed to fall.
+# THIS LIST IS NOT THE ADAPTER'"'"'S SPECIFICATION, whatever the previous version of this comment
+# said. It is a TEXT grep that does not evaluate #ifdef, so most of what it prints is
+# unreachable in this build and specifies nothing:
+#
+#   bb_epaper/src/bb_epaper.h        <Arduino.h> is behind #ifdef ARDUINO. Not defined here --
+#                                    the build takes the __LINUX__ branch. Nothing is included.
+#   bb_epaper/src/arduino_io.inl     NEVER COMPILED. panel/od_bbep.cpp replaces bb_epaper.cpp
+#   bb_epaper/src/esphome_io.inl     and includes panel/od_bbep_idf_io.inl instead.
+#   FastEPD/src/FastEPD.h            <Arduino.h> behind #ifdef ARDUINO. Not defined here.
+#   FastEPD/src/FastEPD.cpp          REAL: includes <SPI.h> under OD_FASTEPD_IDF_SPI (OD-PATCH).
+#   FastEPD/src/FastEPD.inl          REAL: the IT8951 transport, same OD_FASTEPD_IDF_SPI branch.
+#
+# So the adapter exists for TWO files, both FastEPD'"'"'s, and they are served by
+# vendor/fastepd/SPI.h rather than by anything under compat/. Printed for visibility, never
+# enforced, because there is no number here that is supposed to fall.
 third_party_shim_users() {
     grep -rlE '#[[:space:]]*include[[:space:]]*[<"][[:space:]]*(arduino_compat|Arduino|Wire|SPI|WiFi|ledc_compat|esp32-hal-gpio|HardwareSerial)\.h' \
          third_party --include='*.c' --include='*.cpp' --include='*.h' \
@@ -112,10 +143,13 @@ if [ -d third_party ]; then
         echo
         echo "note: $tp_count vendored file(s) under third_party/ also include shim headers."
         third_party_shim_users | sed 's/^/    /'
-        echo "      Not counted: these are vendored Arduino libraries, and this list is the"
-        echo "      VENDOR ADAPTER's specification rather than a backlog -- FastEPD needs a"
-        echo "      permanent compatibility layer. See third_party/NOTICE.md and the note at"
-        echo "      the top of this script."
+        echo "      NOT COUNTED, and NOT a specification: this is a text grep that does not"
+        echo "      evaluate #ifdef. Only FastEPD.cpp and FastEPD.inl actually include anything"
+        echo "      here (<SPI.h>, under OD_FASTEPD_IDF_SPI). The bb_epaper entries are dead --"
+        echo "      arduino_io.inl and esphome_io.inl are never compiled (panel/od_bbep.cpp"
+        echo "      supplies our own IDF backend) and the two *.h hits sit behind an"
+        echo "      #ifdef ARDUINO this build does not define. The adapter that serves the two"
+        echo "      real files is targets/esp32-idf/vendor/fastepd/, not compat/."
     fi
 fi
 
@@ -139,24 +173,19 @@ if [ "$actual" -lt "$budget" ]; then
     exit 1
 fi
 
-if [ "$actual" -eq 0 ]; then
+if [ "$actual" -le 4 ]; then
     echo
-    echo "Budget is 0: no app code under targets/esp32-idf/ includes a shim header."
+    echo "Count is at the FLOOR (4): the only files left include a shim header for their"
+    echo "TARGET_NRF arms -- main.cpp, buzzer_hw.cpp, device_control.cpp, encryption.cpp."
+    echo "None of those arms compiles on this target, so none can be verified here; they leave"
+    echo "with the nRF target at MIGRATION step 4."
     echo
     echo "That is the whole of what this check measures, and it is NOT a licence to delete"
-    echo "$COMPAT_DIR. FastEPD needs a permanent compatibility layer, so the Arduino"
-    echo "primitives the vendored libraries link against -- delay(), delayMicroseconds(),"
-    echo "millis() with C++ linkage, ledc_compat.h -- outlive phase C by decision, not by"
-    echo "omission. See the note at the top of this script."
+    echo "the FastEPD vendor adapter. vendor/fastepd/{SPI.h,fastepd_adapter.cpp} is PERMANENT"
+    echo "and lives outside $COMPAT_DIR precisely so that 'delete compat/' stays unambiguous."
     echo
-    echo "Next: extract those into the VENDOR ADAPTER, owned there rather than borrowed from"
-    echo "here; delete what remains of $COMPAT_DIR; retire this check and"
-    echo ".github/workflows/esp32-shim-ratchet.yml together."
-    if [ -d third_party ] && [ "$(third_party_shim_users | wc -l | tr -d '[:space:]')" -gt 0 ]; then
-        echo
-        echo "Still linked from third_party/ (the files listed above) -- this is the set the"
-        echo "vendor adapter has to satisfy, not a backlog to clear."
-    fi
+    echo "Next: confirm the remainder is nRF-only, delete $COMPAT_DIR, and retire this check"
+    echo "and .github/workflows/esp32-shim-ratchet.yml together. Leave vendor/fastepd alone."
 fi
 
 echo "OK: shim usage is at its recorded budget."
