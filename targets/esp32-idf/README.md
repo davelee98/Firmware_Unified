@@ -78,10 +78,29 @@ what licenses retiring the source repo:
 
 ### Phase C, still owed
 
-The Arduino shim is **not** gone: `compat/` is at 21 files by `compat/ratchet.sh`, and two
-vendored libraries (bb_epaper via `bb_epaper.h`, FastEPD via `arduino_io.inl`) still depend on
-it, so it cannot be deleted even when the imported sources stop needing it. `protocol_pending.h`
-is also outstanding — two panel-IC wire values that belong in the canonical protocol header.
+The Arduino shim is **not** gone: `compat/` is at 11 files by `compat/ratchet.sh`, down from
+the phase-B baseline of 21.
+
+**The endstate is "only the vendor adapter remains", not an empty directory** (decided
+2026-08-04). FastEPD needs a *permanent* compatibility layer — it is a vendored Arduino
+library and there is no version of it that does not want Arduino primitives. So `delay()`,
+`delayMicroseconds()`, `millis()` (all three with C++ linkage, for `bb_epaper.h`'s unmangled
+declaration and FastEPD's 19 `extern millis()` call sites) and `ledc_compat.h` survive phase C
+by decision. When the count reaches 0 they are extracted into the vendor adapter and owned
+there; the remainder of `compat/` is deleted with the ratchet and its workflow.
+
+It is called an **adapter**, not a shim: in this repo "shim" means scheduled demolition, and
+using the word for something permanent would make the ratchet's vocabulary meaningless.
+
+`ratchet.sh`'s report-only `third_party/` list is that adapter's specification — read it as a
+definition of what must survive, not as a backlog.
+
+The count *can* still reach 0: the last three entries (`buzzer_hw.cpp`, `device_control.cpp`,
+`encryption.cpp`) are counted only for their `TARGET_NRF` arms, which leave at migration
+step 4.
+
+`protocol_pending.h` is also outstanding — two panel-IC wire values that belong in the
+canonical protocol header.
 
 ### Toolchain translation findings
 
