@@ -741,10 +741,18 @@ bool writeBootScreenWithQr() {
     int middleScaleText;
     int pad;
     int fwKey1Gap = 0;
-    int modulePx;
-    int qrPx;
-    bool qrRight;
-    int qrX, qrY, availW, textY;
+    // All initialised at declaration. Each is assigned inside a layout branch and read behind
+    // the same condition, so the values here are never the ones used -- but GCC cannot prove
+    // that once bootQrPixelBlack()/bootLogoPixelBlack() are inlined, and rejects it under
+    // -Werror=maybe-uninitialized at -Os. That level was restored to match the reference build
+    // on 2026-08-04; -Og never reached this analysis, which is why a file untouched since the
+    // import suddenly had eight diagnostics. Only the RISC-V targets flagged the full set --
+    // the Xtensa inliner made different choices -- which is itself the argument for pinning
+    // rather than tracking the compiler's mood.
+    int modulePx = 0;
+    int qrPx = 0;
+    bool qrRight = false;
+    int qrX = 0, qrY = 0, availW = 0, textY = 0;
     const bool ultraHiResPanel = useZoneLayout && (w_log >= 1872 && h_log >= 1404);
     {
         const char* bootLinesFull[] = {
@@ -850,7 +858,13 @@ bool writeBootScreenWithQr() {
     uint16_t modelY = 0;
 
 #ifdef BOOT_HAS_LOGO
-    const uint8_t* logoBmp;
+    // Initialised, and read behind a null check below, although the only READ is already
+    // guarded by the same useZoneLayout that guards every assignment. GCC cannot prove that
+    // across the inlined bootLogoPixelBlack() and rejects it under -Werror=maybe-uninitialized
+    // at -Os -- which -Og did not reach, so this surfaced only when the optimisation level was
+    // restored to the reference build's (2026-08-04). The invariant was real but implicit; a
+    // logo layout that ever grows a fourth branch would break it silently. Now it cannot.
+    const uint8_t* logoBmp = nullptr;
     int logoW = 0, logoH = 0, logoStride = 0;
     int logoX = pad;
     int logoY = 8;
@@ -1013,7 +1027,8 @@ bool writeBootScreenWithQr() {
                     bootTextPixelBlack(lx, ly, (uint16_t)k2X,    k2Y,    k2,         (uint8_t)middleScaleText, w_log, textMaxX) ||
                     bootQrPixelBlack(lx, ly, qrX, qrY, qrPx, modulePx, quiet, qrSize, &qr)
 #ifdef BOOT_HAS_LOGO
-                    || (useZoneLayout && bootLogoPixelBlack(lx, ly, logoX, logoY, logoBmp, logoW, logoH, logoStride, (int)w_log))
+                    || (useZoneLayout && logoBmp != nullptr &&
+                        bootLogoPixelBlack(lx, ly, logoX, logoY, logoBmp, logoW, logoH, logoStride, (int)w_log))
 #endif
                     ;
                 if (black) {
