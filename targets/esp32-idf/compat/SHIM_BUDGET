@@ -477,4 +477,20 @@
 # All 10 images are BYTE-IDENTICAL to the previous commit. Expected, and the point: Wire.end()
 # already compiled to od_hal_i2c_deinit(), so this step changes what the source DEPENDS on
 # without changing what it generates. Nothing here needs hardware verification.
-7
+
+# 6 = phase C step 10, 2026-08-04: src/boot_screen.cpp. 7 -> 6, one file.
+#
+# THE INCLUDE WAS PURELY VESTIGIAL -- the file never used a single Arduino symbol. 1087 lines
+# and `#include <Arduino.h>` was the only occurrence of the string "Arduino" in it. It draws
+# through bb_epaper and display_service, formats with snprintf, and reads no clock; the include
+# came in from the source repo, where every translation unit had one.
+#
+# Done AFTER step 11 rather than before, despite being the smaller change, because a file that
+# is on the list for no reason is worse than one that is on it for a real reason: it makes the
+# remaining count read as more work than it is. Now every file left is on the list because it
+# genuinely depends on the shim.
+#
+# All 10 images BYTE-IDENTICAL to the previous commit. Nothing to verify on hardware -- there is
+# no behaviour here to change. -Os and the -Wmaybe-uninitialized fixes this file needed are
+# earlier work and unaffected.
+6

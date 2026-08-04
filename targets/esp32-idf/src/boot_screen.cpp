@@ -1,5 +1,7 @@
 #include "boot_screen.h"
-#include <Arduino.h>
+/* No <Arduino.h>: this file never used one. It draws the boot screen through bb_epaper and
+ * display_service, formats with snprintf, and takes its time from neither -- the include was
+ * carried in from the source repo, where every translation unit had one. Phase C step 10. */
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
