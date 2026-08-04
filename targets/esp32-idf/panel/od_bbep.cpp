@@ -38,6 +38,7 @@
 #include <string.h>
 
 #include "bb_epaper.h"
+#include "od_bbep_stream.h"
 
 #include "od_bbep_idf_io.inl"
 

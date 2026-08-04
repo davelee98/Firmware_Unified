@@ -434,4 +434,20 @@ bool fastepd_partial_refresh(int refresh_mode) {
     return true;
 }
 
+
+// The panel SPI bus release, called from main.cpp's deep-sleep teardown via
+// display_service.h. It lives HERE, not in display_service.cpp, because SPI is the FastEPD
+// vendor adapter's object and this is the file that owns it -- moving it is what took
+// display_service.cpp off the adapter entirely (main/CMakeLists.txt per-source grants).
+//
+// Early return when the parallel driver is in use: that path drives the S3 LCD peripheral and
+// never took the SPI bus. Behaviour is unchanged from when this lived in display_service.cpp.
+// display_service.cpp carries a no-op fallback for boards that compile no FastEPD.
+void displayReleaseSpiBus(void) {
+    if (fastepd_driver_used()) {
+        return;   // parallel driver: the SPI bus was never taken
+    }
+    SPI.end();
+}
+
 #endif

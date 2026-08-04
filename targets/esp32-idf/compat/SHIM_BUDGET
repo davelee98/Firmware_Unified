@@ -586,4 +586,46 @@
 #
 # All 10 boards build; every image BYTE-IDENTICAL. Nothing to verify on hardware: this changes
 # only which files may SEE a header, plus one global's translation unit.
+
+# 6 (UNCHANGED) = 2026-08-04, phase C step 13: ONE OWNER OF SPI2_HOST, and display_service.cpp
+# off the FastEPD vendor adapter.
+#
+# THE BUG: panel/od_bbep_idf_io.inl calls spi_bus_initialize(SPI2_HOST) and registers a device
+# there. The E1004 dual-controller panel's pixel payload went out through the Arduino SPI
+# object in vendor/fastepd/SPI.h, which registers its OWN device on the SAME host. Two drivers,
+# two device handles, one bus -- in shipped firmware. It was visible in the log: bbepDeInitIO()
+# warns "another device is still attached" and then CANNOT re-attach the SCLK/MOSI pads, which
+# is the exact failure its own comment describes (a healthy peripheral wired to nothing, every
+# transfer returning ESP_OK, and the screen never changing).
+#
+# Only the PAYLOAD was misrouted. e1004_begin_plane/advance_to_cs2/end_plane/ccset_both were
+# already on the bb_epaper backend via bbepStartDataStream/bbepEndDataStream/bbepWriteCmdData.
+# One function, e1004_write_stream_bytes(), was on the wrong device.
+#
+# FIX: panel/od_bbep_stream.{h} + implementation in od_bbep_idf_io.inl --
+# od_bbep_stream_begin/write/end, writing on the handle that file already owns.
+#
+# DELIBERATELY NOT bbepWriteData(), which would have been a one-line change. That deasserts CS
+# on every call (bb_epaper's per-row framing); the E1004 holds CS across a whole half-plane.
+# Changing the wire behaviour AND the device owner in one step would leave any hardware failure
+# with two candidate causes. These three preserve CS framing bit-for-bit: begin asserts, write
+# transmits with CS untouched, end deasserts. Collapsing to bbepWriteData is a later
+# simplification to consider once this is confirmed on a panel.
+#
+# displayReleaseSpiBus() MOVED to display_fastepd.cpp, the file that legitimately owns the
+# adapter. display_service.cpp keeps a no-op fallback for boards compiling no FastEPD, and that
+# no-op is CORRECT BY PROOF rather than assumption: the adapter's bus is only brought up by
+# SPI.beginTransaction(), whose only callers are FastEPD.inl and display_fastepd.cpp -- both
+# compiled out on those boards -- so compat SPI's _bus_ok was always false there and the
+# SPI.end() it replaces could never have freed anything.
+#
+# RESULT: display_service.cpp has NO adapter dependency, and main/CMakeLists.txt no longer
+# grants it vendor/fastepd. VERIFIED: adding <SPI.h> to display_service.cpp now fails to
+# compile. The adapter is reachable only from FastEPD.cpp, FastEPD's Group5.cpp,
+# display_fastepd.cpp and its own storage TU -- all four genuinely FastEPD.
+#
+# NOT hardware-verified, and this is the panel data path on the E1004. Every board still builds
+# with the E1004 stream completely broken. Needs a real E1004 refresh: both halves, correct
+# geometry, and a deep-sleep wake afterwards to confirm bbepDeInitIO() no longer warns and the
+# pads re-attach.
 6

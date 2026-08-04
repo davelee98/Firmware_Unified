@@ -57,7 +57,7 @@ extern "C" {
 
 #ifdef TARGET_ESP32
 #include "wifi_service.h"
-#include <SPI.h>
+#include "od_bbep_stream.h"
 #endif
 
 #include "ble_transport.h"
@@ -262,22 +262,30 @@ bool e1004_begin_plane(void) {
     e1004OnLeftHalf = true;
     bbep.iCSPin = bbep.iCS1Pin;
     bbepStartDataStream(&bbep, UC8151_DTM1);
+    /* Payload now goes to the bb_epaper backend's SPI device, not the Arduino SPI object in
+     * vendor/fastepd. Those were TWO devices on SPI2_HOST -- see panel/od_bbep_stream.h.
+     * Opened after bbepStartDataStream() because that issues the controller's data-write
+     * command, which needs the backend's own CS framing. */
+    od_bbep_stream_begin(bbep.iCSPin);
     e1004StreamOpen = true;
     return true;
 }
 
 bool e1004_advance_to_cs2(void) {
     if (!e1004StreamOpen || !e1004OnLeftHalf) return false;
+    od_bbep_stream_end();          /* release CS1 before the command frames below */
     bbepEndDataStream(&bbep);
     e1004OnLeftHalf = false;
     e1004HalfBytesWritten = 0;
     bbep.iCSPin = bbep.iCS2Pin;
     bbepStartDataStream(&bbep, UC8151_DTM1);
+    od_bbep_stream_begin(bbep.iCSPin);   /* ...and hold CS2 for the right half */
     return true;
 }
 
 void e1004_end_plane(void) {
     if (!e1004StreamOpen) return;
+    od_bbep_stream_end();
     bbepEndDataStream(&bbep);
     bbep.iCSPin = bbep.iCS1Pin;
     e1004StreamOpen = false;
@@ -293,7 +301,7 @@ void e1004_write_stream_bytes(const uint8_t* data, uint16_t len) {
         uint16_t n = (uint16_t)(len - off);
         if (n > sizeof(scratch)) n = sizeof(scratch);
         for (uint16_t i = 0; i < n; i++) scratch[i] = e1004_panel_byte(data[off + i]);
-        SPI.writeBytes(scratch, n);
+        od_bbep_stream_write(scratch, n);
         off = (uint16_t)(off + n);
     }
     e1004HalfBytesWritten += len;
@@ -3488,12 +3496,18 @@ static void send_direct_write_nack(uint8_t opcode, uint8_t error, bool cleanupSt
     sendResponse(errResponse, sizeof(errResponse));
 }
 
-// See display_service.h for why this lives here rather than in main.cpp's teardown.
-void displayReleaseSpiBus(void) {
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
-    if (fastepd_driver_used()) {
-        return;   // parallel driver: the SPI bus was never taken
-    }
+// See display_service.h for why this exists rather than main.cpp calling SPI.end() itself.
+//
+// The REAL implementation is in display_fastepd.cpp, which is the file that legitimately owns
+// the FastEPD vendor adapter. This is the fallback for boards that compile no FastEPD at all,
+// and it is a NO-OP BY PROOF rather than by assumption: the adapter's bus is only ever brought
+// up by SPI.beginTransaction(), whose only callers are FastEPD.inl and display_fastepd.cpp --
+// both compiled out here -- so compat SPI's _bus_ok is always false and the SPI.end() this
+// replaces could never have freed anything on such a board.
+//
+// Since the E1004 payload moved to od_bbep_stream_write() (2026-08-04), display_service.cpp
+// has no adapter dependency at all, which is why <SPI.h> is gone from it. The bb_epaper bus is
+// released by bbepDeInitIO(), called from the panel force-off path above.
+#if !defined(OPENDISPLAY_FASTEPD)
+void displayReleaseSpiBus(void) { }
 #endif
-    SPI.end();
-}

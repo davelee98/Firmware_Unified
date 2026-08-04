@@ -233,6 +233,74 @@ static bool od_bbep_spi_write(BBEPDISP *pBBEP, const uint8_t *pBuf, int iLen)
     return ok;
 }
 
+/* ------------------------------------------------------- data streams (OUR extension)
+ *
+ * See panel/od_bbep_stream.h for why these exist. In short: the E1004 dual-CS panel streams a
+ * half-plane with CS held, and it used to do that through the Arduino SPI object, which
+ * registers a SECOND device on the host this file already owns. These give it the bus it was
+ * always writing to.
+ *
+ * Deliberately NOT expressed as bbepWriteData(): that deasserts CS per call, which is
+ * bb_epaper's per-row framing and not the E1004's per-half-plane framing. Changing the wire
+ * behaviour and changing the device owner in one step would leave a hardware failure with two
+ * candidate causes. */
+static int s_stream_cs = -1;
+
+bool od_bbep_stream_begin(int cs_pin)
+{
+    if (s_spi == NULL) {
+        return false;
+    }
+    /* A stream left open by an aborted transfer must not strand CS low on the previous pin --
+     * e1004_advance_to_cs2() switches chip selects mid-plane. */
+    od_bbep_stream_end();
+    if (!od_bbep_pin_valid(cs_pin)) {
+        return false;
+    }
+    s_stream_cs = cs_pin;
+    digitalWrite(s_stream_cs, LOW);
+    return true;
+}
+
+bool od_bbep_stream_write(const uint8_t *buf, int len)
+{
+    if (s_spi == NULL || buf == NULL || len <= 0) {
+        return false;
+    }
+    /* Same chunking as od_bbep_spi_write(), same local transaction struct (re-entrant), and
+     * deliberately NO CS handling -- begin() owns that for the whole stream. */
+    while (len > 0) {
+        int l = (len > OD_BBEP_MAX_XFER) ? OD_BBEP_MAX_XFER : len;
+        spi_transaction_t t = {};
+        t.length    = (size_t)l * 8;
+        t.rxlength  = 0;
+        t.tx_buffer = buf;
+        esp_err_t ret = spi_device_polling_transmit(s_spi, &t);
+        if (ret != ESP_OK) {
+            static bool stream_warned = false;
+            if (!stream_warned) {
+                stream_warned = true;
+                ESP_LOGE(OD_BBEP_TAG, "SPI stream transmit failed (%s); panel output is "
+                                      "incomplete. Further occurrences suppressed.",
+                         esp_err_to_name(ret));
+            }
+            return false;
+        }
+        len -= l;
+        buf += l;
+    }
+    return true;
+}
+
+void od_bbep_stream_end(void)
+{
+    if (s_stream_cs < 0) {
+        return;
+    }
+    digitalWrite(s_stream_cs, HIGH);
+    s_stream_cs = -1;
+}
+
 /* ------------------------------------------------------------------ contract: command/data */
 
 void bbepWriteCmd(BBEPDISP *pBBEP, uint8_t cmd)

@@ -194,18 +194,18 @@ set(OD_FASTEPD_INC_DIR     ${OD_TP_DIR}/FastEPD/src)
 # source property REPLACES rather than appends, so a second set_source_files_properties() call
 # on the same file would silently drop the first grant.
 #
-#   display_service.cpp   bb_epaper (raw BBEPDISP) + adapter (E1004 dual-CS pixel stream).
-#                         THE ADAPTER GRANT IS THE ONE LEAK LEFT, and it is not FastEPD's: that
-#                         stream opens a second device on SPI2_HOST, the host
-#                         panel/od_bbep_idf_io.inl already owns -- which is why bbepDeInitIO()
-#                         logs "another device is still attached". It belongs on the bb_epaper
-#                         backend. Drop the adapter grant when that moves.
+#   display_service.cpp   bb_epaper ONLY. It held an adapter grant until 2026-08-04, for the
+#                         E1004 dual-CS pixel stream, which opened a SECOND device on
+#                         SPI2_HOST -- the host panel/od_bbep_idf_io.inl already owns. That
+#                         payload now goes through od_bbep_stream_write(), so there is ONE
+#                         owner of the host and this file has no adapter dependency at all.
+#                         Do not re-add it: <SPI.h> here means a second bus owner is back.
 #   display_fastepd.cpp   FastEPD + adapter. FastEPD glue by definition.
 #   boot_screen.cpp,      bb_epaper only -- both draw through BBEPDISP.
 #   main.cpp              (main.h defines the `BBEPDISP bbep` global.)
 set_source_files_properties(${OD_SRC_DIR}/display_service.cpp
     TARGET_DIRECTORY ${COMPONENT_LIB}
-    PROPERTIES INCLUDE_DIRECTORIES "${OD_BBEP_INC_DIR};${OD_FASTEPD_ADAPTER_DIR}")
+    PROPERTIES INCLUDE_DIRECTORIES "${OD_BBEP_INC_DIR}")
 set_source_files_properties(${OD_SRC_DIR}/display_fastepd.cpp
     TARGET_DIRECTORY ${COMPONENT_LIB}
     PROPERTIES INCLUDE_DIRECTORIES "${OD_FASTEPD_INC_DIR};${OD_FASTEPD_ADAPTER_DIR}")
