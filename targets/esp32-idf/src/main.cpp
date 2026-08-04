@@ -1,3 +1,11 @@
+/* Explicit, and deliberately not removable yet. main.cpp still calls Serial.*, delay(),
+ * pinMode() and digitalWrite() directly, and has always got them transitively through main.h.
+ * Dropping <HardwareSerial.h> from this file without naming that dependency would have taken
+ * main.cpp off the ratchet's list while it is still one of the most Arduino-dependent files in
+ * the target -- a laundered decrement, which is exactly the failure compat/SHIM_BUDGET says a
+ * ratchet must be able to tell apart from real progress. It leaves for real when main.h does. */
+#include <Arduino.h>
+
 #include "main.h"
 #include "boot_screen.h"
 #include "buzzer_control.h"
@@ -13,29 +21,12 @@
 #include "session_guard.h"
 #include "od_log.h"
 
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_LOG_UART)
-#include <HardwareSerial.h>
-#ifndef OPENDISPLAY_LOG_UART_RX
-#define OPENDISPLAY_LOG_UART_RX 44
-#endif
-#ifndef OPENDISPLAY_LOG_UART_TX
-#define OPENDISPLAY_LOG_UART_TX 43
-#endif
-/* OD: UART 0, not UART 1 as the Arduino source had it.
- *
- * OPENDISPLAY_LOG_UART_TX/RX are 43/44, which ARE UART0's default pins on the ESP32-S3, and
- * IDF's console is UART0 (CONFIG_ESP_CONSOLE_UART_NUM=0). Opening UART1 and remapping it onto
- * those pads makes the GPIO matrix override UART0's IO_MUX function, so from setup() onward
- * the pad belongs to UART1 and EVERY ESP_LOGx line -- the BLE, NVS, SPI and ADC diagnostics --
- * goes to a UART that is no longer connected to anything. You get boot logs, then od_log only.
- *
- * Under Arduino this was harmless because nothing wrote to Serial; the IDF port introduced a
- * real second log stream, so the two have to share one UART. Overridable for a board that
- * genuinely wires its debug UART somewhere other than UART0's pins. */
-#ifndef OPENDISPLAY_LOG_UART_NUM
-#define OPENDISPLAY_LOG_UART_NUM 0
-#endif
-static HardwareSerial LogSerialPort(OPENDISPLAY_LOG_UART_NUM);
+#ifdef TARGET_ESP32
+/* The log port itself lives in hal/od_hal_log.c now -- including the UART-number choice and
+ * the reason for it, which moved there with the code it describes. This file used to hold a
+ * `static HardwareSerial LogSerialPort` and hand it to od_log_init() as a `Stream *`; the
+ * pin/UART defines and compat/HardwareSerial.h went with it. */
+#include "od_hal_log.h"
 #endif
 
 #ifdef TARGET_ESP32
@@ -109,7 +100,7 @@ static void logHeapUsage(const char *when)
 
 void setup() {
     #if defined(TARGET_ESP32) && defined(OPENDISPLAY_LOG_UART)
-    LogSerialPort.begin(115200, SERIAL_8N1, OPENDISPLAY_LOG_UART_RX, OPENDISPLAY_LOG_UART_TX);
+    od_hal_log_open();
     delay(100);
     #elif !defined(DISABLE_USB_SERIAL)
     Serial.begin(115200);
@@ -146,9 +137,16 @@ void setup() {
     #endif
     #endif
     #if defined(TARGET_ESP32) && defined(OPENDISPLAY_LOG_UART)
-    od_log_init(&LogSerialPort);
+    od_log_init();
     #elif !defined(DISABLE_USB_SERIAL)
-    od_log_init(&Serial);
+    #ifdef TARGET_ESP32
+    /* The USB-CDC port needs no begin() -- the IDF console driver is already up, which is why
+     * the Serial.begin(115200) above was a no-op too -- but od_hal_log still has to be told it
+     * may write, so that a DISABLE_USB_SERIAL build (which reaches neither branch) stays a
+     * genuine no-op rather than writing to a port nobody asked for. */
+    od_hal_log_open();
+    #endif
+    od_log_init();
     #ifndef TARGET_ESP32
     // nRF only. With DTR low the CDC TX FIFO is overwritable, so its free-space
     // query reads 0 while a write would still succeed -- without this the logger

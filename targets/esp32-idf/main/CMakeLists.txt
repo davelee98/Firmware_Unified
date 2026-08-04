@@ -29,7 +29,10 @@ list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../compat/arduino_compat.cp
 
 # Target HAL implementations. od_hal_nvs is the first: config storage moved off LittleFS onto
 # NVS (2026-07-25), written to the shared/hal signature so promotion is a repoint.
+# od_hal_log is the second (2026-08-04, phase C): it owns the log PORT so od_log.h could stop
+# including <Arduino.h>. Its backend is a compile-time choice on OPENDISPLAY_LOG_UART.
 list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_nvs.c
+                           ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_log.c
                            ${CMAKE_CURRENT_LIST_DIR}/../ble/od_ble_nimble.cpp)
 
 # ble/od_ble_rx.cpp is GONE, not forgotten. It held od_ble_on_write(): the bounds check,

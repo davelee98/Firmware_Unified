@@ -3,6 +3,26 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef TARGET_ESP32
+#include "od_hal_log.h"
+#include "esp_timer.h"
+
+// millis(), without Arduino. A free-running 32-bit millisecond counter that wraps at ~49.7
+// days: esp_timer_get_time() is 64-bit microseconds, so the division and the truncation
+// together reproduce both the unit and the wrap. Same substitution, and the same reason, as
+// link_owner.cpp and session_guard.cpp.
+static inline uint32_t od_log_millis(void) {
+    return (uint32_t)(esp_timer_get_time() / 1000);
+}
+#else
+// nRF still gets these from the Arduino core, but this file must not INCLUDE Arduino to say
+// so -- it is not one of the files the shim ratchet counts and it is not going to become one
+// on the way to removing Arduino from the logger. Declared, not included. Both leave with the
+// Bluefruit stack at migration step 4.
+extern "C" uint32_t millis(void);
+static inline uint32_t od_log_millis(void) { return millis(); }
+#endif
+
 #ifndef TARGET_ESP32
 // The whole point of this file's nRF path: bypass Adafruit_USBD_CDC::write(), whose
 // send loop is bounded only by tud_cdc_n_connected() -- literally "DTR is high" --
@@ -16,11 +36,15 @@
 // Implemented in main.cpp: RTC-persisted wake cycle count on ESP32, always 0 on nRF52840.
 uint32_t getDeepSleepCount();
 
-// Log output destination, set once by od_log_init(). Stays NULL if
-// od_log_init() is never called (e.g. DISABLE_USB_SERIAL builds), in which
-// case all log calls become no-ops. On nRF this is still used for the readiness
-// hook and flush; the record bytes go out through tud_cdc_write().
-static Stream *s_port = NULL;
+// Armed by od_log_init(). Stays false if od_log_init() is never called (e.g.
+// DISABLE_USB_SERIAL builds), in which case all log calls become no-ops.
+//
+// Was `static Stream *s_port` -- an Arduino object pointer doing duty as a boolean. Every use
+// of it outside od_log_init() was a NULL test except three ESP32 port calls, which now go to
+// od_hal_log; on nRF the record bytes never went through it at all (they go out via
+// tud_cdc_write), so there it was ALREADY nothing but an initialised flag. Making that
+// explicit is what removes the last Arduino type from this file.
+static bool s_armed = false;
 
 // Optional "is a host actually listening" predicate. With DTR low, TinyUSB flips the
 // TX FIFO to overwritable (cdcd_init -> tu_fifo_set_overwritable(&tx_ff, !dtr)), so
@@ -90,11 +114,11 @@ static SemaphoreHandle_t s_txLock = NULL;
 
 static const char level_chars[] = "EWID";
 
-void od_log_init(Stream *port) {
+void od_log_init(void) {
     if (s_txLock == NULL) {
         s_txLock = xSemaphoreCreateMutexStatic(&s_txLockStorage);
     }
-    s_port = port;
+    s_armed = true;
 }
 
 void od_log_set_ready_hook(bool (*fn)(void)) {
@@ -142,7 +166,7 @@ static void od_count_drop(bool feedBackoff) {
 // Free space in the port's TX buffer, without blocking on either target.
 static int od_port_room(void) {
 #ifdef TARGET_ESP32
-    return (s_port != NULL) ? s_port->availableForWrite() : 0;
+    return od_hal_log_room();
 #else
     return (int)tud_cdc_write_available();
 #endif
@@ -159,7 +183,7 @@ static int od_port_room(void) {
 // deliberately left exactly as it is today -- see od_emit().
 static bool od_port_write(const uint8_t *b, size_t n) {
 #ifdef TARGET_ESP32
-    return s_port->write(b, n) == n;
+    return od_hal_log_write(b, n) == n;
 #else
     return tud_cdc_write(b, n) == n;
 #endif
@@ -201,7 +225,7 @@ static bool od_port_wait_ready(int need, TickType_t start, TickType_t budget) {
 // a "[DROP: n] " tag may be spliced (the first byte after "] L: "), or -1 for a
 // partial line that must never carry one.
 static void od_emit(const char *text, int tagAt, bool newline) {
-    if (s_port == NULL) {
+    if (!s_armed) {
         return;
     }
     // Dark port: discard without counting. Nobody is listening, so there is no gap
@@ -307,12 +331,12 @@ static void od_emit(const char *text, int tagAt, bool newline) {
 }
 
 void _od_log(int level, const char *fmt, ...) {
-    if (s_port == NULL) {
+    if (!s_armed) {
         return;
     }
 
     char buf[256];
-    unsigned long ms = millis();
+    unsigned long ms = od_log_millis();
     unsigned long cycleCount = (unsigned long)getDeepSleepCount();
     int pos = snprintf(buf, sizeof(buf), "[%04lu.%03lu|C%lu] %c: ",
                         ms / 1000, ms % 1000,
@@ -334,7 +358,7 @@ void _od_log(int level, const char *fmt, ...) {
 }
 
 void od_log_raw(const char *fmt, ...) {
-    if (s_port == NULL) {
+    if (!s_armed) {
         return;
     }
 
@@ -371,7 +395,7 @@ void od_log_hex_line(char *buf, size_t bufSize, const char *label,
 }
 
 void od_log_flush(void) {
-    if (s_port == NULL) {
+    if (!s_armed) {
         return;
     }
 
@@ -381,7 +405,7 @@ void od_log_flush(void) {
     const bool locked = (s_txLock != NULL) &&
                         (xSemaphoreTake(s_txLock, pdMS_TO_TICKS(OD_LOG_BUDGET_MS)) == pdTRUE);
 #ifdef TARGET_ESP32
-    s_port->flush();
+    od_hal_log_flush();
 #else
     tud_cdc_write_flush();
 #endif
@@ -397,5 +421,11 @@ void od_log_flush(void) {
     // checkpoints and before a rail cut -- the places where losing the last line
     // costs the most and 5 ms costs nothing. 16 call sites, so at most ~80 ms across
     // a boot. Deliberately OUTSIDE the lock: 16 x 5 ms of hold is not worth adding.
-    delay(5);
+    //
+    // vTaskDelay, not Arduino's delay(). On ESP32 that is what delay() called anyway. On nRF
+    // it is a deliberate improvement rather than a translation: the Adafruit core's delay()
+    // flushes CDC first and returns EARLY without ever reaching vTaskDelay when that flush
+    // spans a tick, so a 5 ms settle could become no settle at all -- the same defect this
+    // file's own od_port_wait_ready() comment already documents for its wait loop.
+    vTaskDelay(pdMS_TO_TICKS(5));
 }

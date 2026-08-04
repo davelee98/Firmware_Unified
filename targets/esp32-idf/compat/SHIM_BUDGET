@@ -52,4 +52,38 @@
 #
 # The first three are marked OD-PORT at the call sites so the next sync from Firmware can see
 # why those lines differ from the reference tree.
-21
+#
+# 20 = phase C step 1, 2026-08-04: the logger. src/od_log.h stopped including <Arduino.h>.
+#
+# It was picked first because it is the keystone, not because it is the smallest. od_log.h is
+# included by nearly every file in the target, so for as long as it pulled in <Arduino.h> it
+# was handing the Arduino surface to files that did not ask for it -- and any of those could
+# have "dropped the shim" by deleting its own include while still compiling on od_log.h's.
+# That is the laundering this file exists to catch, and the only way to stop it is at the
+# source. Six files include od_log.h without a shim header of their own; five are already
+# deliberately Arduino-free (link_owner, session_guard, command_queue, both ble_transports),
+# which is what made the blast radius small enough to go first.
+#
+# The only Arduino thing in the logger was the `Stream *` it was handed. A Stream is a PORT,
+# not policy, so the port moved to hal/od_hal_log.{h,c} -- opened by compile-time board choice
+# (IDF UART driver for the *-extuart boards, stdout for USB-CDC) -- and od_log.cpp's `Stream *`
+# became a plain bool. On nRF it had ALREADY been nothing but an initialised flag: the record
+# bytes there go out through tud_cdc_write(), never through the Stream.
+#
+# compat/HardwareSerial.h is DELETED with this step: main.cpp's OPENDISPLAY_LOG_UART path was
+# its only user, and that code is now od_hal_log's UART backend. The shim lost a whole header,
+# not just a caller.
+#
+# ONE FILE MOVED THE OTHER WAY, and it is the honest part. main.cpp lost <HardwareSerial.h>
+# and GAINED an explicit <Arduino.h>, so it stays counted. It still calls Serial.*, delay(),
+# pinMode() and digitalWrite(), and has always got them transitively through main.h -- so
+# letting the HardwareSerial removal take it off the list would have scored a decrement for a
+# file that is arguably the most Arduino-dependent in the target. 21 -> 20, one file, not two.
+#
+# Note for the endgame: delay(), delayMicroseconds() and millis() are shimmed with C++ linkage
+# and defined out-of-line in arduino_compat.cpp because two VENDORED libraries need them
+# externally (bb_epaper.h declares `void delay(long)` unmangled; FastEPD's arduino_io.inl has
+# an extern millis() with 19 call sites and no definition). They are pinned by third_party/,
+# not by app code. Budget 0 will therefore NOT mean compat/ is deletable -- ratchet.sh's
+# report-only third-party list is the thing to watch for that.
+20

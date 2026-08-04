@@ -1,10 +1,23 @@
 #pragma once
 
-#include <Arduino.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+// TaskHandle_t, for od_log_set_loop_task(). FreeRTOS is not Arduino: both targets run it
+// natively, so this is a real dependency of the logger rather than shim residue. The paths
+// differ because the Adafruit nRF52 core ships FreeRTOS at the include root.
+#ifdef TARGET_ESP32
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#else
+#include <FreeRTOS.h>
+#include <task.h>
+#endif
 
 // Timestamped, allocation-free logging.
 //
-// Call od_log_init() once in setup() right after the serial port's begin().
+// Call od_log_init() once in setup(), after od_hal_log_open().
 // Levels are filtered at compile time via OD_LOG_LEVEL, so disabled levels
 // compile to nothing.
 
@@ -26,7 +39,11 @@
 #define od_log_debug(fmt, ...) do { if (OD_LOG_LEVEL >= OD_LOG_DEBUG) \
     _od_log(OD_LOG_DEBUG, fmt, ##__VA_ARGS__); } while (0)
 
-void od_log_init(Stream *port);
+// Was od_log_init(Stream *port). The port is now chosen and owned by od_hal_log (a compile-time
+// board decision -- see hal/od_hal_log.h), which is what let this header stop including
+// <Arduino.h>: `Stream *` was the only Arduino type it ever named. Open the port first; this
+// only arms the logger.
+void od_log_init(void);
 void _od_log(int level, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 void od_log_raw(const char *fmt, ...)         __attribute__((format(printf, 1, 2)));
 void od_log_flush(void);

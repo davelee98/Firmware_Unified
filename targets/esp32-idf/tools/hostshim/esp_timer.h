@@ -1,13 +1,15 @@
 // Minimal esp_timer shim so src/link_owner.cpp can be compiled and tested on the host.
 //
-// The reference firmware's link_owner.cpp takes its clock from Arduino's millis(), and the
-// hostshim next door fakes that. This target's copy reads esp_timer_get_time() instead -- see
-// the OD-PORT note at the top of src/link_owner.cpp for why (the Arduino shim is a demolition
-// schedule, and link_owner.cpp is the clearest shared/ promotion candidate in the target, where
-// Arduino is forbidden outright). So the fake clock has to be reachable through this API too.
+// The reference firmware's link_owner.cpp takes its clock from Arduino's millis(); this
+// target's copy reads esp_timer_get_time() instead -- see the OD-PORT note at the top of
+// src/link_owner.cpp for why (the Arduino shim is a demolition schedule, and link_owner.cpp is
+// the clearest shared/ promotion candidate in the target, where Arduino is forbidden outright).
+// So the fake clock has to be reachable through this API.
 //
-// It is backed by the SAME od_test_millis variable, deliberately: the test drives one clock and
-// both shims read it, so a case cannot accidentally advance one and not the other.
+// This is now the ONLY clock shim. There was a sibling hostshim/Arduino.h faking millis() over
+// the same od_test_millis variable, kept in step so a case could not advance one clock and not
+// the other; it was deleted in phase C step 1 (2026-08-04) once src/od_log.h stopped including
+// <Arduino.h> and nothing in the host build included Arduino at all.
 //
 // Test-only: never on an include path for a firmware build, which gets the real esp_timer from
 // ESP-IDF.
@@ -16,9 +18,10 @@
 
 #include <stdint.h>
 
-// Declared in Arduino.h next door and defined by the test. Read atomically for the same reason
-// stated there: the concurrency cases advance it from one thread while the code under test
-// reads it from another.
+// Defined by the test, which drives it directly -- including parking it just below a wrap
+// boundary, which is not reachable by waiting. Read atomically because the concurrency cases
+// advance it from one thread while the code under test reads it from another; a plain access
+// would be a data race in the HARNESS and would mask the race being hunted for in the code.
 extern volatile uint32_t od_test_millis;
 
 // Microseconds since boot, as ESP-IDF defines it. Scaling the millisecond clock up by 1000 is

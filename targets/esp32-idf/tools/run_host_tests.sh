@@ -13,8 +13,8 @@
 # Two sanitizer builds, matching the reference firmware's: ASan+UBSan, then TSan+UBSan as a
 # SEPARATE binary, because TSan and ASan cannot be combined.
 #
-# -I tools/hostshim supplies a fake clock -- Arduino.h and esp_timer.h over one backing
-# variable -- so the REAL src/link_owner.cpp and src/od_log.h compile unmodified. The test
+# -I tools/hostshim supplies a fake clock (esp_timer.h) and the two FreeRTOS types od_log.h
+# names, so the REAL src/link_owner.cpp and src/od_log.h compile unmodified. The test
 # drives that clock directly, which is the only way to park on the ~49.7-day wrap boundary the
 # wrap cases need; waiting is not an option.
 set -euo pipefail
@@ -23,7 +23,12 @@ cd "$(dirname "$0")/.."
 OUT="${TMPDIR:-/tmp}/od-host-tests"
 mkdir -p "$OUT"
 
-CXXFLAGS=(-std=c++17 -Wall -Wextra -Werror -O1 -I tools/hostshim -I src)
+# -DTARGET_ESP32 so od_log.h takes the same branch the firmware does. It is not a new
+# assumption: src/link_owner.cpp already includes "esp_timer.h" unconditionally (its OD-PORT off
+# Arduino millis()), and tools/hostshim/esp_timer.h is what satisfies it. Without the define,
+# od_log.h took its nRF arm and looked for the Adafruit core's <FreeRTOS.h> -- a header this
+# shim has no business providing, for a target this test does not compile.
+CXXFLAGS=(-std=c++17 -Wall -Wextra -Werror -O1 -DTARGET_ESP32 -I tools/hostshim -I src)
 SRCS=(tools/test_link_owner.cpp src/link_owner.cpp)
 
 # ThreadSanitizer aborts at startup with "unexpected memory mapping" under some kernels' ASLR
