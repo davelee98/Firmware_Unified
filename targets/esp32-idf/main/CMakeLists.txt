@@ -139,6 +139,13 @@ idf_component_register(
         bt nvs_flash esp_timer driver esp_wifi esp_event mbedtls spiffs vfs esp_adc
         # esp_lcd: FastEPD drives the S3 LCD peripheral for parallel e-paper
         esp_lcd esp_psram
+        # mdns: vendored under ../components/mdns (ESP-IDF dropped it from core in v5.0).
+        # Listed UNCONDITIONALLY even though only OPENDISPLAY_ENABLE_WIFI boards call it.
+        # Gating it on the board would make the component list board-dependent, and IDF
+        # resolves REQUIRES before the board fragment's defines exist; the boards that do
+        # not use it never reference a symbol, so the linker discards the archive and they
+        # pay nothing. Verified by comparing esp32-n4's image size across this change.
+        mdns
 )
 
 # Board defines from boards/<board>.cmake. These are the surviving half of the source repo's

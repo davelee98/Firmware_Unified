@@ -94,3 +94,46 @@ CONFIG_ESP_TASK_WDT_PANIC=y
 # PANIC while watching an idle task the reference never watched would not restore its
 # behaviour, it would invent a new reset source. The two settings are one decision.
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
+# ---------------------------------------------------------------------------------------
+# mDNS -- ADVERTISE ONLY. This device announces `_opendisplay._tcp` so Home Assistant can
+# find it; it NEVER resolves a name or browses for a service (decided 2026-08-04).
+# ---------------------------------------------------------------------------------------
+# The component has no responder-only build flag -- mdns_querier.c and mdns_browser.c compile
+# in regardless -- so "advertise only" is expressed here, in what the responder is sized for.
+# Every value below is a REDUCTION from the component's default; nothing is enabled.
+#
+# Applies on every board, including the five that compile no WiFi surface at all. That is
+# harmless: the component is only linked where main references it (see main/CMakeLists.txt).
+
+# ONE service: _opendisplay._tcp. Default is 10. Adding a second would need this raised, and
+# the wire contract (SECTION 9 rule 6) defines exactly one.
+CONFIG_MDNS_MAX_SERVICES=1
+
+# ONE interface: the WiFi station. Default is 3 (STA + AP + Ethernet). This device is never an
+# AP and has no Ethernet, and the count is static RAM in the responder's per-interface state.
+CONFIG_MDNS_MAX_INTERFACES=1
+CONFIG_MDNS_PREDEF_NETIF_STA=y
+CONFIG_MDNS_PREDEF_NETIF_AP=n
+
+# CONSOLE CLI DEFAULTS TO **y** UPSTREAM -- an interactive mdns command set on the device
+# console, with a `console` component dependency behind it. There is no console on a battery
+# e-paper tag, and a CLI that can add and remove service records is attack surface on a device
+# whose whole LAN authentication story is the TLS-PSK on the data port.
+CONFIG_MDNS_ENABLE_CONSOLE_CLI=n
+
+# One instance per service type. Default y allows several, which only costs bookkeeping here.
+CONFIG_MDNS_MULTIPLE_INSTANCE=n
+
+# Reverse (in-addr.arpa) lookups stay OFF -- already the default, stated because it is exactly
+# the "resolve" half of mDNS that this device does not do.
+CONFIG_MDNS_RESPOND_REVERSE_QUERIES=n
+
+# NOT SET, DELIBERATELY, and each is a measure-first item:
+#   CONFIG_MDNS_TASK_STACK_SIZE (4096) -- mDNS runs its own FreeRTOS task. Trim only against a
+#     measured high-water mark; a stack overflow here presents as a crash on an incoming query.
+#   CONFIG_MDNS_MEMORY_ALLOC_SPIRAM -- tempting on the S3, but the mDNS task also serves
+#     packets from the lwIP context, and moving its allocations to PSRAM has cache-coherency
+#     implications that need testing rather than reasoning.
+#   CONFIG_MDNS_TIMER_PERIOD_MS (100) -- the announcement/retransmit tick. Lengthening it is a
+#     radio-duty-cycle win on battery, but it also slows first discovery after a wake.
