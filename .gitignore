@@ -54,3 +54,9 @@ sdkconfig.old
 
 # Agent worktrees -- transient, and each is its own git repo. Never part of a commit here.
 .claude/worktrees/
+
+# IDF component-manager lock file. Generated because the vendored mdns component carries its
+# own idf_component.yml; it records only `idf` itself (nothing is fetched -- the component is
+# found locally), and it is REWRITTEN PER BOARD with that board's `target:` line, so committing
+# it would mean a diff on every build of a different board.
+dependencies.lock
