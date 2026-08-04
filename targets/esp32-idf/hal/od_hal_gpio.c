@@ -85,6 +85,18 @@ int od_hal_gpio_read(uint8_t cfg)
     return gpio_get_level((gpio_num_t)cfg);
 }
 
+/* ONE flag for both attach functions. Two would double-install: gpio_install_isr_service()
+ * returns ESP_ERR_INVALID_STATE when it is already up, which is harmless here but relies on
+ * IDF's behaviour rather than on this file being correct. */
+static void ensure_isr_service(void)
+{
+    static bool started = false;
+    if (!started) {
+        gpio_install_isr_service(0);
+        started = true;
+    }
+}
+
 static gpio_int_type_t edge_to_idf(od_hal_gpio_edge_t edge)
 {
     switch (edge) {
@@ -99,14 +111,7 @@ int od_hal_gpio_config_irq(uint8_t cfg, od_hal_gpio_edge_t edge, od_hal_gpio_irq
     if (!od_pin_valid(cfg) || handler == NULL) {
         return -1;
     }
-    /* Installed once. gpio_install_isr_service() returns ESP_ERR_INVALID_STATE if it is
-     * already up, which is not an error for us -- but the flag avoids relying on that, since
-     * another component may have installed it first with different flags. */
-    static bool isr_service_started = false;
-    if (!isr_service_started) {
-        gpio_install_isr_service(0);
-        isr_service_started = true;
-    }
+    ensure_isr_service();
     gpio_set_intr_type((gpio_num_t)cfg, edge_to_idf(edge));
     /* Remove before add: re-attaching a pin must REPLACE its handler rather than fail, which
      * is what the callers assume -- touch_input re-attaches on every controller re-init. */
@@ -116,6 +121,36 @@ int od_hal_gpio_config_irq(uint8_t cfg, od_hal_gpio_edge_t edge, od_hal_gpio_irq
     }
     gpio_intr_enable((gpio_num_t)cfg);
     return 0;
+}
+
+int od_hal_gpio_config_irq_arg(uint8_t cfg, od_hal_gpio_edge_t edge,
+                               od_hal_gpio_irq_arg_fn handler, void *arg)
+{
+    if (!od_pin_valid(cfg) || handler == NULL) {
+        return -1;
+    }
+    ensure_isr_service();
+    gpio_set_intr_type((gpio_num_t)cfg, edge_to_idf(edge));
+    gpio_isr_handler_remove((gpio_num_t)cfg);
+    if (gpio_isr_handler_add((gpio_num_t)cfg, handler, arg) != ESP_OK) {
+        return -1;
+    }
+    gpio_intr_enable((gpio_num_t)cfg);
+    return 0;
+}
+
+void od_hal_gpio_irq_enable(uint8_t cfg)
+{
+    if (od_pin_valid(cfg)) {
+        gpio_intr_enable((gpio_num_t)cfg);
+    }
+}
+
+void od_hal_gpio_irq_disable(uint8_t cfg)
+{
+    if (od_pin_valid(cfg)) {
+        gpio_intr_disable((gpio_num_t)cfg);
+    }
 }
 
 void od_hal_gpio_clear_irq(uint8_t cfg)

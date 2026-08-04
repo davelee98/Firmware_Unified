@@ -1,7 +1,7 @@
 #ifndef DEVICE_CONTROL_H
 #define DEVICE_CONTROL_H
 
-#include <Arduino.h>
+#include <stdint.h>   // was <Arduino.h>, which this header used for uint8_t alone
 
 void reboot();
 void processButtonEvents();

@@ -56,13 +56,16 @@ what licenses retiring the source repo:
 
 ### Known defects, measured on hardware
 
-1. **FastEPD writes no pixels to an IT8951 panel.** All three
-   `it8951WriteFramebuffer{1,2,4}Bit` functions have unpatched `#ifdef ARDUINO` guards (9
-   sites) that fall through to nothing under IDF: no data preamble, and the row loop builds
-   each line and discards it. Commands, `LD_IMG_END` and `DisplayArea` all still run, so the
-   panel refreshes whatever was already in its RAM and every call reports success.
-   `third_party/NOTICE.md` claims "every affected guard" was patched — that claim is wrong.
-   S3-only (FastEPD is S3-only and PSRAM-mandatory), and only on IT8951/parallel panels.
+1. ~~**FastEPD writes no pixels to an IT8951 panel.**~~ **FIXED 2026-08-04, NOT YET
+   HARDWARE-VERIFIED.** All three `it8951WriteFramebuffer{1,2,4}Bit` functions had unpatched
+   `#ifdef ARDUINO` guards (9 sites) that fell through to nothing under IDF: no data preamble,
+   and the row loop built each line and discarded it. Commands, `LD_IMG_END` and `DisplayArea`
+   all still ran, so the panel refreshed whatever was already in its RAM and every call
+   reported success. The nine guards now carry `OD_FASTEPD_IDF_SPI` like the six on the
+   command path; confirmed in preprocessed output, where all three writers emit live
+   `SPI.writeBytes` calls. **A green build proves nothing here** — the defect's signature was
+   that every call already reported success, so this stays listed until an IT8951 panel is seen
+   to render. S3-only, IT8951-over-SPI only; the parallel ED103 path never went through it.
 2. **`bbepWaitBusy` blocks the loop task.** It polls with a bare `delay(20)` inside
    `bb_ep.inl`, so `serviceBleTx()` cannot run for the duration. A legitimate multi-second
    refresh therefore holds queued BLE responses in the TX ring until it finishes; this was the

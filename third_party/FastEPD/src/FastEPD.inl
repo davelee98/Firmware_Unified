@@ -2196,7 +2196,8 @@ int iPitch;
     it8951LoadImgAreaStart(pState, (pState->iFlags & BB_PANEL_FLAG_MIRROR_X) ? IT8951_LDIMG_B_ENDIAN : IT8951_LDIMG_L_ENDIAN, IT8951_8BPP, 0, 0, iStartLine, pState->native_width/8, 1+(iEndLine-iStartLine));
    
     gpio_set_level((gpio_num_t)pState->u8CS, LOW);
-#ifdef ARDUINO
+/* OD-PATCH: see the OD-PATCH note at the head of it8951WriteData(). */
+#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)
     SPI.beginTransaction(SPISettings(pState->spi_frequency, MSBFIRST, SPI_MODE0));
     it8951WaitForReady(pState);
     SPI.transfer16(0x0000); // data preamble
@@ -2222,7 +2223,8 @@ int iPitch;
                 d[x] = ucMirror[s[x+1]];
             }
         }
-#ifdef ARDUINO
+/* OD-PATCH: see the OD-PATCH note at the head of it8951WriteData(). */
+#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)
         SPI.writeBytes(d, iPitch);
 #elif defined(__LINUX__)
         linux_spi_write(d, iPitch, pState->spi_frequency);
@@ -2232,7 +2234,8 @@ int iPitch;
         }
         s += iPitch;
     }
-#ifdef ARDUINO
+/* OD-PATCH: see the OD-PATCH note at the head of it8951WriteData(). */
+#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)
     SPI.endTransaction();
 #endif
     gpio_set_level((gpio_num_t)pState->u8CS, HIGH);
@@ -2260,7 +2263,8 @@ int iPitch;
 
     gpio_set_level((gpio_num_t)pState->u8CS, LOW);
     it8951WaitForReady(pState);
-#ifdef ARDUINO
+/* OD-PATCH: see the OD-PATCH note at the head of it8951WriteData(). */
+#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)
     SPI.beginTransaction(SPISettings(pState->spi_frequency, MSBFIRST, SPI_MODE0));
     SPI.transfer16(0x0000); // data preamble
 #elif defined(__LINUX__)
@@ -2283,7 +2287,8 @@ int iPitch;
                 d[x] = (s[x+1] >> 4) | (s[x+1] << 4);
             }
         }
-#ifdef ARDUINO
+/* OD-PATCH: see the OD-PATCH note at the head of it8951WriteData(). */
+#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)
         SPI.writeBytes(d, iPitch);
 #elif defined(__LINUX__)
         linux_spi_write(d, iPitch, pState->spi_frequency);
@@ -2293,7 +2298,8 @@ int iPitch;
         }
         s += iPitch;
     }
-#ifdef ARDUINO
+/* OD-PATCH: see the OD-PATCH note at the head of it8951WriteData(). */
+#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)
     SPI.endTransaction();
 #endif
     gpio_set_level((gpio_num_t)pState->u8CS, HIGH);
@@ -2320,7 +2326,8 @@ int iPitch;
 
     gpio_set_level((gpio_num_t)pState->u8CS, LOW);
     it8951WaitForReady(pState);
-#ifdef ARDUINO
+/* OD-PATCH: see the OD-PATCH note at the head of it8951WriteData(). */
+#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)
     SPI.beginTransaction(SPISettings(pState->spi_frequency, MSBFIRST, SPI_MODE0));
     SPI.transfer16(0x0000); // data preamble
 #elif defined(__LINUX__)
@@ -2345,7 +2352,8 @@ int iPitch;
                 d[x] = (b >> 6) | ((b >> 2) & 0xc) | ((b & 0xc) << 2) | ((b & 3) << 6);
             }
         }
-#ifdef ARDUINO
+/* OD-PATCH: see the OD-PATCH note at the head of it8951WriteData(). */
+#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)
         SPI.writeBytes(d, iPitch);
 #elif defined(__LINUX__)
         linux_spi_write(d, iPitch, pState->spi_frequency);
@@ -2356,7 +2364,8 @@ int iPitch;
         s += iPitch;
     }
 
-#ifdef ARDUINO
+/* OD-PATCH: see the OD-PATCH note at the head of it8951WriteData(). */
+#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)
     SPI.endTransaction();
 #endif
     gpio_set_level((gpio_num_t)pState->u8CS, HIGH);

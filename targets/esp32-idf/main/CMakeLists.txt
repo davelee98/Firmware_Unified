@@ -38,6 +38,7 @@ list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_nvs.c
                            ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_gpio.c
                            ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_time.c
                            ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_i2c.c
+                           ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_adc.c
                            ${CMAKE_CURRENT_LIST_DIR}/../ble/od_ble_nimble.cpp)
 
 # ble/od_ble_rx.cpp is GONE, not forgotten. It held od_ble_on_write(): the bounds check,

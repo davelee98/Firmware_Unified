@@ -11,6 +11,7 @@ void enterDeepSleep(bool force = false, uint16_t overrideSleepSeconds = 0);
 #endif
 
 #ifdef TARGET_NRF
+#include <Arduino.h>     // pinMode/attachInterrupt for the nRF arm; leaves at migration step 4
 #include <bluefruit.h>   // enterDFUMode() drives the SoftDevice teardown directly
 extern "C" {
 #include "nrf_soc.h"
@@ -20,7 +21,9 @@ extern "C" void bootloader_util_app_start(uint32_t start_addr);
 #ifdef TARGET_ESP32
 #include <esp_system.h>
 #include "driver/gpio.h"
-#include "esp32-hal-gpio.h"
+#include "od_hal_adc.h"
+#include "od_hal_gpio.h"
+#include "od_hal_time.h"
 #include "wifi_service.h"      // OPENDISPLAY_HAS_WIFI + opendisplay_lan_teardown()
 #endif
 
@@ -62,7 +65,7 @@ static void pollConfiguredPowerOffButtons() {
         if (!btn->initialized || !btn->power_off) {
             continue;
         }
-        bool pinState = digitalRead(btn->pin);
+        bool pinState = (od_hal_gpio_read(btn->pin) != 0);
         bool down = btn->inverted ? !pinState : pinState;
         if (!down) {
             s_pwrOffReleased[i] = true;
@@ -75,10 +78,10 @@ static void pollConfiguredPowerOffButtons() {
         }
         if (!s_pwrOffPressing[i]) {
             s_pwrOffPressing[i] = true;
-            s_pwrOffStartMs[i] = millis();
+            s_pwrOffStartMs[i] = od_hal_uptime_ms();
             continue;
         }
-        if (!s_pwrOffDone[i] && millis() - s_pwrOffStartMs[i] >= btn->power_off_hold_ms) {
+        if (!s_pwrOffDone[i] && od_hal_uptime_ms() - s_pwrOffStartMs[i] >= btn->power_off_hold_ms) {
             s_pwrOffDone[i] = true;
             passiveBuzzerPowerOffAlert();
             powerLatchTriggerOff();
@@ -140,7 +143,9 @@ static uint8_t   adcLadderCount = 0;
 // BinaryInputs.reserved[]; this only makes the SCALE comparable.
 static void adcLadderConfigurePin(uint8_t pin) {
 #if defined(TARGET_ESP32)
-    analogSetPinAttenuation(pin, ADC_11db);
+    // 12 dB, which is what Arduino's ADC_11db mapped to: IDF 5.x deprecated ADC_ATTEN_DB_11 in
+    // favour of DB_12 -- the same setting under a name that matches the silicon.
+    od_hal_adc_set_atten(pin, OD_ADC_ATTEN_12DB);
 #else
     (void)pin;
     analogReadResolution(12);
@@ -195,9 +200,17 @@ static void registerAdcLadder(const struct BinaryInputs* input) {
     l->press_count = 0;
     l->last_button_id = (uint8_t)(l->id_base & 0x07);
     l->last_press_time = 0;
-    pinMode(l->pin, INPUT);
-    (void)analogRead(l->pin);
+    od_hal_gpio_config_input(l->pin, /*pull_up=*/false, /*pull_down=*/false);
+    // A throwaway read, kept: it forces the channel to be configured before the attenuation is
+    // applied below, which is the order this was found working in.
+    (void)od_hal_adc_read(l->pin);
     adcLadderConfigurePin(l->pin);
+    if (!od_hal_adc_pin_readable(l->pin)) {
+        // One line at registration. Every later read returns 0, and the classifier puts 0 in
+        // its catch-all bottom bucket -- so the failure presents as the last button
+        // permanently pressed, not as nothing happening. See od_hal_adc.h.
+        od_log_warn("ADC ladder: pin %u is not an ADC1 input -- readings will be 0", l->pin);
+    }
     adcLadderCount++;
     od_log_info("ADC ladder: pin %u n %u idBase %u byteIdx %u", l->pin, n, l->id_base, l->byte_index);
 }
@@ -205,12 +218,12 @@ static void registerAdcLadder(const struct BinaryInputs* input) {
 static void pollAdcButtons() {
     if (adcLadderCount == 0) return;
     static uint32_t lastPoll = 0;
-    uint32_t now = millis();
+    uint32_t now = od_hal_uptime_ms();
     if (now - lastPoll < ADC_LADDER_POLL_MS) return;
     lastPoll = now;
     for (uint8_t i = 0; i < adcLadderCount; i++) {
         AdcLadder* l = &adcLadders[i];
-        int adc = analogRead(l->pin);
+        int adc = od_hal_adc_read(l->pin);
         int btn = classifyAdcLadder(adc, l);
         if (btn == l->candidate_button) {
             if (l->candidate_count < 255) l->candidate_count++;
@@ -263,16 +276,16 @@ static void esp32_ble_deinit_before_restart() {
     opendisplay_lan_teardown();
 #endif
     ble.stopAdvertising();
-    delay(200);
+    od_hal_delay_ms(200);
     ble.end();                    // clearAll: disables + releases the BT controller
-    delay(100);
+    od_hal_delay_ms(100);
     od_log_info("BLE deinitialized before restart");
 }
 #endif
 
 void reboot(){
     // Banner logged by the dispatcher (commandName() in communication.cpp).
-    delay(100);
+    od_hal_delay_ms(100);
 #ifdef TARGET_NRF
     NVIC_SystemReset();
 #endif
@@ -334,13 +347,13 @@ static void led_all_off(struct LedConfig* led) {
     bool invertGreen = (led->led_flags & 0x02) != 0;
     bool invertBlue = (led->led_flags & 0x04) != 0;
     if (led->led_1_r != 0xFF) {
-        digitalWrite(led->led_1_r, invertRed ? HIGH : LOW);
+        od_hal_gpio_write(led->led_1_r, invertRed);
     }
     if (led->led_2_g != 0xFF) {
-        digitalWrite(led->led_2_g, invertGreen ? HIGH : LOW);
+        od_hal_gpio_write(led->led_2_g, invertGreen);
     }
     if (led->led_3_b != 0xFF) {
-        digitalWrite(led->led_3_b, invertBlue ? HIGH : LOW);
+        od_hal_gpio_write(led->led_3_b, invertBlue);
     }
 }
 
@@ -365,7 +378,7 @@ static void led_schedule_delay_ms(uint16_t ms) {
         return;
     }
     s_led.waiting_delay = true;
-    s_led.delay_until_ms = millis() + ms;
+    s_led.delay_until_ms = od_hal_uptime_ms() + ms;
 }
 
 static void led_load_config(struct LedConfig* led) {
@@ -532,7 +545,7 @@ void processLedFlash() {
         return;
     }
     if (s_led.waiting_delay) {
-        if ((int32_t)(millis() - s_led.delay_until_ms) < 0) {
+        if ((int32_t)(od_hal_uptime_ms() - s_led.delay_until_ms) < 0) {
             return;
         }
         s_led.waiting_delay = false;
@@ -601,15 +614,15 @@ void processButtonEvents() {
     pollConfiguredPowerOffButtons();   // no-op unless the board declares a latch
     pollAdcButtons();                  // no-op off ESP32 (see the ADC ladder guard)
     if (buttonEventPending) {
-        noInterrupts();
+        od_hal_gpio_irq_lock();
         buttonEventPending = false;
         uint8_t changedButtonIndex = lastChangedButtonIndex;
         lastChangedButtonIndex = 0xFF;
-        interrupts();
+        od_hal_gpio_irq_unlock();
         od_log_debug("Button event pending: %u", changedButtonIndex);
         if (changedButtonIndex < MAX_BUTTONS && buttonStates[changedButtonIndex].initialized) {
             ButtonState* btn = &buttonStates[changedButtonIndex];
-            bool pinState = digitalRead(btn->pin);
+            bool pinState = (od_hal_gpio_read(btn->pin) != 0);
             bool logicalPressed = btn->inverted ? !pinState : pinState;
             od_log_debug("Pin state: %d, Logical pressed: %d, inverted: %d", pinState, logicalPressed, btn->inverted);
             uint8_t logicalState = logicalPressed ? 1 : 0;
@@ -638,7 +651,7 @@ void processButtonEvents() {
 
 static inline void ledFlashWrite(uint8_t pin, bool level) {
     if (pin != 0xFF) {
-        digitalWrite(pin, level ? HIGH : LOW);
+        od_hal_gpio_write(pin, level);
     }
 }
 
@@ -666,30 +679,32 @@ void flashLed(uint8_t color, uint8_t brightness) {
         ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 7) : (colorred >= 7));
         ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 7) : (colorgreen >= 7));
         ledFlashWrite(ledBluePin,invertBlue ? !(colorblue >= 3) : (colorblue >= 3));
-        delayMicroseconds(100);
+        od_hal_delay_us(100);
         ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 1) : (colorred >= 1));
         ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 1) : (colorgreen >= 1));
-        delayMicroseconds(100);
+        od_hal_delay_us(100);
         ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 6) : (colorred >= 6));
         ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 6) : (colorgreen >= 6));
         ledFlashWrite(ledBluePin,invertBlue ? !(colorblue >= 1) : (colorblue >= 1));
-        delayMicroseconds(100);
+        od_hal_delay_us(100);
         ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 2) : (colorred >= 2));
         ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 2) : (colorgreen >= 2));
-        delayMicroseconds(100);
+        od_hal_delay_us(100);
         ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 5) : (colorred >= 5));
         ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 5) : (colorgreen >= 5));
-        delayMicroseconds(100);
+        od_hal_delay_us(100);
         ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 3) : (colorred >= 3));
         ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 3) : (colorgreen >= 3));
         ledFlashWrite(ledBluePin,invertBlue ? !(colorblue >= 2) : (colorblue >= 2));
-        delayMicroseconds(100);
+        od_hal_delay_us(100);
         ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 4) : (colorred >= 4));
         ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 4) : (colorgreen >= 4));
-        delayMicroseconds(100);
-        ledFlashWrite(ledRedPin,invertRed ? HIGH : LOW);
-        ledFlashWrite(ledGreenPin,invertGreen ? HIGH : LOW);
-        ledFlashWrite(ledBluePin,invertBlue ? HIGH : LOW);
+        od_hal_delay_us(100);
+        // ledFlashWrite() takes a bool; HIGH/LOW here were Arduino's 1/0 spelt out, and the
+        // ternaries collapse to the invert flag itself. Same levels driven.
+        ledFlashWrite(ledRedPin, invertRed);
+        ledFlashWrite(ledGreenPin, invertGreen);
+        ledFlashWrite(ledBluePin, invertBlue);
     }
 }
 
@@ -700,7 +715,7 @@ void handleButtonISR(uint8_t buttonIndex) {
 #endif
     if (buttonIndex >= MAX_BUTTONS || !buttonStates[buttonIndex].initialized) return;
     ButtonState* btn = &buttonStates[buttonIndex];
-    bool pinState = digitalRead(btn->pin);
+    bool pinState = (od_hal_gpio_read(btn->pin) != 0);
     bool pressed = btn->inverted ? !pinState : pinState;
     uint8_t newState = pressed ? 1 : 0;
     if (newState != btn->current_state) {
@@ -721,7 +736,7 @@ void buttonISRGeneric() {
     for (uint8_t i = 0; i < buttonStateCount; i++) {
         if (buttonStates[i].initialized) {
             ButtonState* btn = &buttonStates[i];
-            bool pinState = digitalRead(btn->pin);
+            bool pinState = (od_hal_gpio_read(btn->pin) != 0);
             bool pressed = btn->inverted ? !pinState : pinState;
             uint8_t newState = pressed ? 1 : 0;
             if (newState != btn->current_state) {
@@ -788,21 +803,26 @@ void initButtons() {
             btn->inverted = (input->invert & (1 << pinIdx)) != 0;
             btn->power_off = (input->power_off_flags & (1 << pinIdx)) != 0;
             btn->power_off_hold_ms = instanceHoldMs;
-            pinMode(pin, INPUT);
             bool hasPullup = (input->pullups & (1 << pinIdx)) != 0;
 #ifdef TARGET_ESP32
             bool hasPulldown = (input->pulldowns & (1 << pinIdx)) != 0;
-            if (hasPullup) pinMode(pin, INPUT_PULLUP);
-            else if (hasPulldown) pinMode(pin, INPUT_PULLDOWN);
+            // One call where Arduino needed two: pinMode(INPUT) followed by a conditional
+            // re-pinMode with the pull. od_hal_gpio_config_input() takes both pulls, and
+            // asking for neither is the plain-INPUT case, so the intermediate configuration
+            // that existed only because Arduino had no combined form is gone. The pad ends in
+            // the same state.
+            od_hal_gpio_config_input(pin, hasPullup, hasPulldown);
 #elif defined(TARGET_NRF)
+            pinMode(pin, INPUT);
             if (hasPullup) pinMode(pin, INPUT_PULLUP);
 #endif
-            delay(10);
-            bool initialPinState = digitalRead(pin);
+            od_hal_delay_ms(10);
+            bool initialPinState = (od_hal_gpio_read(pin) != 0);
             bool initialPressed = btn->inverted ? !initialPinState : initialPinState;
             btn->current_state = initialPressed ? 1 : 0;
 #ifdef TARGET_ESP32
-            attachInterruptArg(pin, buttonISR, (void*)(uintptr_t)buttonStateCount, CHANGE);
+            od_hal_gpio_config_irq_arg(pin, OD_GPIO_EDGE_BOTH, buttonISR,
+                                       (void*)(uintptr_t)buttonStateCount);
 #elif defined(TARGET_NRF)
             attachInterrupt(pin, buttonISRGeneric, CHANGE);
 #endif
@@ -814,7 +834,7 @@ void initButtons() {
 #ifdef TARGET_ESP32
         for (uint8_t i = 0; i < buttonStateCount; i++) {
             if (buttonStates[i].initialized) {
-                gpio_intr_disable((gpio_num_t)digitalPinToGPIONumber(buttonStates[i].pin));
+                od_hal_gpio_irq_disable(buttonStates[i].pin);
             }
         }
 #elif defined(TARGET_NRF)
@@ -824,13 +844,13 @@ void initButtons() {
             }
         }
 #endif
-        delay(50);
+        od_hal_delay_ms(50);
         buttonEventPending = false;
         lastChangedButtonIndex = 0xFF;
         for (uint8_t i = 0; i < buttonStateCount; i++) {
             if (!buttonStates[i].initialized) continue;
             ButtonState* btn = &buttonStates[i];
-            bool pinState = digitalRead(btn->pin);
+            bool pinState = (od_hal_gpio_read(btn->pin) != 0);
             bool initialPressed = btn->inverted ? !pinState : pinState;
             btn->current_state = initialPressed ? 1 : 0;
             btn->press_count = 0;
@@ -838,7 +858,7 @@ void initButtons() {
 #ifdef TARGET_ESP32
         for (uint8_t i = 0; i < buttonStateCount; i++) {
             if (buttonStates[i].initialized) {
-                gpio_intr_enable((gpio_num_t)digitalPinToGPIONumber(buttonStates[i].pin));
+                od_hal_gpio_irq_enable(buttonStates[i].pin);
             }
         }
 #elif defined(TARGET_NRF)
@@ -862,7 +882,7 @@ void enterDFUMode() {
     if (Bluefruit.connected()) {
         od_log_info("Disconnecting BLE...");
         Bluefruit.disconnect(Bluefruit.connHandle());
-        delay(100);
+        od_hal_delay_ms(100);
     }
 
     sd_power_gpregret_clr(0, 0xFF);
@@ -886,7 +906,7 @@ void enterDFUMode() {
 
 #ifdef TARGET_ESP32
     od_log_info("ESP32: Rebooting (OTA typically handled via WiFi)");
-    delay(100);
+    od_hal_delay_ms(100);
     esp32_ble_deinit_before_restart();
     esp_restart();
 #endif
@@ -951,7 +971,7 @@ void handlePowerOffCommand(const uint8_t* payload, uint16_t payloadLen) {
         // On latch HW the rail usually drops before the ACK is actually transmitted.
         uint8_t ok[] = {RESP_ACK, RESP_POWER_OFF, 0x00, 0x00};
         sendResponse(ok, sizeof(ok));
-        delay(100);
+        od_hal_delay_ms(100);
         powerLatchPowerOff();
         return;
     }

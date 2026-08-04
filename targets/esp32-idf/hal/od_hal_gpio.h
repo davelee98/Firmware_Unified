@@ -81,8 +81,25 @@ typedef void (*od_hal_gpio_irq_fn)(void);
 
 int  od_hal_gpio_config_irq(uint8_t cfg, od_hal_gpio_edge_t edge, od_hal_gpio_irq_fn handler);
 
+/* Same, with an opaque argument handed back to the handler. Arduino's attachInterruptArg().
+ * device_control.cpp uses it to give each button ISR its own index, which is what lets four
+ * buttons share one handler instead of needing four near-identical ISRs -- the shape
+ * touch_input.cpp was stuck with. */
+typedef void (*od_hal_gpio_irq_arg_fn)(void *arg);
+
+int  od_hal_gpio_config_irq_arg(uint8_t cfg, od_hal_gpio_edge_t edge,
+                                od_hal_gpio_irq_arg_fn handler, void *arg);
+
 /* Detaches and disables. Safe on a pin that was never attached. */
 void od_hal_gpio_clear_irq(uint8_t cfg);
+
+/* Mask/unmask WITHOUT detaching the handler. Distinct from clear_irq() because the caller that
+ * needs it -- device_control.cpp's button re-baselining -- disables every button interrupt,
+ * settles, re-reads the pin states, and re-enables. Detaching and re-attaching instead would
+ * discard the handler and its argument, and re-attaching is where a wrong index would land a
+ * button's events on its neighbour. */
+void od_hal_gpio_irq_enable(uint8_t cfg);
+void od_hal_gpio_irq_disable(uint8_t cfg);
 
 /* Global interrupt lock. portDISABLE_INTERRUPTS is PER-CORE on ESP32, which is not the same
  * guarantee Arduino's noInterrupts() implied -- these call sites need auditing when the code

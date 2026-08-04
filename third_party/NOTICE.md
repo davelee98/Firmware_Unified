@@ -157,12 +157,25 @@ The consequences were invisible to the build and to the boot log:
 IT8951-over-SPI panel is affected; the parallel ED103 path drives the S3 LCD peripheral and
 never went through this code.
 
-**The patch.** Every affected guard becomes
+**The patch.** All 15 guarded SPI blocks become
 `#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)`, and
 `targets/esp32-idf/main/CMakeLists.txt` sets `OD_FASTEPD_IDF_SPI=1` on `FastEPD.cpp` alone.
 The Arduino branch is reused verbatim because `targets/esp32-idf/compat/SPI.h` provides exactly
 that API over IDF's `spi_master`. Patched sites are marked `OD-PATCH` and all point at the
 explanatory note on `it8951WriteData()`.
+
+> **This section previously claimed "every affected guard" when only six were patched**, and
+> `targets/esp32-idf/README.md` § "Known defects" was right to call the claim wrong. The six
+> covered the command/data/read path — `it8951WriteCmdCode`, `it8951WriteData`,
+> `it8951WriteNData`, `it8951ReadData`, `it8951ReadNData`, and `SPI.begin` in
+> `bbepInitIT8951`. The **nine** in `it8951WriteFramebuffer{1,2,4}Bit` — three each: open
+> transaction, `SPI.writeBytes(d, iPitch)`, close transaction — were missed, which is exactly
+> the set that carries pixels. The result was a panel that accepted every command, performed a
+> real refresh, reported success, and displayed whatever was already in its RAM.
+>
+> Completed 2026-08-04; the count above is now the measured total, not a summary word.
+> Verified in preprocessed output rather than by reading the source: all three writers emit
+> live `SPI.writeBytes` calls where they previously preprocessed to an empty row loop.
 
 **Why not just define `ARDUINO`.** Tried, and rejected: it also selects FastEPD's Arduino
 font/`Print`/`PROGMEM` surface (`pgm_read_*`, `memcpy_P`, `ledcAttach`, `TwoWire::setTimeout`)

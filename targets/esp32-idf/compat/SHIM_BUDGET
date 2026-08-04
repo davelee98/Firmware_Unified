@@ -245,4 +245,50 @@
 # NOT hardware-verified, and touch is the subsystem where that is hardest to reason about from
 # a build: an address-selection sequence that comes out wrong produces a controller that simply
 # never answers, which looks identical to absent hardware.
-13
+
+# 12 = phase C step 7, 2026-08-04: src/device_control.cpp -- buttons, LEDs, the ADC ladder and
+# DFU entry -- plus a new hal/od_hal_adc.{h,c} and the rest of the GPIO interrupt surface.
+#
+# ONE FILE LEAVES THE COUNT, NOT TWO, and the same rule as buzzer_hw.cpp is why.
+# device_control.h drops <Arduino.h>, which it used for uint8_t alone, and leaves.
+# device_control.cpp's ESP32 half is now entirely od_hal_adc/od_hal_gpio/od_hal_time -- its
+# only shim header, esp32-hal-gpio.h, is gone -- but its TARGET_NRF arm still calls
+# pinMode/attachInterrupt/detachInterrupt, so it GAINS a guarded <Arduino.h> and stays counted.
+# 13 -> 12. The alternative was a decrement for a file that still names Arduino, which is the
+# laundering this file exists to catch.
+#
+# hal/od_hal_adc is NOT in docs/SHARED_API_DESIGN.md at all -- the core does not read analogue
+# inputs. It exists because two TARGET drivers do (this file's button ladder and
+# display_service.cpp's battery sense) and IDF's oneshot driver has ONE ADC1 unit handle:
+# adc_oneshot_new_unit() on an already-open unit fails, so two owners would mean whichever
+# initialised second silently read nothing. Same forced-consolidation as step 5's I2C bus. The
+# shim's analogRead/analogSetPinAttenuation/analogReadResolution are now forwarders, because
+# display_service.cpp still calls them until step 10.
+#
+# WHY THAT MATTERS MORE HERE THAN IT LOOKS. Both callers turn a reading into something a host
+# believes. readBatteryVoltageUncached() scales it and publishes it in the MSD advert, so 0
+# becomes a plausible 0.0 V rather than the -1.0 "unknown" the same function returns when no
+# sense pin is configured. The ladder classifies 0 into its catch-all bottom bucket, which
+# reads as the last button permanently pressed. That is exactly what the original `return 0`
+# ADC stub produced, and it is why od_hal_adc exposes pin_readable() as a separate question
+# instead of leaving callers to infer failure from a value that is also a legal reading. The
+# ladder now warns once at registration when its pin is not ADC1-capable.
+#
+# ADC1 ONLY, carried across deliberately: ADC2 shares hardware with the WiFi radio on
+# ESP32/S2/S3 and reads fail with ESP_ERR_TIMEOUT whenever WiFi is up, which these boards run.
+#
+# The GPIO HAL gained config_irq_arg() -- Arduino's attachInterruptArg, which is what lets four
+# buttons share one ISR instead of the four near-identical ones touch_input.cpp was stuck with
+# -- and irq_enable/irq_disable, which MASK without detaching. That distinction is load-bearing
+# for this file: its button re-baselining disables every button interrupt, settles, re-reads the
+# pins and re-enables. Detaching instead would discard each handler AND its index argument, and
+# re-attaching is where a wrong index lands one button's events on its neighbour.
+#
+# One simplification worth naming, since it removes a state the pad used to pass through:
+# `pinMode(pin, INPUT)` followed by a conditional `pinMode(pin, INPUT_PULLUP/PULLDOWN)` became
+# a single od_hal_gpio_config_input(pin, pullup, pulldown). The intermediate pull-less
+# configuration existed only because Arduino had no combined form. The pad ends in the same
+# state.
+#
+# NOT hardware-verified. Buttons, LEDs, battery voltage and DFU entry all sit behind this.
+12
