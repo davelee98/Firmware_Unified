@@ -7,6 +7,7 @@
 #include "encryption.h"
 #include "structs.h"
 #include "od_log.h"
+#include <stdarg.h>
 #include "ble_transport.h"
 #include "link_owner.h"
 #include <Arduino.h>
@@ -43,21 +44,33 @@ extern bool wifiServerConnected;
 // above) so the pointer type is checked against its definition in main.h.
 extern uint8_t msd_payload[16];
 
-// This file builds its log lines with Arduino String concatenation, while the rest
-// of the firmware logs printf-style through od_log_*. Rather than reflow 60-odd
-// call sites into format strings, funnel them through one adapter and route by the
-// message's own ERROR:/WARNING: prefix so the intended level survives. The String
-// is built by the caller either way, so this adds no allocation the call sites did
-// not already make -- and the EVENT-CONTEXT RULE below still forbids calling it
-// from a WiFi event callback.
-static void lanLog(const String& message, bool newLine = true) {
-    (void)newLine;
-    if (message.startsWith("ERROR")) {
-        od_log_error("%s", message.c_str());
-    } else if (message.startsWith("WARNING")) {
-        od_log_warn("%s", message.c_str());
+// Printf-style, routed by the message's own ERROR:/WARNING: prefix so the intended level
+// survives -- the same routing this had when it took an Arduino String.
+//
+// It used to take `const String&`, and this comment used to argue that reflowing 60-odd call
+// sites into format strings was not worth it. It was: String accounted for 53 of this file's
+// Arduino uses -- the single largest reason it could not come off the shim -- and every one of
+// them was building a log line. Nothing else in the firmware logs this way.
+//
+// The format attribute is why this is one variadic rather than snprintf at each site: GCC now
+// checks all 67 calls, so a specifier that does not match its argument is a BUILD error rather
+// than a garbage line discovered on hardware.
+//
+// The EVENT-CONTEXT RULE below still forbids calling this from a WiFi event callback.
+__attribute__((format(printf, 1, 2)))
+static void lanLog(const char* fmt, ...) {
+    char buf[192];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
+    if (strncmp(buf, "ERROR", 5) == 0) {
+        od_log_error("%s", buf);
+    } else if (strncmp(buf, "WARNING", 7) == 0) {
+        od_log_warn("%s", buf);
     } else {
-        od_log_info("%s", message.c_str());
+        od_log_info("%s", buf);
     }
 }
 
@@ -148,11 +161,20 @@ static int tls_bio_recv(void* ctx, unsigned char* buf, size_t len) {
 // (CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN=16384, asymmetric length not set), which is the
 // dominant failure mode once WiFi + BLE coex and the static buffers have taken their cut.
 // Append this to any TLS failure so the log says whether it was OOM and by how much.
-static String tlsFailNote(int ret) {
-    const String code = (ret < 0) ? ("-0x" + String((unsigned)(-ret), HEX)) : String(ret);
-    return String(" (ret=") + code +
-           ", internal free=" + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL)) +
-           ", largest block=" + String((unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)) + ")";
+// Returns `buf` so it can be used inline as a %s argument. mbedTLS error codes are negative
+// and conventionally written as -0xNNNN, which is why the sign is handled explicitly rather
+// than left to %d -- "-0x7280" is greppable against the mbedTLS headers and "-29312" is not.
+static const char* tlsFailNote(int ret, char* buf, size_t n) {
+    char code[16];
+    if (ret < 0) {
+        snprintf(code, sizeof(code), "-0x%X", (unsigned)(-ret));
+    } else {
+        snprintf(code, sizeof(code), "%d", ret);
+    }
+    snprintf(buf, n, " (ret=%s, internal free=%u, largest block=%u)", code,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    return buf;
 }
 
 // -------------------------------------------- TLS record pre-reservation ---
@@ -208,9 +230,9 @@ static void* od_tls_calloc(size_t n, size_t size) {
         static bool warned = false;
         if (!warned) {
             warned = true;
-            lanLog("WARNING: TLS alloc " + String((unsigned)total) +
-                        " B not served from the reserved pool (slot " +
-                        String((unsigned)OD_TLS_RECORD_SLOT_SIZE) + " B) -- falling back to heap");
+            lanLog("WARNING: TLS alloc %u B not served from the reserved pool (slot %u B) "
+                   "-- falling back to heap",
+                   (unsigned)total, (unsigned)OD_TLS_RECORD_SLOT_SIZE);
         }
     }
     return heap_caps_calloc(n, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -245,10 +267,10 @@ void od_tls_reserve_records(void) {
     // and od_tls_calloc falls back to the heap for the rest.
     mbedtls_platform_set_calloc_free(od_tls_calloc, od_tls_free);
     s_tlsAllocHooked = true;
-    lanLog("TLS: reserved " + String(got) + "/" + String((int)OD_TLS_RECORD_SLOTS) +
-                " record slots of " + String((unsigned)OD_TLS_RECORD_SLOT_SIZE) + " B" +
-                ", internal free=" + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL)) +
-                ", largest block=" + String((unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+    lanLog("TLS: reserved %d/%d record slots of %u B, internal free=%u, largest block=%u",
+           (int)got, (int)OD_TLS_RECORD_SLOTS, (unsigned)OD_TLS_RECORD_SLOT_SIZE,
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     if (got < OD_TLS_RECORD_SLOTS) {
         lanLog("WARNING: TLS record reservation incomplete -- ssl_setup may still fail");
     }
@@ -270,10 +292,10 @@ void odLanReserveRxBuffer(void) {
         lanLog("ERROR: LAN RX buffer reservation failed -- LAN transport will not start");
         return;
     }
-    lanLog("LAN: reserved RX buffer " + String((unsigned)OD_LAN_RX_BUFFER_SIZE) + " B in " +
-                String(inPsram ? "PSRAM" : "DRAM") +
-                ", internal free=" + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL)) +
-                ", largest block=" + String((unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+    lanLog("LAN: reserved RX buffer %u B in %s, internal free=%u, largest block=%u",
+           (unsigned)OD_LAN_RX_BUFFER_SIZE, inPsram ? "PSRAM" : "DRAM",
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     if (!inPsram) {
         // The only signal that this board's PSRAM is absent or dead:
         // CONFIG_SPIRAM_IGNORE_NOTFOUND=1 lets it boot silently. No reclaim here.
@@ -299,14 +321,16 @@ static bool tlsEnsureConfig(void) {
     int rc = mbedtls_ctr_drbg_seed(&tlsDrbg, mbedtls_entropy_func, &tlsEntropy,
                                    reinterpret_cast<const unsigned char*>(pers), strlen(pers));
     if (rc != 0) {
-        lanLog("ERROR: TLS RNG seed failed" + tlsFailNote(rc));
+        char note[128];
+        lanLog("ERROR: TLS RNG seed failed%s", tlsFailNote(rc, note, sizeof(note)));
         return false;
     }
     rc = mbedtls_ssl_config_defaults(&tlsConf, MBEDTLS_SSL_IS_SERVER,
                                      MBEDTLS_SSL_TRANSPORT_STREAM,
                                      MBEDTLS_SSL_PRESET_DEFAULT);
     if (rc != 0) {
-        lanLog("ERROR: TLS config defaults failed" + tlsFailNote(rc));
+        char note[128];
+        lanLog("ERROR: TLS config defaults failed%s", tlsFailNote(rc, note, sizeof(note)));
         return false;
     }
     mbedtls_ssl_conf_rng(&tlsConf, mbedtls_ctr_drbg_random, &tlsDrbg);
@@ -315,7 +339,8 @@ static bool tlsEnsureConfig(void) {
                               reinterpret_cast<const unsigned char*>(kTlsPskIdentity),
                               strlen(kTlsPskIdentity));
     if (rc != 0) {
-        lanLog("ERROR: TLS conf_psk failed" + tlsFailNote(rc));
+        char note[128];
+        lanLog("ERROR: TLS conf_psk failed%s", tlsFailNote(rc, note, sizeof(note)));
         return false;
     }
     tlsInited = true;
@@ -338,7 +363,8 @@ static bool tlsBeginSession(void) {
     if (rc != 0) {
         // -0x7F00 == MBEDTLS_ERR_SSL_ALLOC_FAILED: the record buffers did not fit in
         // internal DRAM. Compare "largest block" against ~16.4 KB in the note above.
-        lanLog("ERROR: TLS ssl_setup failed" + tlsFailNote(rc));
+        char note[128];
+        lanLog("ERROR: TLS ssl_setup failed%s", tlsFailNote(rc, note, sizeof(note)));
         mbedtls_ssl_free(&tlsSsl);
         return false;
     }
@@ -371,10 +397,10 @@ void opendisplay_lan_send_frame(const uint8_t* payload, uint16_t len) {
         const uint16_t total = (uint16_t)(len + 2u);
         if (tlsMode) {
             if (mbedtls_ssl_write(&tlsSsl, lanTxFrame, total) < 0) {
-                lanLog("ERROR: TLS LAN response write failed", true);
+                lanLog("ERROR: TLS LAN response write failed");
             }
         } else if (wifiClient.write(lanTxFrame, total) != total) {
-            lanLog("ERROR: LAN response write incomplete", true);
+            lanLog("ERROR: LAN response write incomplete");
         }
         return;
     }
@@ -385,12 +411,12 @@ void opendisplay_lan_send_frame(const uint8_t* payload, uint16_t len) {
     if (tlsMode) {
         if (mbedtls_ssl_write(&tlsSsl, hdr, 2) < 0 ||
             mbedtls_ssl_write(&tlsSsl, payload, len) < 0) {
-            lanLog("ERROR: TLS LAN response write failed", true);
+            lanLog("ERROR: TLS LAN response write failed");
         }
         return;
     }
     if (wifiClient.write(hdr, 2) != 2 || wifiClient.write(payload, len) != len) {
-        lanLog("ERROR: LAN response write incomplete", true);
+        lanLog("ERROR: LAN response write incomplete");
     }
 }
 
@@ -446,7 +472,7 @@ static void restartLanService(void) {
         return;
     }
     uint16_t port = lanActivePort();
-    lanLog("mDNS: " + deviceName + ".local");
+    lanLog("mDNS: %s.local", deviceName.c_str());
     MDNS.addService("opendisplay", "tcp", port);
     // F1 -- identity/capability TXT keys (SECTION 9 rule 6, ADDITIVE to `msd`).
     String mac = advertisedBleMacLower();
@@ -466,8 +492,8 @@ static void restartLanService(void) {
     snprintf(idhex, sizeof(idhex), "%02x%02x%02x%02x", did[0], did[1], did[2], did[3]);
     MDNS.addServiceTxt("opendisplay", "tcp", "id", static_cast<const char*>(idhex));  // OPTIONAL
     MDNS.addServiceTxt("opendisplay", "tcp", "pv", OD_PROTOCOL_VERSION_STR); // OPTIONAL
-    lanLog("mDNS: _opendisplay._tcp port " + String(port) +
-                " tls=" + (isEncryptionEnabled() ? "1" : "0") + " mac=" + mac);
+    lanLog("mDNS: _opendisplay._tcp port %u tls=%s mac=%s",
+           (unsigned)port, isEncryptionEnabled() ? "1" : "0", mac.c_str());
     opendisplay_mdns_update_msd_txt();
 }
 
@@ -482,8 +508,8 @@ static void startLanServer(void) {
     tlsMode = isEncryptionEnabled();
     uint16_t port = lanActivePort();
     wifiServer.begin(port);
-    lanLog(String(tlsMode ? "TLS-PSK" : "Plaintext") +
-                " LAN server listening on port " + String(port));
+    lanLog("%s LAN server listening on port %u",
+           tlsMode ? "TLS-PSK" : "Plaintext", (unsigned)port);
     restartLanService();
 }
 
@@ -571,7 +597,7 @@ static void lanApplyBestApSelection(void) {
 
 static void lanCacheInvalidate(const char* why) {
     if (s_cachedValid) {
-        lanLog(String("WiFi: AP cache cleared (") + why + ") -- next connect will scan");
+        lanLog("WiFi: AP cache cleared (%s) -- next connect will scan", why);
     }
     s_cachedValid = false;
     s_cachedChannel = 0;
@@ -595,8 +621,7 @@ static void lanBeginConnect(void) {
         snprintf(b, sizeof(b), "%02X:%02X:%02X:%02X:%02X:%02X",
                  s_cachedBssid[0], s_cachedBssid[1], s_cachedBssid[2],
                  s_cachedBssid[3], s_cachedBssid[4], s_cachedBssid[5]);
-        lanLog("WiFi: connecting to cached AP " + String(b) +
-                    " ch " + String((int)s_cachedChannel) + " (no scan)");
+        lanLog("WiFi: connecting to cached AP %s ch %d (no scan)", b, (int)s_cachedChannel);
         WiFi.begin(wifiSsid, wifiPassword, (int32_t)s_cachedChannel, s_cachedBssid);
         return;
     }
@@ -626,8 +651,8 @@ static void ensureRoamEventRegistered(void) {
         return;
     }
     // Always report the code -- "could not register" with no reason is undiagnosable.
-    lanLog(String("WiFi: RSSI-low handler register failed (") + esp_err_to_name(rc) +
-                "); will retry on next association");
+    lanLog("WiFi: RSSI-low handler register failed (%s); will retry on next association",
+           esp_err_to_name(rc));
 }
 
 // One-shot: re-arm after every event and after every association.
@@ -635,7 +660,7 @@ static void lanArmRssiThreshold(void) {
     ensureRoamEventRegistered();   // no point arming a threshold nothing listens for
     esp_err_t rc = esp_wifi_set_rssi_threshold(OD_LAN_ROAM_RSSI_THRESHOLD);
     if (rc != ESP_OK) {
-        lanLog("WiFi: RSSI threshold arm failed (" + String((int)rc) + ")");
+        lanLog("WiFi: RSSI threshold arm failed (%d)", (int)rc);
     }
 }
 
@@ -702,11 +727,11 @@ static void registerWiFiDiagEvents(void) {
 static void serviceWifiEventFollowUp(void) {
     if (assocNoticePending) {
         assocNoticePending = false;
-        lanLog("WiFi event: associated (channel " + String((int)s_lastAssocChannel) + ")");
+        lanLog("WiFi event: associated (channel %d)", (int)s_lastAssocChannel);
     }
     if (disconnectNoticePending) {
         disconnectNoticePending = false;
-        lanLog("WiFi event: disconnected, reason " + String((int)s_lastDisconnectReason));
+        lanLog("WiFi event: disconnected, reason %d", (int)s_lastDisconnectReason);
     }
     if (cacheFailPending) {
         cacheFailPending = false;
@@ -714,15 +739,19 @@ static void serviceWifiEventFollowUp(void) {
     }
     if (rssiLowNoticePending) {
         rssiLowNoticePending = false;
-        lanLog("WiFi: RSSI " + String((int)s_lastRssiLowDbm) + " dBm below " +
-                    String(OD_LAN_ROAM_RSSI_THRESHOLD) + " dBm -- roam queued (deferred to idle)");
+        lanLog("WiFi: RSSI %d dBm below %d dBm -- roam queued (deferred to idle)",
+               (int)s_lastRssiLowDbm, (int)OD_LAN_ROAM_RSSI_THRESHOLD);
         lanArmRssiThreshold();   // one-shot: re-arm so a deferred roam still re-triggers
     }
     if (gotIpPending) {
         gotIpPending = false;
-        lanLog("WiFi event: got IP " + IPAddress((uint32_t)s_lastGotIp).toString() +
-                    ", RSSI " + String(WiFi.RSSI()) + " dBm, ch " + String(WiFi.channel()) +
-                    ", BSSID " + WiFi.BSSIDstr());
+        {
+            const uint32_t ipRaw = (uint32_t)s_lastGotIp;
+            lanLog("WiFi event: got IP %u.%u.%u.%u, RSSI %d dBm, ch %d, BSSID %s",
+                   (unsigned)(ipRaw & 0xFF), (unsigned)((ipRaw >> 8) & 0xFF),
+                   (unsigned)((ipRaw >> 16) & 0xFF), (unsigned)((ipRaw >> 24) & 0xFF),
+                   (int)WiFi.RSSI(), (int)WiFi.channel(), WiFi.BSSIDstr().c_str());
+        }
         lanCacheStoreCurrentAp();   // remember this AP for the next deep-sleep wake
         lanArmRssiThreshold();      // also (re)registers the RSSI-low handler
     }
@@ -787,12 +816,12 @@ void initWiFi(bool waitForConnection) {
         return;
     }
     // Do not log the SSID or password (credentials); log only presence/length.
-    lanLog("WiFi: connecting to configured SSID (len " + String(strlen(wifiSsid)) + ")");
+    lanLog("WiFi: connecting to configured SSID (len %u)", (unsigned)strlen(wifiSsid));
     registerWiFiDiagEvents();
     WiFi.setAutoReconnect(true);
     wifiSsid[32] = '\0';
     wifiPassword[32] = '\0';
-    lanLog("Encryption type: 0x" + String(wifiEncryptionType, HEX));
+    lanLog("Encryption type: 0x%X", (unsigned)wifiEncryptionType);
     wifiConnected = false;
     wifiInitialized = true;
     // Cached BSSID when RTC memory still holds one (the deep-sleep-wake fast path:
@@ -815,9 +844,9 @@ void initWiFi(bool waitForConnection) {
         while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt < timeoutPerRetry)) {
             delay(500);
             wl_status_t status = WiFi.status();
-            lanLog("WiFi status: " + String(status));
+            lanLog("WiFi status: %d", (int)status);
             if (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL) {
-                lanLog("Connection failed immediately (Status: " + String(status) + ")");
+                lanLog("Connection failed immediately (Status: %d)", (int)status);
                 abortCurrentRetry = true;
                 break;
             }
@@ -827,7 +856,7 @@ void initWiFi(bool waitForConnection) {
             break;
         }
         if (!abortCurrentRetry) {
-            lanLog("WiFi attempt " + String(retry + 1) + " timed out");
+            lanLog("WiFi attempt %d timed out", (int)(retry + 1));
         }
         if (retry < maxRetries - 1) {
             delay(2000);
@@ -836,7 +865,7 @@ void initWiFi(bool waitForConnection) {
     if (WiFi.status() == WL_CONNECTED) {
         wifiConnected = true;
         lanLog("=== WiFi connected ===");
-        lanLog("IP: " + WiFi.localIP().toString());
+        lanLog("IP: %s", WiFi.localIP().toString().c_str());
         startLanServer();
     } else {
         wifiConnected = false;
@@ -979,8 +1008,8 @@ static void admitOrRefuseLanClient(WiFiClient& incoming) {
     // them apart) landed in it.
     const LinkId held = linkOwnerId();
     if (held.who != OWNER_NONE) {
-        lanLog("LAN: refusing new client, slot held by " +
-               String(held.who == OWNER_BLE ? "BLE" : "LAN"));
+        lanLog("LAN: refusing new client, slot held by %s",
+               held.who == OWNER_BLE ? "BLE" : "LAN");
         incoming.stop();
         return;
     }
@@ -1016,7 +1045,7 @@ static void admitOrRefuseLanClient(WiFiClient& incoming) {
         return;
     }
 
-    lanLog("LAN client connected from " + wifiClient.remoteIP().toString());
+    lanLog("LAN client connected from %s", wifiClient.remoteIP().toString().c_str());
     if (tlsMode && !tlsBeginSession()) {
         lanLog("LAN: TLS session start failed, dropping");
         disconnectWiFiServer();
@@ -1031,9 +1060,9 @@ void handleWiFiServer() {
     if (wifiInitialized && WiFi.status() == WL_CONNECTED && !wifiConnected) {
         wifiConnected = true;
         lanLog("=== WiFi connected ===");
-        lanLog("IP: " + WiFi.localIP().toString() +
-                    ", RSSI " + String(WiFi.RSSI()) + " dBm, ch " + String(WiFi.channel()) +
-                    ", BSSID " + WiFi.BSSIDstr());
+        lanLog("IP: %s, RSSI %d dBm, ch %d, BSSID %s",
+               WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(), (int)WiFi.channel(),
+               WiFi.BSSIDstr().c_str());
         startLanServer();
     }
     if (!wifiConnected || WiFi.status() != WL_CONNECTED) {
@@ -1085,7 +1114,8 @@ void handleWiFiServer() {
         } else {
             // The handshake struct is another internal-DRAM allocation, so annotate the
             // heap here too -- an OOM mid-handshake looks like a protocol error otherwise.
-            lanLog("LAN: TLS handshake failed" + tlsFailNote(hs) + ", dropping");
+            char note[128];
+            lanLog("LAN: TLS handshake failed%s, dropping", tlsFailNote(hs, note, sizeof(note)));
             disconnectWiFiServer();
             return;
         }
@@ -1109,7 +1139,9 @@ void handleWiFiServer() {
         }
         if (got < 0) {
             // Real fault -- name the mbedTLS code, otherwise this is undiagnosable.
-            lanLog("LAN: channel read error" + tlsFailNote(s_lastLanReadErr) + ", dropping");
+            char note[128];
+            lanLog("LAN: channel read error%s, dropping",
+                   tlsFailNote(s_lastLanReadErr, note, sizeof(note)));
             disconnectWiFiServer();
             return;
         }
@@ -1201,7 +1233,7 @@ void opendisplay_lan_teardown(void) {
         tlsInited = false;
     }
     WiFi.disconnect(true);
-    lanLog("LAN/WiFi torn down before restart", true);
+    lanLog("LAN/WiFi torn down before restart");
 }
 
 #endif  // OPENDISPLAY_HAS_WIFI
