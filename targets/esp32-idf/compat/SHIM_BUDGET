@@ -173,4 +173,42 @@
 # compat/ledc_compat.h SURVIVES. Its last app-code user just left, but FastEPD.inl's
 # front-light control uses ledcSetup/ledcAttachPin/ledcWrite at 11 sites. It is the third thing
 # now pinned by third_party/ rather than by our code, after delay() and millis().
-16
+
+# 14 = phase C step 5, 2026-08-04: the I2C sensor drivers -- src/sensor_sht40.cpp and
+# src/sensor_bq27220.cpp -- onto a new hal/od_hal_i2c.{h,c}.
+#
+# THE SEAM HAD TO TAKE THE BUS WITH IT, and that is the interesting part. IDF permits exactly
+# one i2c_new_master_bus() per port. compat/Wire.h owned that handle, and touch_input.cpp
+# (step 6) and display_service.cpp (step 10, the AXP2101 PMIC plus the whole bus lifecycle)
+# still drive Wire. Converting the sensors to a HAL that opened its own bus would have meant
+# two owners of one port -- which does not fail cleanly, it fails wherever the two disagree
+# about who configured the pins.
+#
+# So od_hal_i2c owns the bus and compat/Wire.h became a thin ADAPTER over it. The bus
+# mechanics moved rather than being rewritten: same IDF calls, same timeouts, same
+# device-handle cache. What stayed in Wire.h is only the Arduino semantics -- the buffered
+# beginTransmission/write/endTransmission idiom and the 0/1/2/3/4 return encoding, which is
+# the INVERSE of both esp_err_t and od_hal_i2c's, and is translated at that boundary and
+# nowhere else.
+#
+# TWO HARDWARE-FOUND BEHAVIOURS CARRIED ACROSS DELIBERATELY. Both were already fixed in
+# Wire.h; neither is obvious from the call sites, and either would be easy to lose in a
+# rewrite:
+#
+#   * A ZERO-LENGTH WRITE IS A PRESENCE PROBE. IDF's i2c_master_transmit() rejects size 0
+#     outright, so a scan built on it never reaches the bus -- no START, no address byte, no
+#     ACK to observe -- and reports every address absent whether or not hardware is there. A
+#     connected SHT40 was undetectable. od_hal_i2c_probe() is the address-only primitive.
+#   * endTransmission(false) MUST NOT SEND A STOP. The BQ27220 register read is one
+#     transaction with a repeated START; split into STOP + fresh START it answers as if
+#     unaddressed, so the gauge returns plausible garbage rather than an error. That is
+#     od_hal_i2c_write_read().
+#
+# THE HAL'S SHAPE DIVERGES FROM docs/SHARED_API_DESIGN.md, and this is flagged rather than
+# quietly done. That sketch is register-oriented -- read(addr, reg, buf, len) -- and cannot
+# express either driver: the SHT40 measurement is write-command, STOP, wait ~9 ms, then a bare
+# read (no register, and the delay must sit between two transactions), while the BQ27220 is a
+# single repeated-START transaction. A register-shaped call gets the bus framing wrong for
+# each, in opposite directions. Primitives here; the doc's two calls are expressible on top,
+# the reverse is not. The sketch was written from reading, and this is what building it found.
+14

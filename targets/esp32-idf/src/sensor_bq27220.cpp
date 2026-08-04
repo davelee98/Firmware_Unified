@@ -3,8 +3,9 @@
 #include "display_service.h"
 #include "od_log.h"
 
-#include <Arduino.h>
-#include <Wire.h>
+#include "od_hal_gpio.h"
+#include "od_hal_i2c.h"
+#include "od_hal_time.h"
 
 extern struct GlobalConfig globalConfig;
 extern uint8_t dynamicreturndata[11];
@@ -54,19 +55,11 @@ static bool bq27220_read_block(const SensorData* s, uint8_t cmd, uint8_t* buf, u
     if (!bq27220_ensure_bus(s)) {
         return false;
     }
-    Wire.beginTransmission(addr);
-    Wire.write(cmd);
-    if (Wire.endTransmission(false) != 0) {
-        return false;
-    }
-    int n = Wire.requestFrom(addr, (size_t)len, true);
-    if (n != (int)len) {
-        return false;
-    }
-    for (uint8_t i = 0; i < len; i++) {
-        buf[i] = Wire.read();
-    }
-    return true;
+    // ONE transaction: selector write, repeated START, read -- no STOP between. The BQ27220
+    // does not accept STOP + fresh START for a register read; it answers as if unaddressed, so
+    // splitting this produces plausible garbage rather than an error. Under Wire this was the
+    // endTransmission(false) idiom, and the flag being honoured was the whole point.
+    return od_hal_i2c_write_read(addr, &cmd, 1, buf, len) == OD_HAL_I2C_OK;
 }
 
 static const SensorData* bq27220_config(void) {
@@ -100,13 +93,14 @@ void initChargerGpio(void) {
     const uint8_t flags = globalConfig.power_option.charger_flags;
     const uint8_t en = globalConfig.power_option.charge_enable_pin;
     if (validPin(en)) {
-        pinMode(en, OUTPUT);
         const bool activeLow = (flags & OD_CHARGER_FLAG_ENABLE_ACTIVE_LOW) != 0;
-        digitalWrite(en, activeLow ? LOW : HIGH);
+        // pinMode(OUTPUT) then digitalWrite in one call -- gpio_config() then gpio_set_level(),
+        // the same two register writes in the same order. See od_hal_gpio.h.
+        od_hal_gpio_config_output(en, !activeLow);
     }
     const uint8_t st = globalConfig.power_option.charge_state_pin;
     if (validPin(st)) {
-        pinMode(st, INPUT_PULLUP);
+        od_hal_gpio_config_input(st, /*pull_up=*/true, /*pull_down=*/false);
     }
 }
 
@@ -116,8 +110,8 @@ static bool charger_gpio_charging(void) {
         return false;
     }
     const bool activeLow = (globalConfig.power_option.charger_flags & OD_CHARGER_FLAG_STATE_ACTIVE_LOW) != 0;
-    const int level = digitalRead(st);
-    return activeLow ? (level == HIGH) : (level == LOW);
+    const int level = od_hal_gpio_read(st);
+    return activeLow ? (level == 1) : (level == 0);
 }
 
 void initBq27220Sensors(void) {
@@ -148,10 +142,10 @@ void pollBq27220ForMsd(void) {
     }
     static uint32_t lastPollMs = 0;
     static bool havePolled = false;
-    if (havePolled && (uint32_t)(millis() - lastPollMs) < kBq27220MsdPollTtlMs) {
+    if (havePolled && (uint32_t)(od_hal_uptime_ms() - lastPollMs) < kBq27220MsdPollTtlMs) {
         return;
     }
-    lastPollMs = millis();
+    lastPollMs = od_hal_uptime_ms();
     havePolled = true;
     uint8_t raw[2];
     if (!bq27220_read_block(s, BQ27220_CMD_VOLTAGE, raw, 2)) {
