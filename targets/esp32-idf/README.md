@@ -297,3 +297,29 @@ caller already did.
 requires (sdkconfig defaults, bootloader, startup code all move with it). The override exists
 for testing a candidate release or bisecting a toolchain regression — not for getting past a
 red build.
+
+### The sdkconfig baseline
+
+`sdkconfig.baselines/<board>.sdkconfig` records the **effective** configuration of every board,
+reviewed and checked in. `tools/sdkconfig_baseline.sh` diffs the live build against it:
+
+```bash
+tools/sdkconfig_baseline.sh              # every board that has been built
+tools/sdkconfig_baseline.sh --update     # re-record, in the SAME commit as the change
+```
+
+It exists because 77 behaviour-relevant settings differed from the Arduino build this target
+reproduces, and only **six** were ones the project had declared — the rest were IDF defaults
+inherited by never naming the symbol. Four of those were restored on 2026-08-04 (CPU frequency
+on the S3, tick rate, optimisation level, watchdog panic); the remainder are recorded in
+[docs/TOOLCHAINS.md](../../docs/TOOLCHAINS.md) as reviewed divergences.
+
+A setting you did not write does not appear in any file you can review, which is why this gates
+the whole config rather than a curated subset. CI checks one board per chip; the other six are
+gated only locally.
+
+**`sdkconfig.defaults` edits need a config regeneration.** IDF applies the defaults *only* when
+creating `build/<board>/sdkconfig`; once that file exists it is authoritative and edits to the
+defaults are silently ignored — the build succeeds and produces a binary with the old config.
+`build.sh` now deletes the generated file when any input is newer, so this is handled, but it is
+worth knowing when invoking `idf.py` directly.
