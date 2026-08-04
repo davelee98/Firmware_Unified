@@ -123,3 +123,42 @@ int od_hal_adc_read(uint8_t pin)
     }
     return raw;
 }
+
+/* ------------------------------------------------------------------ die temperature
+ *
+ * Moved here verbatim from compat/arduino_compat.cpp (phase C step 14) so the peripheral has
+ * ONE owner. Behaviour, including the lazy install and the -999.0f sentinel, is unchanged. */
+#include "soc/soc_caps.h"
+#if SOC_TEMP_SENSOR_SUPPORTED
+#include "driver/temperature_sensor.h"
+#endif
+
+float od_hal_adc_die_temp_c(void)
+{
+#if SOC_TEMP_SENSOR_SUPPORTED
+    static temperature_sensor_handle_t s_tsens = NULL;
+    if (!s_tsens) {
+        /* -10..80 C covers the panel's rated operating range with margin; the driver picks
+         * the matching internal range setting. */
+        temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+        if (temperature_sensor_install(&cfg, &s_tsens) != ESP_OK) {
+            s_tsens = NULL;
+            return -999.0f;
+        }
+        if (temperature_sensor_enable(s_tsens) != ESP_OK) {
+            temperature_sensor_uninstall(s_tsens);
+            s_tsens = NULL;
+            return -999.0f;
+        }
+    }
+    float c = 0.0f;
+    if (temperature_sensor_get_celsius(s_tsens, &c) != ESP_OK) {
+        return -999.0f;
+    }
+    return c;
+#else
+    /* Classic ESP32 has no usable die sensor. -999.0 is the sentinel the NRF path uses for
+     * "no reading", and readChipTemperature()'s callers already understand it. */
+    return -999.0f;
+#endif
+}

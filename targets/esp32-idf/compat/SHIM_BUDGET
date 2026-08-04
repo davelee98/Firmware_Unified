@@ -628,4 +628,55 @@
 # with the E1004 stream completely broken. Needs a real E1004 refresh: both halves, correct
 # geometry, and a deep-sleep wake afterwards to confirm bbepDeInitIO() no longer warns and the
 # pads re-attach.
+
+# 6 (UNCHANGED) = phase C step 14, 2026-08-04: src/display_service.cpp's ESP32 half off the
+# shim. The largest Arduino surface in the target -- 207 Wire references -- is gone.
+#
+# THE COUNT DOES NOT MOVE, for the same reason as step 12: this file keeps a GUARDED
+# <Arduino.h> because its TARGET_NRF arms still need it -- epdBsPinLowIfNrf()'s
+# pinMode/digitalWrite and prepareEpdRailForBoot()'s two delay(50) calls, 8 call sites, none
+# compilable or verifiable here. It joins main.cpp, buzzer_hw.cpp, device_control.cpp and
+# encryption.cpp, all of which leave at MIGRATION step 4.
+#
+# What moved (70 ESP32-live sites plus the I2C surface):
+#   41 Wire write transactions  -> od_hal_i2c_write / od_hal_i2c_probe
+#   17 read clusters            -> od_hal_i2c_read
+#   begin/setClock/end          -> odI2cBegin() / od_hal_i2c_set_clock / od_hal_i2c_deinit
+#   GPIO                        -> od_hal_gpio (7 pinMode+digitalWrite pairs merged)
+#   millis/delay                -> od_hal_time
+#   analogRead                  -> od_hal_adc_read
+#   temperatureRead             -> od_hal_adc_die_temp_c (NEW; see below)
+#
+# WRITE-THEN-READ IS DELIBERATELY **NOT** od_hal_i2c_write_read(). Every read here does
+# endTransmission() -- a STOP -- before requestFrom(), and od_hal_i2c.h warns explicitly that
+# the two are not interchangeable ("the BQ27220 does not accept STOP + fresh START ... getting
+# this wrong produces plausible garbage rather than an error"). Converted as write() then
+# read() so the bus framing is bit-for-bit what shipped. There are zero endTransmission(false)
+# calls in this file, so no site wanted a repeated START.
+#
+# temperatureRead() MOVED to hal/od_hal_adc.c as od_hal_adc_die_temp_c(), verbatim, with the
+# shim left as a forwarder for the nRF arm. Same reason analogRead moved in step 7: IDF
+# installs ONE temperature_sensor handle, so the HAL must own it or two installers fight
+# silently. The -999.0f sentinel is preserved -- it is what the callers and the nRF path
+# already agree on, and changing it would change what the device reports on the wire.
+#
+# ONE PRE-EXISTING DEFECT FOUND, TRANSLATED NOT FIXED: compat/Wire.h's begin() has NO DEFAULT
+# PINS -- Wire.begin() with no arguments passes sda = scl = -1 and returns FALSE unless the bus
+# is already up. Two call sites are commented "Uses default I2C pins". THEY NEVER DID. odI2cBegin()
+# preserves that exactly and says so; giving those paths real pins changes which bus comes up on
+# which GPIOs, which is a hardware question for whoever owns those boards.
+#
+# 7 pinMode(X,OUTPUT)+digitalWrite(X,V) pairs became one od_hal_gpio_config_output(X, level)
+# call -- the same deliberate glitch removal as step 12, and the same caveat: these are panel
+# and rail control pins.
+#
+# THE COUNT IS NOW AT ITS FLOOR under the current ratchet pattern. All six remaining files are
+# either nRF-arm-only (five) or a permanent adapter consumer (display_fastepd.cpp includes
+# vendor/fastepd/SPI.h, which does not die). Whether the pattern should stop counting the
+# adapter is an open question -- see the note at the top of ratchet.sh.
+#
+# All 10 boards build and every one SHRANK (~1 KB). NOT hardware-verified, and the exposure is
+# real: this is the AXP2101 PMIC path (rail enables, voltage set-points, battery reads) plus 7
+# GPIO glitch removals. Needs a battery board -- power-on, a panel refresh, and a battery
+# voltage reading that is not obviously wrong.
 6

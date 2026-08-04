@@ -52,6 +52,17 @@ void od_hal_adc_set_resolution(uint8_t bits);
  * refresh, so per-sample warnings buried the rest of the log. */
 int od_hal_adc_read(uint8_t pin);
 
+/* Die temperature in degrees Celsius, or -999.0f when this part has no usable sensor or the
+ * driver refuses. It lives with the ADC because it IS an on-chip analog read, and because the
+ * same "one owner of the peripheral" rule applies: IDF's temperature_sensor driver installs a
+ * single handle, so two callers installing it independently is the failure this HAL exists to
+ * prevent.
+ *
+ * -999.0f rather than NaN or a status out-parameter: that is the sentinel the callers already
+ * understand (readChipTemperature() returns it on the NRF path too), and changing it would
+ * change what the device reports over the wire. */
+float od_hal_adc_die_temp_c(void);
+
 #ifdef __cplusplus
 }
 #endif

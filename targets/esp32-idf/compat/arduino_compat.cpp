@@ -134,32 +134,11 @@ int analogRead(int pin)
 
 float temperatureRead(void)
 {
-#if SOC_TEMP_SENSOR_SUPPORTED
-    static temperature_sensor_handle_t s_tsens = nullptr;
-    if (!s_tsens) {
-        /* -10..80 C covers the panel's rated operating range with margin; the driver picks
-         * the matching internal range setting. */
-        temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
-        if (temperature_sensor_install(&cfg, &s_tsens) != ESP_OK) {
-            s_tsens = nullptr;
-            return -999.0f;
-        }
-        if (temperature_sensor_enable(s_tsens) != ESP_OK) {
-            temperature_sensor_uninstall(s_tsens);
-            s_tsens = nullptr;
-            return -999.0f;
-        }
-    }
-    float c = 0.0f;
-    if (temperature_sensor_get_celsius(s_tsens, &c) != ESP_OK) {
-        return -999.0f;
-    }
-    return c;
-#else
-    /* Classic ESP32 has no usable die sensor. -999.0 is the sentinel the NRF path uses for
-     * "no reading", and readChipTemperature()'s callers already understand it. */
-    return -999.0f;
-#endif
+    /* Forwarder. The implementation MOVED to hal/od_hal_adc.c (phase C step 14), unchanged,
+     * for the same reason analogRead() did in step 7: IDF installs ONE temperature_sensor
+     * handle, so the HAL must own it or two installers silently fight. This remains only
+     * because display_service.cpp's TARGET_NRF arm still compiles against the shim. */
+    return od_hal_adc_die_temp_c();
 }
 
 } /* extern "C" */
