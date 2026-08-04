@@ -7,6 +7,7 @@
 #include "od_hal_gpio.h"
 
 #include "driver/gpio.h"
+#include "freertos/FreeRTOS.h"
 
 /* Pin numbers reach here from host-written config packets, where 0xFF is the "unused"
  * sentinel. Most call sites filter it, but `1ULL << 255` is undefined behaviour and one
@@ -51,6 +52,23 @@ void od_hal_gpio_config_input(uint8_t cfg, bool pull_up, bool pull_down)
     gpio_config(&io);
 }
 
+void od_hal_gpio_set_mode_output(uint8_t cfg)
+{
+    if (!od_pin_valid(cfg)) {
+        return;
+    }
+    gpio_config_t io = {
+        .pin_bit_mask = (1ULL << (uint32_t)cfg),
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    /* No gpio_set_level(): gpio_config() does not touch the output latch, so the pad keeps
+     * whatever it last held -- which is exactly what Arduino's pinMode(OUTPUT) did. */
+    gpio_config(&io);
+}
+
 void od_hal_gpio_write(uint8_t cfg, bool level_high)
 {
     if (!od_pin_valid(cfg)) {
@@ -65,4 +83,56 @@ int od_hal_gpio_read(uint8_t cfg)
         return 0;
     }
     return gpio_get_level((gpio_num_t)cfg);
+}
+
+static gpio_int_type_t edge_to_idf(od_hal_gpio_edge_t edge)
+{
+    switch (edge) {
+        case OD_GPIO_EDGE_RISING:  return GPIO_INTR_POSEDGE;
+        case OD_GPIO_EDGE_FALLING: return GPIO_INTR_NEGEDGE;
+        default:                   return GPIO_INTR_ANYEDGE;
+    }
+}
+
+int od_hal_gpio_config_irq(uint8_t cfg, od_hal_gpio_edge_t edge, od_hal_gpio_irq_fn handler)
+{
+    if (!od_pin_valid(cfg) || handler == NULL) {
+        return -1;
+    }
+    /* Installed once. gpio_install_isr_service() returns ESP_ERR_INVALID_STATE if it is
+     * already up, which is not an error for us -- but the flag avoids relying on that, since
+     * another component may have installed it first with different flags. */
+    static bool isr_service_started = false;
+    if (!isr_service_started) {
+        gpio_install_isr_service(0);
+        isr_service_started = true;
+    }
+    gpio_set_intr_type((gpio_num_t)cfg, edge_to_idf(edge));
+    /* Remove before add: re-attaching a pin must REPLACE its handler rather than fail, which
+     * is what the callers assume -- touch_input re-attaches on every controller re-init. */
+    gpio_isr_handler_remove((gpio_num_t)cfg);
+    if (gpio_isr_handler_add((gpio_num_t)cfg, (gpio_isr_t)handler, NULL) != ESP_OK) {
+        return -1;
+    }
+    gpio_intr_enable((gpio_num_t)cfg);
+    return 0;
+}
+
+void od_hal_gpio_clear_irq(uint8_t cfg)
+{
+    if (!od_pin_valid(cfg)) {
+        return;
+    }
+    gpio_intr_disable((gpio_num_t)cfg);
+    gpio_isr_handler_remove((gpio_num_t)cfg);
+}
+
+void od_hal_gpio_irq_lock(void)
+{
+    portDISABLE_INTERRUPTS();
+}
+
+void od_hal_gpio_irq_unlock(void)
+{
+    portENABLE_INTERRUPTS();
 }

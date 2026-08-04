@@ -211,4 +211,38 @@
 # single repeated-START transaction. A register-shaped call gets the bus framing wrong for
 # each, in opposite directions. Primitives here; the doc's two calls are expressible on top,
 # the reverse is not. The sketch was written from reading, and this is what building it found.
-14
+
+# 13 = phase C step 6, 2026-08-04: src/touch_input.cpp, the GT911 driver. It reuses step 5's
+# od_hal_i2c and brings the GPIO interrupt surface into hal/od_hal_gpio -- config_irq(),
+# clear_irq(), irq_lock()/unlock(), and set_mode_output().
+#
+# TWO PLACES WHERE docs/SHARED_API_DESIGN.md's SKETCH WAS TOO NARROW, both widened
+# deliberately and both for a reason the hardware supplies:
+#
+#   * config_irq() is specified as edge-both with no mode argument. The GT911 asserts INT
+#     active-low and is attached FALLING; edge-both would raise a spurious event on every
+#     release. The HAL takes an od_hal_gpio_edge_t.
+#   * set_mode_output() is not in the sketch at all, and exists because pinMode() and
+#     digitalWrite() are SEPARABLE and gt911_hw_reset() depends on the separation. It makes
+#     both INT and RST outputs BEFORE driving either, and INT's level at RST's rising edge is
+#     what selects the controller's I2C address (0x14 vs 0x5D). Collapsing those pairs into
+#     config_output(), which is what every other call site got, would reorder the sequence and
+#     change which address the part answers on. The whole reset function is therefore
+#     transcribed call-for-call rather than tidied.
+#
+# ONE FUNCTION DELETED, and it is worth knowing why it was not a bus operation.
+# gt911_drain_wire() was `while (Wire.available()) Wire.read();`, called on every I2C retry.
+# It drained bytes left in the SHIM's RX buffer after a partial read -- an artifact of
+# Arduino's requestFrom()/read() split, with nothing corresponding on the wire. od_hal_i2c
+# transfers are all-or-nothing, so there is no residue and nothing for it to do. Its call
+# sites read like bus recovery and never were.
+#
+# The read path keeps BOTH framings on purpose: gt911_read_reg() tries the repeated-START form
+# and then the STOP-then-START form, because GT911 clones differ in which they accept. That is
+# the second consumer of od_hal_i2c exposing write_read() and write()+read() separately rather
+# than one register-shaped call.
+#
+# NOT hardware-verified, and touch is the subsystem where that is hardest to reason about from
+# a build: an address-selection sequence that comes out wrong produces a controller that simply
+# never answers, which looks identical to absent hardware.
+13
