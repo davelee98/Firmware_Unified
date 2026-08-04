@@ -294,6 +294,12 @@ precise:
 | `-DOPENDISPLAY_ZLIB_WINDOW_BITS`, `..._USE_HEAP_WINDOW` | project Kconfig options with ranges + defaults |
 | `extra_scripts = pre:scripts/factory_config_gen.py` | CMake `add_custom_command` — copy the pattern from `Firmware_NRF54/zephyr/CMakeLists.txt`, which already does exactly this |
 
+**This table is necessary and demonstrably not sufficient.** It enumerates the knobs someone
+*wrote down* in `platformio.ini`; it cannot enumerate the settings the Arduino core set on the
+project's behalf without anyone naming them. The 2026-08-04 audit below found four such
+settings — CPU frequency, tick rate, optimisation level, watchdog panic — of which this table
+caught two. See § "sdkconfig divergence audit" for what replaced hand-maintenance.
+
 **The one genuinely new piece: BLE.** IDF ships NimBLE natively, but only the **C host API**
 (`ble_gap_*`, `ble_gatts_*`). NimBLE-Arduino's C++ wrapper — which `ble_init.h` currently
 aliases wholesale (`using BLEDevice = NimBLEDevice;` and nine more) — does not exist in IDF. So
@@ -314,6 +320,229 @@ Verify first that LittleFS holds nothing else on ESP32 (fonts? boot images?) —
 native partition/OTA tooling, `esp_littlefs`/NVS as declared components, no community platform
 fork in the dependency chain, and direct access to the IDF APIs the code already calls without
 Arduino sitting in between.
+
+### sdkconfig divergence audit — 2026-08-04
+
+The port's premise is that it reproduces the shipped `Firmware` behaviour on a new toolchain.
+That premise is only testable against the configuration the shipped build actually runs, so the
+target's **effective** sdkconfig was diffed against the precompiled Arduino core sdkconfigs the
+reference repo links against.
+
+```bash
+# ~/.platformio/packages/framework-arduinoespressif32-libs/<chip>/sdkconfig   (the reference)
+#   vs   targets/esp32-idf/build/<board>/sdkconfig                            (ours, effective)
+cd targets/esp32-idf && ./build.sh s3-n16r8 c6-n4 c3-n4 esp32-n4
+```
+
+Compare with a script that loads both files (treating `# CONFIG_X is not set` as `n`),
+intersects the key sets, and classifies each difference as **[DECLARED]** — the symbol appears
+in `sdkconfig.defaults*` or `boards/*.sdkconfig`, so somebody chose it — or **[inherited]** —
+it does not, so it is an IDF default the project accepted by never naming the symbol. A
+behaviour filter keeps the FreeRTOS / watchdog / CPU-freq / BT / LWIP / SPIRAM / heap /
+optimisation / console / mbedTLS / WiFi / sleep / bootloader families and drops the rest
+(toolpath, component versions, chip-capability `SOC_*`).
+
+Counts at the time of the audit, and on a re-run after the fixes below landed:
+
+| Chip (board) | keys in both | differing | behaviour-relevant | ↳ declared | ↳ inherited |
+|---|---:|---:|---:|---:|---:|
+| esp32s3 (`s3-n16r8`) | 1960 → **1959** | 191 → **173** | 77 → **63** | **6** | **57** |
+| esp32c6 (`c6-n4`) | 1888 → **1887** | 161 → **151** | 59 → **52** | **5** | **47** |
+| esp32c3 (`c3-n4`) | 1736 → **1735** | 171 → **161** | 59 → **52** | **5** | **47** |
+| esp32 (`esp32-n4`) | 1564 → **1563** | 165 → **153** | 58 → **50** | **2** | **48** |
+
+*First figure in each cell is the audit run (pre-fix); bold is a re-run on 2026-08-04 after
+commit `f72187f`. The S3 pre-fix numbers are the ones recorded in that commit message; the
+other three chips' pre-fix numbers come from the same audit run and are not re-derivable now
+that the fixes have landed. The declared/inherited split is from the re-run.*
+
+**The ratio is the finding, not the totals.** Six of 77 on the S3 — under 8 % — were values
+this project had declared. Every other difference existed because nobody wrote the symbol down.
+A setting you did not write does not appear in any file you can review, which is exactly why
+these survived a code review, a translation table, and ten clean builds.
+
+**The operating rule this establishes.** During a port whose premise is reproducing shipped
+behaviour, **an undeclared difference is a defect, not a preference.** It was not weighed
+against the alternative; it is the residue of two different tools' defaults. The burden of
+proof runs the other way from normal: keeping the IDF default requires a reason, not adopting
+the Arduino value. Once a difference is written down with a reason it becomes a decision and
+this rule stops applying to it.
+
+#### Resolved (commit `f72187f`)
+
+Four differences were restored to the Arduino build's values, chosen because the reference
+firmware's behaviour depends on them. All four are now declared, with the reasoning inline in
+`sdkconfig.defaults` / `sdkconfig.defaults.esp32s3`:
+
+| Setting | Was (inherited) | Now | Why |
+|---|---|---|---|
+| `CONFIG_FREERTOS_HZ` | 100 | **1000** | `portTICK_PERIOD_MS` was 1 upstream, 10 here — which does not coarsen short waits, it deletes them: `pdMS_TO_TICKS(2)` is **zero** ticks and `vTaskDelay(0)` yields without blocking. `src/session_guard.cpp`'s R3a link-down poll is exactly that shape. |
+| `CONFIG_COMPILER_OPTIMIZATION_*` | `DEBUG` (`-Og`) | **`SIZE`** (`-Os`) | Nobody chose a debug build; `-Og` is what IDF gives you for saying nothing. |
+| `CONFIG_ESP_TASK_WDT_PANIC` | `n` (log only) | **`y`** | Restores the reset backstop, paired with `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n` — also the reference's value. Enabling PANIC while watching an idle task the reference never watched would invent a new reset source rather than restore the old behaviour; the two are one decision. |
+| `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240` | 160 | **240**, **S3 only** | Measured, not assumed: the Arduino core's own sdkconfigs run esp32, C3 and C6 at 160 (and 160 is the *maximum* on C3/C6). Only the S3 is 240. It is the one chip where the port had slowed the silicon by a third. |
+
+Image size fell about 8 % on every chip — which matters most for `c6-n4`, the shipped board
+with the least slot headroom:
+
+| Board | before | after | Δ |
+|---|---:|---:|---:|
+| `s3-n16r8` | 1353712 | 1245040 | −108672 (−8.0 %) |
+| `c6-n4` | 916352 | 841072 | −75280 (−8.2 %) |
+| `c3-n4` | 810768 | 738448 | −72320 (−8.9 %) |
+| `esp32-n4` | 765024 | 702160 | −62864 (−8.2 %) |
+
+**Not hardware-verified.** These four change clock, code generation and reset behaviour on
+every path. All ten boards build clean; nothing here has been flashed. A direct consequence:
+every throughput and latency figure in `targets/esp32-idf/README.md` § "Verified on hardware"
+was measured at 160 MHz with `-Og` and describes no build that now exists — they need
+re-measuring, not adjusting.
+
+#### Remaining behaviour-relevant divergences, with verdicts
+
+Values below are from the 2026-08-04 re-run; `arduino → ours`, per chip where they differ.
+Everything in this table is **[inherited]** unless marked otherwise.
+
+**Robustness**
+
+| Setting | arduino → ours | Verdict |
+|---|---|---|
+| `FREERTOS_WATCHPOINT_END_OF_STACK` | `y → n` on **esp32s3 and classic esp32** (the C3/C6 Arduino configs also have it off, so there is no divergence there) | **Adopt.** It costs one debug watchpoint and turns a stack overflow into an immediate, located crash instead of silent corruption. It is also the setting that makes the task-stack row below survivable. |
+| `HEAP_POISONING_LIGHT` vs `HEAP_POISONING_DISABLED` | `LIGHT → disabled` (all four chips) | **Keep ours for release.** Poisoning is a per-allocation cost paid forever to catch a class of bug better caught in a debug build. Worth enabling temporarily when chasing heap corruption; not worth shipping. |
+| `ESP_SYSTEM_MEMPROT_FEATURE` | `n → y` on **esp32s3**; on C3 both are `y`; the symbol does not exist on C6/classic esp32 | **Keep ours** — ours is the stricter of the two, and this is a divergence in the safe direction. |
+
+**Task stacks — measure, do not copy**
+
+Every one of these is inherited, and most are *smaller* than the Arduino build's:
+
+| Setting | arduino → ours |
+|---|---|
+| `ESP_TIMER_TASK_STACK_SIZE` | `8192 → 3584` (all four chips) |
+| `BT_NIMBLE_HOST_TASK_STACK_SIZE`, `BT_NIMBLE_TASK_STACK_SIZE` | `5120 → 4096` (S3, C6, C3) |
+| `BT_LE_CONTROLLER_TASK_STACK_SIZE` | `5120 → 4096` (C6 only) |
+| `LWIP_TCPIP_TASK_STACK_SIZE` | `4096 → 3072` (all four) |
+| `FREERTOS_TIMER_TASK_STACK_DEPTH` | `3120 → 2048` (S3); `4096 → 2048` (C3, classic esp32); no divergence on C6 |
+| `ESP_MAIN_TASK_STACK_SIZE` | `4096 → 3584` (all four) |
+| `FREERTOS_ISR_STACKSIZE` | `2096 → 1536` (all four) |
+
+Two go the other way and are called out so the row is not read as "ours is uniformly smaller":
+`FREERTOS_IDLE_TASK_STACKSIZE` is `1024 → 1536` on S3/classic esp32 (but `2304 → 1536` on
+C3/C6), and `ESP_SYSTEM_EVENT_TASK_STACK_SIZE` is `2048 → 2304` everywhere.
+
+**Verdict: measure before changing anything, then decide per chip.** Copying Arduino's numbers
+wholesale would spend several KB of DRAM to buy headroom nobody has shown is needed — and on
+C3, C6 and `esp32-n4` there is no PSRAM, so that DRAM is the real and only DRAM. The
+measurement is `uxTaskGetStackHighWaterMark()` on each task after a full BLE session plus a
+LAN transfer plus a panel refresh; raise only what comes back thin.
+
+**What makes this urgent rather than merely open:** the combination. Smaller stacks *and*
+`FREERTOS_WATCHPOINT_END_OF_STACK=n` means an overflow that the reference build would have
+trapped at the moment it happened corrupts adjacent memory here and surfaces later as something
+unrelated. Adopting the watchpoint (row above) is the cheap half and does not wait on the
+measurement.
+
+**Power / wake**
+
+| Setting | arduino → ours | Verdict |
+|---|---|---|
+| `BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP` | `y → n` (all four chips) | **Adopt.** With it off, the bootloader re-validates the app image on *every* deep-sleep wake — pure latency and battery on a device whose duty cycle is wake, draw, sleep. The caveat, stated so the trade is visible: skipping validation is only a security-relevant relaxation if secure boot ever lands here, and it does not today. Revisit if it does. |
+
+**Memory / PSRAM (S3 only)**
+
+| Setting | arduino → ours |
+|---|---|
+| `SPIRAM_MALLOC_RESERVE_INTERNAL` | `0 → 32768` |
+| `SPIRAM_MALLOC_ALWAYSINTERNAL` | `4096 → 16384` |
+| `SPIRAM_BOOT_HW_INIT` | `n → y` |
+| `SPIRAM_PRE_CONFIGURE_MEMORY_PROTECTION` | `n → y` |
+
+**Verdict: do not touch.** These three allocator knobs decide what lands in DRAM versus PSRAM,
+and the DRAM-reclaim work merged at `60980f7` (sync to `Firmware` `feat/psram-dram-reclaim`)
+was tuned *under our current values*. Changing them invalidates those measurements rather than
+improving on them. If they are ever revisited, the order is: re-run the reclaim measurements
+first, then change one knob, then re-run again. (Also note the classic ESP32 case, which is not
+a divergence to fix: the Arduino `esp32` sdkconfig has `SPIRAM=y`, `esp32-n4` has no PSRAM.)
+
+**LAN / TCP**
+
+| Setting | arduino → ours |
+|---|---|
+| `LWIP_TCPIP_CORE_LOCKING` | `y → n` |
+| `LWIP_TCP_SACK_OUT` | `y → n` |
+| `LWIP_TCP_RTO_TIME` | `3000 → 1500` |
+| `LWIP_TCP_SYNMAXRTX` | `6 → 12` |
+| `LWIP_MAX_SOCKETS` | `16 → 10` |
+| `LWIP_TCP_MSS` | `1436 → 1440` |
+| `LWIP_SO_RCVBUF` | `y → n` |
+| `LWIP_TCP_SND_BUF_DEFAULT` | `5744 → 5760` |
+| `LWIP_TCPIP_TASK_AFFINITY` | `CPU0 → no affinity` |
+
+All four chips, all inherited. **Verdict: record only.** Each is individually plausible in both
+directions and none has a known victim; the MSS/SND_BUF pair are just the arithmetic
+consequence of a different MSS. Revisit as a group **if and only if** LAN throughput is measured
+and disappoints — at which point `CORE_LOCKING` and `SACK_OUT` are the two to try first, and
+the affinity difference is the one most likely to matter on the dual-core S3.
+
+**The six declared differences — deliberate, and already justified in the tree**
+
+| Setting | arduino → ours | Where the reason lives |
+|---|---|---|
+| `BT_NIMBLE_ENABLED` (+ `BT_BLUEDROID_ENABLED` off) | `n → y` on classic esp32 | `sdkconfig.defaults` — the source uses NimBLE-Arduino; the C API port keeps the same stack rather than adding a second migration. |
+| `BT_NIMBLE_MAX_CONNECTIONS` | `3 → 1` | `sdkconfig.defaults` — one central at a time is the product's connection policy (CONNECTION_POLICY.md). |
+| `BT_NIMBLE_LOG_LEVEL_WARNING` | `INFO → WARNING` | `sdkconfig.defaults`, at length: NimBLE's INFO chatter interleaves mid-line with `od_log` on the same UART and corrupts hex dumps. Commit `cce8165`; DIVERGENCE_MATRIX.md 7a. |
+| `ESP_TASK_WDT_TIMEOUT_S` | `5 → 60` | `sdkconfig.defaults` — `platformio.ini` asked for 120 via a raw `-D`; IDF caps the Kconfig at [1,60], so 60 is the closest legal value. A translation finding, not a typo. |
+| `ESP_CONSOLE_USB_CDC` / `ESP_CONSOLE_USB_SERIAL_JTAG` / `ESP_CONSOLE_UART_DEFAULT` | varies by chip | `sdkconfig.defaults.esp32s3` (CDC), `.esp32c3` / `.esp32c6` (USB-Serial-JTAG — the C3/C6 have no CDC), `.esp32` and `boards/_extuart.sdkconfig` (UART). This is the `ARDUINO_USB_MODE`/`ARDUINO_USB_CDC_ON_BOOT` row of the translation table above. |
+| `SPIRAM_MODE_OCT` | `QUAD → OCT` | `sdkconfig.defaults.esp32s3` — the `board_build.arduino.memory_type = qio_opi` row of the translation table. The R8 modules are octal PSRAM; the Arduino core's generic sdkconfig is not. |
+
+#### The honest caveat
+
+**The Arduino core ships against an older ESP-IDF than the `v5.5.4` this target pins**, so some
+part of the 50-63 remaining differences per chip is version drift — a default Espressif changed
+between releases — rather than a decision anyone made on either side. That is a reason to treat
+the long tail as "record and revisit", not as a defect list to burn down. It is **not** a reason
+to dismiss the four already fixed: CPU frequency, tick rate, optimisation level and watchdog
+panic are all settings the Arduino core sets *explicitly* in its own sdkconfig, and the
+divergence is against that explicit value, not against a moved default.
+
+Which of the remaining rows are version drift has not been established. Doing so means diffing
+the Arduino core's IDF version against `v5.5.4`'s Kconfig defaults, which nobody has done.
+
+#### The gate that replaces hand-maintenance
+
+- [`targets/esp32-idf/sdkconfig.baselines/`](../targets/esp32-idf/sdkconfig.baselines) — the
+  **whole** effective sdkconfig of all ten boards, checked in, header block stripped (it carries
+  the IDF version and would otherwise conflict on every toolchain bump for a non-configuration
+  reason).
+- [`targets/esp32-idf/tools/sdkconfig_baseline.sh`](../targets/esp32-idf/tools/sdkconfig_baseline.sh)
+  — diffs the live build against the baseline; `--update` re-records after an approved change.
+  With no arguments it checks every board that has been built.
+- [`.github/workflows/esp32-sdkconfig-baseline.yml`](../.github/workflows/esp32-sdkconfig-baseline.yml)
+  — one board per chip (`s3-n16r8`, `c3-n4`, `c6-n4`, `esp32-n4`) on `espressif/idf:v5.5.4`,
+  the same release `.idf_version` pins. This is the first CI job in the repo that builds
+  anything. Its deliberate coverage gap is recorded in the workflow: a board-fragment change
+  affecting only one of the other six boards is caught locally, not by CI.
+
+**Why the whole config and not a curated list.** State it plainly: the hand-maintained
+translation table in this document existed for exactly this purpose and caught **two of the
+four**. A curated list can only catch drift in settings someone already thought of, and all
+four were missed precisely because nobody thought of them. The cost is a noisy diff on an IDF
+upgrade — and that noise *is* the review, because an IDF bump moves defaults underneath the
+project and this is the only place that becomes visible before hardware makes it visible
+instead. Same argument `compat/ratchet.sh` makes about the Arduino shim, same answer: a
+mechanical gate rather than good intentions.
+
+#### The `build.sh` footgun found doing this
+
+**IDF applies `sdkconfig.defaults` only when it *creates* `build/<board>/sdkconfig`.** Once
+that file exists it is authoritative: edits to the defaults are silently ignored, the build
+succeeds, warns about nothing, and produces a binary carrying the old configuration. That cost
+a full ten-board build to notice while restoring the four values above — they appeared to have
+no effect whatsoever, including an `-Os` change that did not move the image size by a byte.
+
+`build.sh` now deletes the generated `build/<board>/sdkconfig` when any input that produces it
+(`sdkconfig.defaults`, `sdkconfig.defaults.<chip>`, `boards/<board>.sdkconfig`,
+`boards/_*.sdkconfig`) is newer, and says so on stderr. Deleting it is safe here specifically
+because this target never runs `menuconfig` — the generated file holds nothing a human authored.
+A target that did edit its sdkconfig interactively would need a different fix.
 
 ### nRF52840 → Zephyr / nRF Connect SDK
 

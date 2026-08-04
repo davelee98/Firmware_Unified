@@ -66,7 +66,7 @@ CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
 # ones this project had declared. The rest are IDF defaults inherited by saying nothing -- and
 # a difference nobody declared is a defect in the port, not a configuration choice.
 #
-# tools/check_sdkconfig_baseline.sh now gates the whole effective config so this class of drift
+# tools/sdkconfig_baseline.sh now gates the whole effective config so this class of drift
 # surfaces as a diff to approve rather than as behaviour discovered months later.
 
 # TICK RATE. IDF defaults to 100 Hz; the Arduino core ships 1000 Hz, so portTICK_PERIOD_MS was
