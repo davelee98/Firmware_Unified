@@ -72,7 +72,10 @@ extern volatile uint8_t g_commandOrigin;
 // transfer types and is declared in display_service.h.
 bool transferActive(void);
 
-String getChipIdHex();
+void getChipIdHex(char* out, size_t out_size);
+#ifndef OD_CHIP_ID_HEX_LEN
+#define OD_CHIP_ID_HEX_LEN 6
+#endif
 static void lanBeginConnect(void);   // defined with the roaming / RTC AP-cache block below
 uint8_t getFirmwareMajor();
 uint8_t getFirmwareMinor();
@@ -435,7 +438,9 @@ static String advertisedBleMacLower(void) {
 }
 
 static void restartLanService(void) {
-    String deviceName = "OD" + getChipIdHex();
+    char idHex[OD_CHIP_ID_HEX_LEN + 1] = {0};
+    getChipIdHex(idHex, sizeof(idHex));
+    String deviceName = String("OD") + idHex;
     if (!MDNS.begin(deviceName.c_str())) {
         lanLog("ERROR: mDNS responder failed");
         return;

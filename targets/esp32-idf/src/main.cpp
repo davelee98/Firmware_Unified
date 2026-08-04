@@ -248,12 +248,13 @@ void setup() {
     {
         // Named local, not a temporary: the name outlives the call regardless of
         // whether the stack copies it.
-        String bleDeviceName = "OD" + getChipIdHex();
+        char bleDeviceName[3 + OD_CHIP_ID_HEX_LEN + 1] = "OD";
+        getChipIdHex(bleDeviceName + 2, sizeof(bleDeviceName) - 2);
 #ifdef OPENDISPLAY_BOOT_DIAG
         Serial.println("[BOOTDIAG] before ble.begin() / SoftDevice enable");
         Serial.flush();
 #endif
-        ble.begin(bleDeviceName.c_str());
+        ble.begin(bleDeviceName);
 #ifdef OPENDISPLAY_BOOT_DIAG
         Serial.println("[BOOTDIAG] after ble.begin() / SoftDevice enable");
         Serial.flush();
@@ -275,14 +276,15 @@ void setup() {
     // Full BLE after display: ESP32 queues commands for loop() until setup returns.
     if (is_deep_sleep_wake) { od_log_info("[wake] >> ble_begin"); od_log_flush(); }
     {
-        String bleDeviceName = "OD" + getChipIdHex();
-        if (ble.begin(bleDeviceName.c_str())) {
+        char bleDeviceName[3 + OD_CHIP_ID_HEX_LEN + 1] = "OD";
+        getChipIdHex(bleDeviceName + 2, sizeof(bleDeviceName) - 2);
+        if (ble.begin(bleDeviceName)) {
             // Historical order: build the manufacturer data into the advertisement
             // BEFORE the first start(), since setAdvertisementData() must be the
             // last data call before start() (see ble_transport_esp32.cpp).
             updatemsdata();
             ble.startAdvertising();
-            od_log_info("Device ready: %s", bleDeviceName.c_str());
+            od_log_info("Device ready: %s", bleDeviceName);
             od_log_info("Waiting for BLE connections...");
         }
     }

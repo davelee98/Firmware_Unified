@@ -232,7 +232,6 @@ extern struct SecurityConfig securityConfig;
 extern chunked_write_state_t chunkedWriteState;
 extern uint8_t configReadResponseBuffer[128];
 extern uint8_t msd_payload[16];
-String getChipIdHex();
 float readBatteryVoltage();
 
 /** Mirror responses to BLE only when a central is connected; LAN responses go via opendisplay_lan_send_frame. */

@@ -291,4 +291,35 @@
 # state.
 #
 # NOT hardware-verified. Buttons, LEDs, battery voltage and DFU entry all sit behind this.
-12
+
+# 11 = phase C step 8, 2026-08-04: src/encryption.h. The last Arduino String on an INTERFACE.
+#
+# `String getChipIdHex()` was the one remaining place Arduino's String appeared in a
+# declaration rather than inside a function body, and CLAUDE.md forbids it in shared/ outright.
+# It becomes `void getChipIdHex(char* out, size_t out_size)` with a stated contract: exactly six
+# uppercase hex digits, zero-padded, NUL-terminated. Every caller was already padding to six by
+# hand, so the contract replaces a convention that each site re-implemented.
+#
+# A TOO-SMALL BUFFER YIELDS AN EMPTY STRING, NOT A TRUNCATED ONE, and that is a deliberate
+# choice rather than defensive habit: the host keys the device on its advertised name, so a
+# shortened id is not a degraded id -- it is a DIFFERENT device. Empty fails visibly; truncated
+# fails as a stranger appearing in Home Assistant.
+#
+# Three DEAD forward declarations went with it -- communication.cpp, display_service.cpp and
+# ble_transport_nrf.cpp each declared the function and never called it.
+#
+# encryption.cpp's ESP32 half also came off the shim (millis, ESP.getEfuseMac, and
+# checkResetPin's pinMode/digitalRead/delay), but the FILE stays counted: its TARGET_NRF arm
+# still needs <Arduino.h> for random() and its own pinMode calls. Same rule as buzzer_hw.cpp and
+# device_control.cpp. 12 -> 11, one file.
+#
+# ESP.getEfuseMac() -> esp_efuse_mac_get_default(), with the little-endian packing written out
+# explicitly rather than tidied. The Arduino call returned the six factory bytes packed into a
+# uint64_t with MAC byte 0 in the LOW byte, and both call sites shift that value to select a
+# subrange. One feeds the AUTH device id and the other the advertised device NAME -- a
+# different packing is a different device to the host, and the fleet is keyed on both.
+#
+# NOT hardware-verified. The device name and the AUTH device id both derive from the changed
+# code, and getting either wrong presents as a new device rather than a broken one -- which is
+# exactly the failure mode the S3 MAC pinning in sdkconfig.defaults.esp32s3 exists to prevent.
+11

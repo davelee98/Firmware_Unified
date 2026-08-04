@@ -198,7 +198,7 @@ void enterDeepSleep(bool force = false, uint16_t overrideSleepSeconds = 0);
 extern bool advertising_timeout_active;
 extern uint32_t advertising_start_time;
 #endif
-String getChipIdHex();
+void getChipIdHex(char* out, size_t out_size);   // see encryption.h for the contract
 
 // imageDataWritten + its opaque parameter typedefs come from communication.h.
 void sendResponse(uint8_t* response, uint16_t len);

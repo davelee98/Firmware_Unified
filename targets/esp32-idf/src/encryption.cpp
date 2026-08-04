@@ -11,12 +11,15 @@
 #include "nrf_cc310/include/ssi_aes_defs.h"
 #endif
 #ifdef TARGET_ESP32
-#include <Arduino.h>
+#include "esp_mac.h"       // esp_efuse_mac_get_default -- was ESP.getEfuseMac() via the shim
+#include "od_hal_gpio.h"
+#include "od_hal_time.h"
 #include "mbedtls/aes.h"
 #include "mbedtls/ccm.h"
 #include "mbedtls/cmac.h"
 #include "esp_random.h"
 #endif
+#include <stdio.h>
 #include <string.h>
 
 #ifdef TARGET_NRF
@@ -44,6 +47,34 @@ bool aes_ccm_decrypt(const uint8_t* key, const uint8_t* nonce, size_t nonce_len,
                      uint8_t* plaintext, const uint8_t* tag, size_t tag_len);
 bool constantTimeCompare(const uint8_t* a, const uint8_t* b, size_t len);
 void secure_random(uint8_t* output, size_t len);
+
+/* Milliseconds since boot. ESP32 takes it from od_hal_time; the nRF arm still has Arduino's
+ * millis() from the include above, and leaves with Bluefruit at migration step 4. Both wrap at
+ * ~49.7 days, which every comparison here relies on -- they are unsigned subtractions. */
+static inline uint32_t od_now_ms(void) {
+#ifdef TARGET_ESP32
+    return od_hal_uptime_ms();
+#else
+    return millis();
+#endif
+}
+
+/* Same split for the two other Arduino primitives this file uses, both in checkResetPin(). */
+static inline void od_delay_ms(uint32_t ms) {
+#ifdef TARGET_ESP32
+    od_hal_delay_ms(ms);
+#else
+    delay((long)ms);
+#endif
+}
+
+static inline int od_read_pin(uint8_t pin) {
+#ifdef TARGET_ESP32
+    return od_hal_gpio_read(pin);
+#else
+    return digitalRead(pin) ? 1 : 0;
+#endif
+}
 #ifdef TARGET_ESP32
 static void ccm_session_init(EncryptionSession& session);
 static void ccm_session_free(EncryptionSession& session);
@@ -54,7 +85,15 @@ void getAuthDeviceIdBytes(uint8_t* device_id) {
 #ifdef TARGET_NRF
     uint32_t id = NRF_FICR->DEVICEID[0];
 #elif defined(TARGET_ESP32)
-    uint64_t mac = ESP.getEfuseMac();
+    uint8_t macb[6] = {0};
+    esp_efuse_mac_get_default(macb);
+    /* ESP.getEfuseMac() returns the six factory bytes packed little-endian into a uint64_t,
+     * i.e. byte 0 of the MAC in the LOW byte. `mac >> 16` therefore selected MAC bytes 2..5.
+     * Reproduced exactly rather than "tidied": this feeds the AUTH device id, so a different
+     * packing is a different device to the host. */
+    uint64_t mac = ((uint64_t)macb[0])       | ((uint64_t)macb[1] << 8)  |
+                   ((uint64_t)macb[2] << 16) | ((uint64_t)macb[3] << 24) |
+                   ((uint64_t)macb[4] << 32) | ((uint64_t)macb[5] << 40);
     uint32_t id = (uint32_t)(mac >> 16);
 #else
     uint32_t id = 0x00000001;
@@ -224,7 +263,7 @@ void clearEncryptionSession() {
 bool checkEncryptionSessionTimeout() {
     if (!encryptionSession.authenticated) return false;
     if (securityConfig.session_timeout_seconds == 0) return true;
-    uint32_t currentTime = millis() / 1000;
+    uint32_t currentTime = od_now_ms() / 1000;
     uint32_t sessionAge = currentTime - (encryptionSession.session_start_time / 1000);
     if (sessionAge >= securityConfig.session_timeout_seconds) {
         od_log_info("Encryption session timeout (%us >= %us)", (unsigned)sessionAge, securityConfig.session_timeout_seconds);
@@ -236,7 +275,7 @@ bool checkEncryptionSessionTimeout() {
 
 void updateEncryptionSessionActivity() {
     if (encryptionSession.authenticated) {
-        encryptionSession.last_activity = millis();
+        encryptionSession.last_activity = od_now_ms();
     }
 }
 
@@ -567,7 +606,7 @@ bool handleAuthenticate(uint8_t* data, uint16_t len) {
         sendResponse(response, sizeof(response));
         return false;
     }
-    uint32_t currentTime = millis();
+    uint32_t currentTime = od_now_ms();
     if (encryptionSession.last_auth_time > 0) {
         uint32_t timeSinceLastAuth = (currentTime - encryptionSession.last_auth_time) / 1000;
         if (timeSinceLastAuth < 60) {
@@ -783,33 +822,42 @@ static constexpr const char* CONFIG_FILE_PATH_LOCAL = "/config.bin";
 
 void reboot();
 
-String getChipIdHex() {
+void getChipIdHex(char* out, size_t out_size) {
+    if (out == NULL || out_size == 0) {
+        return;
+    }
+    /* Refuse rather than truncate: a shortened device id is not a degraded id, it is a
+     * DIFFERENT device to the host, which keys on the advertised name. */
+    if (out_size < OD_CHIP_ID_HEX_LEN + 1u) {
+        out[0] = '\0';
+        return;
+    }
 #ifdef TARGET_NRF
     uint32_t id1 = NRF_FICR->DEVICEID[0];
     uint32_t id2 = NRF_FICR->DEVICEID[1];
-    uint32_t last3Bytes = id2 & 0xFFFFFF;
-    String hexId = String(last3Bytes, HEX);
-    hexId.toUpperCase();
-    while (hexId.length() < 6) {
-        hexId = "0" + hexId;
-    }
+    uint32_t last3Bytes = id2 & 0xFFFFFFu;
+    /* "%06X" replaces String(v, HEX) + toUpperCase() + a manual zero-pad loop, and produces
+     * the same six characters for every input. */
+    snprintf(out, out_size, "%06X", (unsigned)last3Bytes);
     od_log_debug("Chip ID: %08X%08X", (unsigned)id1, (unsigned)id2);
-    od_log_debug("Using last 3 bytes: %s", hexId.c_str());
-    return hexId;
-#endif
-#ifdef TARGET_ESP32
-    uint64_t macAddress = ESP.getEfuseMac();
-    uint32_t chipId = (uint32_t)(macAddress >> 24) & 0xFFFFFF;
-    String hexId = String(chipId, HEX);
-    hexId.toUpperCase();
-    while (hexId.length() < 6) {
-        hexId = "0" + hexId;
-    }
+    od_log_debug("Using last 3 bytes: %s", out);
+    return;
+#elif defined(TARGET_ESP32)
+    uint8_t macb[6] = {0};
+    esp_efuse_mac_get_default(macb);
+    /* Same little-endian packing as getAuthDeviceIdBytes() above -- see the note there. The
+     * advertised device NAME is derived from this, and the fleet is keyed on it. */
+    uint64_t macAddress = ((uint64_t)macb[0])       | ((uint64_t)macb[1] << 8)  |
+                          ((uint64_t)macb[2] << 16) | ((uint64_t)macb[3] << 24) |
+                          ((uint64_t)macb[4] << 32) | ((uint64_t)macb[5] << 40);
+    uint32_t chipId = (uint32_t)(macAddress >> 24) & 0xFFFFFFu;
+    snprintf(out, out_size, "%06X", (unsigned)chipId);
     od_log_debug("Chip ID: %06X", (unsigned)chipId);
-    od_log_debug("Using chip ID: %s", hexId.c_str());
-    return hexId;
+    od_log_debug("Using chip ID: %s", out);
+    return;
+#else
+    out[0] = '\0';
 #endif
-    return "";
 }
 
 void secureEraseConfig() {
@@ -867,12 +915,10 @@ void checkResetPin() {
                  pin, polarity ? "HIGH" : "LOW", pullup, pulldown);
 
 #ifdef TARGET_ESP32
-    pinMode(pin, INPUT);
-    if (pullup) {
-        pinMode(pin, INPUT_PULLUP);
-    } else if (pulldown) {
-        pinMode(pin, INPUT_PULLDOWN);
-    }
+    /* One call where Arduino needed two: pinMode(INPUT) then a conditional re-pinMode with the
+     * pull. Asking for neither pull IS the plain-INPUT case, so the intermediate configuration
+     * disappears and the pad ends in the same state. */
+    od_hal_gpio_config_input(pin, pullup, pulldown);
 #elif defined(TARGET_NRF)
     pinMode(pin, INPUT);
     if (pullup) {
@@ -880,13 +926,13 @@ void checkResetPin() {
     }
 #endif
 
-    delay(100);
-    bool pinState = digitalRead(pin);
+    od_delay_ms(100);
+    bool pinState = (od_read_pin(pin) != 0);
 
     if (pinState == polarity) {
         od_log_warn("Reset pin triggered! Securely erasing config and rebooting...");
         secureEraseConfig();
-        delay(100);
+        od_delay_ms(100);
         reboot();
     } else {
         od_log_debug("Reset pin not triggered (state: %s)", pinState ? "HIGH" : "LOW");

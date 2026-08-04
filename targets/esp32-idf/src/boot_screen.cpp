@@ -21,7 +21,8 @@ extern struct SecurityConfig securityConfig;
 extern BBEPDISP bbep;
 extern uint8_t staticRowBuffer[BOOT_ROW_BUFFER_SIZE];
 
-String getChipIdHex();
+void getChipIdHex(char* out, size_t out_size);
+#define OD_CHIP_ID_HEX_LEN 6
 uint8_t getFirmwareMajor();
 uint8_t getFirmwareMinor();
 uint8_t getFirmwarePatch();
@@ -653,20 +654,25 @@ bool writeBootScreenWithQr() {
     }
     const bool colorSwatchPlane1 = useBitplanes && numSwatches > 0;
 
-    String chipId = getChipIdHex();
-    if (chipId.length() < 6) {
-        chipId = String("000000").substring(0, 6 - chipId.length()) + chipId;
-    }
-    String last6 = chipId.substring(chipId.length() - 6);
-    for (size_t i = 0; i < last6.length(); i++) last6.setCharAt(i, (char)toupper(last6.charAt(i)));
+    // getChipIdHex() now guarantees exactly six uppercase hex digits, zero-padded, so the
+    // pad-to-six / take-last-six / uppercase dance this used to do is the contract instead of
+    // a convention at each call site. An empty result (buffer too small, or an unsupported
+    // target) leaves the three id bytes zero, which is what the old short-string path did too.
+    char last6[OD_CHIP_ID_HEX_LEN + 1] = {0};
+    getChipIdHex(last6, sizeof(last6));
 
     uint8_t payload[23] = {0};
     uint16_t res = globalConfig.displays[0].legacy_tag_type;
     payload[0] = (uint8_t)((res >> 8) & 0xFF);
     payload[1] = (uint8_t)(res & 0xFF);
-    payload[2] = (uint8_t)strtoul(last6.substring(0, 2).c_str(), nullptr, 16);
-    payload[3] = (uint8_t)strtoul(last6.substring(2, 4).c_str(), nullptr, 16);
-    payload[4] = (uint8_t)strtoul(last6.substring(4, 6).c_str(), nullptr, 16);
+    if (last6[0] != '\0') {
+        char pair[3] = {0};
+        for (uint8_t i = 0; i < 3; i++) {
+            pair[0] = last6[i * 2];
+            pair[1] = last6[i * 2 + 1];
+            payload[2 + i] = (uint8_t)strtoul(pair, nullptr, 16);
+        }
+    }
     if (securityConfig.flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN) {
         memcpy(&payload[5], securityConfig.encryption_key, 16);
     } else {
@@ -706,11 +712,11 @@ bool writeBootScreenWithQr() {
     char nameLine[32];
     char fwLine[32];
     if (useZoneLayout) {
-        snprintf(nameLine, sizeof(nameLine), "ID:   OD%s", last6.c_str());
+        snprintf(nameLine, sizeof(nameLine), "ID:   OD%s", last6);
         snprintf(fwLine, sizeof(fwLine), "FW:   OD ver %u.%u.%u",
                  (unsigned)getFirmwareMajor(), (unsigned)getFirmwareMinor(), (unsigned)getFirmwarePatch());
     } else {
-        snprintf(nameLine, sizeof(nameLine), "OD%s", last6.c_str());
+        snprintf(nameLine, sizeof(nameLine), "OD%s", last6);
         snprintf(fwLine, sizeof(fwLine), "FW:O %u.%u.%u",
                  (unsigned)getFirmwareMajor(), (unsigned)getFirmwareMinor(), (unsigned)getFirmwarePatch());
     }
