@@ -448,4 +448,33 @@
 # `avahi-browse -r _opendisplay._tcp` on the LAN should show the device, its port, and all
 # seven TXT keys. Nothing about this has ever worked on this target, so there is no regression
 # risk -- only the question of whether the advertisement is correct.
-8
+
+# 7 = phase C step 11, 2026-08-04: src/main.h -- <Arduino.h>, <SPI.h> and <Wire.h> all three.
+# 8 -> 7, one file. (Step 10, src/boot_screen.cpp, is deliberately still open: its include is
+# vestigial and it can go at any time.)
+#
+# MAIN.H USED NONE OF THEM. It is the header that defines this firmware's globals, and it has
+# no Arduino type or call of its own -- the three includes were serving main.cpp, its ONLY
+# consumer, transitively. That is worth stating because it is the honest version of a decrement
+# the ratchet cannot distinguish from laundering by itself: the surface did not move to another
+# file, it was never used here.
+#
+# main.cpp then failed to compile on three call sites it had been getting through main.h, which
+# is the whole reason the include had to be named rather than deleted:
+#   - TWO Wire.end() -> od_hal_i2c_deinit(). compat/Wire.h's end() IS exactly that call, so this
+#     is a real removal, not a rename.
+#   - ONE SPI.end() -> stays, and main.cpp now includes <SPI.h> explicitly. It is NOT a one-line
+#     HAL call: compat/SPI.h's end() releases the device AND frees the bus using ownership state
+#     (_owns_bus) that only the shim holds, and there is no od_hal_spi. Naming the include costs
+#     nothing on the count -- main.cpp is already counted for <Arduino.h> -- and hiding it in a
+#     header would have been the laundering this file exists to catch.
+#
+# CHECKED FOR A BACK DOOR: main.h still includes <bb_epaper.h>, which is itself on the
+# third_party shim list. It includes <Arduino.h> only under #ifdef ARDUINO, and this build does
+# not define ARDUINO (it takes the __LINUX__ branch -- see main/CMakeLists.txt on why defining
+# ARDUINO was rejected). So nothing is laundered in through it.
+#
+# All 10 images are BYTE-IDENTICAL to the previous commit. Expected, and the point: Wire.end()
+# already compiled to od_hal_i2c_deinit(), so this step changes what the source DEPENDS on
+# without changing what it generates. Nothing here needs hardware verification.
+7

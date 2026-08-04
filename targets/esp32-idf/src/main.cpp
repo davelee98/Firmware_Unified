@@ -5,6 +5,13 @@
  * the target -- a laundered decrement, which is exactly the failure compat/SHIM_BUDGET says a
  * ratchet must be able to tell apart from real progress. It leaves for real when main.h does. */
 #include <Arduino.h>
+/* Named explicitly as of phase C step 11, because main.h no longer supplies them. Only
+ * SPI.end() is left here, and it is not a one-line HAL call: compat/SPI.h's end() releases the
+ * device AND frees the bus, using ownership state (_owns_bus) that only the shim holds. There
+ * is no od_hal_spi yet, so this is the honest form of the dependency until the vendor-adapter
+ * boundary is settled -- see compat/SHIM_BUDGET. <Wire.h> is NOT here: its two call sites
+ * became od_hal_i2c_deinit() in this same step. */
+#include <SPI.h>
 
 #include "main.h"
 #include "boot_screen.h"
@@ -28,6 +35,7 @@
  * pin/UART defines and compat/HardwareSerial.h went with it. */
 #include "od_hal_log.h"
 #endif
+#include "od_hal_i2c.h"
 
 #ifdef TARGET_ESP32
 // Distinguishes a hidden mid-cycle reset (PANIC/WDT/BROWNOUT/SW) from a real
@@ -1314,7 +1322,7 @@ void pwrmgm(bool onoff){
         else{
             od_log_info("Powering down AXP2101 PMIC...");
             powerDownAXP2101();
-            Wire.end();
+            od_hal_i2c_deinit();
             invalidateOpenDisplayWire();
             pinMode(47, OUTPUT);
             digitalWrite(47, HIGH);
@@ -1374,7 +1382,7 @@ void pwrmgm(bool onoff){
         }
         // Keep I2C alive when sensors/touch use data_bus[0] (e.g. reTerminal MISC_I2C on GPIO0/1).
         if (!openDisplayI2cBusConfigured()) {
-            Wire.end();
+            od_hal_i2c_deinit();
             invalidateOpenDisplayWire();
         }
         if (globalConfig.system_config.pwr_pin != 0xFF) {

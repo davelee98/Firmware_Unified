@@ -1,8 +1,15 @@
-#include <Arduino.h>
+/* NO <Arduino.h>, <SPI.h> or <Wire.h> here (phase C step 11). This header defines the
+ * firmware's globals; it uses no Arduino type or function of its own, and the three includes
+ * were serving main.cpp -- its only consumer -- transitively. main.cpp now names its own
+ * dependency explicitly, which is the point: a header that pulls in a surface it does not use
+ * hides which file actually depends on it.
+ *
+ * <bb_epaper.h> below is NOT a back door. It includes <Arduino.h> only under #ifdef ARDUINO,
+ * which this build does not define (it takes the __LINUX__ branch), so nothing is laundered
+ * in through it. */
 #include "structs.h"
 #include "uzlib.h"
 #include <bb_epaper.h>
-#include <SPI.h>
 #include "encryption_state.h"
 #include "config_parser.h"
 #include "ble_transport.h"
@@ -29,7 +36,6 @@ using namespace Adafruit_LittleFS_Namespace;
 
 /* OD: config storage is NVS (hal/od_hal_nvs.h); LittleFS is gone from this target. */
 
-#include <Wire.h>
 
 #define MAX_BLOCKS 64
 // Text rendering constants
