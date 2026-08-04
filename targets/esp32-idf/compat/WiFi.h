@@ -32,11 +32,7 @@
 #define WL_CONNECT_FAILED   4
 #define WL_DISCONNECTED     6
 
-#define WIFI_ALL_CHANNEL_SCAN 1
-#define WIFI_FAST_SCAN        0
 
-#define WIFI_POWER_15dBm      60
-#define WIFI_POWER_19_5dBm    78
 
 /* Arduino's wl_status_t is an enum; the shim's status() returns int, so alias it. */
 typedef int wl_status_t;
@@ -247,31 +243,17 @@ private:
     bool _noDelay = false;
 };
 
-class WiFiClass {
-public:
-    int begin(const char *ssid, const char *pass);
-    void disconnect(bool wifioff = false);
-    int status() const;
-    IPAddress localIP() const;
-    int32_t RSSI() const;
-    int32_t channel() const;
-    String BSSIDstr() const;
-    void setTxPower(int) {}
-    void setScanMethod(int) {}
-    void setMinSecurity(int) {}
-    uint8_t *BSSID() { static uint8_t b[6] = {0}; return b; }
-    /* Arduino's begin() has several overloads; the sources use the 4-arg form with an
-     * explicit channel and BSSID. Channel/BSSID pinning is not modelled -- esp_wifi will
-     * scan for the SSID -- which is slower to associate but not incorrect. */
-    int begin(const char *ssid, const char *pass, int32_t, const uint8_t *)
-    { return begin(ssid, pass); }
-    /* NOT dispatched. Arduino's event callback signature and IDF's default-event-loop
-     * handler are different shapes, and this handler is diagnostics only -- wiring it
-     * wrongly would produce misleading link diagnostics, which is worse than none. */
-    void onEvent(void (*)(arduino_event_id_t, arduino_event_info_t)) {}
-    void setAutoReconnect(bool) {}
-    void setSortMethod(int) {}
-    void mode(int) {}
-};
+/* WiFiClass is GONE (phase C step 9b-ii). src/wifi_service.cpp drives esp_wifi/esp_netif
+ * directly now, and main.cpp asks it for the link state through wifiLinkIsUp().
+ *
+ * It was removed rather than left as dead code because five of its methods were SILENT
+ * NO-OPS -- setScanMethod, setSortMethod, setTxPower, setAutoReconnect and onEvent -- plus a
+ * BSSID() that returned a static zero array. Leaving that where a future caller could find it
+ * is worse than the shim's usual cost: a no-op that compiles is indistinguishable from a
+ * feature that works. See the comment block on the replacement in wifi_service.cpp for what
+ * each one broke.
+ *
+ * What remains in this file is WiFiServer/WiFiClient (the LAN data path, phase C step 9b-iii)
+ * and the IPAddress they return. It goes with them.
+ */
 
-extern WiFiClass WiFi;

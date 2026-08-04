@@ -43,6 +43,10 @@ extern bool wifiServerConnected;
 // above) so the pointer type is checked against its definition in main.h.
 extern uint8_t msd_payload[16];
 
+// Defined further down with the rest of the WiFi station layer; used before that point.
+static int  odWifiStatus(void);
+static void odWifiIpStr(char* out, size_t n);
+
 
 // Command origin marker (F4): the shared dispatcher (imageDataWritten) reads this
 // to decide whether to run the app-layer AES-CCM gate. Defined in communication.cpp;
@@ -404,7 +408,7 @@ static void hex14_lower(const uint8_t* src, char* out29) {
 }
 
 void opendisplay_mdns_update_msd_txt(void) {
-    if (!wifiConnected || WiFi.status() != WL_CONNECTED) {
+    if (!wifiConnected || odWifiStatus() != WL_CONNECTED) {
         return;
     }
     static uint8_t last_msd[14];
@@ -483,7 +487,7 @@ static void startLanServer(void) {
     restartLanService();
 }
 
-// WiFi.status() collapses every association failure into WL_DISCONNECTED (6), which
+// odWifiStatus() collapses every association failure into WL_DISCONNECTED (6), which
 // is useless for field diagnosis. Log the 802.11/ESP reason code instead: 201
 // (NO_AP_FOUND) means the SSID was never seen -- typically a 5 GHz-only or hidden
 // network; 15 (4WAY_HANDSHAKE_TIMEOUT) / 202 (AUTH_FAIL) mean a bad password; 200
@@ -558,11 +562,143 @@ RTC_DATA_ATTR static bool    s_cachedValid;
 static bool usingCachedAp = false;      // this attempt used the cache (drives fallback)
 static bool rescanReconnectPending = false;  // cached BSSID failed; re-begin with a scan
 
-// Make every (re)connect choose the strongest AP for the SSID. Must be called
-// BEFORE WiFi.begin(); the setting is sticky for later auto-reconnects.
-static void lanApplyBestApSelection(void) {
-    WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);      // required for the sort below to apply
-    WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);  // strongest RSSI wins
+// Scan/sort selection is no longer a pair of sticky pre-begin setters -- it lives in the
+// wifi_config_t that odWifiBegin() writes for the non-pinned path, because that is where IDF
+// actually reads it from. The two Arduino setters this replaced were no-ops, so this is the
+// first time the "strongest AP wins" behaviour described above is real.
+
+// ---------------------------------------------------------------------------------------
+// WiFi station control, against esp_wifi/esp_netif directly (phase C step 9b-ii).
+//
+// This replaces compat/WiFi.h's WiFiClass, which was not merely a thin wrapper: FIVE of its
+// methods were SILENT NO-OPS, and the code around them was written assuming they worked. Each
+// is implemented here, and each fixes a behaviour this target has not had since the import:
+//
+//   setScanMethod / setSortMethod  no-ops. So "scan all channels, strongest AP wins" did not
+//                                  happen -- on a multi-AP SSID the STA took whichever AP
+//                                  answered first, which on a mesh is usually the one you
+//                                  just walked away from.
+//   setTxPower                     no-op. The radio ran at the driver default rather than the
+//                                  15 dBm this code asks for -- a current-draw difference on
+//                                  a battery tag, not just a range one.
+//   BSSID()                        returned a STATIC ZERO ARRAY. lanCacheStoreCurrentAp()
+//                                  therefore cached 00:00:00:00:00:00, so the whole
+//                                  deep-sleep-wake fast path was inert while logging success.
+//   begin(ssid, pass, ch, bssid)   dropped the channel and BSSID. Same consequence: the
+//                                  "no scan" path always scanned.
+//   onEvent()                      never dispatched. onWiFiDiagEvent() has NEVER RUN on this
+//                                  target: no association notice, no disconnect reason, no
+//                                  got-IP line, no cached-AP failure handling -- and with
+//                                  setAutoReconnect also a no-op, nothing reconnected a
+//                                  dropped link at all.
+//
+// The handlers below are the real IDF ones, feeding the same flag variables the Arduino-shaped
+// handler used, so serviceWifiEventFollowUp() on the loop task is unchanged. The
+// EVENT-CONTEXT RULE applies to them exactly as before: flags only.
+// ---------------------------------------------------------------------------------------
+
+static esp_netif_t* s_staNetif = nullptr;
+static bool s_wifiStackUp = false;
+
+static void odWifiEnsureStack(void) {
+    if (s_wifiStackUp) return;
+    esp_netif_init();
+    esp_event_loop_create_default();
+    s_staNetif = esp_netif_create_default_wifi_sta();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    s_wifiStackUp = true;
+}
+
+// Associate. A non-NULL bssid pins the AP and channel (the deep-sleep fast path); NULL scans
+// every channel and takes the strongest, which is what lanApplyBestApSelection() used to ask
+// for through two no-op setters. Both live in one wifi_config_t, so they are set together
+// here rather than as separate "sticky" calls.
+static int odWifiBegin(const char* ssid, const char* pass,
+                       const uint8_t* bssid, uint8_t channel) {
+    if (!ssid) return WL_CONNECT_FAILED;
+    odWifiEnsureStack();
+
+    wifi_config_t wc = {};
+    strncpy((char*)wc.sta.ssid, ssid, sizeof(wc.sta.ssid) - 1);
+    if (pass) {
+        strncpy((char*)wc.sta.password, pass, sizeof(wc.sta.password) - 1);
+    }
+    if (bssid != nullptr && channel >= 1 && channel <= 14) {
+        wc.sta.bssid_set = true;
+        memcpy(wc.sta.bssid, bssid, 6);
+        wc.sta.channel = channel;
+    } else {
+        wc.sta.bssid_set = false;
+        wc.sta.channel = 0;
+        wc.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+        wc.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    }
+    // Credentials are never logged, at any level -- ARCHITECTURE.md "Secrets are never logged
+    // verbatim". Presence and length only.
+    od_log_info("WiFi: join SSID (set, %u chars), password %s%s",
+                (unsigned)strlen(ssid), (pass && *pass) ? "(set)" : "(empty)",
+                wc.sta.bssid_set ? ", BSSID-pinned" : ", all-channel scan");
+
+    esp_wifi_set_config(WIFI_IF_STA, &wc);
+    esp_wifi_start();
+    esp_wifi_connect();
+    return WL_IDLE_STATUS;
+}
+
+static int odWifiStatus(void) {
+    if (!s_wifiStackUp) return WL_IDLE_STATUS;
+    wifi_ap_record_t ap;
+    return (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? WL_CONNECTED : WL_DISCONNECTED;
+}
+
+static int32_t odWifiRssi(void) {
+    wifi_ap_record_t ap;
+    return (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : 0;
+}
+
+static int32_t odWifiChannel(void) {
+    wifi_ap_record_t ap;
+    return (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.primary : 0;
+}
+
+// Real BSSID of the associated AP, or NULL when not associated. The shim returned a static
+// zero array unconditionally, which is what made the AP cache inert.
+static const uint8_t* odWifiBssid(void) {
+    static wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return nullptr;
+    return ap.bssid;
+}
+
+static void odWifiBssidStr(char* out, size_t n) {
+    const uint8_t* b = odWifiBssid();
+    if (b == nullptr) {
+        if (n) out[0] = '\0';
+        return;
+    }
+    snprintf(out, n, "%02X:%02X:%02X:%02X:%02X:%02X", b[0], b[1], b[2], b[3], b[4], b[5]);
+}
+
+static void odWifiIpStr(char* out, size_t n) {
+    esp_netif_ip_info_t ip = {};
+    if (s_staNetif && esp_netif_get_ip_info(s_staNetif, &ip) == ESP_OK) {
+        snprintf(out, n, IPSTR, IP2STR(&ip.ip));
+    } else {
+        snprintf(out, n, "0.0.0.0");
+    }
+}
+
+static void odWifiDisconnect(bool radioOff) {
+    if (!s_wifiStackUp) return;
+    esp_wifi_disconnect();
+    if (radioOff) esp_wifi_stop();
+}
+
+// 0.25 dBm units, so 60 == 15 dBm -- the value Arduino's WIFI_POWER_15dBm encodes. Only valid
+// once the STA is started, which is why the call site is after begin().
+static void odWifiSetTxPower15dBm(void) {
+    esp_wifi_set_max_tx_power(60);
 }
 
 static void lanCacheInvalidate(const char* why) {
@@ -575,8 +711,8 @@ static void lanCacheInvalidate(const char* why) {
 
 // Record the AP we actually associated with, so the next wake can go straight to it.
 static void lanCacheStoreCurrentAp(void) {
-    const uint8_t* b = WiFi.BSSID();
-    int32_t ch = WiFi.channel();
+    const uint8_t* b = odWifiBssid();
+    int32_t ch = odWifiChannel();
     if (b == nullptr || ch < 1 || ch > 14) return;
     memcpy(s_cachedBssid, b, 6);
     s_cachedChannel = (uint8_t)ch;
@@ -592,13 +728,12 @@ static void lanBeginConnect(void) {
                  s_cachedBssid[0], s_cachedBssid[1], s_cachedBssid[2],
                  s_cachedBssid[3], s_cachedBssid[4], s_cachedBssid[5]);
         od_log_info("WiFi: connecting to cached AP %s ch %d (no scan)", b, (int)s_cachedChannel);
-        WiFi.begin(wifiSsid, wifiPassword, (int32_t)s_cachedChannel, s_cachedBssid);
+        odWifiBegin(wifiSsid, wifiPassword, s_cachedBssid, s_cachedChannel);
         return;
     }
     usingCachedAp = false;
     od_log_info("WiFi: scanning all channels for the strongest AP");
-    lanApplyBestApSelection();
-    WiFi.begin(wifiSsid, wifiPassword);
+    odWifiBegin(wifiSsid, wifiPassword, nullptr, 0);
 }
 
 static void onWifiRssiLow(void* arg, esp_event_base_t base, int32_t id, void* data);
@@ -650,40 +785,60 @@ static void onWifiRssiLow(void* arg, esp_event_base_t base, int32_t id, void* da
     rssiLowNoticePending = true;
 }
 
-// Flags only -- see the EVENT-CONTEXT RULE above. No logging and no esp_* calls: this runs
-// on the 4096-byte "arduino_events" task.
-static void onWiFiDiagEvent(arduino_event_id_t event, arduino_event_info_t info) {
-    switch (event) {
-        case ARDUINO_EVENT_WIFI_STA_CONNECTED:
-            s_lastAssocChannel = (int)info.wifi_sta_connected.channel;
-            assocNoticePending = true;
-            break;
-        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-            s_lastDisconnectReason = (int)info.wifi_sta_disconnected.reason;
-            disconnectNoticePending = true;
-            // A BSSID-pinned begin() leaves bssid_set = 1 in the driver config, so the
-            // framework's auto-reconnect would retry that ONE AP forever -- fatal if it
-            // moved, changed channel, or powered off. Ask the loop to drop the cache and
-            // re-begin WITHOUT a BSSID, which both clears bssid_set and rescans.
-            if (usingCachedAp) {
-                usingCachedAp = false;
-                cacheFailPending = true;      // loop() invalidates + logs
-                rescanReconnectPending = true;
-            }
-            break;
-        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-            s_lastGotIp = info.got_ip.ip_info.ip.addr;
-            rescanReconnectPending = false;
-            gotIpPending = true;              // loop() logs RSSI/ch/BSSID, caches, arms
-            break;
-        default:
-            break;
+// The Arduino-shaped diagnostic handler that used to live here is DELETED, not ported. It took
+// (arduino_event_id_t, arduino_event_info_t) -- shim types -- and compat/WiFi.h's onEvent() was
+// a no-op, so it was never dispatched on this target. Its body now lives in
+// odWifiEventHandler() above, against the real IDF event types.
+
+
+// The real IDF handlers. Same flag-setting bodies as the Arduino-shaped onWiFiDiagEvent()
+// they replace -- which the shim never dispatched, so none of this has run on this target
+// before. EVENT-CONTEXT RULE: flags only, no logging, no esp_* calls.
+static void odWifiEventHandler(void* arg, esp_event_base_t base, int32_t id, void* data) {
+    (void)arg;
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        const wifi_event_sta_connected_t* e = (const wifi_event_sta_connected_t*)data;
+        s_lastAssocChannel = e ? (int)e->channel : 0;
+        assocNoticePending = true;
+        return;
+    }
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t* e = (const wifi_event_sta_disconnected_t*)data;
+        s_lastDisconnectReason = e ? (int)e->reason : 0;
+        disconnectNoticePending = true;
+        // A BSSID-pinned begin() leaves bssid_set = 1 in the driver config, so retrying would
+        // hammer that ONE AP forever -- fatal if it moved, changed channel, or powered off.
+        // Ask the loop to drop the cache and re-begin WITHOUT a BSSID, which both clears
+        // bssid_set and rescans. That reasoning was already here; it is only now reachable,
+        // because the pinning it guards against is only now real.
+        if (usingCachedAp) {
+            usingCachedAp = false;
+            cacheFailPending = true;
+            rescanReconnectPending = true;
+        } else {
+            // Plain drop: reconnect. Arduino's setAutoReconnect(true) was meant to do this and
+            // was a no-op, so until now a dropped link stayed down until something else
+            // re-initialised WiFi. esp_wifi_connect() from the event task is the documented
+            // way to do it and does not block.
+            esp_wifi_connect();
+        }
+        return;
+    }
+    if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        const ip_event_got_ip_t* e = (const ip_event_got_ip_t*)data;
+        s_lastGotIp = e ? (uint32_t)e->ip_info.ip.addr : 0;
+        gotIpPending = true;
+        return;
     }
 }
 
 static void registerWiFiDiagEvents(void) {
     if (wifiDiagEventsRegistered) return;
-    WiFi.onEvent(onWiFiDiagEvent);
+    // Needs the default event loop, which odWifiEnsureStack() creates. Called from initWiFi()
+    // before the first begin(), so bring the stack up here rather than relying on ordering.
+    odWifiEnsureStack();
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &odWifiEventHandler, nullptr);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &odWifiEventHandler, nullptr);
     wifiDiagEventsRegistered = true;
     // The raw WIFI_EVENT handler is NOT registered here: this runs before WiFi.begin(),
     // and esp_event_handler_register() needs the default event loop, which Arduino only
@@ -718,10 +873,12 @@ static void serviceWifiEventFollowUp(void) {
         gotIpPending = false;
         {
             const uint32_t ipRaw = (uint32_t)s_lastGotIp;
+            char bssidStr[18] = "";
+            odWifiBssidStr(bssidStr, sizeof(bssidStr));
             od_log_info("WiFi event: got IP %u.%u.%u.%u, RSSI %d dBm, ch %d, BSSID %s",
                    (unsigned)(ipRaw & 0xFF), (unsigned)((ipRaw >> 8) & 0xFF),
                    (unsigned)((ipRaw >> 16) & 0xFF), (unsigned)((ipRaw >> 24) & 0xFF),
-                   (int)WiFi.RSSI(), (int)WiFi.channel(), WiFi.BSSIDstr().c_str());
+                   (int)odWifiRssi(), (int)odWifiChannel(), bssidStr);
         }
         lanCacheStoreCurrentAp();   // remember this AP for the next deep-sleep wake
         lanArmRssiThreshold();      // also (re)registers the RSSI-low handler
@@ -736,7 +893,7 @@ void serviceLanRoam(void) {
     if (rescanReconnectPending && !wifiConnected) {
         rescanReconnectPending = false;
         od_log_info("WiFi: cached AP unreachable -- falling back to a full scan");
-        WiFi.disconnect(false);
+        odWifiDisconnect(false);
         lanBeginConnect();   // cache was invalidated on the disconnect -> scan path
         return;
     }
@@ -759,7 +916,7 @@ void serviceLanRoam(void) {
     // Clearing wifiConnected lets handleWiFiServer()'s existing re-association path
     // restart the LAN server once the new link is up.
     wifiConnected = false;
-    WiFi.disconnect(false);
+    odWifiDisconnect(false);
     lanBeginConnect();   // cache now invalid -> full scan, strongest AP wins
 }
 
@@ -789,7 +946,8 @@ void initWiFi(bool waitForConnection) {
     // Do not log the SSID or password (credentials); log only presence/length.
     od_log_info("WiFi: connecting to configured SSID (len %u)", (unsigned)strlen(wifiSsid));
     registerWiFiDiagEvents();
-    WiFi.setAutoReconnect(true);
+    // No setAutoReconnect(): IDF has no such switch, and the Arduino one was a no-op here
+    // anyway. Reconnection is driven explicitly by the STA_DISCONNECTED handler below.
     wifiSsid[32] = '\0';
     wifiPassword[32] = '\0';
     od_log_info("Encryption type: 0x%X", (unsigned)wifiEncryptionType);
@@ -800,7 +958,7 @@ void initWiFi(bool waitForConnection) {
     lanBeginConnect();
     // Tx power can only be set once the STA is started, i.e. after begin(); the
     // pre-begin() call this replaces failed with ESP_ERR_WIFI_NOT_START.
-    WiFi.setTxPower(WIFI_POWER_15dBm);
+    odWifiSetTxPower15dBm();
     if (!waitForConnection) {
         od_log_info("WiFi: STA started (non-blocking; LAN starts when associated)");
         return;
@@ -812,9 +970,9 @@ void initWiFi(bool waitForConnection) {
     for (int retry = 0; retry < maxRetries && !connected; retry++) {
         unsigned long startAttempt = millis();
         bool abortCurrentRetry = false;
-        while (WiFi.status() != WL_CONNECTED && (millis() - startAttempt < timeoutPerRetry)) {
+        while (odWifiStatus() != WL_CONNECTED && (millis() - startAttempt < timeoutPerRetry)) {
             delay(500);
-            wl_status_t status = WiFi.status();
+            wl_status_t status = odWifiStatus();
             od_log_info("WiFi status: %d", (int)status);
             if (status == WL_CONNECT_FAILED || status == WL_NO_SSID_AVAIL) {
                 od_log_info("Connection failed immediately (Status: %d)", (int)status);
@@ -822,7 +980,7 @@ void initWiFi(bool waitForConnection) {
                 break;
             }
         }
-        if (WiFi.status() == WL_CONNECTED) {
+        if (odWifiStatus() == WL_CONNECTED) {
             connected = true;
             break;
         }
@@ -833,10 +991,12 @@ void initWiFi(bool waitForConnection) {
             delay(2000);
         }
     }
-    if (WiFi.status() == WL_CONNECTED) {
+    if (odWifiStatus() == WL_CONNECTED) {
         wifiConnected = true;
         od_log_info("=== WiFi connected ===");
-        od_log_info("IP: %s", WiFi.localIP().toString().c_str());
+        char ipStr[16];
+        odWifiIpStr(ipStr, sizeof(ipStr));
+        od_log_info("IP: %s", ipStr);
         startLanServer();
     } else {
         wifiConnected = false;
@@ -1023,20 +1183,31 @@ static void admitOrRefuseLanClient(WiFiClient& incoming) {
     }
 }
 
+bool wifiLinkIsUp(void) {
+    return odWifiStatus() == WL_CONNECTED;
+}
+
+void wifiLocalIpStr(char* out, size_t out_size) {
+    odWifiIpStr(out, out_size);
+}
+
 void handleWiFiServer() {
     // Execute a queued roam (RSSI dropped below OD_LAN_ROAM_RSSI_THRESHOLD) before any
     // other work; it self-gates on idle, so this is a no-op mid-transfer.
     serviceLanRoam();
 
-    if (wifiInitialized && WiFi.status() == WL_CONNECTED && !wifiConnected) {
+    if (wifiInitialized && odWifiStatus() == WL_CONNECTED && !wifiConnected) {
         wifiConnected = true;
         od_log_info("=== WiFi connected ===");
+        char ipStr[16];
+        char bssidStr[18] = "";
+        odWifiIpStr(ipStr, sizeof(ipStr));
+        odWifiBssidStr(bssidStr, sizeof(bssidStr));
         od_log_info("IP: %s, RSSI %d dBm, ch %d, BSSID %s",
-               WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(), (int)WiFi.channel(),
-               WiFi.BSSIDstr().c_str());
+               ipStr, (int)odWifiRssi(), (int)odWifiChannel(), bssidStr);
         startLanServer();
     }
-    if (!wifiConnected || WiFi.status() != WL_CONNECTED) {
+    if (!wifiConnected || odWifiStatus() != WL_CONNECTED) {
         if (wifiServerConnected || wifiClient.connected()) {
             od_log_info("WiFi lost, closing LAN session");
             disconnectWiFiServer();
@@ -1179,7 +1350,7 @@ void handleWiFiServer() {
 }
 
 void restartWiFiLanAfterReconnect() {
-    if (!wifiConnected || WiFi.status() != WL_CONNECTED) {
+    if (!wifiConnected || odWifiStatus() != WL_CONNECTED) {
         return;
     }
     disconnectWiFiServer();
@@ -1203,7 +1374,7 @@ void opendisplay_lan_teardown(void) {
         mbedtls_entropy_free(&tlsEntropy);
         tlsInited = false;
     }
-    WiFi.disconnect(true);
+    odWifiDisconnect(true);
     od_log_info("LAN/WiFi torn down before restart");
 }
 

@@ -1019,16 +1019,19 @@ void loop() {
     static uint32_t lastWiFiCheck = 0;
     if (wifiInitialized && (millis() - lastWiFiCheck > 10000)) {
         lastWiFiCheck = millis();
-        int wifiStatus = WiFi.status();   /* OD: wl_status_t is an Arduino enum; the shim returns int */
-        if (wifiStatus != WL_CONNECTED && wifiConnected) {
-            od_log_warn("WiFi connection lost (status: %d)", wifiStatus);
+        /* OD: was WiFi.status() != WL_CONNECTED through the Arduino shim. The WiFi stack is
+         * wifi_service.cpp's business; this file only needs the boolean. */
+        const bool linkUp = wifiLinkIsUp();
+        if (!linkUp && wifiConnected) {
+            od_log_warn("WiFi connection lost");
             wifiConnected = false;
             if (wifiServerConnected) {
                 disconnectWiFiServer();
             }
-        } else if (wifiStatus == WL_CONNECTED && !wifiConnected) {
-            String wifiIp = WiFi.localIP().toString();
-            od_log_info("WiFi reconnected (IP: %s)", wifiIp.c_str());
+        } else if (linkUp && !wifiConnected) {
+            char wifiIp[16];
+            wifiLocalIpStr(wifiIp, sizeof(wifiIp));
+            od_log_info("WiFi reconnected (IP: %s)", wifiIp);
             wifiConnected = true;
             restartWiFiLanAfterReconnect();
         }

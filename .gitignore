@@ -51,3 +51,6 @@ factory_config*.hex
 build/
 sdkconfig
 sdkconfig.old
+
+# Agent worktrees -- transient, and each is its own git repo. Never part of a commit here.
+.claude/worktrees/

@@ -24,7 +24,6 @@ list(APPEND OD_APP_SOURCES
 
 # The Arduino shim. TEMPORARY -- removed in phase C together with compat/ and its ratchet.
 list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../compat/arduino_compat.cpp
-                           ${CMAKE_CURRENT_LIST_DIR}/../compat/wifi_compat.cpp
                            ${CMAKE_CURRENT_LIST_DIR}/../compat/app_main.cpp)
 
 # Target HAL implementations. od_hal_nvs is the first: config storage moved off LittleFS onto
