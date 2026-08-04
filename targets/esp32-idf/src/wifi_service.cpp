@@ -9,9 +9,10 @@
 #include "od_log.h"
 #include "ble_transport.h"
 #include "link_owner.h"
-#include <Arduino.h>
-#include <ESPmDNS.h>
+#include "od_hal_time.h"
 #include <errno.h>
+#include <mdns.h>
+#include <esp_err.h>
 #include <lwip/sockets.h>
 #include <esp_wifi.h>
 #include <esp_netif.h>
@@ -558,16 +559,61 @@ static void hex14_lower(const uint8_t* src, char* out29) {
     out29[28] = '\0';
 }
 
+// --------------------------------------------------------------------- mDNS ---
+// Phase C step 9b-iv. This replaces compat/ESPmDNS.h, whose MDNSResponder was
+// ENTIRELY NO-OPS -- begin() returned true, addService() and addServiceTxt() did
+// nothing at all. So this target has never advertised anything since the import,
+// while logging nine TXT records as though it had. The shim said why: "if the mdns
+// component is not present in the build, these become no-ops rather than a build
+// failure". It was not present, because ESP-IDF dropped mdns from core in v5.0. It
+// is now vendored at targets/esp32-idf/components/mdns (see third_party/NOTICE.md).
+//
+// THIS DEVICE ADVERTISES ONLY. It never resolves a name and never browses. The
+// component ships a querier and a browser regardless -- there is no build flag for
+// responder-only -- so that decision lives in sdkconfig.defaults, which sizes the
+// responder for exactly one service on exactly one interface.
+//
+// NOTE THE LEADING UNDERSCORES on the service type below. Arduino's ESPmDNS took
+// "opendisplay"/"tcp" and prefixed them itself; the IDF API does not, and takes
+// "_opendisplay"/"_tcp" as written. Passing the Arduino spelling advertises
+// `opendisplay.tcp.local` -- a name no client looks for, and a failure that looks
+// identical to the mDNS not working at all.
+#define OD_MDNS_SERVICE  "_opendisplay"
+#define OD_MDNS_PROTO    "_tcp"
+
+static bool s_mdnsUp = false;          // mdns_init() has succeeded
+static bool s_mdnsServiceUp = false;   // the _opendisplay._tcp record is registered
+
+// The advertised BLE address, lowercase colon-separated (SECTION 9 rule 6, key
+// `mac`). Prior identity used getChipIdHex() (eFuse), which is NOT what HA
+// stores as the device unique_id. The lowercasing and the hardware-validation
+// caveat live in BleTransport::addressString(), which already returns a plain
+// const char* -- the String wrapper this used to have bought nothing.
+static const char* advertisedBleMacLower(void) {
+    return ble.addressString();
+}
+
+// Push the rolling MSD nibble into the `msd` TXT key.
+//
+// RATE-LIMITED ON PURPOSE, and it matters more now than it did against the no-op
+// shim. Every TXT change makes the responder re-announce the record on the
+// multicast group, so an unthrottled caller here is unthrottled radio traffic on a
+// battery device that also shares its antenna with BLE. The 400 ms floor and the
+// unchanged-payload check below are what keep announcement traffic proportional to
+// real state changes rather than to loop() frequency.
 void opendisplay_mdns_update_msd_txt(void) {
     if (!wifiConnected || odWifiStatus() != OD_WIFI_CONNECTED) {
         return;
+    }
+    if (!s_mdnsServiceUp) {
+        return;   // nothing registered to attach a TXT item to
     }
     static uint8_t last_msd[14];
     static uint32_t last_ms = 0;
     static bool have_last = false;
     uint8_t cur[14];
     memcpy(cur, &msd_payload[2], sizeof(cur));
-    uint32_t now = millis();
+    uint32_t now = od_hal_uptime_ms();
     if (have_last && memcmp(cur, last_msd, sizeof(cur)) == 0 && (now - last_ms) < 400) {
         return;
     }
@@ -576,49 +622,101 @@ void opendisplay_mdns_update_msd_txt(void) {
     last_ms = now;
     char hex[29];
     hex14_lower(cur, hex);
-    // const char* overload (void); char* overload (bool) — avoid ambiguous resolution with char hex[].
-    MDNS.addServiceTxt("opendisplay", "tcp", "msd", static_cast<const char*>(hex));
+    esp_err_t err = mdns_service_txt_item_set(OD_MDNS_SERVICE, OD_MDNS_PROTO, "msd", hex);
+    if (err != ESP_OK) {
+        od_log_warn("mDNS: msd TXT update failed (%s)", esp_err_to_name(err));
+    }
 }
 
-// The advertised BLE address, lowercase colon-separated (SECTION 9 rule 6, key
-// `mac`). Prior identity used getChipIdHex() (eFuse), which is NOT what HA
-// stores as the device unique_id. The lowercasing and the hardware-validation
-// caveat now live in BleTransport::addressString().
-static String advertisedBleMacLower(void) {
-    return String(ble.addressString());
+// Tear the responder down completely. Used on LAN teardown before restart; also the
+// recovery path if service registration fails, so a half-registered responder does
+// not linger advertising a port nothing listens on.
+static void odMdnsStop(void) {
+    if (s_mdnsUp) {
+        mdns_free();
+        s_mdnsUp = false;
+    }
+    s_mdnsServiceUp = false;
 }
 
 static void restartLanService(void) {
     char idHex[OD_CHIP_ID_HEX_LEN + 1] = {0};
     getChipIdHex(idHex, sizeof(idHex));
-    String deviceName = String("OD") + idHex;
-    if (!MDNS.begin(deviceName.c_str())) {
-        od_log_error("mDNS responder failed");
+    char deviceName[3 + OD_CHIP_ID_HEX_LEN + 1];
+    snprintf(deviceName, sizeof(deviceName), "OD%s", idHex);
+
+    // init ONCE. This function runs on every LAN (re)start -- reconnect, config
+    // change, encryption toggle -- and mdns_init() on an already-running responder
+    // returns ESP_ERR_INVALID_STATE. Cycling free/init per restart would also drop
+    // and recreate a FreeRTOS task each time, so the service record is replaced
+    // instead (below) and the responder itself persists.
+    if (!s_mdnsUp) {
+        esp_err_t err = mdns_init();
+        if (err != ESP_OK) {
+            od_log_error("mDNS responder failed to start (%s)", esp_err_to_name(err));
+            return;
+        }
+        s_mdnsUp = true;
+    }
+    esp_err_t err = mdns_hostname_set(deviceName);
+    if (err != ESP_OK) {
+        od_log_error("mDNS hostname set failed (%s)", esp_err_to_name(err));
+        odMdnsStop();
         return;
     }
+    mdns_instance_name_set(deviceName);
+
+    // Replace, do not append. The port moves when encryption is toggled (plaintext
+    // base, TLS base+1), and every TXT value below can change with config, so a
+    // restart must not leave the previous record advertised alongside the new one.
+    // With MDNS_MULTIPLE_INSTANCE=n a duplicate add would fail rather than
+    // duplicate -- but failing is not the behaviour wanted either.
+    if (s_mdnsServiceUp) {
+        mdns_service_remove_all();
+        s_mdnsServiceUp = false;
+    }
+
     uint16_t port = lanActivePort();
-    od_log_info("mDNS: %s.local", deviceName.c_str());
-    MDNS.addService("opendisplay", "tcp", port);
+
     // F1 -- identity/capability TXT keys (SECTION 9 rule 6, ADDITIVE to `msd`).
-    String mac = advertisedBleMacLower();
-    MDNS.addServiceTxt("opendisplay", "tcp", "mac", mac.c_str());        // REQUIRED
-    MDNS.addServiceTxt("opendisplay", "tcp", "tls", isEncryptionEnabled() ? "1" : "0"); // REQUIRED
-    // const char* overload (value) vs char* overload (key/value) — cast char[] to
-    // const char* to disambiguate, matching opendisplay_mdns_update_msd_txt().
+    // Registered as ONE array at add time rather than as six follow-up calls. The
+    // Arduino spelling did the latter, which against a real responder is six
+    // separate record mutations and therefore up to six re-announcements for a
+    // record that was never once advertised in a complete state.
     char fw[12];
     snprintf(fw, sizeof(fw), "%u.%u", (unsigned)getFirmwareMajor(), (unsigned)getFirmwareMinor());
-    MDNS.addServiceTxt("opendisplay", "tcp", "fw", static_cast<const char*>(fw));  // RECOMMENDED
     char cm[3];
     snprintf(cm, sizeof(cm), "%02x", (unsigned)globalConfig.system_config.communication_modes);
-    MDNS.addServiceTxt("opendisplay", "tcp", "cm", static_cast<const char*>(cm));  // RECOMMENDED
     uint8_t did[4];
     getAuthDeviceIdBytes(did);
     char idhex[9];
     snprintf(idhex, sizeof(idhex), "%02x%02x%02x%02x", did[0], did[1], did[2], did[3]);
-    MDNS.addServiceTxt("opendisplay", "tcp", "id", static_cast<const char*>(idhex));  // OPTIONAL
-    MDNS.addServiceTxt("opendisplay", "tcp", "pv", OD_PROTOCOL_VERSION_STR); // OPTIONAL
-    od_log_info("mDNS: _opendisplay._tcp port %u tls=%s mac=%s",
-           (unsigned)port, isEncryptionEnabled() ? "1" : "0", mac.c_str());
+    const char* mac = advertisedBleMacLower();
+    const char* tls = isEncryptionEnabled() ? "1" : "0";
+
+    // Value pointers need only outlive the call -- the component copies both key and
+    // value into its own record storage.
+    mdns_txt_item_t txt[] = {
+        { "mac", mac    },   // REQUIRED
+        { "tls", tls    },   // REQUIRED
+        { "fw",  fw     },   // RECOMMENDED
+        { "cm",  cm     },   // RECOMMENDED
+        { "id",  idhex  },   // OPTIONAL
+        { "pv",  OD_PROTOCOL_VERSION_STR },  // OPTIONAL
+    };
+    err = mdns_service_add(NULL, OD_MDNS_SERVICE, OD_MDNS_PROTO, port,
+                           txt, sizeof(txt) / sizeof(txt[0]));
+    if (err != ESP_OK) {
+        od_log_error("mDNS service add failed (%s) -- LAN is up but undiscoverable",
+               esp_err_to_name(err));
+        odMdnsStop();
+        return;
+    }
+    s_mdnsServiceUp = true;
+
+    od_log_info("mDNS: %s.local", deviceName);
+    od_log_info("mDNS: %s.%s port %u tls=%s mac=%s",
+           OD_MDNS_SERVICE, OD_MDNS_PROTO, (unsigned)port, tls, mac);
     opendisplay_mdns_update_msd_txt();
 }
 
@@ -1128,10 +1226,10 @@ void initWiFi(bool waitForConnection) {
     const unsigned long timeoutPerRetry = 10000;
     bool connected = false;
     for (int retry = 0; retry < maxRetries && !connected; retry++) {
-        unsigned long startAttempt = millis();
+        uint32_t startAttempt = od_hal_uptime_ms();
         bool abortCurrentRetry = false;
-        while (odWifiStatus() != OD_WIFI_CONNECTED && (millis() - startAttempt < timeoutPerRetry)) {
-            delay(500);
+        while (odWifiStatus() != OD_WIFI_CONNECTED && (od_hal_uptime_ms() - startAttempt < timeoutPerRetry)) {
+            od_hal_delay_ms(500);
             od_wifi_status_t status = odWifiStatus();
             od_log_info("WiFi status: %d", (int)status);
             if (status == OD_WIFI_CONNECT_FAIL || status == OD_WIFI_NO_SSID) {
@@ -1148,7 +1246,7 @@ void initWiFi(bool waitForConnection) {
             od_log_info("WiFi attempt %d timed out", (int)(retry + 1));
         }
         if (retry < maxRetries - 1) {
-            delay(2000);
+            od_hal_delay_ms(2000);
         }
     }
     if (odWifiStatus() == OD_WIFI_CONNECTED) {
@@ -1529,6 +1627,11 @@ void opendisplay_lan_teardown(void) {
     lanSockClose(&s_lanListenFd);
     wifiServerConnected = false;
     tcpReceiveBufferPos = 0;
+    // Withdraw the advertisement. The shim's MDNS.end() was a no-op like the rest of
+    // it, so this never happened: against a real responder, skipping it means no
+    // goodbye packet is sent and clients keep a cached record pointing at a device
+    // that is rebooting -- they retry the port through the whole restart.
+    odMdnsStop();
     if (tlsInited) {
         mbedtls_ssl_config_free(&tlsConf);
         mbedtls_ctr_drbg_free(&tlsDrbg);

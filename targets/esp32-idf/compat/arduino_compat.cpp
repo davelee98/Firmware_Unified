@@ -4,7 +4,6 @@
 #include "arduino_compat.h"
 #include "Wire.h"
 #include "SPI.h"
-#include "ESPmDNS.h"
 
 #include "esp_system.h"
 #include "esp_heap_caps.h"
@@ -22,7 +21,6 @@ SerialCompat Serial;
 TwoWire  Wire;
 SPIClass SPI;
 EspClass ESP;
-MDNSResponder MDNS;
 
 /* INTERNAL DRAM ONLY -- MALLOC_CAP_INTERNAL, matching Arduino-ESP32's EspClass exactly:
  *

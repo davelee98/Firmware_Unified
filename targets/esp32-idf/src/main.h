@@ -72,7 +72,6 @@ extern "C" {
 #include <esp_mac.h>
 #include <esp_timer.h>
 #include "esp_sleep.h"
-#include <ESPmDNS.h>
 
 // RTC memory variables for deep sleep state tracking (declared in main.cpp)
 extern bool advertising_timeout_active;

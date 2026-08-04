@@ -402,4 +402,50 @@
 # every board here builds and advertises identically with LAN completely broken. Needs a real
 # host push over both plaintext and TLS-PSK, a second client refused while one is connected,
 # and a config change that flips encryption (to exercise the rebind above).
-9
+
+# 8 = phase C step 9b-iv, 2026-08-04: src/wifi_service.cpp and src/main.h off <ESPmDNS.h> and
+# <Arduino.h>. compat/ESPmDNS.h DELETED. wifi_service.cpp -- the largest file in the WiFi
+# group and the last of it -- finally leaves the count. 9 -> 8, one file.
+#
+# THE SHIM'S MDNSResponder WAS ENTIRELY NO-OPS. begin() returned true, addService() and
+# addServiceTxt() did nothing whatsoever. This target has therefore never advertised anything
+# since the import, while logging nine TXT records as though it had. The shim was honest about
+# it -- "if the mdns component is not present in the build, these become no-ops rather than a
+# build failure" -- and it was not present, because ESP-IDF dropped mdns from core in v5.0.
+# Same shape as 9b-ii's WiFiClass, and the same lesson: a no-op that compiles is
+# indistinguishable from a feature that works.
+#
+# So this step needed a DEPENDENCY before it could need a translation. espressif/mdns 1.11.3 is
+# vendored at targets/esp32-idf/components/mdns in its own commit, configured advertise-only
+# (this device announces; it never resolves or browses). Provenance in third_party/NOTICE.md,
+# configuration and its reasoning in sdkconfig.defaults.
+#
+# THE UNDERSCORES ARE THE TRAP. Arduino's ESPmDNS took "opendisplay"/"tcp" and prefixed them
+# itself; the IDF API takes "_opendisplay"/"_tcp" as written. Carrying the Arduino spelling
+# across would have advertised `opendisplay.tcp.local` -- a name no client looks for, failing
+# exactly like mDNS not working at all, which is the state we are leaving.
+#
+# Three behaviour changes beyond the translation, each because the target is now real:
+#   - The six identity/capability TXT keys are registered as ONE array at add time, not as six
+#     follow-up calls. Against a real responder the latter is six record mutations and up to
+#     six re-announcements for a record never once advertised complete.
+#   - restartLanService() replaces the service record rather than appending. The port MOVES
+#     when encryption is toggled (plaintext base, TLS base+1).
+#   - opendisplay_lan_teardown() now stops the responder, so a reboot sends a goodbye. The
+#     shim's end() was a no-op like everything else, so clients kept a cached record pointing
+#     at a rebooting device and retried the port through the whole restart.
+#
+# The 400 ms floor on the msd TXT update was already there and now MATTERS: every TXT change
+# re-announces on the multicast group, and this device shares its antenna with BLE.
+#
+# Arduino String went with it (deviceName, mac) and so did millis()/delay() -> od_hal_time,
+# which is what actually drops the <Arduino.h> include.
+#
+# Cost: +33,648 bytes of flash on each S3 board. The five non-WiFi boards are BYTE-IDENTICAL,
+# confirming the linker discards the component where main never references it.
+#
+# NOT hardware-verified, and unusually here the bench test is easy and worth doing FIRST:
+# `avahi-browse -r _opendisplay._tcp` on the LAN should show the device, its port, and all
+# seven TXT keys. Nothing about this has ever worked on this target, so there is no regression
+# risk -- only the question of whether the advertisement is correct.
+8
