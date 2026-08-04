@@ -5,9 +5,11 @@
 // stubs for every other target. That guard was inherited, not required: the latch is
 // a board feature (DEVICE_FLAG_BATTERY_LATCH / DEVICE_FLAG_PWR_LATCH_DFF plus
 // pwr_pin_2/pwr_pin_3), not a SoC feature, and every predicate, the press state
-// machine and the D-FF clock pulse are plain Arduino GPIO. Only two things are
-// genuinely ESP32-specific, and they are shimmed below rather than fencing the file:
-// pad-hold across deep sleep, and the deep-sleep park after the rail is cut.
+// machine and the D-FF clock pulse are plain GPIO and a millisecond clock -- now
+// od_hal_gpio and od_hal_time, which is what took this file off the Arduino shim
+// (phase C step 3). Only two things are genuinely ESP32-specific, and they are
+// shimmed below rather than fencing the file: pad-hold across deep sleep, and the
+// deep-sleep park after the rail is cut.
 //
 // No nRF board ships this hardware today, so the flags are simply never set there and
 // every entry point returns early exactly as the old stubs did. The difference is that
@@ -15,8 +17,8 @@
 
 #include "power_latch.h"
 
-#include <Arduino.h>
-
+#include "od_hal_gpio.h"
+#include "od_hal_time.h"
 #include "od_log.h"
 #include "structs.h"
 
@@ -86,7 +88,7 @@ inline void padIsolateAndHold(uint8_t pin) {
 #if defined(TARGET_ESP32)
 #if SOC_GPIO_SUPPORT_DEEPSLEEP_WAKEUP
     if (haveWakePin) {
-        pinMode(wakePin, INPUT_PULLUP);
+        od_hal_gpio_config_input((uint8_t)wakePin, true, false);
         esp_deep_sleep_enable_gpio_wakeup(1ULL << wakePin, ESP_GPIO_WAKEUP_GPIO_LOW);
     }
 #else
@@ -100,7 +102,7 @@ inline void padIsolateAndHold(uint8_t pin) {
     od_log_warn("Power latch: rail cut but still running -- parking");
     od_log_flush();
     for (;;) {
-        delay(1000);
+        od_hal_delay_ms(1000);
     }
 #endif
 }
@@ -127,11 +129,10 @@ bool hasButton() { return validPin(globalConfig.system_config.pwr_pin_3); }
 // --- D flip-flop latch --------------------------------------------------------
 
 void dffClockPulse(uint8_t cpPin) {
-    pinMode(cpPin, OUTPUT);
-    digitalWrite(cpPin, LOW);
-    delayMicroseconds(50);
-    digitalWrite(cpPin, HIGH);
-    delayMicroseconds(50);
+    od_hal_gpio_config_output(cpPin, false);
+    od_hal_delay_us(50);
+    od_hal_gpio_write(cpPin, true);
+    od_hal_delay_us(50);
 }
 
 void dffLatchEngage() {
@@ -139,9 +140,8 @@ void dffLatchEngage() {
     const uint8_t cpPin = globalConfig.system_config.pwr_pin_3;
     padHoldDisable(dPin);
     padHoldDisable(cpPin);
-    pinMode(dPin, OUTPUT);
-    digitalWrite(dPin, HIGH);
-    delayMicroseconds(50);
+    od_hal_gpio_config_output(dPin, true);
+    od_hal_delay_us(50);
     dffClockPulse(cpPin);
 }
 
@@ -150,15 +150,12 @@ void dffLatchRelease() {
     const uint8_t cpPin = globalConfig.system_config.pwr_pin_3;
     padHoldDisable(dPin);
     padHoldDisable(cpPin);
-    pinMode(dPin, OUTPUT);
-    digitalWrite(dPin, LOW);
-    delayMicroseconds(50);
+    od_hal_gpio_config_output(dPin, false);
+    od_hal_delay_us(50);
     dffClockPulse(cpPin);
-    pinMode(dPin, OUTPUT);
-    digitalWrite(dPin, LOW);
+    od_hal_gpio_config_output(dPin, false);
     padIsolateAndHold(dPin);
-    pinMode(cpPin, OUTPUT);
-    digitalWrite(cpPin, LOW);
+    od_hal_gpio_config_output(cpPin, false);
 }
 
 // --- MOSFET latch -------------------------------------------------------------
@@ -166,14 +163,13 @@ void dffLatchRelease() {
 [[noreturn]] void powerOff() {
     const uint8_t latch = latchPin();
     if (hasButton()) {
-        pinMode(buttonPin(), INPUT_PULLUP);
-        while (digitalRead(buttonPin()) == LOW) {
-            delay(20);
+        od_hal_gpio_config_input((uint8_t)buttonPin(), true, false);
+        while (od_hal_gpio_read((uint8_t)buttonPin()) == 0) {
+            od_hal_delay_ms(20);
         }
     }
     padHoldDisable(latch);
-    pinMode(latch, OUTPUT);
-    digitalWrite(latch, LOW);
+    od_hal_gpio_config_output(latch, false);
     padIsolateAndHold(latch);
     parkAfterRailCut(buttonPin(), hasButton());
 }
@@ -190,7 +186,7 @@ void powerLatchBegin() {
     }
     padHoldDisable(latchPin());
     if (hasButton()) {
-        pinMode(buttonPin(), INPUT_PULLUP);
+        od_hal_gpio_config_input((uint8_t)buttonPin(), true, false);
     }
 }
 
@@ -198,7 +194,7 @@ void powerButtonPoll() {
     if (dffLatchEnabled() || !latchEnabled() || !hasButton()) {
         return;
     }
-    const bool down = digitalRead(buttonPin()) == LOW;
+    const bool down = od_hal_gpio_read((uint8_t)buttonPin()) == 0;
     if (!down) {
         buttonReleasedSinceBoot = true;
         pressing = false;
@@ -209,10 +205,10 @@ void powerButtonPoll() {
     }
     if (!pressing) {
         pressing = true;
-        pressStartMs = millis();
+        pressStartMs = od_hal_uptime_ms();
         return;
     }
-    if (millis() - pressStartMs >= POWER_OFF_HOLD_MS) {
+    if (od_hal_uptime_ms() - pressStartMs >= POWER_OFF_HOLD_MS) {
         powerOff();
     }
 }
@@ -221,16 +217,14 @@ void powerLatchHoldForSleep() {
     if (dffLatchEnabled()) {
         const uint8_t dPin = globalConfig.system_config.pwr_pin_2;
         padHoldDisable(dPin);
-        pinMode(dPin, OUTPUT);
-        digitalWrite(dPin, HIGH);
+        od_hal_gpio_config_output(dPin, true);
         padHold(dPin);
         return;
     }
     if (!latchEnabled()) {
         return;
     }
-    pinMode(latchPin(), OUTPUT);
-    digitalWrite(latchPin(), HIGH);
+    od_hal_gpio_config_output(latchPin(), true);
     padHold(latchPin());
 }
 

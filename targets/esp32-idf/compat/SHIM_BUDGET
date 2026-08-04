@@ -102,4 +102,36 @@
 # transitive cannot be cleared until the header that supplied it is cleared. Expect more of
 # these to fall out for free as the real subsystems land -- and expect none of them to be
 # claimable before that.
-19
+#
+# 17 = phase C step 3, 2026-08-04: the power latch and the wake-button armer, and with them the
+# GPIO/clock seam the rest of the leaf files will reuse -- hal/od_hal_gpio.{h,c} and
+# hal/od_hal_time.{h,c}, signatures taken from docs/SHARED_API_DESIGN.md rather than invented.
+#
+# TWO FILES IN ONE STEP, which MIGRATION.md's "do not batch subsystem swaps" allows only
+# because they are one subsystem: power_latch.cpp owns pwr_pin_2/pwr_pin_3, and wake_button.cpp
+# exists partly to refuse to arm those same two pins (arming the latch clock would clock the
+# rail off mid-sleep). Splitting them would have put a commit boundary through one hardware
+# interlock. They revert together for the same reason.
+#
+# wake_button.cpp was ONE LINE -- a digitalRead. The file already included driver/gpio.h and
+# was otherwise pure IDF (esp_sleep_*), and the shim's digitalRead was itself gpio_get_level
+# behind a validity guard, so it calls gpio_get_level directly rather than taking a HAL
+# dependency it does not need. Not every leaf needs the seam.
+#
+# power_latch.cpp is the real one: 11 pinMode, 9 digitalWrite, 4 delayMicroseconds, 2
+# digitalRead, 2 millis, 2 delay. Two notes on the translation, both about not changing
+# hardware behaviour by accident:
+#
+#   * pinMode(p, OUTPUT) + digitalWrite(p, X) collapses to od_hal_gpio_config_output(p, X),
+#     which is gpio_config() THEN gpio_set_level() -- the same two register writes in the same
+#     order. It is deliberately not one "configure at level" call: gpio_config() does not touch
+#     the output latch, so a merged version would change the glitch behaviour on a pin that was
+#     already driven the other way. On this file's hardware that glitch cuts the rail.
+#   * od_hal_delay_ms() keeps the shim's round-UP-to-whole-ticks arithmetic. At the default
+#     100 Hz tick a plain vTaskDelay(pdMS_TO_TICKS(5)) rounds to zero and returns immediately,
+#     turning a settle into a busy-spin.
+#
+# NOT hardware-verified, and this is the step where that matters most so far: the latch is the
+# path that can leave a unit unable to power on. Build-verified on five boards across four
+# chips only.
+17
