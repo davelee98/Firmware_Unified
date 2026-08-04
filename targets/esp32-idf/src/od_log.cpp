@@ -418,10 +418,17 @@ void od_log_flush(void) {
     // costs the most and 5 ms costs nothing. 16 call sites, so at most ~80 ms across
     // a boot. Deliberately OUTSIDE the lock: 16 x 5 ms of hold is not worth adding.
     //
-    // vTaskDelay, not Arduino's delay(). On ESP32 that is what delay() called anyway. On nRF
-    // it is a deliberate improvement rather than a translation: the Adafruit core's delay()
-    // flushes CDC first and returns EARLY without ever reaching vTaskDelay when that flush
-    // spans a tick, so a 5 ms settle could become no settle at all -- the same defect this
-    // file's own od_port_wait_ready() comment already documents for its wait loop.
-    vTaskDelay(pdMS_TO_TICKS(5));
+    // od_hal_delay_ms, not Arduino's delay() and not a raw vTaskDelay.
+    //
+    // This line was `vTaskDelay(pdMS_TO_TICKS(5))` between phase C step 1 and 2026-08-04, and
+    // that was WRONG on this target: CONFIG_FREERTOS_HZ was 100, so pdMS_TO_TICKS(5) was zero
+    // ticks and the settle did not happen at all. The shim's delay(5) it replaced had rounded
+    // up to one tick. Restoring the 1000 Hz tick makes the raw form correct again by accident;
+    // going through the HAL makes it correct on purpose, whatever the tick rate is.
+    //
+    // Not Arduino's delay() on nRF either, and that part is a deliberate improvement rather
+    // than a translation: the Adafruit core's delay() flushes CDC first and returns EARLY
+    // without ever reaching vTaskDelay when that flush spans a tick -- the same defect this
+    // file's own od_port_wait_ready() comment documents for its wait loop.
+    od_hal_delay_ms(5);
 }

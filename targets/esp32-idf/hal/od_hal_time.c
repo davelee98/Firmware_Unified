@@ -19,9 +19,9 @@ uint32_t od_hal_uptime_ms(void)
 
 void od_hal_delay_ms(uint32_t ms)
 {
-    /* Round UP, then floor at one tick: see the header. A delay that rounds to zero is a
-     * busy-spin dressed as a wait, and the call sites that matter (a 50 us D-FF hold, a 20 ms
-     * button debounce) are all shorter than a tick at 100 Hz. */
+    /* Round UP, then floor at one tick: see the header. Exact at the current 1000 Hz tick --
+     * this is what keeps every caller correct if that ever changes, not what makes them
+     * correct today. A delay that rounds to zero is a busy-spin dressed as a wait. */
     TickType_t ticks = (TickType_t)((ms + portTICK_PERIOD_MS - 1) / portTICK_PERIOD_MS);
     vTaskDelay(ticks ? ticks : 1);
 }
