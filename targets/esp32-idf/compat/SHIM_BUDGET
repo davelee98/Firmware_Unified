@@ -86,4 +86,20 @@
 # an extern millis() with 19 call sites and no definition). They are pinned by third_party/,
 # not by app code. Budget 0 will therefore NOT mean compat/ is deletable -- ratchet.sh's
 # report-only third-party list is the thing to watch for that.
-20
+#
+# 19 = phase C step 2, 2026-08-04: src/factory_config.cpp. A one-line removal, and recorded as
+# what it is -- bookkeeping that step 1 made TRUE, not work in its own right.
+#
+# The file uses no Arduino API at all. Its `#include <Arduino.h>` has been dead since the
+# import. Removing it BEFORE step 1 would have been the laundered decrement this file keeps
+# warning about: the include would have gone, the file would still have compiled, and it would
+# have compiled on the Arduino that od_log.h was dragging in behind it -- so the number would
+# have fallen while nothing changed. After step 1 the whole chain (factory_config.h ->
+# config_parser.h -> stdint.h, communication.h, od_log.h) is Arduino-free, so the build itself
+# is now the proof, which is the only reason this counts.
+#
+# The general rule this is the first instance of: a file whose only Arduino dependency was
+# transitive cannot be cleared until the header that supplied it is cleared. Expect more of
+# these to fall out for free as the real subsystems land -- and expect none of them to be
+# claimable before that.
+19
