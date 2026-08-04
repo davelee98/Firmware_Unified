@@ -56,3 +56,41 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=60
 # it the encrypted LAN port silently fails to build.
 CONFIG_MBEDTLS_PSK_MODES=y
 CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+
+# ---------------------------------------------------------------------------------------
+# Restored to the Arduino build's values (2026-08-04). Not preferences -- unchosen drift.
+# ---------------------------------------------------------------------------------------
+# Found by diffing this target's EFFECTIVE sdkconfig against the precompiled Arduino core
+# sdkconfigs the reference firmware links (~/.platformio/packages/framework-arduinoespressif32-
+# libs/<chip>/sdkconfig). 77 behaviour-relevant differences on the S3, of which only six were
+# ones this project had declared. The rest are IDF defaults inherited by saying nothing -- and
+# a difference nobody declared is a defect in the port, not a configuration choice.
+#
+# tools/check_sdkconfig_baseline.sh now gates the whole effective config so this class of drift
+# surfaces as a diff to approve rather than as behaviour discovered months later.
+
+# TICK RATE. IDF defaults to 100 Hz; the Arduino core ships 1000 Hz, so portTICK_PERIOD_MS was
+# 1 in the reference firmware and became 10 here. That is not merely coarser -- it silently
+# breaks every sub-10 ms wait: pdMS_TO_TICKS(2) evaluates to ZERO ticks, and vTaskDelay(0)
+# yields without blocking. src/session_guard.cpp's R3a link-down poll is exactly this case, so
+# it has been busy-spinning at loop-task priority through every BLE teardown on this target
+# while working correctly on the shipped firmware. Fixing the tick rate fixes the whole class
+# at the root, and makes every existing short-delay call site mean what its author wrote.
+CONFIG_FREERTOS_HZ=1000
+
+# OPTIMIZATION. The Arduino core builds -Os (SIZE); this target inherited IDF's -Og (DEBUG).
+# Nobody chose a debug build -- it is what happens when the symbol is never named. Restoring
+# -Os also matters for a shipped board: c6-n4 has 23% slot headroom against 62-81% elsewhere.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# TASK WATCHDOG: PANIC, i.e. reset, not just log. The Arduino build panics; this target
+# inherited log-only, so a wedged loop() never recovers. That backstop matters MORE here than
+# upstream, because bbepWaitBusy() can hold the loop task for 16-30 s on a panel that will not
+# answer (README known defects, item 2). Timeout stays 60 s -- see the note above, where IDF's
+# [1,60] cap forced it.
+CONFIG_ESP_TASK_WDT_PANIC=y
+
+# ...and DO NOT watch the CPU1 idle task, which the Arduino build also does not. Enabling
+# PANIC while watching an idle task the reference never watched would not restore its
+# behaviour, it would invent a new reset source. The two settings are one decision.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n

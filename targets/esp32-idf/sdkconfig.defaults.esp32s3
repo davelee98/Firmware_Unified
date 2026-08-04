@@ -48,3 +48,16 @@ CONFIG_ESP_CONSOLE_USB_CDC=y
 # The S3 has no internal EMAC (SPI Ethernet chips carry their own MACs), so nothing here
 # needs the two addresses FOUR would spend on AP and ETH.
 CONFIG_ESP32S3_UNIVERSAL_MAC_ADDRESSES_TWO=y
+
+# CPU FREQUENCY: 240 MHz, the Arduino build's value for this chip. The target had inherited
+# IDF's 160 MHz default -- two-thirds the clock, on every path.
+#
+# S3 ONLY, and that is measured rather than assumed. The Arduino core's own sdkconfigs run
+# esp32, esp32c3 and esp32c6 at 160 (160 is the maximum on C3 and C6 anyway); only the S3 is
+# 240, which its board definition agrees with (esp32-s3-devkitc-1.json, f_cpu=240000000L).
+# So this is the single chip where the port slowed the silicon down.
+#
+# Every throughput and latency figure in README.md § Verified on hardware was measured at
+# 160 MHz with -Og. They are not comparable to the reference firmware's, and they are not
+# comparable to this build's either -- re-measure on hardware.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
