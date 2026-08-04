@@ -134,4 +134,43 @@
 # NOT hardware-verified, and this is the step where that matters most so far: the latch is the
 # path that can leave a unit unable to power on. Build-verified on five boards across four
 # chips only.
-17
+#
+# 16 = phase C step 4, 2026-08-04: the buzzer. TWO files were converted, but only ONE leaves
+# the count -- src/buzzer_control.cpp. Read the rest of this entry before assuming that is a
+# mistake.
+#
+# src/buzzer_hw.cpp's ESP32 half is now Arduino-free: it drives IDF's ledc driver directly and
+# calls od_hal_gpio for the park-low. But the file also carries an ARDUINO_ARCH_NRF52 arm
+# (Bluefruit HardwarePWM) that needs pinMode/digitalWrite, so <Arduino.h> is still in the file
+# and the ratchet still counts it. That is CORRECT, and is left alone deliberately:
+#
+#   * the grep is textual by design -- what it measures is "files that still name Arduino",
+#     and this one does;
+#   * the alternative was declaring pinMode/digitalWrite rather than including Arduino, the
+#     trick od_log.cpp uses for millis(). Rejected here: that arm's linkage cannot be checked
+#     from this repo, and guessing wrong buys a decrement at the price of a link error on a
+#     target nobody can build yet;
+#   * deleting the nRF arm outright would score the decrement honestly, but it is a real
+#     divergence from the reference tree inside a commit about removing Arduino, and it makes
+#     the next sync conflict. That arm dies at migration step 4, where it is rewritten for
+#     Zephyr anyway.
+#
+# A LATENT DEFECT FELL OUT OF THIS, and it is why the step was worth doing carefully.
+# buzzer_hw.cpp forked on `#if ESP_ARDUINO_VERSION_MAJOR >= 3`: a 3.x pin-based LEDC path and a
+# 2.x channel-based one. That macro is defined NOWHERE under IDF, so the test was `0 >= 3` and
+# this target had silently been compiling the 2.x branch -- the one the reference firmware, on
+# Arduino core 3.x, does not take. compat/ledc_compat.h implements only the 2.x calls, which
+# corroborates it: the 3.x branch could never have linked.
+#
+# Consequence, now fixed: the 2.x branch computed the frequency as a double and handed it to a
+# uint32_t shim parameter, so it TRUNCATED where 3.x rounds -- up to 1 Hz flat, worst at the
+# bottom of the range. The fork is gone rather than resolved toward one side: there is one LEDC
+# peripheral and one way to drive it from IDF, and a version macro from a framework this target
+# no longer uses cannot select anything meaningful. Timer/channel selection is deliberately
+# UNCHANGED, oddities included (channel 7, `7 % LEDC_TIMER_MAX`, `7 % LEDC_CHANNEL_MAX`, which
+# land differently per chip), because that is what is flashed today.
+#
+# compat/ledc_compat.h SURVIVES. Its last app-code user just left, but FastEPD.inl's
+# front-light control uses ledcSetup/ledcAttachPin/ledcWrite at 11 sites. It is the third thing
+# now pinned by third_party/ rather than by our code, after delay() and millis().
+16

@@ -1,7 +1,8 @@
 #include "buzzer_control.h"
 #include "buzzer_hw.h"
 #include "structs.h"
-#include <Arduino.h>
+#include "od_hal_gpio.h"
+#include "od_hal_time.h"
 #include <string.h>
 
 extern struct GlobalConfig globalConfig;
@@ -109,12 +110,11 @@ static void buzzer_set_enable(const BuzzerConfig* b, bool on) {
     if ((b->flags & OD_BUZZER_FLAG_ENABLE_ACTIVE_HIGH) == 0) {
         high = !high;
     }
-    digitalWrite(b->enable_pin, high ? HIGH : LOW);
+    od_hal_gpio_write(b->enable_pin, high);
 }
 
 static void buzzer_drive_off(const BuzzerConfig* b) {
-    pinMode(b->drive_pin, OUTPUT);
-    digitalWrite(b->drive_pin, LOW);
+    od_hal_gpio_config_output(b->drive_pin, false);
 }
 
 // --- Non-blocking playback state machine (modeled on s_led/processLedFlash) ---
@@ -159,7 +159,7 @@ static void buzzer_stop_internal(void) {
 // is scheduled, or finish. The currently-playing tone (if any) is stopped by
 // the caller (buzzerService) before this runs; the handler calls it with none.
 static void buzzer_run(void) {
-    uint32_t now = millis();
+    uint32_t now = od_hal_uptime_ms();
     for (;;) {
         if (!s_buzzer.active) {
             return;
@@ -250,7 +250,7 @@ void buzzerService(void) {
     if (!s_buzzer.active) {
         return;
     }
-    if ((int32_t)(millis() - s_buzzer.step_until_ms) < 0) {
+    if ((int32_t)(od_hal_uptime_ms() - s_buzzer.step_until_ms) < 0) {
         return;   // current step/gap still in progress
     }
     // Wait elapsed: silence the current tone, then advance.
@@ -267,10 +267,12 @@ void initPassiveBuzzers(void) {
         if (b->drive_pin == 0xFF) {
             continue;
         }
-        pinMode(b->drive_pin, OUTPUT);
-        digitalWrite(b->drive_pin, LOW);
+        od_hal_gpio_config_output(b->drive_pin, false);
         if (b->enable_pin != 0xFF) {
-            pinMode(b->enable_pin, OUTPUT);
+            // Configured low first, then driven to its inactive level by
+            // buzzer_set_enable() -- which is polarity-aware, so the two steps cannot be
+            // merged into one config_output(): active-low hardware wants it HIGH here.
+            od_hal_gpio_config_output(b->enable_pin, false);
             buzzer_set_enable(b, false);
         }
     }
@@ -348,7 +350,7 @@ void handleBuzzerActivate(uint8_t* data, uint16_t len) {
     s_buzzer.si = 0;
     s_buzzer.phase = BZ_PHASE_STEP;
     s_buzzer.tone_on = false;
-    s_buzzer.play_start_ms = millis();
+    s_buzzer.play_start_ms = od_hal_uptime_ms();
     s_buzzer.active = true;
 
     // Start the first step, then ACK "accepted & started" immediately.
@@ -376,11 +378,11 @@ void passiveBuzzerPowerOffAlert(void) {
     const uint32_t centihz = buzzer_index_to_centihz(nG8);   // ~6271.93 Hz
     buzzer_set_enable(b, true);
     buzzer_hw_tone_start(b->drive_pin, centihz, b->duty_percent);
-    delay(80);
+    od_hal_delay_ms(80);
     buzzer_hw_tone_stop(b->drive_pin);
-    delay(80);
+    od_hal_delay_ms(80);
     buzzer_hw_tone_start(b->drive_pin, centihz, b->duty_percent);
-    delay(80);
+    od_hal_delay_ms(80);
     buzzer_hw_tone_stop(b->drive_pin);
     buzzer_set_enable(b, false);
     buzzer_drive_off(b);
