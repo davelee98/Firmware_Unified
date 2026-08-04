@@ -4,8 +4,22 @@
 # This number may only ever go DOWN. Raising it is the failure mode the ratchet exists to
 # prevent -- see ratchet.sh and docs/MIGRATION.md § "The ESP32 import is different".
 #
-# Lower it with each subsystem that stops needing the shim; when it reaches 0 and
-# arduino_compat.h is deleted, remove this directory and the workflow that reads it.
+# Lower it with each subsystem that stops needing the shim.
+#
+# THE ENDSTATE IS "ONLY THE VENDOR ADAPTER REMAINS" (decided 2026-08-04), not an empty
+# directory. FastEPD needs a PERMANENT compatibility layer -- it is a vendored Arduino library
+# and there is no version of it that does not want Arduino primitives. So when this count
+# reaches 0, the surviving pieces (delay(), delayMicroseconds(), millis() with C++ linkage,
+# ledc_compat.h) are EXTRACTED into the vendor adapter and owned there; only what is left over
+# is deleted, along with the ratchet and its workflow.
+#
+# It is called an ADAPTER and not a shim on purpose. In this repo "shim" means scheduled
+# demolition -- that is the whole premise of this file -- and using the word for something
+# permanent would make the ratchet's own vocabulary meaningless.
+#
+# The count itself can still reach 0: the last three entries (buzzer_hw.cpp,
+# device_control.cpp, encryption.cpp) are counted only for their TARGET_NRF arms, which leave
+# at MIGRATION step 4. Reaching 0 is the trigger for the extraction, not a licence to delete.
 #
 # 21 = the phase-B baseline. It was 20 when the metric counted only arduino_compat.h/Arduino.h;
 # widening it to every shim header (Wire, SPI, WiFi, ledc, esp32-hal-gpio) found one more file.
@@ -84,8 +98,12 @@
 # and defined out-of-line in arduino_compat.cpp because two VENDORED libraries need them
 # externally (bb_epaper.h declares `void delay(long)` unmangled; FastEPD's arduino_io.inl has
 # an extern millis() with 19 call sites and no definition). They are pinned by third_party/,
-# not by app code. Budget 0 will therefore NOT mean compat/ is deletable -- ratchet.sh's
-# report-only third-party list is the thing to watch for that.
+# not by app code.
+#
+# As of 2026-08-04 that is a DECISION rather than an obstacle: FastEPD keeps a permanent
+# compatibility layer, so these three plus ledc_compat.h become the vendor adapter. ratchet.sh's
+# report-only third-party list is that adapter's specification -- read it as a definition of
+# what must survive, not as a list of things to eliminate.
 #
 # 19 = phase C step 2, 2026-08-04: src/factory_config.cpp. A one-line removal, and recorded as
 # what it is -- bookkeeping that step 1 made TRUE, not work in its own right.
