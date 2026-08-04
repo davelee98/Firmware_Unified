@@ -7,7 +7,8 @@
 #include "display_service.h"
 #include "od_log.h"
 
-#include <Arduino.h>
+#include "od_hal_time.h"
+#include <stdio.h>
 #include <string.h>
 
 #include "ble_transport.h"
@@ -136,7 +137,7 @@ static void noteAuthRejected(void) {
     od_log_warn("Auth abuse: %u consecutive unauthenticated commands - dropping link",
                 (unsigned)s_authRejectRun);
     s_authAbuseDropPending = true;
-    s_authAbuseDeadlineMs = millis() + OD_AUTH_ABUSE_FLUSH_MS;
+    s_authAbuseDeadlineMs = od_hal_uptime_ms() + OD_AUTH_ABUSE_FLUSH_MS;
     s_authAbuseDwellUntil = 0;
 }
 
@@ -169,11 +170,11 @@ void serviceBleAuthAbuseDisconnect(void) {
     // signal to wait on, so this drains, dwells about one connection interval to
     // give the radio a chance to send, and then drops.
     serviceBleTx();
-    const bool expired = (int32_t)(millis() - s_authAbuseDeadlineMs) >= 0;
+    const bool expired = (int32_t)(od_hal_uptime_ms() - s_authAbuseDeadlineMs) >= 0;
     if (!bleTxQueuePending() && s_authAbuseDwellUntil == 0) {
         uint16_t intervalMs = ble.connIntervalMs(owner.handle);
         if (intervalMs == 0) intervalMs = OD_AUTH_ABUSE_DWELL_FALLBACK_MS;
-        const uint32_t dwellEnd = millis() + intervalMs + 5u;   // +margin
+        const uint32_t dwellEnd = od_hal_uptime_ms() + intervalMs + 5u;   // +margin
         // Never past the hard deadline: a drain landing just before it yields a
         // short or zero dwell, which is the expiry case behaving as specified
         // rather than a contradiction.
@@ -181,7 +182,7 @@ void serviceBleAuthAbuseDisconnect(void) {
             ((int32_t)(dwellEnd - s_authAbuseDeadlineMs) > 0) ? s_authAbuseDeadlineMs : dwellEnd;
     }
     const bool dwelled = (s_authAbuseDwellUntil != 0) &&
-                         ((int32_t)(millis() - s_authAbuseDwellUntil) >= 0);
+                         ((int32_t)(od_hal_uptime_ms() - s_authAbuseDwellUntil) >= 0);
     if (!expired && !dwelled) return;   // keep draining next pass
 
     // One more pass if RX still holds frames. serviceBleRx() drains once per pass,
@@ -471,18 +472,36 @@ void handleFirmwareVersion() {
     uint8_t major = getFirmwareMajor();
     uint8_t minor = getFirmwareMinor();
     uint8_t patch = getFirmwarePatch();
-    String shaStr = String(getFirmwareShaString());
-    if (shaStr.length() >= 2 && shaStr.charAt(0) == '"' && shaStr.charAt(shaStr.length() - 1) == '"') {
-        shaStr = shaStr.substring(1, shaStr.length() - 1);
+    // Was three String operations: strip surrounding quotes, trim, substitute a placeholder
+    // when empty. Done in place on a fixed buffer instead -- the SHA is at most 40 bytes on the
+    // wire and the response array below is sized for exactly that, so a growable string was
+    // never buying anything here.
+    char shaBuf[64];
+    snprintf(shaBuf, sizeof(shaBuf), "%s", getFirmwareShaString());
+    char* sha = shaBuf;
+    size_t shaChars = strlen(sha);
+    if (shaChars >= 2 && sha[0] == '"' && sha[shaChars - 1] == '"') {
+        sha[shaChars - 1] = '\0';
+        sha++;
+        shaChars -= 2;
     }
-    shaStr.trim();
-    const bool noShaCompiled = (shaStr.length() == 0 || shaStr == "\"\"");
-    if (noShaCompiled) {
-        shaStr = kFirmwareShaPlaceholder;
+    // trim(), both ends, matching Arduino's definition of whitespace closely enough for a
+    // build-stamped hex string.
+    while (shaChars > 0 && (unsigned char)sha[shaChars - 1] <= ' ') {
+        sha[--shaChars] = '\0';
+    }
+    while (shaChars > 0 && (unsigned char)sha[0] <= ' ') {
+        sha++;
+        shaChars--;
+    }
+    if (shaChars == 0) {
+        snprintf(shaBuf, sizeof(shaBuf), "%s", kFirmwareShaPlaceholder);
+        sha = shaBuf;
+        shaChars = strlen(sha);
     }
     od_log_info("Firmware version: %u.%u.%u", major, minor, patch);
-    od_log_info("SHA: %s", shaStr.c_str());
-    uint8_t shaLen = shaStr.length();
+    od_log_info("SHA: %s", sha);
+    uint8_t shaLen = (uint8_t)(shaChars > 255 ? 255 : shaChars);
     if (shaLen > 40) shaLen = 40;
     // [ACK][0x43][major][minor][shaLen][sha…][patch] — patch is trailing so
     // old hosts that stop after SHA keep working.
@@ -494,7 +513,7 @@ void handleFirmwareVersion() {
     response[offset++] = minor;
     response[offset++] = shaLen;
     for (uint8_t i = 0; i < shaLen && i < 40; i++) {
-        response[offset++] = shaStr.charAt(i);
+        response[offset++] = (uint8_t)sha[i];
     }
     response[offset++] = patch;
     sendResponse(response, offset);
@@ -793,7 +812,7 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
     // (any target) — it falls to default as an unknown command.
     switch (command) {
         case CMD_REBOOT:              // 0x000F
-            delay(100);
+            od_hal_delay_ms(100);
             reboot();
             break;
         case CMD_CONFIG_READ:         // 0x0040

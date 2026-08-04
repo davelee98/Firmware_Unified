@@ -340,4 +340,31 @@
 # NOT hardware-verified. The device name and the AUTH device id both derive from the changed
 # code, and getting either wrong presents as a new device rather than a broken one -- which is
 # exactly the failure mode the S3 MAC pinning in sdkconfig.defaults.esp32s3 exists to prevent.
-11
+
+# 9 = phase C step 9a, 2026-08-04: src/communication.cpp and src/config_parser.cpp -- the two
+# small members of the WiFi/LAN group. wifi_service.cpp, the large one, is step 9b.
+#
+# NEITHER WAS REALLY A WiFi FILE, which is why they are worth separating from the step's
+# headline. communication.cpp's shim dependency was 4 millis(), 3 delay() and one String; its
+# <WiFi.h> had already gone in phase B, and the comment recording that is still there.
+# config_parser.cpp's was a single WiFi.localIP().toString() for a status log line, plus
+# <Arduino.h> for the same String.
+#
+# The String work is the part worth noting. handleFirmwareVersion() used three String
+# operations -- strip surrounding quotes, trim, substitute a placeholder when empty -- on a
+# build-stamped SHA that is at most 40 bytes on the wire, into a response array already sized
+# for exactly that. Rewritten in place on a fixed buffer: the growable string was never buying
+# anything, and communication.cpp is a dispatcher heading for shared/core, where String is
+# forbidden outright.
+#
+# config_parser.cpp matters more than its one line suggests: it is the PRE-AUTH ATTACK SURFACE
+# and the first planned shared/core promotion (NEXT_STEPS item 5). Neither IPAddress nor String
+# may appear there, so the esp_netif call replaces a type round-trip that existed only to
+# format four bytes.
+#
+# One build-only defect found here, and it is the kind a single-board build hides: the
+# esp_netif.h include was first guarded on OPENDISPLAY_HAS_WIFI while the code using IP2STR sits
+# under plain TARGET_ESP32. s3-n16r8 built fine; esp32-n4 -- the one board that compiles no WiFi
+# surface at all -- did not. The guard is now TARGET_ESP32, and the lookup simply returns NULL
+# on a board without WiFi, printing "?".
+9
