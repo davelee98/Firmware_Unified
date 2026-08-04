@@ -1,24 +1,22 @@
 // Connection ownership arbiter. See link_owner.h for the word layout and why the
 // token has to be a single atomic word rather than loop-task-only state.
 
-// OD-PORT: <Arduino.h> in the reference tree, for millis() alone. Replaced with the IDF call
-// below rather than pulling this file onto the Arduino shim, for two reasons: the shim ratchet
-// (compat/ratchet.sh) requires the shim to shrink and never grow, and THIS FILE is the
-// clearest promotion candidate in the target -- pure arbitration logic, no vendor surface, and
-// it already has a host test (../tools/test_link_owner.cpp). shared/ forbids Arduino outright,
-// so the dependency had to go before the promotion, not after it.
-#include "esp_timer.h"
+// OD-PORT: <Arduino.h> in the reference tree, for millis() alone. Replaced rather than pulling
+// this file onto the Arduino shim, for two reasons: the shim ratchet (compat/ratchet.sh)
+// requires the shim to shrink and never grow, and THIS FILE is the clearest promotion candidate
+// in the target -- pure arbitration logic, no vendor surface, and it already has a host test
+// (../tools/test_link_owner.cpp). shared/ forbids Arduino outright, so the dependency had to go
+// before the promotion, not after it.
+//
+// It now reads the clock through od_hal_time rather than calling esp_timer_get_time() itself.
+// That is the point of the seam for a file headed to shared/: shared/ may call od_hal_*, and it
+// may not call esp_*. The wrap semantics this file depends on are the HAL's documented contract
+// -- a free-running 32-bit millisecond counter wrapping at ~49.7 days -- and every comparison
+// below is an unsigned subtraction that relies on that modular arithmetic.
+#include "od_hal_time.h"
 
 #include "link_owner.h"
 #include "od_log.h"
-
-// Milliseconds since boot, the semantics millis() had: a free-running 32-bit counter that
-// wraps at ~49.7 days. esp_timer_get_time() is a 64-bit microsecond count, so the division and
-// the truncation together reproduce both the unit and the wrap -- and the wrap is load-bearing,
-// since every comparison below is an unsigned subtraction that relies on modular arithmetic.
-static inline uint32_t od_millis(void) {
-    return (uint32_t)(esp_timer_get_time() / 1000);
-}
 
 // The token. Written by CAS from either the stack callback task (BLE connect) or
 // the loop task (LAN accept, release), read from both.
@@ -33,7 +31,7 @@ static volatile uint16_t s_epochCounter = 0;
 // ONE baseline, not three timestamps compared with a max(). The policy defines the
 // baseline as "the later of admission, last recognised command, and last refresh
 // end" -- but each of those events stamps the clock AT the moment it happens, so
-// storing od_millis() into a single variable at each of the three sites already IS
+// storing od_hal_uptime_ms() into a single variable at each of the three sites already IS
 // their maximum, and it stays correct across the ~49.7-day counter wrap.
 //
 // A three-timestamp max() is not: comparing stamps pairwise needs signed
@@ -86,7 +84,7 @@ bool linkClaim(LinkId id) {
         // Baseline first, then the tag that claims it for this owner. A reader that
         // catches the gap sees a tag that does not match the live owner and reports
         // 0 rather than the previous owner's stale baseline.
-        __atomic_store_n(&s_baselineMs, od_millis(), __ATOMIC_RELAXED);
+        __atomic_store_n(&s_baselineMs, od_hal_uptime_ms(), __ATOMIC_RELAXED);
         __atomic_store_n(&s_baselineOwner, desired, __ATOMIC_RELEASE);
     }
     return won;
@@ -137,14 +135,14 @@ uint32_t linkMsSinceOwnerCommand(void) {
     if (linkOwnerWord() != owner) return 0;
     // One unsigned subtraction, which is wrap-correct by construction: modular
     // arithmetic gives the true elapsed interval for any gap under 2^32 ms.
-    return od_millis() - base;
+    return od_hal_uptime_ms() - base;
 }
 
 void linkStampOwnerCommand(void) {
     // Loop-task-only, and only ever for the live owner, so the tag is already this
     // owner's -- but stamp it the same way regardless, so the two writers publish
     // through one discipline.
-    __atomic_store_n(&s_baselineMs, od_millis(), __ATOMIC_RELAXED);
+    __atomic_store_n(&s_baselineMs, od_hal_uptime_ms(), __ATOMIC_RELAXED);
     __atomic_store_n(&s_baselineOwner, linkOwnerWord(), __ATOMIC_RELEASE);
 }
 
@@ -153,6 +151,6 @@ void linkStampRefreshEnd(void) {
     // only moves forward, re-stamping can only ever DELAY a drop and never cause a
     // spurious one -- which is what makes it safe to apply at the transition
     // without first testing who owns the slot.
-    __atomic_store_n(&s_baselineMs, od_millis(), __ATOMIC_RELAXED);
+    __atomic_store_n(&s_baselineMs, od_hal_uptime_ms(), __ATOMIC_RELAXED);
     __atomic_store_n(&s_baselineOwner, linkOwnerWord(), __ATOMIC_RELEASE);
 }

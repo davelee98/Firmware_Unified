@@ -5,15 +5,11 @@
 
 #ifdef TARGET_ESP32
 #include "od_hal_log.h"
-#include "esp_timer.h"
+#include "od_hal_time.h"
 
-// millis(), without Arduino. A free-running 32-bit millisecond counter that wraps at ~49.7
-// days: esp_timer_get_time() is 64-bit microseconds, so the division and the truncation
-// together reproduce both the unit and the wrap. Same substitution, and the same reason, as
-// link_owner.cpp and session_guard.cpp.
-static inline uint32_t od_log_millis(void) {
-    return (uint32_t)(esp_timer_get_time() / 1000);
-}
+// The clock comes from od_hal_time. This was a private esp_timer_get_time()/1000 helper when it
+// was written (phase C step 1, before the time HAL existed) -- same arithmetic, one place now.
+static inline uint32_t od_log_millis(void) { return od_hal_uptime_ms(); }
 #else
 // nRF still gets these from the Arduino core, but this file must not INCLUDE Arduino to say
 // so -- it is not one of the files the shim ratchet counts and it is not going to become one

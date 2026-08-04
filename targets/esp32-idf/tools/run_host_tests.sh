@@ -13,7 +13,7 @@
 # Two sanitizer builds, matching the reference firmware's: ASan+UBSan, then TSan+UBSan as a
 # SEPARATE binary, because TSan and ASan cannot be combined.
 #
-# -I tools/hostshim supplies a fake clock (esp_timer.h) and the two FreeRTOS types od_log.h
+# -I tools/hostshim supplies a fake clock (od_hal_time.h) and the two FreeRTOS types od_log.h
 # names, so the REAL src/link_owner.cpp and src/od_log.h compile unmodified. The test
 # drives that clock directly, which is the only way to park on the ~49.7-day wrap boundary the
 # wrap cases need; waiting is not an option.
@@ -23,11 +23,15 @@ cd "$(dirname "$0")/.."
 OUT="${TMPDIR:-/tmp}/od-host-tests"
 mkdir -p "$OUT"
 
-# -DTARGET_ESP32 so od_log.h takes the same branch the firmware does. It is not a new
-# assumption: src/link_owner.cpp already includes "esp_timer.h" unconditionally (its OD-PORT off
-# Arduino millis()), and tools/hostshim/esp_timer.h is what satisfies it. Without the define,
-# od_log.h took its nRF arm and looked for the Adafruit core's <FreeRTOS.h> -- a header this
-# shim has no business providing, for a target this test does not compile.
+# -DTARGET_ESP32 so od_log.h takes the same branch the firmware does. Without it, od_log.h
+# takes its nRF arm and looks for the Adafruit core's <FreeRTOS.h> -- a header this shim has no
+# business providing, for a target this test does not compile.
+#
+# The fake clock is now hostshim/od_hal_time.h, which is the interface src/link_owner.cpp
+# actually calls. It replaced hostshim/esp_timer.h, and that replaced hostshim/Arduino.h: three
+# fakes over the life of one test, each following the clock up a layer as the port moved it.
+# This is the last of them -- od_hal_* is the only clock interface shared/ may know about, so
+# promoting link_owner.cpp changes nothing here.
 CXXFLAGS=(-std=c++17 -Wall -Wextra -Werror -O1 -DTARGET_ESP32 -I tools/hostshim -I src)
 SRCS=(tools/test_link_owner.cpp src/link_owner.cpp)
 

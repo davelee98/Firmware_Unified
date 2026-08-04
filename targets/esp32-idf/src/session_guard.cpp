@@ -1,10 +1,12 @@
 // The shared session-teardown routine and the R3a link-down wait.
 // See session_guard.h for the caller set and CONNECTION_POLICY R3a/R6 for the rules.
 
-// OD-PORT: <Arduino.h> in the reference tree, for millis() and delay(). Written against IDF
-// directly instead, so this file is not one of the files the shim ratchet counts
-// (compat/ratchet.sh -- the shim is a demolition schedule, not a portability layer).
-#include "esp_timer.h"
+// OD-PORT: <Arduino.h> in the reference tree, for millis() and delay(). Written against the
+// HAL instead, so this file is not one of the files the shim ratchet counts (compat/ratchet.sh
+// -- the shim is a demolition schedule, not a portability layer). The clock comes from
+// od_hal_time; FreeRTOS stays because the poll below deliberately uses a raw tick delay, for
+// the reason documented at that call site.
+#include "od_hal_time.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -44,18 +46,11 @@ extern bool directWriteActive;
 #define OD_BLE_LINK_DOWN_POLL_MS 2
 #endif
 
-// millis()/delay() equivalents. The wrap semantics matter: the deadline test below is a
-// signed difference of two wrapping 32-bit counters, which is only correct if this truncates
-// the same way millis() did.
-static inline uint32_t od_millis(void) {
-    return (uint32_t)(esp_timer_get_time() / 1000);
-}
-
 bool bleDropAndWait(uint16_t handle, uint16_t epoch) {
     if (!ble.instanceLive(handle, epoch)) return true;   // already down
     ble.disconnect(handle, epoch);
-    const uint32_t deadline = od_millis() + OD_BLE_LINK_DOWN_WAIT_MS;
-    while ((int32_t)(od_millis() - deadline) < 0) {
+    const uint32_t deadline = od_hal_uptime_ms() + OD_BLE_LINK_DOWN_WAIT_MS;
+    while ((int32_t)(od_hal_uptime_ms() - deadline) < 0) {
         // Per-handle, so a refused contender still attached cannot mask the owner's
         // departure (the aggregate count would read 1 and never reach 0).
         if (!ble.instanceLive(handle, epoch)) return true;
