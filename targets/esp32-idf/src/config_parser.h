@@ -30,21 +30,10 @@ typedef struct {
 // silently shifts the payload offset and orphans every previously stored config.
 static_assert(sizeof(config_header_t) == 16, "config_header_t must stay 16 bytes on flash");
 
-// Reassembly state for a multi-chunk BLE config write (CMD_CONFIG_WRITE START +
-// CMD_CONFIG_CHUNK continuations). Defined here, NOT in main.h: communication.cpp
-// used to carry its own copy of this struct with a hardcoded 4096 in place of
-// MAX_CONFIG_SIZE, so the bound checked in handleWriteConfigChunk() and the slot
-// it guards were sized in two different files -- two definitions of one type (an
-// ODR violation) that had to be edited in lockstep or the guard would admit more
-// than the buffer holds. Same footgun as the old ResponseQueueItem duplication.
-typedef struct {
-    bool active;
-    uint32_t totalSize;
-    uint32_t receivedSize;
-    uint8_t buffer[MAX_CONFIG_SIZE];
-    uint32_t expectedChunks;
-    uint32_t receivedChunks;
-} chunked_write_state_t;
+// Chunked CONFIG_WRITE reassembly state moved to shared/core/od_config_asm.h (F3, 2026-08-05).
+// The local chunked_write_state_t is GONE: its shape checks and bounds were the defect, and a
+// per-target copy of the state is what let the bound and the buffer it guards be sized in two
+// different files. The object now lives in communication.cpp as `g_configAsm`.
 
 /**
  * Clear the chunked config-upload state.

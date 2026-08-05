@@ -21,6 +21,9 @@
 #include "wifi_service.h"
 #endif
 
+/* Chunked CONFIG_WRITE reassembly, promoted to shared/core (F3). */
+#include "od_config_asm.h"
+
 #include "link_owner.h"
 #include "session_guard.h"
 
@@ -38,6 +41,10 @@ extern struct GlobalConfig globalConfig;
 // enum CommandOrigin lives in communication.h so display_service.cpp / main.cpp can
 // name the values instead of comparing against a bare 0.
 volatile uint8_t g_commandOrigin = ORIGIN_BLE;
+
+/* The chunked CONFIG_WRITE transfer in progress, if any. Replaces chunkedWriteState. Loop-task
+ * only, like every other dispatcher-adjacent object in this file. */
+struct od_config_asm g_configAsm;
 
 // Instance identity of the frame currently being dispatched -- the packed owner
 // word (link_owner.h) of the connection that WROTE it, not merely its transport.
@@ -230,7 +237,6 @@ void secureEraseConfig();
 extern struct SecurityConfig securityConfig;
 // chunked_write_state_t comes from config_parser.h; this file used to redefine it
 // with a hardcoded 4096 in place of MAX_CONFIG_SIZE.
-extern chunked_write_state_t chunkedWriteState;
 extern uint8_t configReadResponseBuffer[128];
 extern uint8_t msd_payload[16];
 float readBatteryVoltage();
@@ -617,37 +623,47 @@ void handleWriteConfig(uint8_t* data, uint16_t len) {
     if (gate == CONFIG_WRITE_ALLOWED_ERASE) {
         secureEraseConfig();
     }
-    if (len > CONFIG_CHUNK_SIZE) {
-        chunkedWriteState.active = true;
-        chunkedWriteState.receivedSize = 0;
-        chunkedWriteState.expectedChunks = 0;
-        chunkedWriteState.receivedChunks = 0;
-        if (len >= CONFIG_CHUNK_SIZE_WITH_PREFIX) {
-            chunkedWriteState.totalSize = data[0] | (data[1] << 8);
-            chunkedWriteState.expectedChunks = (chunkedWriteState.totalSize + CONFIG_CHUNK_SIZE - 1) / CONFIG_CHUNK_SIZE;
-            uint16_t chunkDataSize = ((len - 2) < CONFIG_CHUNK_SIZE) ? (len - 2) : CONFIG_CHUNK_SIZE;
-            memcpy(chunkedWriteState.buffer, data + 2, chunkDataSize);
-            chunkedWriteState.receivedSize = chunkDataSize;
-            chunkedWriteState.receivedChunks = 1;
-        } else {
-            uint16_t chunkSize = (len < CONFIG_CHUNK_SIZE) ? len : CONFIG_CHUNK_SIZE;
-            chunkedWriteState.totalSize = len;
-            chunkedWriteState.expectedChunks = 1;
-            memcpy(chunkedWriteState.buffer, data, chunkSize);
-            chunkedWriteState.receivedSize = chunkSize;
-            chunkedWriteState.receivedChunks = 1;
+
+    uint8_t responseOk[]  = {RESP_ACK,  RESP_CONFIG_WRITE, 0x00, 0x00};
+    uint8_t responseErr[] = {RESP_NACK, RESP_CONFIG_WRITE, 0x00, 0x00};
+
+    /* Shape, declared-total bounds and reassembly now live in shared/core/od_config_asm.c
+     * (correctness review F3). This handler is reduced to policy + I/O, which is the point:
+     * the checks that were missing are missing in ONE place for every target, and they are
+     * covered by host vectors rather than by whichever malformed frame someone thought of. */
+    switch (od_config_asm_start(&g_configAsm, data, len)) {
+    case OD_CONFIG_ASM_SINGLE: {
+        const bool ok = saveConfig(data, len);
+        if (ok) {
+            reloadConfigAfterSave();
         }
-        uint8_t ackResponse[] = {RESP_ACK, RESP_CONFIG_WRITE, 0x00, 0x00};
-        sendResponse(ackResponse, sizeof(ackResponse));
+        sendResponse(ok ? responseOk : responseErr, 4);
         return;
     }
-    uint8_t responseOk[] = {RESP_ACK, RESP_CONFIG_WRITE, 0x00, 0x00};
-    uint8_t responseErr[] = {RESP_NACK, RESP_CONFIG_WRITE, 0x00, 0x00};
-    bool ok = saveConfig(data, len);
-    if (ok) {
-        reloadConfigAfterSave();
+    case OD_CONFIG_ASM_ACCEPTED:
+        sendResponse(responseOk, sizeof(responseOk));
+        return;
+    case OD_CONFIG_ASM_COMPLETE: {
+        /* Not reachable today -- a chunked start never completes on its own frame -- but
+         * handled rather than assumed, so a future single-frame-with-prefix shape cannot fall
+         * through to the NACK below and look like a malformed write. */
+        const bool ok = saveConfig(g_configAsm.buffer, (uint16_t)g_configAsm.total_size);
+        if (ok) {
+            reloadConfigAfterSave();
+        }
+        od_config_asm_reset(&g_configAsm);
+        sendResponse(ok ? responseOk : responseErr, 4);
+        return;
     }
-    sendResponse(ok ? responseOk : responseErr, 4);
+    case OD_CONFIG_ASM_REJECTED:
+    default:
+        /* NOTHING WAS STORED. That is guaranteed by construction: the assembler has no
+         * storage symbol to reach, so a rejection cannot have altered NVS. */
+        od_log_error("ERROR: [%s] malformed CONFIG_WRITE (%u B) -- nothing stored",
+                     originTag(), (unsigned)len);
+        sendResponse(responseErr, sizeof(responseErr));
+        return;
+    }
 }
 
 void handleClearConfig(void) {
@@ -664,15 +680,16 @@ void handleClearConfig(void) {
 }
 
 void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
-    if (!chunkedWriteState.active) {
-        uint8_t errorResponse[] = {RESP_NACK, RESP_CONFIG_CHUNK, 0x00, 0x00};
-        sendResponse(errorResponse, sizeof(errorResponse));
-        return;
-    }
-    if (chunkedWriteState.receivedChunks == 1) {
+    uint8_t ok_resp[]  = {RESP_ACK,  RESP_CONFIG_CHUNK, 0x00, 0x00};
+    uint8_t err_resp[] = {RESP_NACK, RESP_CONFIG_CHUNK, 0x00, 0x00};
+
+    /* The authorization re-check stays HERE, not in shared/: it is policy about who may mutate
+     * configuration, and it needs frame origin and session state the assembler has no business
+     * knowing. Still gated on the first continuation only, exactly as before. */
+    if (g_configAsm.chunks == 1u && g_configAsm.active) {
         const ConfigWriteGate gate = configWriteGate();
         if (gate == CONFIG_WRITE_DENIED) {
-            resetChunkedWriteState();
+            od_config_asm_reset(&g_configAsm);
             noteAuthRejected();
             uint8_t response[] = {RESP_ACK, (uint8_t)(CMD_CONFIG_CHUNK & 0xFF), RESP_AUTH_REQUIRED};
             sendResponseUnencrypted(response, sizeof(response));
@@ -682,27 +699,28 @@ void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
             secureEraseConfig();
         }
     }
-    if (len == 0 || len > CONFIG_CHUNK_SIZE || chunkedWriteState.receivedSize + len > MAX_CONFIG_SIZE || chunkedWriteState.receivedChunks >= MAX_CONFIG_CHUNKS) {
-        resetChunkedWriteState();
-        uint8_t errorResponse[] = {RESP_NACK, RESP_CONFIG_CHUNK, 0x00, 0x00};
-        sendResponse(errorResponse, sizeof(errorResponse));
+
+    switch (od_config_asm_chunk(&g_configAsm, data, len)) {
+    case OD_CONFIG_ASM_ACCEPTED:
+        sendResponse(ok_resp, sizeof(ok_resp));
         return;
-    }
-    memcpy(chunkedWriteState.buffer + chunkedWriteState.receivedSize, data, len);
-    chunkedWriteState.receivedSize += len;
-    chunkedWriteState.receivedChunks++;
-    if (chunkedWriteState.receivedChunks >= chunkedWriteState.expectedChunks) {
-        uint8_t ok[] = {RESP_ACK, RESP_CONFIG_CHUNK, 0x00, 0x00};
-        uint8_t err[] = {RESP_NACK, RESP_CONFIG_CHUNK, 0x00, 0x00};
-        bool saved = saveConfig(chunkedWriteState.buffer, chunkedWriteState.receivedSize);
+    case OD_CONFIG_ASM_COMPLETE: {
+        /* Committed on an EXACT byte count, never a chunk count -- the F3 fix. */
+        const bool saved = saveConfig(g_configAsm.buffer, (uint16_t)g_configAsm.total_size);
         if (saved) {
             reloadConfigAfterSave();
         }
-        sendResponse(saved ? ok : err, 4);
-        resetChunkedWriteState();
-    } else {
-        uint8_t ackResponse[] = {RESP_ACK, RESP_CONFIG_CHUNK, 0x00, 0x00};
-        sendResponse(ackResponse, sizeof(ackResponse));
+        od_config_asm_reset(&g_configAsm);
+        sendResponse(saved ? ok_resp : err_resp, 4);
+        return;
+    }
+    case OD_CONFIG_ASM_SINGLE:
+    case OD_CONFIG_ASM_REJECTED:
+    default:
+        od_log_error("ERROR: [%s] bad CONFIG_CHUNK (%u B) -- transfer dropped, nothing stored",
+                     originTag(), (unsigned)len);
+        sendResponse(err_resp, sizeof(err_resp));
+        return;
     }
 }
 

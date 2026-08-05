@@ -273,8 +273,9 @@ void getCurrentNonce(uint8_t* nonce);
 
 // chunked_write_state_t comes from config_parser.h so this file and
 // communication.cpp cannot drift apart on the buffer size.
-extern chunked_write_state_t chunkedWriteState;
-chunked_write_state_t chunkedWriteState = {false, 0, 0, {0}, 0, 0};
+/* chunkedWriteState is GONE -- see config_parser.h. The 4 KB reassembly buffer now lives in
+ * communication.cpp's g_configAsm (shared/core/od_config_asm.h). Same one buffer, same static
+ * allocation; it simply is not defined in a header any more. */
 struct GlobalConfig globalConfig = {0};
 uint8_t configReadResponseBuffer[128];
 

@@ -65,14 +65,14 @@ extern bool encryptionInitialized;
 
 // Defined in main.h (the single-inclusion globals header), so it needs an extern
 // here rather than an include -- main.h may not be included twice.
-extern chunked_write_state_t chunkedWriteState;
+#include "od_config_asm.h"
+extern struct od_config_asm g_configAsm;
 
 void resetChunkedWriteState(void) {
-    chunkedWriteState.active = false;
-    chunkedWriteState.totalSize = 0;
-    chunkedWriteState.receivedSize = 0;
-    chunkedWriteState.expectedChunks = 0;
-    chunkedWriteState.receivedChunks = 0;
+    /* One line now: the state it clears is shared/core's. Kept as a named primitive because
+     * abortToKnownState() and session_guard.cpp call it, and routing every teardown through one
+     * function is what stopped three call sites each zeroing a different subset. */
+    od_config_asm_reset(&g_configAsm);
 }
 
 bool initConfigStorage(){
