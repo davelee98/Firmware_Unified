@@ -71,10 +71,17 @@ uint16_t od_config_tlv_body_size(uint8_t packet_id);
  * UNKNOWN IDS END THE WALK, and that is current fleet behaviour, not an oversight -- see the
  * header comment. The walk stops cleanly and returns OD_CFG_TLV_OK: a config carrying a packet
  * this build does not know is not corrupt, it is newer.
+ *
+ * unknown_id_out, when supplied, receives the id that ended the walk, or 0 if it ran to the
+ * end. It exists so the caller can keep logging WHICH id stopped it: the per-target parser used
+ * to warn "Unknown packet ID 0x%02X", and losing that in the promotion would trade a diagnostic
+ * for nothing. The walk deliberately does no logging of its own -- shared/ has no log seam and
+ * a kernel-free target may have nowhere to send it.
  */
 enum od_config_tlv_result od_config_tlv_walk(const uint8_t *blob, uint32_t len,
                                              od_config_tlv_packet_fn fn, void *ctx,
-                                             uint8_t *version_out);
+                                             uint8_t *version_out,
+                                             uint8_t *unknown_id_out);
 
 /* CRC-16/CCITT over the body, matching the toolbox, nRF and Silabs firmware.
  *

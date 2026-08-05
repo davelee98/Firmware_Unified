@@ -94,13 +94,13 @@ static void test_too_short(void)
     struct seen s; seen_init(&s);
     CASE("blobs with no room for header + CRC are refused");
     for (uint32_t n = 0; n < OD_CFG_TLV_HEADER_LEN + OD_CFG_TLV_CRC_LEN; ++n) {
-        CHECK(od_config_tlv_walk(g_blob, n, on_packet, &s, NULL) == OD_CFG_TLV_TOO_SHORT);
+        CHECK(od_config_tlv_walk(g_blob, n, on_packet, &s, NULL, NULL) == OD_CFG_TLV_TOO_SHORT);
     }
     CHECK(s.count == 0);
 
     CASE("null arguments are refused, not dereferenced");
-    CHECK(od_config_tlv_walk(NULL, 100, on_packet, &s, NULL) == OD_CFG_TLV_TOO_SHORT);
-    CHECK(od_config_tlv_walk(g_blob, 100, NULL, &s, NULL) == OD_CFG_TLV_TOO_SHORT);
+    CHECK(od_config_tlv_walk(NULL, 100, on_packet, &s, NULL, NULL) == OD_CFG_TLV_TOO_SHORT);
+    CHECK(od_config_tlv_walk(g_blob, 100, NULL, &s, NULL, NULL) == OD_CFG_TLV_TOO_SHORT);
 }
 
 static void test_walks_known_packets(void)
@@ -115,7 +115,7 @@ static void test_walks_known_packets(void)
     blob_add(0x27, 0xA3);
     blob_end();
 
-    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, &version) == OD_CFG_TLV_OK);
+    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, &version, NULL) == OD_CFG_TLV_OK);
     CHECK(version == 0x07);
     CHECK(s.count == 3);
     CHECK(s.ids[0] == 0x01 && s.lens[0] == od_config_tlv_body_size(0x01));
@@ -141,7 +141,7 @@ static void test_repeatable_packets(void)
         blob_add(0x20, (uint8_t)(0xB0 + i));
     }
     blob_end();
-    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL) == OD_CFG_TLV_OK);
+    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL, NULL) == OD_CFG_TLV_OK);
     CHECK(s.count == 6);
     for (unsigned i = 0; i < 6; ++i) {
         CHECK(s.bodies[i][0] == (uint8_t)(0xB0 + i));
@@ -161,7 +161,7 @@ static void test_unknown_id_ends_the_walk(void)
     blob_add(0x04, 0xC2);
     blob_end();
 
-    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL) == OD_CFG_TLV_OK);
+    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL, NULL) == OD_CFG_TLV_OK);
     CHECK(s.count == 1);
     CHECK(s.ids[0] == 0x01);
 }
@@ -181,7 +181,7 @@ static void test_truncated_packet(void)
         seen_init(&s);
         const uint32_t shorter = g_len - cut;
         const enum od_config_tlv_result r =
-            od_config_tlv_walk(g_blob, shorter, on_packet, &s, NULL);
+            od_config_tlv_walk(g_blob, shorter, on_packet, &s, NULL, NULL);
         CHECK(r == OD_CFG_TLV_TRUNCATED);
         CHECK(s.count == 1);       /* the first packet still fit; the second did not */
     }
@@ -192,13 +192,24 @@ static void test_header_straddling_the_crc(void)
     struct seen s; seen_init(&s);
     /* A trailing byte pair that is really the CRC must never be read as a packet header. This
      * is the confusion a single body_end bound exists to prevent. */
+    /* THE CRC BYTES ARE CHOSEN SO THIS CANNOT PASS BY ACCIDENT. An earlier version used a zero
+     * stray byte and zero CRC placeholders, so deleting the two-byte header check still gave
+     * reserved=0x00, id=0x00 -- an UNKNOWN id, which ends the walk with the same count the
+     * assertions expected. The test passed with the protection removed. Here the second CRC
+     * FIRST CRC byte is 0x01, a KNOWN id -- the id is read from there, not the second byte,
+     * because the stray byte ahead of it is consumed as `reserved`. With the header check
+     * dropped the walk reads a packet header straight out of the CRC field and reports a
+     * second packet, so the count assertion below fails. Verified by injecting exactly that
+     * mutation; the first attempt at this test used zero CRC bytes and still passed, because
+     * id 0x00 is unknown and ended the walk with the expected count. */
     CASE("a lone byte before the CRC is not parsed as a packet header");
     blob_begin(1);
     blob_add(0x01, 0xE1);
-    g_blob[g_len++] = 0x00;        /* one stray byte: not enough for [reserved][id] */
-    blob_end();
+    g_blob[g_len++] = 0x00;        /* one stray byte -- would be read as `reserved` */
+    g_blob[g_len++] = 0x01;        /* CRC byte 0 -- would be read as a KNOWN packet id */
+    g_blob[g_len++] = 0x00;        /* CRC byte 1 */
 
-    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL) == OD_CFG_TLV_OK);
+    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL, NULL) == OD_CFG_TLV_OK);
     CHECK(s.count == 1);
 }
 
@@ -212,8 +223,31 @@ static void test_callback_refusal(void)
     blob_add(0x27, 0xF3);
     blob_end();
     s.refuse_at = 1;
-    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL) == OD_CFG_TLV_REJECTED);
+    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL, NULL) == OD_CFG_TLV_REJECTED);
     CHECK(s.count == 1);           /* the refused one is not recorded */
+}
+
+static void test_unknown_id_is_reported(void)
+{
+    struct seen s; seen_init(&s);
+    uint8_t stopper = 0xFF;
+
+    CASE("the id that ended the walk is reported, so the caller can still log it");
+    blob_begin(1);
+    blob_add(0x01, 0xC1);
+    g_blob[g_len++] = 0; g_blob[g_len++] = 0x7E;
+    blob_end();
+    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL, &stopper) == OD_CFG_TLV_OK);
+    CHECK(stopper == 0x7E);
+
+    CASE("a walk that runs to the end reports no stopper");
+    seen_init(&s);
+    stopper = 0xFF;
+    blob_begin(1);
+    blob_add(0x01, 0xC2);
+    blob_end();
+    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL, &stopper) == OD_CFG_TLV_OK);
+    CHECK(stopper == 0x00);
 }
 
 static void test_body_size_table(void)
@@ -227,9 +261,18 @@ static void test_body_size_table(void)
     CHECK(od_config_tlv_body_size(0x00) == 0);
     CHECK(od_config_tlv_body_size(0x7E) == 0);
     CHECK(od_config_tlv_body_size(0xFF) == 0);
-    /* 0x22 and 0x2A are gaps in the assigned range, not oversights in the table. */
+    /* 0x22 is genuinely unassigned. 0x2A IS NOT -- it is OD_PKT_NFC, canonical, 32 bytes
+     * (opendisplay_structs.h). An earlier version of this test called it "a gap in the assigned
+     * range", which was simply false.
+     *
+     * It reports 0 because NO target here implements NFC, so it behaves as unknown and ends the
+     * walk -- exactly what every shipped build does. Adding it to the table would be a
+     * BEHAVIOUR CHANGE, not a fix: the walk would continue and later packets (0x2B, 0x2C) that
+     * are discarded today would start being applied. That is the size-table skip model,
+     * deferred as an incompatible wire change (D4). This assertion therefore pins current
+     * behaviour deliberately, and the comment says which of the two it is. */
     CHECK(od_config_tlv_body_size(0x22) == 0);
-    CHECK(od_config_tlv_body_size(0x2A) == 0);
+    CHECK(od_config_tlv_body_size(0x2A) == 0);   /* canonical, unimplemented -- NOT unassigned */
 }
 
 /* -------------------------------------------------------------------------------- the CRC --- */
@@ -294,6 +337,7 @@ int main(void)
     test_truncated_packet();
     test_header_straddling_the_crc();
     test_callback_refusal();
+    test_unknown_id_is_reported();
     test_body_size_table();
     test_crc_matches_shipped();
 

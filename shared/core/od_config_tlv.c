@@ -27,8 +27,11 @@ uint16_t od_config_tlv_body_size(uint8_t packet_id)
 
 enum od_config_tlv_result od_config_tlv_walk(const uint8_t *blob, uint32_t len,
                                              od_config_tlv_packet_fn fn, void *ctx,
-                                             uint8_t *version_out)
+                                             uint8_t *version_out, uint8_t *unknown_id_out)
 {
+    if (unknown_id_out) {
+        *unknown_id_out = 0u;
+    }
     if (!blob || !fn) {
         return OD_CFG_TLV_TOO_SHORT;
     }
@@ -64,7 +67,18 @@ enum od_config_tlv_result od_config_tlv_walk(const uint8_t *blob, uint32_t len,
             /* Unknown id: abandon the remainder. Current fleet behaviour, preserved
              * deliberately -- the size-table skip that would let the walk continue is an
              * incompatible wire change and is deferred (D4). Not an error: a config carrying a
-             * packet this build does not know is newer, not corrupt. */
+             * packet this build does not know is newer, not corrupt.
+             *
+             * NOTE 0x2A (OD_PKT_NFC) IS CANONICAL AND DELIBERATELY ABSENT from the table above.
+             * It is a known packet no target here implements, so it lands in this branch and
+             * abandons the remainder -- which is exactly what every shipped build does today.
+             * Adding it would be a behaviour change, not a bug fix: the walk would continue and
+             * later packets (0x2B, 0x2C) that are currently discarded would start being
+             * applied. That is the size-table skip model, deferred as an incompatible wire
+             * change (D4), and it must not arrive one packet id at a time. */
+            if (unknown_id_out) {
+                *unknown_id_out = packet_id;
+            }
             return OD_CFG_TLV_OK;
         }
 

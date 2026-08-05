@@ -625,8 +625,17 @@ bool loadGlobalConfig(){
     /* The walk itself is shared. version comes back through it; the per-packet copies happen
      * in onConfigPacket() above. */
     uint8_t parsedVersion = 0;
+    uint8_t stoppedOnId = 0;
     const enum od_config_tlv_result walk =
-        od_config_tlv_walk(configData, configLen, onConfigPacket, NULL, &parsedVersion);
+        od_config_tlv_walk(configData, configLen, onConfigPacket, NULL,
+                           &parsedVersion, &stoppedOnId);
+    if (stoppedOnId != 0) {
+        /* Restores the per-packet parser's "Unknown packet ID 0x%02X, skipping" warning. The
+         * walk cannot log -- shared/ has no log seam -- so it reports the id and the target
+         * says it. Losing this in the promotion would have traded a diagnostic for nothing. */
+        od_log_warn("WARNING: Unknown packet ID 0x%02X, remainder of config skipped",
+                    stoppedOnId);
+    }
     globalConfig.version = parsedVersion;
     globalConfig.minor_version = 0;   // not stored in the current format
     if (walk == OD_CFG_TLV_TOO_SHORT) {
