@@ -104,7 +104,37 @@ Two are accounted for rather than acted on (`NOTIFY_RX`, `SCAN_REQ_RCVD`), and t
 point: an unhandled case returns 0 and is indistinguishable from success, which is exactly how
 eight missing events went unnoticed until one of them broke connections.
 
-#### …AND THE SECURITY-MANAGER DEFAULTS WERE THE ACTUAL ROOT CAUSE
+#### CORRECTION 2026-08-05: the SM defaults were NOT the root cause
+
+Hardware disproved it. The device was reflashed at `c5119eb` (which includes the SM restoration)
+and **`status=26` still occurs on most connections**. `sm_bonding = 0` did not remove it, so the
+bonding story below is wrong as a *cause*.
+
+**What 26 actually is.** It travels 1:1 with these, on every affected connection:
+
+```
+GAP CONNECT h=1 status=26
+NimBLE: ogf=0x08, ocf=0x0032, hci_err=0x21A : BLE_ERR_UNSUPP_REM_FEATURE
+2M PHY request rejected (rc=538, staying at 1M)
+DLE 251 request rejected (rc=538)
+```
+
+`538 = 0x21A = BLE_HS_HCI_ERR(0x1A)`, and **`26 = 0x1A`**. Both are the same HCI error —
+**Unsupported Remote Feature** — surfacing once raw in `connect.status` and once wrapped in the
+PHY/DLE rejections. It is a link-layer feature negotiation the peer refuses, and has nothing to
+do with encryption, bonding or key size. `BLE_HS_EENCRYPT_KEY_SZ` is 26 as well, which is what
+made the wrong reading plausible; the co-occurrence with `0x21A` is what settles it.
+
+Affected connections come up at 1M PHY and are refused DLE; unaffected ones negotiate 2M and a
+251-byte PDU. So this is peer-dependent, not device state.
+
+**The SM restoration stands anyway** — it returns the device to the shipped security posture and
+stops it offering bonding it cannot persist — but it fixed a latent divergence, not this bug.
+**What actually fixed the connect stutter is `1c2e2f5`**, adopting a link that exists whatever
+the status says: confirmed on hardware, `link_exists=1` followed by `CLIENT CONNECTED` with an
+epoch, and no `Dropped write from non-owner` anywhere in the capture.
+
+#### (superseded) the security-manager defaults
 
 Found 2026-08-05 by a second review specifically comparing behaviour against the wrapper, after
 the event census was already closed. `NimBLEDevice::init()` sets six `ble_hs_cfg.sm_*` fields
