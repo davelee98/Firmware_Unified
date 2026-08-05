@@ -94,11 +94,27 @@ fi
 # indistinguishable from "we let it grow", and a ratchet that cannot tell them apart is not
 # a ratchet.
 #
+# SPI.h WAS REMOVED FROM THIS PATTERN on 2026-08-04, and it is the only header ever removed.
+# It is no longer a shim header: it is targets/esp32-idf/vendor/fastepd/SPI.h, the PERMANENT
+# FastEPD vendor adapter. Counting it would have pinned the floor one file above where the
+# migration can actually finish -- display_fastepd.cpp includes it and always will, so the
+# budget could never reach the point where compat/ is deletable, which is the single question
+# this check exists to answer.
+#
+# THIS IS A DEFINITION CHANGE, NOT PROGRESS, and the same rule applies as when the pattern was
+# WIDENED in phase B: say so, or a later reader cannot tell it apart from work. Measured both
+# ways at the time -- 6 under the old pattern, 6 under this one. THE NUMBER DID NOT MOVE,
+# because the one file affected (display_fastepd.cpp) is still counted for its <Arduino.h>.
+# What changed is the FLOOR: 6 before, 5 after, reachable once that include goes.
+#
+# The obvious risk is that a genuine shim SPI header could now reappear in compat/ and slip
+# past unnoticed. The check below closes that: compat/SPI.h existing is a hard failure.
+#
 # NOTE the `|| true`: grep exits 1 when it matches nothing, which under `set -e` + `pipefail`
 # aborts the script on the healthiest possible state -- zero shim users. Without it this check
 # fails hardest exactly when the port has succeeded.
 shim_users() {
-    grep -rlE '#[[:space:]]*include[[:space:]]*[<"][[:space:]]*(arduino_compat|Arduino|Wire|SPI|WiFi|ledc_compat|esp32-hal-gpio|HardwareSerial)\.h' \
+    grep -rlE '#[[:space:]]*include[[:space:]]*[<"][[:space:]]*(arduino_compat|Arduino|Wire|WiFi|ledc_compat|esp32-hal-gpio|HardwareSerial)\.h' \
          targets/esp32-idf --include='*.c' --include='*.cpp' --include='*.h' \
          --include='*.hpp' --include='*.inl' 2>/dev/null \
         | grep -v '^targets/esp32-idf/compat/' \
@@ -128,6 +144,18 @@ third_party_shim_users() {
          third_party --include='*.c' --include='*.cpp' --include='*.h' \
          --include='*.hpp' --include='*.inl' 2>/dev/null || true
 }
+
+# See the pattern note above: <SPI.h> is deliberately no longer counted, because it resolves to
+# the permanent vendor adapter. That is only safe while no SHIM SPI header exists -- if one
+# reappears under compat/, every file including it would silently drop off the count.
+if [ -f "$COMPAT_DIR/SPI.h" ]; then
+    echo "::error::$COMPAT_DIR/SPI.h exists, but <SPI.h> is no longer counted by this check."
+    echo "SPI.h was removed from the pattern because it is the FastEPD vendor adapter"
+    echo "(targets/esp32-idf/vendor/fastepd/SPI.h), which is permanent and must not be"
+    echo "ratcheted. A shim SPI header under compat/ would therefore be invisible here."
+    echo "Either delete it, or put SPI back in the pattern above and raise the budget."
+    exit 1
+fi
 
 if [ -d targets/esp32-idf ]; then
     actual=$(shim_users | wc -l | tr -d '[:space:]')

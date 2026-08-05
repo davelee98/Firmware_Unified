@@ -679,4 +679,42 @@
 # real: this is the AXP2101 PMIC path (rail enables, voltage set-points, battery reads) plus 7
 # GPIO glitch removals. Needs a battery board -- power-on, a panel refresh, and a battery
 # voltage reading that is not obviously wrong.
-6
+
+# 5 = phase C step 15, 2026-08-04: <SPI.h> stops being counted, and src/display_fastepd.cpp
+# leaves the list. 6 -> 5, one file. THIS IS THE FLOOR.
+#
+# TWO SEPARATE THINGS, and they must not be conflated:
+#
+# 1. A DEFINITION CHANGE, WHICH IS NOT PROGRESS. ratchet.sh no longer counts <SPI.h>, because
+#    it is no longer a shim header -- it is vendor/fastepd/SPI.h, the PERMANENT FastEPD
+#    adapter. Counting it pinned the floor one file above where the migration can actually
+#    finish: display_fastepd.cpp includes it and always will, so the budget could never reach
+#    the point where compat/ is deletable, which is the one question this check exists to
+#    answer. Measured both ways: 6 under the old pattern, 6 under the new one. THE NUMBER DID
+#    NOT MOVE on the definition change alone. Same discipline as the phase-B WIDENING, which is
+#    also recorded above -- a ratchet that cannot tell a redefinition from work is not a ratchet.
+#
+#    Risk this creates, and the mitigation: a genuine shim SPI header could reappear under
+#    compat/ and every file including it would silently drop off the count. ratchet.sh now
+#    FAILS HARD if compat/SPI.h exists. Verified: exit 1 with it present, 0 without.
+#
+# 2. THE ACTUAL DECREMENT, which is unrelated to (1). display_fastepd.cpp's <Arduino.h> was
+#    VESTIGIAL -- like boot_screen.cpp's in step 10. Its only Arduino-shaped names (SPISettings,
+#    MSBFIRST, SPI_MODE0) come from the adapter, not from Arduino.h. Three real dependencies
+#    surfaced when the include went, all trivially equivalent:
+#      LOW / HIGH  -> the literals 0 / 1, at two gpio_set_level() calls that were already
+#                     calling IDF directly.
+#      yield()     -> taskYIELD(), which is verbatim what compat/arduino_compat.h defined it as.
+#    All 10 images are BYTE-IDENTICAL, which is the proof that none of the three changed
+#    anything.
+#
+# THE FLOOR IS 5, AND IT IS REACHED. The five files left -- main.cpp, display_service.cpp,
+# buzzer_hw.cpp, device_control.cpp, encryption.cpp -- are counted ONLY for their TARGET_NRF
+# arms. None of those arms compiles on this target, so none can be verified here; converting
+# them blind is the unverifiable edit MIGRATION.md warns against. They leave with the nRF
+# target at MIGRATION step 4, and compat/ is deletable at that moment, not before.
+#
+# Phase C's ESP32 app-code work is therefore DONE. What remains under targets/esp32-idf/ is
+# nRF-arm code and the permanent adapter. Nothing to verify on hardware in THIS step; the
+# outstanding hardware debt is steps 12, 13 and 14.
+5
