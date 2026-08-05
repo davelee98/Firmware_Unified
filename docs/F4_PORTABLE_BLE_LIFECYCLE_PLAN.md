@@ -1,6 +1,9 @@
 # F4 portable BLE advertising and lifecycle plan
 
-**Status:** proposed design; no implementation is implied by this document
+**Status:** **ADOPTED 2026-08-05.** This is the accepted design for F4, and
+[NEXT_STEPS_2026-08-05.md](NEXT_STEPS_2026-08-05.md) D1 schedules it as the first real source in
+`shared/`. Implementation follows the merge sequence in that document's Milestone 1 —
+test-first, one reviewable commit per step.
 
 **Scope:** correctness review finding F4
 

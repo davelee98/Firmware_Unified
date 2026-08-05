@@ -150,6 +150,19 @@ host backend covers both Nordic boards, and it is unbudgeted.
    *into* `shared/` behind HAL interfaces).
 4. Replace the target's copy with the shared implementation **one subsystem at a time** —
    config parsing, then dispatch, then each transfer path. Build + flash + verify after each.
+
+   > **Promotion order, amended 2026-08-05.** The *first* source in `shared/` is
+   > `shared/core/od_adv_control.c`, not the config parser — see
+   > [NEXT_STEPS_2026-08-05.md](NEXT_STEPS_2026-08-05.md) D1 and
+   > [F4_PORTABLE_BLE_LIFECYCLE_PLAN.md](F4_PORTABLE_BLE_LIFECYCLE_PLAN.md). It is a narrow
+   > infrastructure exception taken on architectural grounds: the advertising controller is a
+   > self-contained plain-C state machine with no wire surface, so it establishes the
+   > shared-source build and test pattern without moving protocol state.
+   >
+   > **The subsystem order above is unchanged.** Config parsing remains the first subsystem
+   > that parses, stores, or alters wire behaviour, and the pre-auth-attack-surface reasoning
+   > for putting it first still holds. The amendment inserts one non-protocol component ahead
+   > of the sequence; it does not reorder the sequence.
 5. Only then delete the corresponding code from the original repo, and point its README at
    this one.
 

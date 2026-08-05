@@ -20,11 +20,20 @@ build" until 2026-08-05; that is no longer true and the guidance below replaces 
   `compat/ratchet.sh` and `tools/sdkconfig_baseline.sh` are the two gates a change must not
   break. The other two targets — `nordic-zephyr`, `efr32bg22-slc` — are still **README-only**,
   so "compile all targets" means those 10 ESP32 boards.
-- **`shared/` is still empty, and that is still by design.** The first promotion
-  (`od_config.c`) has not happened — see docs/NEXT_STEPS.md item 5, which is historical but is
-  still where that choice is argued; note docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md proposes a
-  different first promotion and the conflict is unresolved. So the ESP32 target holds
-  logic that is destined for `shared/core`, and touching it means reading MIGRATION.md first.
+- **`shared/` is still empty, and that is still by design.** So the ESP32 target holds logic
+  destined for `shared/core`, and touching it means reading MIGRATION.md first.
+  **The first source in `shared/` is `shared/core/od_adv_control.c`** — the portable BLE
+  advertising/lifecycle controller — decided 2026-08-05 (docs/NEXT_STEPS_2026-08-05.md D1,
+  docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md, both adopted). Earlier text here named `od_config.c`;
+  that was superseded, and the ordering conflict it flagged is resolved. `od_config.c` is still
+  the first *protocol* subsystem promoted — the amendment inserts one non-protocol component
+  ahead of the sequence rather than reordering it.
+- **docs/NEXT_STEPS_2026-08-05.md is the live sequence.** docs/NEXT_STEPS.md is historical;
+  do not plan from it.
+- **The ESP32 target is not correctness-signed-off.** docs/CORRECTNESS_REVIEW_2026-08-04.md
+  raised ten findings; F1 and F2 are fixed, F3-F10 are open. F3 lets malformed input commit an
+  inconsistent config record to NVS, and the WiFi/LAN transport has never run on hardware.
+  Check it before assuming a subsystem here is sound.
 - **The HALs are real now.** `targets/esp32-idf/hal/` implements od_hal_{nvs,log,gpio,time,
   i2c,adc,panel} against docs/SHARED_API_DESIGN.md. That document has been corrected ten times
   by contact with the implementations — trust the headers over the design doc where they
