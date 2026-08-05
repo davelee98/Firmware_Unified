@@ -20,8 +20,9 @@ target order and migration rules remain in [MIGRATION.md](MIGRATION.md), known d
 2. Implement the portable F4 advertising/lifecycle controller as the first real source in
    `shared/`.
 3. Promote `od_config.c` as the first **protocol-behavior** subsystem, closing F3 with tests.
-4. Close the remaining ESP32 correctness findings in transport, event handoff, lifecycle truth,
-   secure erase, and mDNS.
+4. ~~Close the remaining ESP32 correctness findings in transport, event handoff, lifecycle
+   truth, secure erase, and mDNS.~~ **DEFERRED 2026-08-05** — F6/F8/F9/F10 are not being
+   worked. All three Highs are fixed; this is the Medium/Low tail. See Milestone 3.
 5. Run the release acceptance matrix and explicitly record any hardware debt still accepted.
 6. Import nRF54L15 into `targets/nordic-zephyr/`, one subsystem at a time.
 7. Import EFR32BG22, using its no-kernel and 32 KB RAM limits as hard shared-core gates.
@@ -42,7 +43,7 @@ security decision run in parallel, with deadlines stated below.
 | Hardware defects | FastEPD pixel-path fix is not hardware-verified; `bbepWaitBusy` still blocks the loop | These remain named release risks, not invisible assumptions |
 | `shared/` | Source list empty | The next shared source establishes the real build/test pattern |
 | Host tests | Header canary, vector replay where Python permits it, and link-owner sanitizer tests | The first controller/config sources need real C unit suites and fakes |
-| Correctness review | F1, F2 fixed on `main`; **F3 fixed** (`96a29b8`, branch); F4/F7 implemented but NOT closed (no hardware); F5, F6, F8, F9, F10 open | All three Highs now have fixes. Closure still needs the hardware evidence F4/F7 lack |
+| Correctness review | **All three Highs fixed on `main`** (F1, F2, F3). F5 code half fixed; F4/F7 implemented but NOT closed (no hardware); **F6, F8, F9, F10 DEFERRED 2026-08-05** | Highs closed is not the same as the target being correctness-signed-off. See Milestone 3 for what stays exposed |
 | Nordic/Zephyr | README scaffold only | Real target import is migration step 2 |
 | Silabs | README scaffold only | Real target import is migration step 3 |
 | nRF52840 | Still part of the source `Firmware` tree and Bluefruit-based | Its guarded shim arms cannot be converted or deleted blindly on ESP32 |
@@ -374,7 +375,57 @@ and fuzz workflow.
 - an S3 performs config write, reboot, and exact read-back using both single-frame and chunked
   paths.
 
-## Milestone 3 — remaining ESP32 correctness closure
+## Milestone 3 — remaining ESP32 correctness closure — **DEFERRED 2026-08-05**
+
+**The remaining correctness fixes are deferred by decision.** F6, F8, F9 and F10 are not being
+worked; 3A's code half landed before the deferral (`1cfe78b`, PIPE rejected on LAN) and its
+header half was always upstream work.
+
+This is the third deferral recorded in this document in one day, so state the shape plainly
+rather than let it accumulate quietly: **F1, F2 and F3 — every High — are fixed on `main`.**
+What is being deferred is the Medium and Low tail plus the closure of F4/F7, not the severe
+defects. That is a defensible place to stop; it is not the same as the subsystem being correct,
+and no document here should imply otherwise.
+
+### What stays exposed while this is deferred
+
+Named so the deferral is visible rather than implicit:
+
+| # | Sev | What remains true on shipped firmware |
+|---|---|---|
+| F8 | Med | **Secure erase reports success when the zero-write failed.** `od_hal_nvs.c` discards the result of the same-size zero blob write and its commit, and logs "zero-written and erased" unconditionally — including when no record existed. On failure the old entry containing the **AES master key** may remain recoverable from raw flash while the operator is told the wipe completed. This is the one with a security consequence, and it is the cheapest of the four to fix. |
+| F9 | Med | WiFi event→loop handoff uses `volatile`, which is not synchronisation. Paired scalar-then-flag writes have no ordering, so the loop can act on a pending flag with a stale reason/channel/RSSI, and an unsynchronised `usingCachedAp` can miss the full-scan fallback after a cached BSSID fails. |
+| F10 | Low | The mDNS "400 ms floor" is inverted: a *changed* payload bypasses the floor entirely and an *unchanged* one re-announces once 400 ms elapse — the opposite of the stated policy, permitting multicast bursts on a battery device sharing its radio with BLE. |
+| F6 | Low\* | LAN response writes are not retried to completion. \*Rated Medium by the review; verification showed the accepted socket is blocking and the oversized two-write fallback is unreachable at current buffer sizes (642 B vs a 600 B maximum response), so the live risk is lower. It becomes Medium again the moment either fact changes. |
+
+Also still open, and **not** fixed by anything merged: **F4 and F7 are implemented but NOT
+closed.** Their code is on `main`; their evidence is not. Closure needs the Milestone 0 byte
+fixture and hardware fault injection, which is bench work rather than a deferral of effort.
+
+### This deferral has no review trigger
+
+Same gap D3 named, now the second live instance:
+
+| Field | Value |
+|---|---|
+| Owner | **UNSET** |
+| Expiry date | **UNSET** |
+| Affected released versions | **UNSET** |
+| Release expected to remove the exposure | **UNSET** |
+
+Two untriggered deferrals now stand — this one and D3's BG22 pair. A third (F3) was recorded
+and then discharged by being fixed, which is the outcome the fields exist to make likely.
+Without them, "deferred" and "forgotten" are the same state.
+
+### Sequencing consequence
+
+With Milestone 3 deferred, the next code work is **Milestone 2's remaining half** —
+`od_config.c`, the TLV parser — and after it Milestone 5's Nordic import. Milestone 4's release
+acceptance matrix cannot be run to a pass while F4/F7 lack evidence and four findings are open;
+running it now would produce a matrix whose honest result is mostly `ACCEPTED-UNRUN`.
+
+The original text of this milestone follows unchanged, because it is the work that resumes when
+the deferral is lifted.
 
 After config is isolated, finish the boundary defects without conflating them with target
 migration.
