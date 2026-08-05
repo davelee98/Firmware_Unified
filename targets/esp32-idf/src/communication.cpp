@@ -570,16 +570,51 @@ void handleReadConfig() {
     }
 }
 
+// Outcome of "is this frame allowed to MUTATE stored configuration?".
+enum ConfigWriteGate {
+    CONFIG_WRITE_ALLOWED,        // proceed as-is
+    CONFIG_WRITE_ALLOWED_ERASE,  // proceed, but wipe the old record first (rewrite policy)
+    CONFIG_WRITE_DENIED,         // answer RESP_AUTH_REQUIRED
+};
+
+// THE single authorization predicate for config mutation. Both 0x0041 and its 0x0042
+// continuations ask it, because a second authorization decision taken in a handler must
+// apply the same origin rule the dispatcher applied -- and until this existed, it did
+// not. The dispatcher exempts ORIGIN_LAN_TLS from the app-layer gate (SECTION 9 rule 4:
+// the TLS handshake IS the authentication on that port and 0x0050 is NOT used there),
+// but handleWriteConfig() then re-tested the raw isEncryptionEnabled() && !isAuthenti-
+// cated() pair. isAuthenticated() is set only by a successful app-layer 0x0050 exchange
+// (encryption.cpp), which a conforming TLS client never sends -- so a client that had
+// already proved possession of the derived PSK could read config but not write it,
+// unless REWRITE_ALLOWED happened to be set. Encrypted WiFi supported half the workflow.
+//
+// Origin ALONE is not sufficient authority: it is paired with lanTlsSessionEstablished()
+// so the exemption tracks a completed handshake on the live socket rather than the
+// global encryption-enabled bit.
+static ConfigWriteGate configWriteGate(void) {
+#ifdef OPENDISPLAY_HAS_WIFI
+    if (g_commandOrigin == ORIGIN_LAN_TLS && lanTlsSessionEstablished()) {
+        return CONFIG_WRITE_ALLOWED;
+    }
+#endif
+    // BLE and plaintext LAN keep the pre-TLS rule unchanged.
+    if (!isEncryptionEnabled() || isAuthenticated()) {
+        return CONFIG_WRITE_ALLOWED;
+    }
+    const bool rewriteAllowed = (securityConfig.flags & (1 << 0)) != 0;
+    return rewriteAllowed ? CONFIG_WRITE_ALLOWED_ERASE : CONFIG_WRITE_DENIED;
+}
+
 void handleWriteConfig(uint8_t* data, uint16_t len) {
     if (len == 0) return;
-    if (isEncryptionEnabled() && !isAuthenticated()) {
-        bool rewriteAllowed = (securityConfig.flags & (1 << 0)) != 0;
-        if (!rewriteAllowed) {
-            noteAuthRejected();
-            uint8_t response[] = {RESP_ACK, (uint8_t)(CMD_CONFIG_WRITE & 0xFF), RESP_AUTH_REQUIRED};
-            sendResponseUnencrypted(response, sizeof(response));
-            return;
-        }
+    const ConfigWriteGate gate = configWriteGate();
+    if (gate == CONFIG_WRITE_DENIED) {
+        noteAuthRejected();
+        uint8_t response[] = {RESP_ACK, (uint8_t)(CMD_CONFIG_WRITE & 0xFF), RESP_AUTH_REQUIRED};
+        sendResponseUnencrypted(response, sizeof(response));
+        return;
+    }
+    if (gate == CONFIG_WRITE_ALLOWED_ERASE) {
         secureEraseConfig();
     }
     if (len > CONFIG_CHUNK_SIZE) {
@@ -634,16 +669,18 @@ void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
         sendResponse(errorResponse, sizeof(errorResponse));
         return;
     }
-    if (chunkedWriteState.receivedChunks == 1 && isEncryptionEnabled() && !isAuthenticated()) {
-        bool rewriteAllowed = (securityConfig.flags & (1 << 0)) != 0;
-        if (!rewriteAllowed) {
+    if (chunkedWriteState.receivedChunks == 1) {
+        const ConfigWriteGate gate = configWriteGate();
+        if (gate == CONFIG_WRITE_DENIED) {
             resetChunkedWriteState();
             noteAuthRejected();
             uint8_t response[] = {RESP_ACK, (uint8_t)(CMD_CONFIG_CHUNK & 0xFF), RESP_AUTH_REQUIRED};
             sendResponseUnencrypted(response, sizeof(response));
             return;
         }
-        secureEraseConfig();
+        if (gate == CONFIG_WRITE_ALLOWED_ERASE) {
+            secureEraseConfig();
+        }
     }
     if (len == 0 || len > CONFIG_CHUNK_SIZE || chunkedWriteState.receivedSize + len > MAX_CONFIG_SIZE || chunkedWriteState.receivedChunks >= MAX_CONFIG_CHUNKS) {
         resetChunkedWriteState();

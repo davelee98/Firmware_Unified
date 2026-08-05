@@ -119,6 +119,11 @@ bool wifiLanClientConnected(void);
 uint16_t lanActivePort(void);
 /// True when the LAN channel is TLS-PSK rather than plaintext (= isEncryptionEnabled()).
 bool lanTlsEnabled(void);
+/// True while a TLS-PSK session on the accepted socket has COMPLETED its handshake.
+/// This -- not lanTlsEnabled(), which is only a configuration question -- is what
+/// authorizes a TLS-origin frame: SECTION 9 rule 4 makes the handshake the
+/// authentication on this transport.
+bool lanTlsSessionEstablished(void);
 // NOTE: this firmware deliberately never calls esp_wifi_set_ps(). WiFi and BLE share
 // one radio with software coex compiled in, and the coex arbiter needs WiFi's
 // modem-sleep windows to time-share the antenna with the always-on BLE advertiser.

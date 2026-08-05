@@ -268,6 +268,20 @@ uint16_t lanActivePort(void) {
 
 bool lanTlsEnabled(void) { return isEncryptionEnabled(); }
 
+// Is there a LIVE, FULLY HANDSHAKEN TLS-PSK session on the accepted socket?
+//
+// Distinct from lanTlsEnabled(), which only answers "is the TLS listener the one we
+// bound" -- a configuration question with no session in it. Authorization decisions
+// need this one: SECTION 9 rule 4 makes the TLS handshake the authentication on this
+// transport, so "authenticated" means the peer proved possession of the derived PSK,
+// which is true only once mbedtls_ssl_handshake() has returned 0. Deriving it from the
+// global encryption-enabled bit instead would authorize a plaintext frame on a device
+// that merely has encryption configured.
+bool lanTlsSessionEstablished(void) {
+    return tlsMode && tlsSessionActive && tlsHandshakeDone &&
+           wifiServerConnected && s_lanClientFd >= 0;
+}
+
 // mbedTLS BIO shims over the accepted socket (non-blocking cooperative model).
 // ctx is unused and deliberately so: these read s_lanClientFd through the same
 // accessors as the rest of the file, so they always see the CURRENT descriptor.
