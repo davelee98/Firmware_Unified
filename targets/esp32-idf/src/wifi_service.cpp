@@ -85,6 +85,17 @@ static void lanSockClose(int* fd) {
 // true until reboot. (The TLS path is unaffected -- it maps recv == 0 to
 // OD_LAN_READ_CLOSED itself.) MSG_PEEK|MSG_DONTWAIT answers the question without
 // consuming a byte or blocking the loop task.
+//
+// LIVENESS ONLY -- NEVER GUARD A TEARDOWN WITH THIS. The two questions "do we own a
+// descriptor" and "is the peer still live" are separate predicates, and teardown wants
+// the first one (`s_lanClientFd >= 0`). Guarding a close with this leaked the socket on
+// the single most common path there is: wifiLanReapClosedSession() fires precisely when
+// !lanClientConnected(), so an orderly FIN / TLS close_notify reached disconnectWiFi-
+// Server(), re-asked the same question, got "not connected", and skipped the close --
+// after which the next accept overwrote the only reference to the fd. A few hundred
+// normal host reconnects exhausted the lwIP descriptor table and LAN admission failed
+// until reboot. lanSockClose() is idempotent and clears the fd, so teardown sites call
+// it unconditionally.
 static bool lanClientConnected(void) {
     if (s_lanClientFd < 0) {
         return false;
@@ -1272,7 +1283,10 @@ void wifiLanDropOwnedSocket(void) {
     // clearEncryptionSession() or requestTransferSessionCleanup(), which are the
     // abort's own steps 8 and 3-5. Calling them here would nest the two teardowns.
     tlsCloseSession();
-    if (lanClientConnected()) {
+    // Ownership, not liveness -- see lanClientConnected(). A peer that has already
+    // gone away still leaves us holding its descriptor, and that is exactly the case
+    // this has to close.
+    if (s_lanClientFd >= 0) {
         od_log_info("Closing LAN client (session abort)");
         lanSockClose(&s_lanClientFd);
     }
@@ -1286,7 +1300,10 @@ void wifiLanDropOwnedSocket(void) {
 
 void disconnectWiFiServer() {
     tlsCloseSession();
-    if (lanClientConnected()) {
+    // Ownership, not liveness -- see lanClientConnected(). The dominant caller is
+    // wifiLanReapClosedSession(), which runs BECAUSE the peer is gone, so a liveness
+    // guard here skipped both the close and the crypto clear on every orderly close.
+    if (s_lanClientFd >= 0) {
         od_log_info("Closing LAN client");
         clearEncryptionSession();
         lanSockClose(&s_lanClientFd);
@@ -1621,9 +1638,9 @@ void restartWiFiLanAfterReconnect() {
 // Extends PR #114's BLE-only teardown (device_control.cpp) to the WiFi surface.
 void opendisplay_lan_teardown(void) {
     tlsCloseSession();
-    if (lanClientConnected()) {
-        lanSockClose(&s_lanClientFd);
-    }
+    // Ownership, not liveness -- see lanClientConnected(). Reboot teardown must hand
+    // the descriptor back whatever the peer's state; lanSockClose() no-ops on -1.
+    lanSockClose(&s_lanClientFd);
     lanSockClose(&s_lanListenFd);
     wifiServerConnected = false;
     tcpReceiveBufferPos = 0;
