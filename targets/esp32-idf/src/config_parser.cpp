@@ -66,6 +66,7 @@ extern bool encryptionInitialized;
 // Defined in main.h (the single-inclusion globals header), so it needs an extern
 // here rather than an include -- main.h may not be included twice.
 #include "od_config_asm.h"
+#include "od_config_tlv.h"
 extern struct od_config_asm g_configAsm;
 
 void resetChunkedWriteState(void) {
@@ -321,37 +322,11 @@ bool hasValidStoredConfig(void) {
     return loadConfig(getConfigScratch(), &len);
 }
 
-static uint16_t crc16_ccitt_feed(uint16_t crc, uint8_t b) {
-    crc ^= (uint16_t)((uint16_t)b << 8);
-    for (int j = 0; j < 8; j++) {
-        if ((crc & 0x8000U) != 0U) {
-            crc = (uint16_t)(((uint32_t)crc << 1) ^ 0x1021U);
-        } else {
-            crc = (uint16_t)((uint32_t)crc << 1);
-        }
-    }
-    return crc;
-}
-
-// CRC-16/CCITT-FALSE over the toolbox-outer config container body (excludes the
-// trailing 2 CRC bytes), with the first two (length) bytes forced to zero so the
-// value is independent of the container length. Matches the canonical helper in
-// OpenDisplay-Firmware_NRF/config_parser.c and OpenDisplay-Firmware_Silabs.
-static uint16_t config_toolbox_outer_crc16(const uint8_t* data, uint32_t body_len) {
-    uint16_t crc = 0xFFFFU;
-    if (body_len < 2U) {
-        for (uint32_t i = 0; i < body_len; i++) {
-            crc = crc16_ccitt_feed(crc, data[i]);
-        }
-        return crc;
-    }
-    crc = crc16_ccitt_feed(crc, 0);
-    crc = crc16_ccitt_feed(crc, 0);
-    for (uint32_t i = 2U; i < body_len; i++) {
-        crc = crc16_ccitt_feed(crc, data[i]);
-    }
-    return crc;
-}
+/* The toolbox CRC-16/CCITT that used to live here is now
+ * od_config_tlv_crc16() in shared/core. Deleted rather than left beside it: a local copy of a
+ * promoted function is dead code that still compiles, and the next edit to one of them is the
+ * drift this repo exists to prevent. calculateConfigCRC() below is a DIFFERENT checksum --
+ * CRC-32 over the storage record -- and stays. */
 
 uint32_t calculateConfigCRC(uint8_t* data, uint32_t len){
     uint32_t crc = 0xFFFFFFFF;
@@ -368,170 +343,97 @@ uint32_t calculateConfigCRC(uint8_t* data, uint32_t len){
     return ~crc;
 }
 
-bool loadGlobalConfig(){
-    memset(&globalConfig, 0, sizeof(globalConfig));
-    // Initialize security config defaults
-    memset(&securityConfig, 0, sizeof(securityConfig));
-    // Reset pin defaults to disabled (flag not set)
-    wifiConfigured = false;
-    wifiSsid[0] = '\0';
-    wifiPassword[0] = '\0';
-    wifiEncryptionType = 0;
-    globalConfig.data_extended_loaded = false;
-    uint8_t* configData = getConfigScratch();
-    uint32_t configLen = MAX_CONFIG_SIZE;
-    if (!loadConfig(configData, &configLen)) {
-        globalConfig.loaded = false;
-        return false;
-    }
-    if (configLen < 3) {
-        od_log_error("ERROR: Config too short");
-        globalConfig.loaded = false;
-        return false;
-    }
-    uint32_t offset = 0;
-    offset += 2;
-    globalConfig.version = configData[offset++];
-    globalConfig.minor_version = 0; // Not stored in current format
-    while (offset < configLen - 2) { // -2 for CRC
-        if (offset + 2 > configLen - 2) break;
-        offset++;
-        uint8_t packetId = configData[offset++];
-        switch (packetId) {
+/* One config packet, bounds already guaranteed by od_config_tlv_walk().
+ *
+ * THE BOUNDS CHECKS ARE GONE FROM HERE, and that is the promotion: this function used to spell
+ * out `offset + sizeof(T) <= configLen - 2` once per packet type -- fifteen independent chances
+ * to write the wrong comparison on the pre-auth attack surface. That check now exists once, in
+ * shared/core/od_config_tlv.c, with host vectors for truncation and overflow.
+ *
+ * What is left is the part that is genuinely per-target: where each packet is stored, the
+ * instance-count caps, and the logging. Returning false aborts the walk; a packet this build
+ * does not implement is NOT a reason to do that.
+ */
+static bool onConfigPacket(void *ctx, uint8_t packetId, const uint8_t *body, uint16_t bodyLen) {
+    (void)ctx; (void)bodyLen;
+    switch (packetId) {
+
             case 0x01: // system_config
-                if (offset + sizeof(struct SystemConfig) <= configLen - 2) {
-                    memcpy(&globalConfig.system_config, &configData[offset], sizeof(struct SystemConfig));
-                    offset += sizeof(struct SystemConfig);
-                } else {
-                    od_log_error("ERROR: Not enough data for system_config");
-                    globalConfig.loaded = false;
-                    return false;
+                {
+                    memcpy(&globalConfig.system_config, body, sizeof(struct SystemConfig));
                 }
-                break;
+                return true;
             case 0x02: // manufacturer_data
-                if (offset + sizeof(struct ManufacturerData) <= configLen - 2) {
-                    memcpy(&globalConfig.manufacturer_data, &configData[offset], sizeof(struct ManufacturerData));
-                    offset += sizeof(struct ManufacturerData);
-                } else {
-                    od_log_error("ERROR: Not enough data for manufacturer_data");
-                    globalConfig.loaded = false;
-                    return false;
+                {
+                    memcpy(&globalConfig.manufacturer_data, body, sizeof(struct ManufacturerData));
                 }
-                break;
+                return true;
             case 0x04: // power_option
-                if (offset + sizeof(struct PowerOption) <= configLen - 2) {
-                    memcpy(&globalConfig.power_option, &configData[offset], sizeof(struct PowerOption));
-                    offset += sizeof(struct PowerOption);
-                } else {
-                    od_log_error("ERROR: Not enough data for power_option");
-                    globalConfig.loaded = false;
-                    return false;
+                {
+                    memcpy(&globalConfig.power_option, body, sizeof(struct PowerOption));
                 }
-                break;
+                return true;
             case 0x20: // display
-                if (globalConfig.display_count < 4 && offset + sizeof(struct DisplayConfig) <= configLen - 2) {
-                    memcpy(&globalConfig.displays[globalConfig.display_count], &configData[offset], sizeof(struct DisplayConfig));
-                    offset += sizeof(struct DisplayConfig);
+                if (globalConfig.display_count < 4) {
+                    memcpy(&globalConfig.displays[globalConfig.display_count], body, sizeof(struct DisplayConfig));
                     globalConfig.display_count++;
-                } else if (globalConfig.display_count >= 4) {
-                    od_log_warn("WARNING: Maximum display count reached, skipping");
-                    offset += sizeof(struct DisplayConfig);
                 } else {
-                    od_log_error("ERROR: Not enough data for display");
-                    globalConfig.loaded = false;
-                    return false;
+                    od_log_warn("WARNING: Maximum display count reached, skipping");
                 }
-                break;
+                return true;
             case 0x21: // led
-                if (globalConfig.led_count < 4 && offset + sizeof(struct LedConfig) <= configLen - 2) {
-                    memcpy(&globalConfig.leds[globalConfig.led_count], &configData[offset], sizeof(struct LedConfig));
-                    offset += sizeof(struct LedConfig);
+                if (globalConfig.led_count < 4) {
+                    memcpy(&globalConfig.leds[globalConfig.led_count], body, sizeof(struct LedConfig));
                     globalConfig.led_count++;
                     // Reset active LED instance to re-detect RGB LEDs after config change
                     activeLedInstance = 0xFF;
-                } else if (globalConfig.led_count >= 4) {
+                } else {
                     od_log_warn("WARNING: Maximum LED count reached, skipping");
-                    offset += sizeof(struct LedConfig);
-                } else {
-                    od_log_error("ERROR: Not enough data for LED");
-                    globalConfig.loaded = false;
-                    return false;
                 }
-                break;
+                return true;
             case 0x23: // sensor_data
-                if (globalConfig.sensor_count < 4 && offset + sizeof(struct SensorData) <= configLen - 2) {
-                    memcpy(&globalConfig.sensors[globalConfig.sensor_count], &configData[offset], sizeof(struct SensorData));
-                    offset += sizeof(struct SensorData);
+                if (globalConfig.sensor_count < 4) {
+                    memcpy(&globalConfig.sensors[globalConfig.sensor_count], body, sizeof(struct SensorData));
                     globalConfig.sensor_count++;
-                } else if (globalConfig.sensor_count >= 4) {
+                } else {
                     od_log_warn("WARNING: Maximum sensor count reached, skipping");
-                    offset += sizeof(struct SensorData);
-                } else {
-                    od_log_error("ERROR: Not enough data for sensor");
-                    globalConfig.loaded = false;
-                    return false;
                 }
-                break;
+                return true;
             case 0x24: // data_bus
-                if (globalConfig.data_bus_count < 4 && offset + sizeof(struct DataBus) <= configLen - 2) {
-                    memcpy(&globalConfig.data_buses[globalConfig.data_bus_count], &configData[offset], sizeof(struct DataBus));
-                    offset += sizeof(struct DataBus);
+                if (globalConfig.data_bus_count < 4) {
+                    memcpy(&globalConfig.data_buses[globalConfig.data_bus_count], body, sizeof(struct DataBus));
                     globalConfig.data_bus_count++;
-                } else if (globalConfig.data_bus_count >= 4) {
+                } else {
                     od_log_warn("WARNING: Maximum data_bus count reached, skipping");
-                    offset += sizeof(struct DataBus);
-                } else {
-                    od_log_error("ERROR: Not enough data for data_bus");
-                    globalConfig.loaded = false;
-                    return false;
                 }
-                break;
+                return true;
             case 0x25: // binary_inputs
-                if (globalConfig.binary_input_count < 4 && offset + sizeof(struct BinaryInputs) <= configLen - 2) {
-                    memcpy(&globalConfig.binary_inputs[globalConfig.binary_input_count], &configData[offset], sizeof(struct BinaryInputs));
-                    offset += sizeof(struct BinaryInputs);
+                if (globalConfig.binary_input_count < 4) {
+                    memcpy(&globalConfig.binary_inputs[globalConfig.binary_input_count], body, sizeof(struct BinaryInputs));
                     globalConfig.binary_input_count++;
-                } else if (globalConfig.binary_input_count >= 4) {
+                } else {
                     od_log_warn("WARNING: Maximum binary_input count reached, skipping");
-                    offset += sizeof(struct BinaryInputs);
-                } else {
-                    od_log_error("ERROR: Not enough data for binary_input");
-                    globalConfig.loaded = false;
-                    return false;
                 }
-                break;
+                return true;
             case 0x28: // touch_controller
-                if (globalConfig.touch_controller_count < 4 && offset + sizeof(struct TouchController) <= configLen - 2) {
-                    memcpy(&globalConfig.touch_controllers[globalConfig.touch_controller_count], &configData[offset], sizeof(struct TouchController));
-                    offset += sizeof(struct TouchController);
+                if (globalConfig.touch_controller_count < 4) {
+                    memcpy(&globalConfig.touch_controllers[globalConfig.touch_controller_count], body, sizeof(struct TouchController));
                     globalConfig.touch_controller_count++;
-                } else if (globalConfig.touch_controller_count >= 4) {
+                } else {
                     od_log_warn("WARNING: Maximum touch_controller count reached, skipping");
-                    offset += sizeof(struct TouchController);
-                } else {
-                    od_log_error("ERROR: Not enough data for touch_controller");
-                    globalConfig.loaded = false;
-                    return false;
                 }
-                break;
+                return true;
             case 0x29: // passive_buzzer
-                if (globalConfig.passive_buzzer_count < 4 && offset + sizeof(struct BuzzerConfig) <= configLen - 2) {
-                    memcpy(&globalConfig.passive_buzzers[globalConfig.passive_buzzer_count], &configData[offset], sizeof(struct BuzzerConfig));
-                    offset += sizeof(struct BuzzerConfig);
+                if (globalConfig.passive_buzzer_count < 4) {
+                    memcpy(&globalConfig.passive_buzzers[globalConfig.passive_buzzer_count], body, sizeof(struct BuzzerConfig));
                     globalConfig.passive_buzzer_count++;
-                } else if (globalConfig.passive_buzzer_count >= 4) {
-                    od_log_warn("WARNING: Maximum passive_buzzer count reached, skipping");
-                    offset += sizeof(struct BuzzerConfig);
                 } else {
-                    od_log_error("ERROR: Not enough data for passive_buzzer");
-                    globalConfig.loaded = false;
-                    return false;
+                    od_log_warn("WARNING: Maximum passive_buzzer count reached, skipping");
                 }
-                break;
+                return true;
             case 0x2C: // data_extended
-                if (offset + sizeof(struct DataExtended) <= configLen - 2) {
-                    memcpy(&globalConfig.data_extended, &configData[offset], sizeof(struct DataExtended));
-                    offset += sizeof(struct DataExtended);
+                {
+                    memcpy(&globalConfig.data_extended, body, sizeof(struct DataExtended));
                     globalConfig.data_extended.manufacturer_name[31] = '\0';
                     globalConfig.data_extended.model_name[31] = '\0';
                     globalConfig.data_extended.serial_number[31] = '\0';
@@ -542,36 +444,20 @@ bool loadGlobalConfig(){
                     globalConfig.data_extended.custom_string_2[31] = '\0';
                     globalConfig.data_extended.custom_string_3[31] = '\0';
                     globalConfig.data_extended_loaded = true;
-                } else {
-                    od_log_error("ERROR: Not enough data for data_extended");
-                    globalConfig.loaded = false;
-                    return false;
                 }
-                break;
+                return true;
             case 0x2B: // flash_config
-                if (globalConfig.flash_config_count < 2 && offset + sizeof(struct FlashConfig) <= configLen - 2) {
-                    memcpy(&globalConfig.flash_configs[globalConfig.flash_config_count], &configData[offset], sizeof(struct FlashConfig));
-                    offset += sizeof(struct FlashConfig);
+                if (globalConfig.flash_config_count < 2) {
+                    memcpy(&globalConfig.flash_configs[globalConfig.flash_config_count], body, sizeof(struct FlashConfig));
                     globalConfig.flash_config_count++;
-                } else if (globalConfig.flash_config_count >= 2) {
-                    od_log_warn("WARNING: Maximum flash_config count reached, skipping");
-                    offset += sizeof(struct FlashConfig);
                 } else {
-                    od_log_error("ERROR: Not enough data for flash_config");
-                    globalConfig.loaded = false;
-                    return false;
+                    od_log_warn("WARNING: Maximum flash_config count reached, skipping");
                 }
-                break;
+                return true;
             case 0x26: // wifi_config (see struct WifiConfig)
                 {
-                    if (offset + sizeof(struct WifiConfig) > configLen - 2) {
-                        od_log_error("ERROR: Not enough data for wifi_config");
-                        globalConfig.loaded = false;
-                        return false;
-                    }
                     struct WifiConfig wc;
-                    memcpy(&wc, &configData[offset], sizeof(wc));
-                    offset += sizeof(wc);
+                    memcpy(&wc, body, sizeof(wc));
 
                     memcpy(wifiSsid, wc.ssid, sizeof(wc.ssid));
                     wifiSsid[32] = '\0';
@@ -667,12 +553,11 @@ bool loadGlobalConfig(){
                     od_log_debug("Password length: %u bytes", passwordLen);
                     od_log_debug("WiFi configured: true");
                 }
-                break;
+                return true;
             case 0x27: // security_config
                 {
-                    if (offset + sizeof(struct SecurityConfig) <= configLen - 2) {
-                        memcpy(&securityConfig, &configData[offset], sizeof(struct SecurityConfig));
-                        offset += sizeof(struct SecurityConfig);
+                    {
+                        memcpy(&securityConfig, body, sizeof(struct SecurityConfig));
                         // Check if key is all zeros (encryption disabled)
                         bool keyIsZero = true;
                         for (int i = 0; i < 16; i++) {
@@ -706,19 +591,58 @@ bool loadGlobalConfig(){
                         } else {
                             od_log_debug("Security config: Reset pin disabled");
                         }
-                    } else {
-                        od_log_error("ERROR: Not enough data for security_config");
-                        globalConfig.loaded = false;
-                        return false;
                     }
                 }
-                break;
+                return true;
             default:
-                od_log_warn("WARNING: Unknown packet ID 0x%02X, skipping", packetId);
-                offset = configLen - 2; // Skip to CRC
-                break;
-        }
+                /* Unreachable: od_config_tlv_walk() ends the walk on an id it does not know,
+                 * so an unknown one never reaches this callback. Handled rather than assumed. */
+                return true;
     }
+}
+
+bool loadGlobalConfig(){
+    memset(&globalConfig, 0, sizeof(globalConfig));
+    // Initialize security config defaults
+    memset(&securityConfig, 0, sizeof(securityConfig));
+    // Reset pin defaults to disabled (flag not set)
+    wifiConfigured = false;
+    wifiSsid[0] = '\0';
+    wifiPassword[0] = '\0';
+    wifiEncryptionType = 0;
+    globalConfig.data_extended_loaded = false;
+    uint8_t* configData = getConfigScratch();
+    uint32_t configLen = MAX_CONFIG_SIZE;
+    if (!loadConfig(configData, &configLen)) {
+        globalConfig.loaded = false;
+        return false;
+    }
+    if (configLen < 3) {
+        od_log_error("ERROR: Config too short");
+        globalConfig.loaded = false;
+        return false;
+    }
+    /* The walk itself is shared. version comes back through it; the per-packet copies happen
+     * in onConfigPacket() above. */
+    uint8_t parsedVersion = 0;
+    const enum od_config_tlv_result walk =
+        od_config_tlv_walk(configData, configLen, onConfigPacket, NULL, &parsedVersion);
+    globalConfig.version = parsedVersion;
+    globalConfig.minor_version = 0;   // not stored in the current format
+    if (walk == OD_CFG_TLV_TOO_SHORT) {
+        od_log_error("ERROR: Config too short");
+        globalConfig.loaded = false;
+        return false;
+    }
+    if (walk == OD_CFG_TLV_TRUNCATED) {
+        /* A packet claimed more bytes than the blob holds. Previously reported per packet type
+         * as "Not enough data for <name>"; the walk cannot name the type, so the id is logged
+         * instead -- the same information, from one place. */
+        od_log_error("ERROR: Config truncated -- a packet claims more data than the blob holds");
+        globalConfig.loaded = false;
+        return false;
+    }
+
     // Advisory (warn-only) validation using CRC-16/CCITT to match the toolbox, nRF and
     // Silabs firmware. Not enforced: a mismatch logs a warning only.
     //
@@ -730,7 +654,7 @@ bool loadGlobalConfig(){
     // the shipped fleet) -- see docs/FOLLOWUPS.md for the upstream propagation.
     if (configLen >= 2) {
         uint16_t crcGiven = configData[configLen - 2] | (configData[configLen - 1] << 8);
-        uint16_t crcCalculated = config_toolbox_outer_crc16(configData, configLen - 2);
+        uint16_t crcCalculated = od_config_tlv_crc16(configData, configLen - 2);
         if (crcGiven != crcCalculated) {
             od_log_warn("WARNING: Config CRC mismatch (given: 0x%04X, calculated: 0x%04X)", crcGiven, crcCalculated);
         }

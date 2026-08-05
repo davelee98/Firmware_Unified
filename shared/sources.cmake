@@ -27,7 +27,7 @@
 # Order of arrival, per docs/MIGRATION.md § "Per-target procedure" step 4:
 #   core/od_adv_control.c advertising/lifecycle policy          (LANDED — no wire surface)
 #   core/od_config_asm.c  chunked CONFIG_WRITE reassembly        (LANDED — closes F3)
-#   core/od_config.c      config TLV parse                       (next — pre-auth surface)
+#   core/od_config_tlv.c  config blob walk + CRC                 (LANDED — pre-auth surface)
 #   core/od_dispatch.c    opcode dispatch, encryption gate
 #   core/od_xfer_direct.c 0x70/0x71/0x72
 #   core/od_xfer_partial.c 0x76
@@ -41,6 +41,7 @@ get_filename_component(OD_SHARED_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
 set(OD_SHARED_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/core/od_adv_control.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config_asm.c"
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_config_tlv.c"
 )
 
 # Public headers live alongside their sources; shared/protocol is the wire contract and is
