@@ -103,10 +103,71 @@ static const ble_uuid128_t od_svc_uuid = BLE_UUID128_INIT(OD_UUID_LE_BYTES);
 static const ble_uuid128_t od_chr_uuid = BLE_UUID128_INIT(OD_UUID_LE_BYTES);
 
 static uint16_t s_chr_val_handle = 0;
-static uint8_t  s_own_addr_type  = 0;
-static bool     s_addr_resolved  = false;   /* s_own_addr_type is meaningful only after sync */
 static uint16_t s_preferred_mtu  = 0;
 static bool     s_inited         = false;
+
+/* ------------------------------------------------------- the identity handoff (F4, part 1) ---
+ *
+ * s_own_addr_type and s_addr_resolved USED TO BE two plain file statics: written by
+ * od_on_sync() on the NimBLE HOST task, read by od_ble_is_ready(), od_ble_get_identity_addr()
+ * and the init spin on the LOOP task. That is a cross-context handoff of a flag and the
+ * payload it guards, with no ordering between them -- correctness review F4.
+ *
+ * WHAT WAS ACTUALLY AT RISK, stated precisely rather than inflated. On the S3 baselines both
+ * tasks are pinned to core 0 (CONFIG_BT_NIMBLE_PINNED_TO_CORE=0,
+ * CONFIG_ESP_MAIN_TASK_AFFINITY=0x0), and a context switch on one core is a full barrier -- so
+ * the reader could not in practice observe the flag without the payload. The defect is that
+ * NOTHING SAYS SO: it is undefined behaviour that happens to work, it depends on an affinity
+ * setting recorded nowhere near this code, and it breaks silently the day either task moves.
+ *
+ * The fix publishes both as ONE record behind a seqlock. The sequence is odd while a write is
+ * in progress and even-and-non-zero once a coherent snapshot exists, so a reader either gets a
+ * whole snapshot or knows to retry. Writer is single (the host task), which is what makes the
+ * cheap seqlock sound here.
+ *
+ * The counter doubles as the STACK GENERATION: it advances on every sync, so a later step can
+ * discard facts stamped with a generation the stack has since left behind. */
+struct od_ble_identity {
+    uint8_t addr_type;      /* BLE_OWN_ADDR_*, as ble_gap_adv_start() consumes it */
+};
+static struct od_ble_identity s_identity;
+static volatile uint32_t      s_identity_seq = 0;
+
+/* HOST TASK ONLY. */
+static void od_ble_publish_identity(uint8_t addr_type)
+{
+    const uint32_t seq = __atomic_load_n(&s_identity_seq, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_identity_seq, seq + 1u, __ATOMIC_RELEASE);   /* odd: writing */
+    s_identity.addr_type = addr_type;
+    __atomic_store_n(&s_identity_seq, seq + 2u, __ATOMIC_RELEASE);   /* even: published */
+}
+
+/* Any task. False when no coherent snapshot exists yet. */
+static bool od_ble_read_identity(struct od_ble_identity *out)
+{
+    for (unsigned attempt = 0; attempt < 4u; ++attempt) {
+        const uint32_t s1 = __atomic_load_n(&s_identity_seq, __ATOMIC_ACQUIRE);
+        if (s1 == 0u || (s1 & 1u) != 0u) {
+            continue;   /* never published, or a write is in flight */
+        }
+        const struct od_ble_identity snap = s_identity;
+        const uint32_t s2 = __atomic_load_n(&s_identity_seq, __ATOMIC_ACQUIRE);
+        if (s1 == s2) {
+            if (out) {
+                *out = snap;
+            }
+            return true;
+        }
+    }
+    /* A single writer cannot starve a reader indefinitely; four attempts is generous. Failing
+     * closed reports "no identity yet", which every caller already handles. */
+    return false;
+}
+
+static bool od_ble_identity_valid(void)
+{
+    return od_ble_read_identity(NULL);
+}
 
 /* The characteristic's stored value: the last frame written to it. Serves both the write path
  * (as its flatten scratch) and the READ path, which hands it back the way NimBLE-Arduino's
@@ -565,7 +626,14 @@ static int od_ble_start_now(void)
     adv.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv.disc_mode = BLE_GAP_DISC_MODE_GEN;
 
-    int rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &adv, od_gap_event, NULL);
+    struct od_ble_identity id;
+    if (!od_ble_read_identity(&id)) {
+        /* Unreachable from the callers below, which all gate on the identity first. Kept as a
+         * hard floor rather than an assert: advertising from an unresolved address is a silent
+         * on-air defect, not a crash. */
+        return BLE_HS_EAGAIN;
+    }
+    int rc = ble_gap_adv_start(id.addr_type, NULL, BLE_HS_FOREVER, &adv, od_gap_event, NULL);
     /* OD-INSTRUMENTATION: stamp EVERY start, with a sequence number, so the log shows whether
      * od_gap_event was the live callback before the connection in question formed -- the
      * "event arrived before we were listening" hypothesis. rc=6 is BLE_HS_ENOMEM and is
@@ -589,7 +657,7 @@ static void od_ble_advertise(void)
     if (!s_adv_wanted) {
         return;
     }
-    if (!s_addr_resolved) {
+    if (!od_ble_identity_valid()) {
         /* Before sync there is no identity address to advertise from, and ble_gap_adv_start()
          * would fail with a log line on every call. od_on_sync() retries once it has one --
          * which is the whole reason the request is remembered rather than acted on. */
@@ -606,15 +674,17 @@ static void od_ble_advertise(void)
 static void od_on_sync(void)
 {
     ble_hs_util_ensure_addr(0);
-    if (ble_hs_id_infer_auto(0, &s_own_addr_type) != 0) {
+    uint8_t own_addr_type = 0;
+    if (ble_hs_id_infer_auto(0, &own_addr_type) != 0) {
         ESP_LOGE(TAG, "no usable BLE address");
         return;
     }
     /* Published to the LAN mDNS TXT record via od_ble_get_identity_addr(); a host correlating
      * BLE with LAN matches on it, so log which kind it is. */
-    s_addr_resolved = true;
+    /* Publish the whole record, THEN it becomes visible -- see the seqlock above. */
+    od_ble_publish_identity(own_addr_type);
     ESP_LOGI(TAG, "BLE identity address type: %s",
-             (s_own_addr_type == BLE_OWN_ADDR_PUBLIC) ? "public" : "static-random");
+             (own_addr_type == BLE_OWN_ADDR_PUBLIC) ? "public" : "static-random");
     od_ble_advertise();
 }
 
@@ -718,11 +788,11 @@ bool od_ble_init(const char *device_name)
     {
         const uint32_t kSyncTimeoutMs = 2000;
         uint32_t waited = 0;
-        while (!s_addr_resolved && waited < kSyncTimeoutMs) {
+        while (!od_ble_identity_valid() && waited < kSyncTimeoutMs) {
             vTaskDelay(pdMS_TO_TICKS(5));
             waited += 5;
         }
-        if (!s_addr_resolved) {
+        if (!od_ble_identity_valid()) {
             ESP_LOGE(TAG, "host did not sync within %u ms -- continuing, but the BLE identity "
                           "address is not available yet", (unsigned)kSyncTimeoutMs);
         }
@@ -738,7 +808,7 @@ bool od_ble_is_ready(void)
     /* Both halves: the stack is initialised AND the host has synced far enough to have an
      * identity address. s_inited alone was true before sync, so this used to answer "ready"
      * for a stack that could not yet name itself. */
-    return s_inited && s_addr_resolved;
+    return s_inited && od_ble_identity_valid();
 }
 
 bool od_ble_notify_handle(uint16_t conn_handle, const uint8_t *data, uint16_t len)
@@ -873,14 +943,15 @@ void od_ble_set_preferred_mtu(uint16_t mtu)
 
 bool od_ble_get_identity_addr(uint8_t addr_out[6], uint8_t *addr_type_out)
 {
-    if (!addr_out || !s_inited || !s_addr_resolved) {
+    struct od_ble_identity id;
+    if (!addr_out || !s_inited || !od_ble_read_identity(&id)) {
         return false;
     }
     /* s_own_addr_type is BLE_OWN_ADDR_* as ble_gap_adv_start() consumes it; ble_hs_id_copy_addr
      * wants a BLE_ADDR_* identity type. The two low values coincide (PUBLIC=0, RANDOM=1) and
      * only the RPA variants differ, which this build never selects. */
-    uint8_t id_type = (s_own_addr_type == BLE_OWN_ADDR_PUBLIC) ? BLE_ADDR_PUBLIC
-                                                               : BLE_ADDR_RANDOM;
+    uint8_t id_type = (id.addr_type == BLE_OWN_ADDR_PUBLIC) ? BLE_ADDR_PUBLIC
+                                                            : BLE_ADDR_RANDOM;
     if (ble_hs_id_copy_addr(id_type, addr_out, NULL) != 0) {
         return false;
     }
@@ -920,7 +991,18 @@ void od_ble_deinit(void)
      * read the previous session's last frame back after a teardown and restart. */
     s_chr_value_len  = 0;
     s_chr_val_handle = 0;
-    s_addr_resolved  = false;
+    /* Invalidate the identity so nothing reads a departed stack's address: leave the counter
+     * ODD, which od_ble_read_identity() treats as "no coherent snapshot".
+     *
+     * DELIBERATELY NOT A RESET TO ZERO. The counter is also the stack generation, and a later
+     * step discards facts stamped with a generation the stack has left behind -- which only
+     * works if it never repeats a value. Zeroing here would restart generations at 2 after
+     * every deinit/init cycle and make a stale fact from the previous stack indistinguishable
+     * from a current one. `| 1` invalidates while staying monotonic. */
+    {
+        const uint32_t seq = __atomic_load_n(&s_identity_seq, __ATOMIC_RELAXED);
+        __atomic_store_n(&s_identity_seq, seq | 1u, __ATOMIC_RELEASE);
+    }
     s_inited         = false;
     s_adv_wanted     = false;
     __atomic_store_n(&s_conn_count, (uint8_t)0, __ATOMIC_RELEASE);
@@ -933,7 +1015,7 @@ void od_ble_deinit(void)
  * (shared/core/od_adv_control.c, docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md).
  *
  * WHY THESE LIVE HERE AND NOT IN hal/od_hal_adv.c, where every other HAL lives. They need
- * this file's statics -- s_name, s_own_addr_type, od_svc_uuid and od_gap_event -- and the
+ * this file's statics -- s_name, the identity snapshot, od_svc_uuid and od_gap_event --
  * only way to reach those from hal/ would be accessors that duplicate the state the F4 work
  * exists to consolidate. A second home for advertising state is the defect, not the fix.
  *
@@ -956,7 +1038,7 @@ enum od_hal_adv_result od_hal_adv_program(const uint8_t msd[16])
     /* Before host sync there is no identity address, so a programmed record could not be
      * advertised anyway. RETRY, not ERROR: this is ordinary startup timing and the controller
      * must simply try again next pass. */
-    if (!s_addr_resolved) {
+    if (!od_ble_identity_valid()) {
         return OD_HAL_ADV_RETRY;
     }
     return od_ble_pack_adv_records(msd, (uint8_t)OD_ADV_MSD_LEN) ? OD_HAL_ADV_OK
@@ -968,7 +1050,7 @@ enum od_hal_adv_result od_hal_adv_start(void)
     if (!s_inited) {
         return OD_HAL_ADV_ERROR;
     }
-    if (!s_addr_resolved) {
+    if (!od_ble_identity_valid()) {
         return OD_HAL_ADV_RETRY;
     }
     const int rc = od_ble_start_now();
