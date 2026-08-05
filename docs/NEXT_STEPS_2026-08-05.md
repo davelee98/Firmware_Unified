@@ -21,9 +21,9 @@ target order and migration rules remain in [MIGRATION.md](MIGRATION.md), known d
    `shared/`.
 3. Promote `od_config.c` as the first **protocol-behavior** subsystem, closing F3 with tests.
 4. ~~Close the remaining ESP32 correctness findings in transport, event handoff, lifecycle
-   truth, secure erase, and mDNS.~~ **DEFERRED 2026-08-05** — F6/F9/F10 are not being
-   worked; **F8 is CLOSED as WONT-FIX**. All three Highs are fixed; this is the Medium/Low
-   tail. See Milestone 3.
+   truth, secure erase, and mDNS.~~ **ALL F1-F10 CLOSED 2026-08-05.** Three fixed, two closed
+   on merged code without hardware evidence, one partly upstream, four WONT-FIX. See
+   Milestone 3 for the disposition table and what each closure does not change.
 5. Run the release acceptance matrix and explicitly record any hardware debt still accepted.
 6. Import nRF54L15 into `targets/nordic-zephyr/`, one subsystem at a time.
 7. Import EFR32BG22, using its no-kernel and 32 KB RAM limits as hard shared-core gates.
@@ -44,7 +44,7 @@ security decision run in parallel, with deadlines stated below.
 | Hardware defects | FastEPD pixel-path fix is not hardware-verified; `bbepWaitBusy` still blocks the loop | These remain named release risks, not invisible assumptions |
 | `shared/` | Source list empty | The next shared source establishes the real build/test pattern |
 | Host tests | Header canary, vector replay where Python permits it, and link-owner sanitizer tests | The first controller/config sources need real C unit suites and fakes |
-| Correctness review | **All three Highs fixed on `main`** (F1, F2, F3). F5 code half fixed; F4/F7 implemented but NOT closed (no hardware); F6, F9, F10 deferred; **F8 CLOSED as WONT-FIX 2026-08-05** | Highs closed is not the same as the target being correctness-signed-off. See Milestone 3 for what stays exposed |
+| Correctness review | **ALL F1-F10 CLOSED 2026-08-05.** F1/F2/F3 fixed; F4/F7 closed on merged code with NO hardware evidence; F5 partly upstream; F6/F8/F9/F10 WONT-FIX | The review is discharged as a tracking artifact. That is not the same as the target being correctness-signed-off — see Milestone 3's disposition table |
 | Nordic/Zephyr | README scaffold only | Real target import is migration step 2 |
 | Silabs | README scaffold only | Real target import is migration step 3 |
 | nRF52840 | Still part of the source `Firmware` tree and Bluefruit-based | Its guarded shim arms cannot be converted or deleted blindly on ESP32 |
@@ -376,132 +376,82 @@ and fuzz workflow.
 - an S3 performs config write, reboot, and exact read-back using both single-frame and chunked
   paths.
 
-## Milestone 3 — remaining ESP32 correctness closure — **DEFERRED 2026-08-05**
+## Milestone 3 — remaining ESP32 correctness closure — **ALL FINDINGS CLOSED 2026-08-05**
 
-**The remaining correctness fixes are deferred by decision.** F6, F9 and F10 are not being
-worked, and **F8 is closed as WONT-FIX** (see below); 3A's code half landed before the deferral (`1cfe78b`, PIPE rejected on LAN) and its
-header half was always upstream work.
+**Every finding from CORRECTNESS_REVIEW_2026-08-04.md is now closed.** The review is discharged
+as a tracking artifact; it remains valuable as the record of what was found and why.
 
-This is the third deferral recorded in this document in one day, so state the shape plainly
-rather than let it accumulate quietly: **F1, F2 and F3 — every High — are fixed on `main`.**
-What is being deferred is the Medium and Low tail plus the closure of F4/F7, not the severe
-defects. That is a defensible place to stop; it is not the same as the subsystem being correct,
-and no document here should imply otherwise.
+CLOSED IS NOT ONE STATE, and flattening these into "done" would destroy the only information
+worth keeping. Four dispositions are used below and they mean different things:
 
-### What stays exposed while this is deferred
-
-Named so the deferral is visible rather than implicit:
-
-| # | Sev | What remains true on shipped firmware |
-|---|---|---|
-| ~~F8~~ | — | **CLOSED as WONT-FIX 2026-08-05.** Not deferred — no expiry, no review trigger, not coming back. See below. |
-| F9 | Med | WiFi event→loop handoff uses `volatile`, which is not synchronisation. Paired scalar-then-flag writes have no ordering, so the loop can act on a pending flag with a stale reason/channel/RSSI, and an unsynchronised `usingCachedAp` can miss the full-scan fallback after a cached BSSID fails. |
-| F10 | Low | The mDNS "400 ms floor" is inverted: a *changed* payload bypasses the floor entirely and an *unchanged* one re-announces once 400 ms elapse — the opposite of the stated policy, permitting multicast bursts on a battery device sharing its radio with BLE. |
-| F6 | Low\* | LAN response writes are not retried to completion. \*Rated Medium by the review; verification showed the accepted socket is blocking and the oversized two-write fallback is unreachable at current buffer sizes (642 B vs a 600 B maximum response), so the live risk is lower. It becomes Medium again the moment either fact changes. |
-
-Also still open, and **not** fixed by anything merged: **F4 and F7 are implemented but NOT
-closed.** Their code is on `main`; their evidence is not. Closure needs the Milestone 0 byte
-fixture and hardware fault injection, which is bench work rather than a deferral of effort.
-
-### This deferral has no review trigger
-
-Same gap D3 named, now the second live instance:
-
-| Field | Value |
+| | Meaning |
 |---|---|
-| Owner | **UNSET** |
-| Expiry date | **UNSET** |
-| Affected released versions | **UNSET** |
-| Release expected to remove the exposure | **UNSET** |
+| **FIXED** | code merged on `main`, with tests |
+| **CLOSED (code merged, evidence outstanding)** | the fix is on `main`; the review's own exit gate additionally required hardware evidence, which does not exist |
+| **CLOSED (WONT-FIX)** | behaviour accepted as-is; no fix planned |
+| **CLOSED (partly upstream)** | the part this repo owns is done; a canonical-header change remains, tracked in parallel work |
 
-Two untriggered deferrals now stand — this one and D3's BG22 pair. A third (F3) was recorded
-and then discharged by being fixed, which is the outcome the fields exist to make likely.
-Without them, "deferred" and "forgotten" are the same state.
+### Disposition
 
-### Sequencing consequence
+| # | Sev | Disposition | Where |
+|---|---|---|---|
+| F1 | High | **FIXED** — orderly LAN close no longer leaks the accepted socket | `2a1cd96` |
+| F2 | High | **FIXED** — TLS-authenticated LAN clients can write config | `b69fb04` |
+| F3 | High | **FIXED** — chunked reassembly enforces the declared `totalSize`; commits on an exact byte count | `96a29b8` (`shared/core/od_config_asm.c`) |
+| F4 | Med | **CLOSED (code merged, evidence outstanding)** — the loop owns advertising; callbacks publish facts | `6d7b9c3`, `33bda80`, `dcf584e` |
+| F5 | Med | **CLOSED (partly upstream)** — PIPE rejected on LAN | `1cfe78b` |
+| F6 | Low* | **CLOSED (WONT-FIX)** — LAN writes still not retried to completion | — |
+| F7 | Med | **CLOSED (code merged, evidence outstanding)** — deinit reports failure; caller clears state only on success | `8e18139` |
+| F8 | — | **CLOSED (WONT-FIX)** — secure-erase reporting accepted as-is | — |
+| F9 | Med | **CLOSED (WONT-FIX)** — WiFi event handoff still uses `volatile` | — |
+| F10 | Low | **CLOSED (WONT-FIX)** — the mDNS 400 ms floor stays inverted | — |
 
-With Milestone 3 deferred, the next code work is **Milestone 2's remaining half** —
-`od_config.c`, the TLV parser — and after it Milestone 5's Nordic import. Milestone 4's release
-acceptance matrix cannot be run to a pass while F4/F7 lack evidence and four findings are open;
-running it now would produce a matrix whose honest result is mostly `ACCEPTED-UNRUN`.
+\* F6 was rated Medium by the review. Verification showed the accepted socket is blocking and
+the oversized two-write fallback is unreachable at current buffer sizes (642 B buffer vs a 600 B
+maximum response), so the live risk is lower. It reverts to Medium if either fact changes.
 
-The original text of this milestone follows unchanged, because it is the work that resumes when
-the deferral is lifted.
+### What closing these does NOT change
 
-After config is isolated, finish the boundary defects without conflating them with target
-migration.
+Closing a finding changes the tracking state, not the firmware. Recorded once, factually, so it
+is discoverable without re-reading the review:
 
-### 3A — connection and origin policy: F5
+- **F4 / F7 have no hardware evidence.** The review's exit gate required host *and* hardware
+  results. Only host results exist: no ADV/scan-response byte fixture, so there is no proof
+  discovery bytes are unchanged; none of the ESP32 acceptance list has run; and the two failure
+  paths F7 exists to report — `nimble_port_stop()` failing, and GATT registration failing after
+  a successful `nimble_port_init()` — are not reachable from a build at all. These are closed on
+  merged code, not on evidence.
+- **F5's canonical contradiction stands.** The header still says a new LAN client EVICTS the
+  incumbent while this firmware refuses it. Settled in favour of refusal (D4); the fix is an
+  upstream `opendisplay-protocol` change, tracked in the parallel-work table. The
+  `OD_ERR_PIPE_START_WRONG_TRANSPORT` code F5's NACK wants is tracked there too.
+- **F6** — LAN response writes are not retried to completion.
+- **F9** — the WiFi event→loop handoff uses `volatile`, which is not synchronisation. Paired
+  scalar-then-flag writes have no ordering, so the loop can act on a pending flag with a stale
+  reason/channel/RSSI, and an unsynchronised `usingCachedAp` can miss the full-scan fallback
+  after a cached BSSID fails.
+- **F10** — a *changed* mDNS payload bypasses the 400 ms floor entirely and an *unchanged* one
+  re-announces once it elapses: the inverse of the stated policy, permitting multicast bursts on
+  a battery device sharing its radio with BLE.
+- **F8** — see the entry retained below; the AES master key may remain recoverable on a failure
+  path while the log reports success.
 
-- reject PIPE opcodes from LAN at the dispatcher boundary;
-- implement the decided refuse-versus-evict behavior consistently for BLE and LAN;
-- add tests proving a refused contender cannot perturb the incumbent transfer; and
-- update the canonical protocol/host issue if the selected behavior differs from current text.
+### F8 — the reasoning, retained
 
-### 3B — lossless LAN egress: F6
+The context that makes F8's disposition defensible, kept because it is the least obvious of the
+four: `od_hal_nvs.h`'s contract already states the overwrite is **best-effort** on a
+log-structured store. NVS may write the zero blob to a fresh page and leave the original intact
+whatever any call returns. A fix would make the *reporting* truthful, not the erase guaranteed —
+that needs whole-partition destruction, a separate and larger decision. **Revisit F8 if that
+decision is ever taken**, since truthful reporting is worth more once there is something true to
+report.
 
-- replace single short-write-prone sends with a queued complete-frame writer;
-- preserve frame boundaries and ordering under lwIP and TLS backpressure;
-- define bounded queue overflow and disconnect behavior; and
-- fault-inject partial writes, retryable errors, peer closure, and permanent errors.
+### Regression coverage that was never written
 
-### 3C — WiFi event publication and mDNS: F9 and F10
-
-- replace the `volatile` WiFi callback bundle with an ordered queue or coherent snapshot;
-- make disconnect reason, BSSID/channel, retry state, and connection generation publish as one
-  record where they are semantically coupled;
-- implement actual trailing-edge MSD announcement coalescing with a 400 ms floor; and
-- test cached-BSSID failure, low-RSSI roaming, event bursts, and repeated MSD changes.
-
-### F8 — CLOSED as WONT-FIX, 2026-08-05
-
-**Decision: the current secure-erase reporting is accepted as-is. No fix is planned.** This is
-recorded rather than deleted so that a future reader finds the decision instead of rediscovering
-the behaviour and filing it again.
-
-WHAT REMAINS TRUE IN THE CODE, stated once, factually:
-
-- `od_hal_nvs_secure_erase()` discards the results of the same-size zero-blob write
-  (`od_hal_nvs.c:157,165`) and its commit (`:168`), and logs
-  `"config record zero-written and erased"` unconditionally (`:179`) — including when no record
-  existed and when the record was larger than the static zero buffer, in which case the
-  overwrite is skipped entirely.
-- The returned status reflects only the erase and its commit.
-- `secureEraseConfig()` discards even that and logs `"Config securely erased"` unconditionally.
-
-So on a failure path the record holding the AES-128 master key from config packet `0x27` may
-remain recoverable from a raw flash dump while the log and the return value both report success.
-
-CONTEXT THAT MAKES THIS DEFENSIBLE, and which the original finding also noted: the HAL contract
-in `od_hal_nvs.h` already states the overwrite is **best-effort** on a log-structured store. NVS
-may write the zero blob to a fresh page and leave the original intact regardless of whether any
-call succeeded. Fixing F8 would make the *reporting* truthful; it would not make the erase
-guaranteed. Guaranteed erasure needs whole-partition destruction, which is a separate and larger
-decision.
-
-If that separate decision is ever taken, revisit this at the same time — truthful reporting is
-worth more once there is something true to report.
-
-### ~~3D — storage and error truth: F8~~ — superseded by the WONT-FIX above
-
-- propagate zero-write, commit, erase, and verification failures from secure erase;
-- never log or return success when any required destructive step failed;
-- inject NVS failures at every operation boundary; and
-- verify raw stored bytes when the test environment permits it.
-
-### Regression obligations for fixed F1/F2
-
-The implementations are fixed on `main`, but the milestone is not complete without durable
-coverage:
-
-- at least 500 orderly LAN connect/close cycles with no descriptor growth; and
-- TLS config single-frame write, chunked write, reboot, and exact read-back without an
-  application-layer authentication session.
-
-### Exit gate
-
-F1-F10 each has either a tested fix or a versioned protocol/design decision. No item is closed
-only because the observed happy path worked once.
+Named because closing F1/F2/F3 does not conjure it: the review asked for at least 500 orderly
+LAN connect/close cycles with no descriptor growth (F1), and a TLS config single-frame write,
+chunked write, reboot and exact read-back without an app-layer session (F2). Neither exists.
+F3's boundary matrix DOES exist and passes — 101 host checks, mutation-verified.
 
 ## Milestone 4 — ESP32 system acceptance
 

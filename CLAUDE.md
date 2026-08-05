@@ -30,10 +30,12 @@ build" until 2026-08-05; that is no longer true and the guidance below replaces 
   ahead of the sequence rather than reordering it.
 - **docs/NEXT_STEPS_2026-08-05.md is the live sequence.** docs/NEXT_STEPS.md is historical;
   do not plan from it.
-- **The ESP32 target is not correctness-signed-off.** docs/CORRECTNESS_REVIEW_2026-08-04.md
-  raised ten findings; F1 and F2 are fixed, F3-F10 are open. F3 lets malformed input commit an
-  inconsistent config record to NVS, and the WiFi/LAN transport has never run on hardware.
-  Check it before assuming a subsystem here is sound.
+- **All ten correctness-review findings are CLOSED (2026-08-05) — which is not the same as the
+  target being correctness-signed-off.** F1/F2/F3 are fixed with tests; F4/F7 are closed on
+  merged code with NO hardware evidence; F5's canonical-header half is upstream work; F6/F8/F9/
+  F10 are WONT-FIX and their behaviour stands. docs/NEXT_STEPS_2026-08-05.md § Milestone 3 has
+  the disposition table and states what each closure does not change. The WiFi/LAN transport
+  has still never run on hardware.
 - **The HALs are real now.** `targets/esp32-idf/hal/` implements od_hal_{nvs,log,gpio,time,
   i2c,adc,panel} against docs/SHARED_API_DESIGN.md. That document has been corrected ten times
   by contact with the implementations — trust the headers over the design doc where they
