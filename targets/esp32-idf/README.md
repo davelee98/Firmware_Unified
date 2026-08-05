@@ -65,15 +65,21 @@ AXP2101 sensor, so until then step 14 is only partly verified.
 sockets, TLS-PSK) and 9b-iv (mDNS) are still unexercised. Also untested: the E1004 dual-CS
 path (compiled out on every board) and FastEPD (this panel uses bb_epaper).
 
-#### Two defects the log exposes
+#### One defect and one warning the log exposes
 
-1. **The buzzer does not sound.** `W (41054) ledc: GPIO 45 is not usable, maybe conflict with
-   others`, repeating roughly every 100 ms for the duration of each `0x0077`. IDF's LEDC driver
-   refuses GPIO 45 — a strapping pin (`VDD_SPI`) that the flash/PSRAM configuration reserves on
-   this board — so `ledc_channel_config()` fails, `buzzerHwStart()` returns false, and no tone is
-   produced. The command still ACKs, so it looks successful from the client. Two things to
-   decide, both hardware questions: whether 45 is the right pin for this unit at all, and
-   whether a failed attach should stop retrying every tick instead of spamming the log.
+1. **A GPIO reservation conflict on the buzzer pin — noisy, but NOT a failure.**
+   `W (41054) ledc: GPIO 45 is not usable, maybe conflict with others`, repeating roughly every
+   100 ms for the duration of each `0x0077`. **The buzzer works** (confirmed on hardware); this
+   was first recorded here as "the buzzer does not sound", which was wrong. The warning is
+   informational: IDF's `_ledc_set_pin()` calls `esp_gpio_reserve()`, logs this line if the pin
+   was already reserved by something else, and then connects the output signal and returns
+   `ESP_OK` regardless (`esp_driver_ledc/src/ledc.c:809-820`). So `ledc_channel_config()`
+   succeeds and the tone plays.
+
+   What is real: **something else already holds GPIO 45's output reservation**, so two drivers
+   believe they own that pin, and the message repeats because the buzzer re-runs
+   `ledc_channel_config()` per note rather than attaching once. Neither breaks output today.
+   Worth finding the other owner before it does — a `LOG_LOCAL_LEVEL` bump is not the fix.
 2. **`ble_gap_adv_start failed: 6` on the disconnect -> re-advertise path.** Six is
    **`BLE_HS_ENOMEM`**, not `BLE_HS_EALREADY` (which is 2) — and `ble/od_ble_nimble.cpp` only
    tolerates EALREADY, so this is a real failure being logged rather than a benign race. It
