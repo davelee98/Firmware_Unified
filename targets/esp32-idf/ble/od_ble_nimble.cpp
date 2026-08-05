@@ -320,6 +320,89 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
         od_ble_evt_link_negotiated(event->phy_updated.conn_handle, "PHY update");
         return 0;
 
+    /* ------------------------------------------------- the rest of the wrapper's census
+     *
+     * NimBLE-Arduino's NimBLEServer::handleGapEvent covers 14 GAP events; phase B's C-API
+     * rewrite covered 6, and the gap produced a live regression (see REPEAT_PAIRING below).
+     * These five close the census. Each is the EQUIVALENT of what the wrapper did, translated
+     * into this target's idiom -- the wrapper dispatched to NimBLEServerCallbacks virtuals
+     * that this firmware has no counterpart for, so "equivalent" means the same information
+     * reaches the same place, not the same shape.
+     *
+     * All are host-task context and therefore flag-or-log only, exactly like the six above. */
+
+    case BLE_GAP_EVENT_CONN_UPDATE:
+        /* Wrapper: looked the connection up and called onConnParamsUpdate(peerInfo).
+         *
+         * The connection interval changed -- the central re-negotiated it, typically dropping
+         * from a fast transfer interval back to a slow idle one. This target already has the
+         * right reporter for that: the same one MTU and PHY changes use, so all three
+         * renegotiations produce one comparable line rather than three formats. That answers
+         * "why did throughput fall off mid-transfer", which was previously unanswerable. */
+        od_ble_evt_link_negotiated(event->conn_update.conn_handle, "connection update");
+        return 0;
+
+    case BLE_GAP_EVENT_NOTIFY_TX:
+        /* Wrapper: found the characteristic and called onStatus(chr, status), after letting an
+         * unacknowledged INDICATION pass silently (status 0 on an indication means "sent, ack
+         * still outstanding" -- the real result arrives in a second event).
+         *
+         * This target has ONE characteristic, so the lookup collapses. What matters is the
+         * status: a non-zero value means the notification did NOT go out, and this firmware
+         * runs its own BLE TX queue that has been unable to see that. Only failures are
+         * logged -- a line per successful notification would be one per frame of every
+         * transfer, which is exactly the kind of logging that hides the failures. */
+        if (event->notify_tx.indication && event->notify_tx.status == 0) {
+            return 0;   /* indication sent, ack outstanding -- not a result yet */
+        }
+        if (event->notify_tx.status != 0) {
+            ESP_LOGW(TAG, "notify TX failed: status=%d h=%u attr=%u",
+                     event->notify_tx.status,
+                     (unsigned)event->notify_tx.conn_handle,
+                     (unsigned)event->notify_tx.attr_handle);
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_IDENTITY_RESOLVED: {
+        /* Wrapper: resolved the peer and called onIdentity(peerInfo).
+         *
+         * The peer connected with a resolvable private address and the stack has now matched
+         * it to a bonded identity. Diagnostics only here -- this firmware identifies clients
+         * by its own link-owner epoch, not by BLE address -- but it is worth seeing, because
+         * it is the event that says "this peer IS bonded to us", which is the state the
+         * REPEAT_PAIRING path exists to repair. */
+        struct ble_gap_conn_desc desc;
+        if (ble_gap_conn_find(event->identity_resolved.conn_handle, &desc) == 0) {
+            ESP_LOGI(TAG, "identity resolved h=%u type=%u",
+                     (unsigned)event->identity_resolved.conn_handle,
+                     (unsigned)desc.peer_id_addr.type);
+        }
+        return 0;
+    }
+
+    case BLE_GAP_EVENT_NOTIFY_RX:
+        /* Wrapper: forwarded to NimBLEClient -- it supports the CENTRAL role and this event is
+         * a notification arriving FROM a peer.
+         *
+         * This build is peripheral-only and never subscribes to anything, so it cannot occur.
+         * Handled explicitly rather than left to fall through: an unhandled case returns 0 and
+         * is indistinguishable from success, which is precisely how eight missing events went
+         * unnoticed until one of them broke connections. If this ever fires, the assumption
+         * behind it has changed and the log will say so. */
+        ESP_LOGW(TAG, "NOTIFY_RX on a peripheral-only build (h=%u) -- unexpected",
+                 (unsigned)event->notify_rx.conn_handle);
+        return 0;
+
+    case BLE_GAP_EVENT_SCAN_REQ_RCVD:
+        /* Wrapper: routed to NimBLEAdvertising/NimBLEExtAdvertising, which for legacy
+         * advertising does no work beyond its own bookkeeping.
+         *
+         * DELIBERATELY SILENT. A scan request arrives from every scanning phone in radio
+         * range, several times a second; logging each one would bury the events that matter --
+         * the opposite of what this census is for. The case exists so the event is accounted
+         * for rather than falling through as an unknown. */
+        return 0;
+
     /* ---------------------------------------------------------------- security
      *
      * THESE THREE WERE LOST IN THE PORT, and their absence is a REGRESSION against the

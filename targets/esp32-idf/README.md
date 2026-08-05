@@ -83,10 +83,26 @@ handles **14** GAP events. Phase B's rewrite against the raw NimBLE C API
 `REPEAT_PAIRING` is the one that reached the user, as the connect stutter: with a stale bond on
 the client, the wrapper deleted it and re-paired, while this port kept the mismatched keys and
 failed identically on every attempt — **permanently**, because nothing on the device side could
-clear it. The first three are restored; the rest are recorded here and NOT implemented blind.
+clear it.
 
-`NOTIFY_TX` is the one to look at next: this target runs its own BLE TX queue, and transmit
-completion is exactly the signal a queue would want.
+**All eight are now implemented and coverage is at parity: 14 of 14.** "Equivalent" means the
+same information reaches the same place, not the same shape — the wrapper dispatched to
+`NimBLEServerCallbacks` virtuals this firmware has no counterpart for. What each became:
+
+| Event | Here |
+|---|---|
+| `REPEAT_PAIRING` | deletes the stale bond, returns `RETRY` — behaviour, not logging |
+| `ENC_CHANGE` | logged; nothing depends on link encryption (`SM_LVL=0`, no `_ENC` flags) |
+| `PASSKEY_ACTION` | logged; cannot fire with no IO capability, but will not stall silently |
+| `CONN_UPDATE` | routed to the existing link reporter, so interval/MTU/PHY renegotiations all read alike — this is what answers "why did throughput drop mid-transfer" |
+| `NOTIFY_TX` | **failures only.** A non-zero status means the notification never went out, which the BLE TX queue could not previously see. Success is not logged: one line per frame per transfer would bury the failures |
+| `IDENTITY_RESOLVED` | logged — it is the event that says "this peer IS bonded to us" |
+| `NOTIFY_RX` | explicit, and warns: peripheral-only build, so it cannot occur |
+| `SCAN_REQ_RCVD` | deliberately silent — every scanning phone in range emits these several times a second |
+
+Two are accounted for rather than acted on (`NOTIFY_RX`, `SCAN_REQ_RCVD`), and that is the
+point: an unhandled case returns 0 and is indistinguishable from success, which is exactly how
+eight missing events went unnoticed until one of them broke connections.
 
 **The general lesson, worth more than the individual events:** re-implementing a vendor
 wrapper's dispatch means inheriting its *whole* case list, and a partial switch fails silently —
