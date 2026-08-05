@@ -24,12 +24,16 @@
  * inversion -- differing only in whether the pin read goes through digitalRead() or
  * nrf54_gpio_read() directly, and digitalRead() here IS nrf54_gpio_read().
  *
- * WHAT THAT COSTS, STATED RATHER THAN GLOSSED: this is a behaviour change on a SHIPPED target,
- * and it is not hardware-verified. The vendored version additionally honours bLightSleep, which
- * the nRF54 override did not -- so a busy-wait on this target may now enter light sleep between
- * polls where it previously spun. That should be a power improvement and is the vendored
- * library's intent, but it is a real difference in timing behaviour on a panel path, and it
- * belongs on the hardware checklist before this target is called working.
+ * CORRECTION (validated 2026-08-05): an earlier version of this comment claimed the vendored
+ * version "additionally honours bLightSleep", so the busy-wait might now enter light sleep
+ * where it previously spun. THAT WAS WRONG. bbepLightSleep() is `#ifdef ARDUINO_ARCH_ESP32`
+ * only; off ESP32 it is `(void)bLightSleep; delay(u32Millis)` (bb_ep.inl:3962-3975). On Zephyr
+ * the two implementations poll identically -- same 10 ms + 1 ms settle, same 20 ms poll, same
+ * 5 s / 30 s timeouts, same UC81xx polarity -- and digitalRead() here IS nrf54_gpio_read().
+ *
+ * The only real difference is on TIMEOUT: the source override re-read BUSY and logged; the
+ * vendored one's warning is guarded by ESP_PLATFORM, so this build is silent. Both then return
+ * void and continue as if ready. A lost diagnostic, not a timing change.
  *
  * INCLUDE ORDER IS LOAD-BEARING and must not be "tidied":
  *
