@@ -3,10 +3,23 @@
 One repository for **all OpenDisplay firmware targets**, replacing four independently
 versioned repos that had drifted apart while implementing the same wire protocol.
 
-> **Status: scaffold.** Nothing is imported yet. The layout, the `shared/` boundary rules,
-> and the migration order are defined; the per-target code lands incrementally (see
-> [docs/MIGRATION.md](docs/MIGRATION.md)). Until a target's directory contains a build
-> file, build it from its original repo.
+> **Status: one target imported and running** (updated 2026-08-05). `targets/esp32-idf/`
+> builds **10 boards** and has been flashed and exercised on an ESP32-S3. The other two
+> targets — `nordic-zephyr` and `efr32bg22-slc` — are still README-only, so build those from
+> their original repos.
+>
+> Two things that sound like omissions but are deliberate:
+>
+> - **`shared/` is still empty.** No promotion has happened yet, so the ESP32 target holds
+>   logic destined for `shared/core`. The first promotion is a planned, test-first step, not
+>   something to do opportunistically — see [docs/MIGRATION.md](docs/MIGRATION.md).
+> - **The Arduino shim is at its floor, not gone.** `targets/esp32-idf/compat/` is down to 5
+>   files from 21, and 5 is the floor: those files are counted only for `TARGET_NRF` arms that
+>   do not compile on this target and leave with the Nordic migration.
+>
+> The ESP32 target is **not** correctness-signed-off. Ten findings from
+> [docs/CORRECTNESS_REVIEW_2026-08-04.md](docs/CORRECTNESS_REVIEW_2026-08-04.md) are open or
+> partly closed; the WiFi/LAN transport in particular has never been exercised on hardware.
 
 ## Why unify
 
@@ -161,11 +174,21 @@ be confused with a legacy one by version alone. This is a deliberate deviation f
 "start at 0.1.0" convention, taken because the version namespace is shared with deployed
 devices that cannot be renumbered.
 
-During the migration the repo ships nothing and stays untagged; `v2.0.0` is cut when the first
-target passes hardware verification (Gate 2 in docs/MIGRATION.md). A release records **which
-targets were built and hardware-verified at that tag** — targets are verified separately by
-construction, and a target that was not rebuilt keeps reporting the older version on real
-devices. That is expected, not a defect.
+During the migration the repo ships nothing and cuts no release tag; `v2.0.0` is cut when the
+first target passes hardware verification (Gate 2 in docs/MIGRATION.md). A release records
+**which targets were built and hardware-verified at that tag** — targets are verified
+separately by construction, and a target that was not rebuilt keeps reporting the older version
+on real devices. That is expected, not a defect.
+
+Two cautions, both live as of 2026-08-05:
+
+- **`git tag` is not empty, and none of it is a release.** 44 tags (`0.1` … `0.64`, `beta-*`,
+  `test7`) arrived with the `Firmware` import history. No `v*` tag exists. Do not read the
+  legacy tags as versions of this repo.
+- **Gate 2 is not fully met, so `v2.0.0` is not yet cuttable.** The ESP32 target's Gate 2
+  tracking item was closed *by decision*, with an uncompressed image push and an
+  interrupted-transfer recovery never exercised. Closing the item did not change what the gate
+  covers.
 
 > **Do not couple this to `OD_PROTOCOL_VERSION`.** Both happen to be 2.x today and they are
 > unrelated numbers on different schedules: the protocol version (`2.2`) is the wire contract
@@ -175,11 +198,25 @@ devices. That is expected, not a defect.
 
 ## Getting started
 
-Per-target builds are documented in each `targets/*/README.md` once that target is imported.
+The ESP32 target builds every board with one command, which sources ESP-IDF itself:
+
+```bash
+cd targets/esp32-idf
+./build.sh                 # all 10 boards -> release/, with a MANIFEST
+./build.sh s3-n16r8        # or just one; ./build.sh --list to see them
+tools/run_host_tests.sh    # host tests under ASan+UBSan and TSan+UBSan
+compat/ratchet.sh          # Arduino-shim budget; must not regress
+tools/sdkconfig_baseline.sh
+```
+
+The last three are gates a change must not break. Per-target details are in each
+`targets/*/README.md`; the other two targets have no build yet.
+
 All three toolchains are installed on the primary dev box (ESP-IDF v5.5.4, nRF Connect SDK
 v3.3.1 with west v1.5.0, Simplicity SDK 2025.12.2), though **none is on `PATH`** — each needs
-an activation step, listed in [docs/TOOLCHAINS.md](docs/TOOLCHAINS.md). CI still carries more
-weight than usual: one machine with one set of versions is not a build matrix.
+an activation step, listed in [docs/TOOLCHAINS.md](docs/TOOLCHAINS.md). Only ESP-IDF has
+actually built anything here; for the other two only version strings have been run. CI still
+carries more weight than usual: one machine with one set of versions is not a build matrix.
 
 Host-runnable tests for `shared/` need none of that — see [tests/](tests/README.md):
 
@@ -195,6 +232,10 @@ cmake -S tests/host -B build -G Ninja && cmake --build build && ctest --test-dir
   reasoning it records, not to decide what to do next
 - [docs/FOLLOWUPS.md](docs/FOLLOWUPS.md) — known defects and open items awaiting action,
   including host-side bugs the wire corpus found
+- [docs/CORRECTNESS_REVIEW_2026-08-04.md](docs/CORRECTNESS_REVIEW_2026-08-04.md) — ten findings
+  against the ESP-IDF target; F1 and F2 are fixed, the other eight are open
+- [docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md](docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md) — proposed
+  design for finding F4; no implementation is implied
 - [docs/BBEPAPER_IO_BACKENDS.md](docs/BBEPAPER_IO_BACKENDS.md) — how `bb_epaper` is ported to a
   platform, which backend each target uses, and the open decision on owning the ESP-IDF one
 
