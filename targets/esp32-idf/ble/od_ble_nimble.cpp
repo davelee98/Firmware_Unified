@@ -103,6 +103,13 @@ static bool     s_addr_resolved  = false;   /* s_own_addr_type is meaningful onl
 static uint16_t s_preferred_mtu  = 0;
 static bool     s_inited         = false;
 
+/* The characteristic's stored value: the last frame written to it. Serves both the write path
+ * (as its flatten scratch) and the READ path, which hands it back the way NimBLE-Arduino's
+ * NimBLEAttValue did. One buffer, because NimBLE serialises host callbacks so a read can never
+ * overlap a write. */
+static uint8_t  s_chr_value[OD_BLE_MAX_FRAME];
+static uint16_t s_chr_value_len  = 0;
+
 /* The stack's peer count. Maintained here because NimBLE's C API offers no accessor for it;
  * written only from GAP events (host task), read from the loop task, hence atomic. It is a
  * COUNT, never a test for whether one particular link is up -- the transport's instance table
@@ -155,29 +162,54 @@ static int od_gatt_access(uint16_t conn_handle, uint16_t attr_handle,
         if (OS_MBUF_PKTLEN(ctxt->om) > OD_BLE_MAX_FRAME) {
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         }
-        /* Function-static rather than a stack array: this runs on the NimBLE host task, whose
+        /* File-static rather than a stack array: this runs on the NimBLE host task, whose
          * stack is sized by CONFIG_BT_NIMBLE_TASK_STACK_SIZE and has no room to spare for a
          * 256-byte frame buffer. Safe because NimBLE serialises host callbacks -- there is
          * never a second access in flight -- and because od_ble_evt_write() is contractually
-         * required to copy before returning. */
-        static uint8_t buf[OD_BLE_MAX_FRAME];
+         * required to copy before returning.
+         *
+         * It now doubles as the characteristic's stored value; see the READ case. */
         uint16_t len = 0;
-        int rc = ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof(buf), &len);
+        int rc = ble_hs_mbuf_to_flat(ctxt->om, s_chr_value, sizeof(s_chr_value), &len);
         if (rc != 0) {
+            s_chr_value_len = 0;
             return BLE_ATT_ERR_INSUFFICIENT_RES;
         }
+        /* Retain it, exactly as NimBLECharacteristic::writeEvent() does with setValue()
+         * (NimBLE-Arduino/src/NimBLECharacteristic.cpp:334). See the READ case for why. */
+        s_chr_value_len = len;
         /* The handle travels with the frame. Without it the transport cannot tell an owner's
          * write from a gatecrasher's, and the non-owner filter -- which must run HERE, before
          * the bytes reach the RX ring, because during a ~16 s refresh no loop-side decision
          * runs at all -- would have nothing to decide on. */
-        od_ble_evt_write(conn_handle, buf, len);
+        od_ble_evt_write(conn_handle, s_chr_value, len);
         return 0;
     }
-    case BLE_GATT_ACCESS_OP_READ_CHR:
-        /* The characteristic is READ-able for discovery but carries no readable state; the
-         * data path is notify-only. Returning an empty value matches what the Arduino
-         * characteristic did with no value set. */
-        return 0;
+    case BLE_GATT_ACCESS_OP_READ_CHR: {
+        /* RETURN THE LAST WRITTEN VALUE, restoring NimBLE-Arduino behaviour (2026-08-05).
+         *
+         * This case used to return an empty value, claiming it "matches what the Arduino
+         * characteristic did with no value set". THAT PREMISE WAS WRONG: a value was always
+         * set, by every write. NimBLECharacteristic::writeEvent() calls setValue() on each
+         * write (NimBLECharacteristic.cpp:334) and the READ path appends the stored value with
+         * os_mbuf_append() (NimBLEServer.cpp:743). So under the shipped firmware, reading the
+         * characteristic returned the last command written to it; under this port it returned
+         * zero bytes.
+         *
+         * The primary data path is notify-based and unaffected either way -- this matters to
+         * diagnostic and third-party clients that read rather than subscribe.
+         *
+         * CONSEQUENCE WORTH KNOWING: the last frame written is readable by any connected
+         * client, with no authentication. That is the shipped behaviour being restored, not a
+         * new exposure, and with app-layer encryption enabled the retained bytes are AES-CCM
+         * ciphertext. With encryption disabled they are the plaintext command. If that is not
+         * wanted, the fix is to stop retaining rather than to keep diverging silently. */
+        if (s_chr_value_len == 0) {
+            return 0;
+        }
+        int rc = os_mbuf_append(ctxt->om, s_chr_value, s_chr_value_len);
+        return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
     default:
         return BLE_ATT_ERR_UNLIKELY;
     }
@@ -855,6 +887,11 @@ void od_ble_deinit(void)
         return;
     }
     nimble_port_deinit();
+    /* Drop the retained characteristic value. The wrapper got this for free -- deinit
+     * destroyed the NimBLECharacteristic and a later init built a fresh one with an empty
+     * NimBLEAttValue -- whereas this buffer is file-static and would otherwise let a client
+     * read the previous session's last frame back after a teardown and restart. */
+    s_chr_value_len  = 0;
     s_chr_val_handle = 0;
     s_addr_resolved  = false;
     s_inited         = false;
