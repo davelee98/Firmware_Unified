@@ -21,6 +21,7 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
+#include "store/config/ble_store_config.h"
 #include "host/ble_uuid.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
@@ -317,6 +318,45 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
          * controller has finished. The hook re-reads both directions rather than trusting the
          * event's fields, so one log line describes the whole link. */
         od_ble_evt_link_negotiated(event->phy_updated.conn_handle, "PHY update");
+        return 0;
+
+    /* ---------------------------------------------------------------- security
+     *
+     * THESE THREE WERE LOST IN THE PORT, and their absence is a REGRESSION against the
+     * shipped Arduino firmware. NimBLE-Arduino's NimBLEServer::handleGapEvent handles 14 GAP
+     * events; phase B's C-API rewrite covered 6. REPEAT_PAIRING is the one that reached the
+     * user: with a stale bond on the client, the wrapper deleted it and re-paired, while this
+     * port silently kept the mismatched keys and failed the same way on every attempt.
+     * Restored 2026-08-05 after the connect-stutter investigation. */
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        /* The peer is bonded to us but the keys no longer agree -- typically because the
+         * client kept a bond across a reflash, or the key sizes differ. Deleting our side and
+         * retrying is what the Arduino wrapper did and what every NimBLE peripheral example
+         * does; without it the condition is PERMANENT until a human forgets the device on the
+         * client, because nothing on this side can clear it. */
+        struct ble_gap_conn_desc desc;
+        if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
+            ble_store_util_delete_peer(&desc.peer_id_addr);
+            ESP_LOGW(TAG, "repeat pairing: stale bond deleted, retrying");
+        }
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
+
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        /* Observation only -- the app layer does its own AES-CCM and does not depend on link
+         * encryption (no characteristic carries an _ENC flag and CONFIG_BT_NIMBLE_SM_LVL=0).
+         * Logged because without it an encryption failure is INVISIBLE, which is precisely
+         * how the connect stutter stayed unexplained across three captures. */
+        ESP_LOGW(TAG, "encryption change: status=%d h=%u",
+                 event->enc_change.status, (unsigned)event->enc_change.conn_handle);
+        return 0;
+
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+        /* Should not fire: no IO capability is declared, so pairing is "just works". Logged
+         * rather than ignored so that if it ever DOES fire, it appears instead of the pairing
+         * silently stalling -- the same failure mode REPEAT_PAIRING had. */
+        ESP_LOGW(TAG, "passkey action requested (action=%u) -- unhandled, pairing will stall",
+                 (unsigned)event->passkey.params.action);
         return 0;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:

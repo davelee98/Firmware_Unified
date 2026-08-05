@@ -65,6 +65,33 @@ AXP2101 sensor, so until then step 14 is only partly verified.
 sockets, TLS-PSK) and 9b-iv (mDNS) are still unexercised. Also untested: the E1004 dual-CS
 path (compiled out on every board) and FastEPD (this panel uses bb_epaper).
 
+#### GAP EVENT COVERAGE IS A PORT REGRESSION (found 2026-08-05)
+
+`NimBLEServer::handleGapEvent` in NimBLE-Arduino — the wrapper the shipped firmware uses —
+handles **14** GAP events. Phase B's rewrite against the raw NimBLE C API
+(`ble/od_ble_nimble.cpp`) covered **6**. The eight that were dropped:
+
+| Event | What the wrapper did |
+|---|---|
+| `REPEAT_PAIRING` | **deleted the stale bond and returned `RETRY`** |
+| `ENC_CHANGE` | observed the encryption result |
+| `PASSKEY_ACTION` | drove passkey exchange during pairing |
+| `CONN_UPDATE` | connection-parameter updates |
+| `NOTIFY_TX` | notification transmit completion |
+| `NOTIFY_RX`, `IDENTITY_RESOLVED`, `SCAN_REQ_RCVD` | central-role, privacy, diagnostics |
+
+`REPEAT_PAIRING` is the one that reached the user, as the connect stutter: with a stale bond on
+the client, the wrapper deleted it and re-paired, while this port kept the mismatched keys and
+failed identically on every attempt — **permanently**, because nothing on the device side could
+clear it. The first three are restored; the rest are recorded here and NOT implemented blind.
+
+`NOTIFY_TX` is the one to look at next: this target runs its own BLE TX queue, and transmit
+completion is exactly the signal a queue would want.
+
+**The general lesson, worth more than the individual events:** re-implementing a vendor
+wrapper's dispatch means inheriting its *whole* case list, and a partial switch fails silently —
+every unhandled event returns 0 and looks like success.
+
 #### One defect and one warning the log exposes
 
 1. **A GPIO reservation conflict on the buzzer pin — noisy, but NOT a failure.**
