@@ -42,7 +42,7 @@ security decision run in parallel, with deadlines stated below.
 | Hardware defects | FastEPD pixel-path fix is not hardware-verified; `bbepWaitBusy` still blocks the loop | These remain named release risks, not invisible assumptions |
 | `shared/` | Source list empty | The next shared source establishes the real build/test pattern |
 | Host tests | Header canary, vector replay where Python permits it, and link-owner sanitizer tests | The first controller/config sources need real C unit suites and fakes |
-| Correctness review | F1 and F2 implementation fixes are on `main`; F3-F10 remain open | Correctness closure precedes declaring the ESP32 target release-ready |
+| Correctness review | F1, F2 fixed on `main`; **F3 fixed** (`96a29b8`, branch); F4/F7 implemented but NOT closed (no hardware); F5, F6, F8, F9, F10 open | All three Highs now have fixes. Closure still needs the hardware evidence F4/F7 lack |
 | Nordic/Zephyr | README scaffold only | Real target import is migration step 2 |
 | Silabs | README scaffold only | Real target import is migration step 3 |
 | nRF52840 | Still part of the source `Firmware` tree and Bluefruit-based | Its guarded shim arms cannot be converted or deleted blindly on ESP32 |
@@ -222,9 +222,9 @@ unreviewed assumption into every target.
    remains for this gate: state the interim **4,000-byte** ceiling in tests and host-facing
    documentation, and **add `shared/protocol/` to the sync tool's copy map before any bump**,
    since nothing currently detects drift between this vendored copy and canonical.
-6. ~~Land F3's `totalSize` enforcement as a target-local fix~~ — **DEFERRED 2026-08-05 to
-   Milestone 2.** F3 is not fixed ahead of the config promotion; it closes with it. See the
-   deferral record in Milestone 2.
+6. ~~Land F3's `totalSize` enforcement as a target-local fix~~ — **MOOT: F3 IS FIXED**
+   (2026-08-05, `96a29b8`). It was deferred to Milestone 2 rather than pulled forward, and
+   Milestone 2's first slice then closed it. Nothing is owed here.
 7. ~~Propagate D1's promotion order into `CLAUDE.md` and `MIGRATION.md`~~ — **DONE 2026-08-05**
    (commit `5cf6ded`). Both now name `od_adv_control.c` as the first `shared/` source, and
    `CLAUDE.md` points at this document as the live sequence.
@@ -319,29 +319,21 @@ Promote the config TLV parser and chunked-write assembly as one tested subsystem
 the known ESP32 `0x2A`/unknown-packet behavior while establishing the real shared-core vector
 and fuzz workflow.
 
-> **F3 CLOSES HERE — DEFERRED 2026-08-05.** An earlier revision pulled F3's `totalSize`
-> enforcement forward into Milestone 0 as a ~30-line target-local fix. **That is reversed by
-> decision:** F3 is not fixed ahead of the config promotion. It closes with `od_config.c`, in
-> this milestone, behind Milestone 1.
+> **F3 IS CLOSED — fixed 2026-08-05 in `96a29b8`,** by the first slice of this milestone.
+> `shared/core/od_config_asm.c` enforces the declared `totalSize` and commits on an exact byte
+> count rather than a chunk count, with 101 host checks over the review's boundary matrix.
 >
-> **What is exposed until then**, stated so the deferral is visible rather than implicit:
+> **THE DEFERRAL RECORDED HERE IS SUPERSEDED, not still running.** An earlier revision of this
+> document deferred F3 with four `UNSET` review-trigger fields and warned it would roll over
+> silently. That warning is discharged: it did not roll over, because the milestone that owned
+> it closed it. The exposure it described — malformed input committing an inconsistent record
+> to NVS, reachable without authentication on a device with encryption disabled — no longer
+> exists on `main` once this branch merges.
 >
-> - Malformed chunk sequences can commit a byte sequence inconsistent with the declared config
->   to NVS. Storage is changed before any downstream CRC check rejects it.
-> - **On a device with encryption disabled the config-write path has no authentication gate at
->   all** (`configWriteGate()` returns ALLOWED when `!isEncryptionEnabled()`), so any BLE or LAN
->   client that can connect can reach it. With encryption enabled it needs either a session or
->   `REWRITE_ALLOWED`.
-> - A 201-byte start frame is ACKed as an active transfer and never saved; a start frame longer
->   than 202 bytes silently discards the excess.
-> - **F2 therefore delivers single-frame TLS config writes only.** Chunked TLS writes still
->   traverse the unbounded reassembly path, so "TLS clients can write config" remains
->   true-but-partial until this milestone.
->
-> **This deferral has no review trigger yet.** D3 established that a kept deferral records an
-> owner, an expiry, the affected versions, and the release that removes the exposure; the same
-> applies here and none is set. Without them this rolls over silently — the exact failure D3
-> exists to prevent, now applying to a High rather than to the BG22 pair.
+> One consequence to carry forward: F2 delivered single-frame TLS config writes only while this
+> was open. With reassembly fixed, chunked TLS writes are now correct **by construction**, but
+> the end-to-end path is still unproven on hardware — a real chunked write over BLE and TLS,
+> reboot, and exact read-back remain owed by Milestone 4.
 
 ### Required behavior
 

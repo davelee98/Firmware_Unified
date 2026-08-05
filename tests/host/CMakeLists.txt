@@ -70,6 +70,16 @@ add_executable(od_adv_control_test adv_control_test.c)
 target_link_libraries(od_adv_control_test od_shared)
 add_test(NAME adv_control COMMAND od_adv_control_test)
 
+# config_asm: chunked CONFIG_WRITE reassembly (correctness review F3). Pure state machine over
+# a byte stream, so the host test IS the coverage -- there is no target-specific behaviour to
+# leave unverified here, unlike the advertising controller.
+#
+# Every rejection case asserts the result is not COMPLETE, which is the same assertion as
+# "storage did not change": COMPLETE is the only result that lets a caller write NVS.
+add_executable(od_config_asm_test config_asm_test.c)
+target_link_libraries(od_config_asm_test od_shared)
+add_test(NAME config_asm COMMAND od_config_asm_test)
+
 # replay_vectors: the corpus replayed through py-opendisplay's public API. This is the
 # dual-stack half of the contract test — the same vectors will later run against the C
 # core, and a vector the two sides disagree on is exactly the host/firmware divergence
