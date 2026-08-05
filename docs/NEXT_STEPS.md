@@ -21,17 +21,29 @@ page."** That is no longer true, and item 1 below is retired accordingly.
 | HALs | od_hal_{nvs,log,gpio,time,i2c,adc,panel} implemented in `targets/esp32-idf/hal/` |
 | Host tests | green: 1 shared/ test + link_owner under ASan and TSan |
 | ESP32 target | 10 boards build; **S3 flashed and exercised** — see targets/esp32-idf/README.md § Verified on hardware |
-| Gate 2 | *mostly* met: uncompressed push and interrupted-transfer recovery still unexercised |
+| Gate 2 | **not fully met** — uncompressed push and interrupted-transfer recovery are unexercised; item 1 is closed by decision, not by a pass |
 | Other three targets | not started |
 
 ---
 
-## 1. ~~Flash it — Gate 2~~ — DONE 2026-08-03, partially
+## 1. ~~Flash it — Gate 2~~ — CLOSED 2026-08-05 **by decision, not by a full pass**
 
 The S3 boots, renders, and completes encrypted compressed image pushes; deep-sleep button wake
-works. Two Gate 2 items remain unexercised (uncompressed push; an interrupted transfer that
-recovers), so this cannot yet license retiring the source repo. The original checklist and the
-highest-risk items follow, kept because the two open items are in it.
+works (2026-08-03).
+
+**Two Gate 2 items were never exercised and are now closed unrun:** an **uncompressed image
+push**, and an **interrupted transfer that recovers**. This is an accepted risk taken so the
+item stops gating item 5 — it is not a pass, and nothing below should be read as evidence that
+those two paths work. They are named here rather than deleted so they stay findable: both are
+plausible silent-failure sites, and the first bug report that looks like either one should
+start by testing it.
+
+The earlier text said this "cannot yet license retiring the source repo." That judgement is
+unchanged by closing the item. Retiring `Firmware` is a separate decision that still rests on
+a Gate 2 the ESP32 target has not fully met.
+
+The original checklist and the highest-risk items follow, kept because the two closed-unrun
+items are in it.
 
 Everything below is lower value than finding out whether the image boots. GATT registration,
 advertising, the CCCD subscribe path, notify-under-load, the NVS record round-trip and the LAN
