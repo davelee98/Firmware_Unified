@@ -865,6 +865,47 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
     // CMD_FIRMWARE_VERSION are handled by the early returns above and so are absent
     // here. CMD_NFC_ENDPOINT (0x0083) is intentionally not handled by this Firmware
     // (any target) — it falls to default as an unknown command.
+    /* ------------------------------------------------- NO PIPE ON LAN (review F5) ---
+     *
+     * SECTION 9 rule 2 of the canonical header: the sliding-window image PIPE (0x0080 /
+     * 0x0081 / 0x0082) MUST NOT be used on the LAN transport, because TCP already provides
+     * the ordered, reliable, flow-controlled delivery PIPE reimplements; a host is directed
+     * to DIRECT_WRITE instead. DIVERGENCE_MATRIX.md 9.4 states the same rule as a dispatcher
+     * obligation. Confirmed as settled policy 2026-08-05 (NEXT_STEPS_2026-08-05.md D4).
+     *
+     * The dispatcher did not enforce it, so the device exposed over LAN a protocol its own
+     * specification forbids -- on the TLS port that also means a path reachable without any
+     * app-layer authentication.
+     *
+     * REFUSAL IS INERT. No transfer state is touched, no session is aborted, no panel session
+     * torn down: a stray PIPE frame from a confused LAN client must not be able to disturb a
+     * BLE transfer that legitimately owns the slot. That is the same rule LAN client refusal
+     * follows, and for the same reason.
+     */
+    if (g_commandOrigin != ORIGIN_BLE &&
+        (command == CMD_PIPE_WRITE_START || command == CMD_PIPE_WRITE_DATA ||
+         command == CMD_PIPE_WRITE_END)) {
+        od_log_error("ERROR: [%s] PIPE 0x%04X is BLE-only -- rejected (use DIRECT_WRITE)",
+                     originTag(), command);
+        /* ERROR CODE, AND THE COMPROMISE IN IT. The 0x80 NACK shape is
+         * [0xFF][0x80][OD_ERR_PIPE_START_*][0x00], and that namespace has no "wrong
+         * transport" member -- 0x04 is explicitly marked unused in the canonical header.
+         * Claiming 0x04 here would be inventing a wire meaning unilaterally, which is exactly
+         * the divergence this repo exists to prevent, and the header is frozen so it cannot be
+         * done properly yet. BAD_HEADER is therefore reused: it is the one existing code that
+         * means "this frame is not acceptable as sent", it invents nothing, and the log line
+         * above carries the real reason. A dedicated OD_ERR_PIPE_START_WRONG_TRANSPORT should
+         * be added upstream when the freeze lifts -- flagged, not silently taken.
+         *
+         * 0x81 and 0x82 have no canonical error namespace at all (see the TODO in
+         * display_service.cpp), so they get the bare NACK shape their acks already use. */
+        const uint8_t err = (command == CMD_PIPE_WRITE_START)
+                                ? (uint8_t)OD_ERR_PIPE_START_BAD_HEADER : (uint8_t)0x00;
+        uint8_t nack[4] = {RESP_NACK, (uint8_t)(command & 0xFF), err, 0x00};
+        sendResponse(nack, sizeof(nack));
+        return;
+    }
+
     switch (command) {
         case CMD_REBOOT:              // 0x000F
             od_hal_delay_ms(100);
