@@ -80,13 +80,19 @@ path (compiled out on every board) and FastEPD (this panel uses bb_epaper).
    believe they own that pin, and the message repeats because the buzzer re-runs
    `ledc_channel_config()` per note rather than attaching once. Neither breaks output today.
    Worth finding the other owner before it does — a `LOG_LOCAL_LEVEL` bump is not the fix.
-2. **`ble_gap_adv_start failed: 6` on the disconnect -> re-advertise path.** Six is
-   **`BLE_HS_ENOMEM`**, not `BLE_HS_EALREADY` (which is 2) — and `ble/od_ble_nimble.cpp` only
-   tolerates EALREADY, so this is a real failure being logged rather than a benign race. It
-   fires immediately after a disconnect, when the host has not yet released the connection's
-   memory. Advertising did not start on those attempts and nothing retries; the device is
-   invisible until the next event happens to restart it. Needs a bounded retry, not a wider
-   tolerance list.
+2. **`ble_gap_adv_start failed: 6` is EXPECTED, and logged at the wrong level.** Six is
+   `BLE_HS_ENOMEM`, not `BLE_HS_EALREADY` (2), which is why the existing `rc != BLE_HS_EALREADY`
+   guard does not suppress it. But it is not a fault: **`CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1`**,
+   and connectable undirected advertising needs a free connection object. With the single slot
+   already taken by a live client, NimBLE has nothing to allocate and returns ENOMEM. It fires
+   because the MSD-publish path re-starts advertising to refresh the manufacturer data, which
+   happens while connected.
+   
+   So: nothing is broken, and the device is not left invisible — it cannot accept a second
+   connection anyway. What is wrong is that a routine, unavoidable condition is reported with
+   `ESP_LOGE`. The tolerance list should include ENOMEM-while-connected, and the remaining
+   genuine failures should stay loud. (First recorded here as "a real failure ... nothing
+   retries"; that was wrong.)
 
 Also visible and worth a look: **five consecutive connections were refused ownership** at the
 start of the log ("Dropped write from non-owner h=1", each ending in a remote-terminated
