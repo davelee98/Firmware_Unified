@@ -589,6 +589,37 @@ bool od_ble_init(const char *device_name)
     ble_hs_cfg.sync_cb  = od_on_sync;
     ble_hs_cfg.reset_cb = od_on_reset;
 
+    /* SECURITY MANAGER DEFAULTS -- RESTORED FROM NimBLE-Arduino 2026-08-05.
+     *
+     * THIS IS THE ROOT CAUSE OF THE CONNECT STUTTER, and it is an omission rather than a
+     * mistake: NimBLEDevice::init() sets all six of these explicitly
+     * (NimBLE-Arduino/src/NimBLEDevice.cpp:991-997) and phase B's C-API rewrite set NONE of
+     * them, silently inheriting ESP-IDF's defaults -- which ENABLE bonding and Secure
+     * Connections. So the shipped Arduino firmware never bonded, and this port started
+     * advertising bonding capability the moment it was flashed.
+     *
+     * The failure that follows is exact: a client accepts the offer and bonds; nothing here
+     * calls ble_store_config_init() and NVS persistence is off in every baseline, so the bond
+     * dies with the boot; the client keeps its half; the next connection presents keys this
+     * device no longer has and NimBLE reports the connect with BLE_HS_EENCRYPT_KEY_SZ (26).
+     * That is why it reproduced on the first connection after every deep-sleep wake.
+     *
+     * Nothing wants bonding here. No characteristic carries an _ENC or _AUTHEN flag
+     * (od_chrs above), CONFIG_BT_NIMBLE_SM_LVL is 0, and confidentiality and authentication
+     * are the application's job -- the 0x0050 challenge/response and per-frame AES-CCM, which
+     * work identically over an unencrypted link. Link-layer pairing buys this device nothing
+     * and costs it a connection failure class.
+     *
+     * Values are the wrapper's, field for field, deliberately: this is a restoration of
+     * shipped behaviour, not a new security policy. Changing any of them is a wire-visible
+     * decision about how the device pairs and belongs in DIVERGENCE_MATRIX.md. */
+    ble_hs_cfg.sm_io_cap         = BLE_HS_IO_NO_INPUT_OUTPUT;
+    ble_hs_cfg.sm_bonding        = 0;   /* do not offer to store keys */
+    ble_hs_cfg.sm_mitm           = 0;   /* no man-in-the-middle protection demanded */
+    ble_hs_cfg.sm_sc             = 0;   /* no Secure Connections */
+    ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC;
+
     ble_svc_gap_init();
     ble_svc_gatt_init();
 

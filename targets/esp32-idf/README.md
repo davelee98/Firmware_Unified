@@ -104,9 +104,37 @@ Two are accounted for rather than acted on (`NOTIFY_RX`, `SCAN_REQ_RCVD`), and t
 point: an unhandled case returns 0 and is indistinguishable from success, which is exactly how
 eight missing events went unnoticed until one of them broke connections.
 
-**The general lesson, worth more than the individual events:** re-implementing a vendor
-wrapper's dispatch means inheriting its *whole* case list, and a partial switch fails silently —
-every unhandled event returns 0 and looks like success.
+#### …AND THE SECURITY-MANAGER DEFAULTS WERE THE ACTUAL ROOT CAUSE
+
+Found 2026-08-05 by a second review specifically comparing behaviour against the wrapper, after
+the event census was already closed. `NimBLEDevice::init()` sets six `ble_hs_cfg.sm_*` fields
+explicitly (`NimBLE-Arduino/src/NimBLEDevice.cpp:991-997`); the C-API rewrite set **none** of
+them and silently inherited ESP-IDF's defaults, **which enable bonding and Secure Connections**:
+
+| | wrapper (shipped) | this port, before the fix |
+|---|---|---|
+| `sm_bonding` | **0** | 1 (IDF default) |
+| `sm_sc` | **0** | 1 (IDF default) |
+| `sm_mitm` | 0 | 0 |
+| `sm_io_cap` | `NO_INPUT_OUTPUT` | unset |
+
+So the shipped firmware **never bonded**, and this port began advertising bonding capability the
+moment it was flashed. The failure chain is exact: a client accepts and bonds → nothing calls
+`ble_store_config_init()` and NVS persistence is off in every baseline, so the bond dies with the
+boot → the client keeps its half → the next connection presents keys the device no longer has →
+NimBLE reports the connect with `BLE_HS_EENCRYPT_KEY_SZ` (26). That is why it reproduced on the
+first connection after **every deep-sleep wake**.
+
+Nothing here wants bonding: no characteristic carries an `_ENC`/`_AUTHEN` flag, `SM_LVL=0`, and
+authentication and confidentiality are the application's job (`0x0050` challenge/response plus
+per-frame AES-CCM, which work identically over an unencrypted link). The wrapper's values are
+restored field for field — a restoration of shipped behaviour, not a new security policy.
+
+**The general lesson, worth more than the individual events:** re-implementing a vendor wrapper
+means inheriting its whole surface, not just its dispatch. A partial `switch` fails silently —
+every unhandled event returns 0 and looks like success. **Unset configuration fails even more
+silently**: the port did not choose IDF's defaults, it simply never mentioned them, and the
+result was a security posture the shipped product never had.
 
 #### One defect and one warning the log exposes
 
