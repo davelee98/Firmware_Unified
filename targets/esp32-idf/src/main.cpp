@@ -1278,9 +1278,16 @@ void enterDeepSleep(bool force, uint16_t overrideSleepSeconds) {
     woke_from_deep_sleep = true; // Will be true on next boot
     ble.stopAdvertising();
     od_hal_delay_ms(200);
-    ble.end();
+    // F7: report the truth. Deep sleep powers the digital core down, so a failed teardown does
+    // not strand the controller here the way it would before esp_restart() -- but "BLE
+    // deinitialized" printed unconditionally is how a failure this path CAN have became
+    // invisible. Sleep proceeds either way; the log now says which happened.
+    if (ble.end()) {
+        od_log_info("BLE deinitialized");
+    } else {
+        od_log_warn("BLE teardown FAILED -- sleeping anyway; the core powers down regardless");
+    }
     od_hal_delay_ms(100);
-    od_log_info("BLE deinitialized");
     // Host override (0x0053 payload) applies to this one cycle only: it is a
     // parameter, never stored, so an aborted or later sleep reverts to config.
     uint16_t sleepSeconds = overrideSleepSeconds ? overrideSleepSeconds

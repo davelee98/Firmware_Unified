@@ -72,8 +72,17 @@ bool od_ble_init(const char *device_name);
  * (software-reset) boot re-enters od_ble_init() with a controller that is already enabled;
  * nimble_port_init() then fails and BLE comes up dead for the rest of that boot, with only
  * a log line to say so. Stopping advertising is NOT a substitute -- it does not touch the
- * controller at all. Not needed before deep sleep: that powers the digital core down. */
-void od_ble_deinit(void);
+ * controller at all. Not needed before deep sleep: that powers the digital core down.
+ *
+ * Withdraws advertising intent and pumps the controller to quiescence before stopping the
+ * host, so nothing is advertising when the controller is released.
+ *
+ * RETURNS FALSE WHEN THE STACK IS STILL UP. nimble_port_stop() can fail, and this reports that
+ * rather than swallowing it: on failure the host task and controller remain allocated and this
+ * file's state is left describing reality. A caller that clears its own readiness regardless
+ * makes the two layers disagree -- the upper one saying BLE is down while the lower one knows
+ * it is not -- which is correctness-review finding F7. Clear caller state only on true. */
+bool od_ble_deinit(void);
 
 /* True once the GATT server is registered and the host task is running. */
 bool od_ble_is_ready(void);

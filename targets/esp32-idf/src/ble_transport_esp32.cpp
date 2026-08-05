@@ -360,10 +360,20 @@ void BleTransport::stopAdvertising() {
     od_log_info("BLE advertising stopped");
 }
 
-void BleTransport::end() {
-    od_ble_deinit();   // stops the host AND releases the BT controller
+bool BleTransport::end() {
+    // F7: CLEAR STATE ONLY ON CONFIRMED SUCCESS. This used to drop s_ready and the whole
+    // instance table unconditionally, while od_ble_deinit() correctly left ITS state intact
+    // when nimble_port_stop() failed. The two layers then disagreed: this one reporting BLE
+    // down, the one that actually knows reporting it up. Every later lifecycle decision --
+    // isReady(), a re-init, a connection callback arriving against an emptied instance table
+    // -- reasoned from whichever answer it happened to ask.
+    if (!od_ble_deinit()) {
+        od_log_error("ERROR: BLE teardown failed -- stack still UP, transport state unchanged");
+        return false;
+    }
     s_ready = false;
     instancesClear();
+    return true;
 }
 
 bool BleTransport::isReady() const {

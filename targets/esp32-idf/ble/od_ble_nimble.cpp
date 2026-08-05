@@ -760,7 +760,13 @@ bool od_ble_init(const char *device_name)
         rc = ble_gatts_add_svcs(od_svcs);
     }
     if (rc != 0) {
-        ESP_LOGE(TAG, "GATT registration failed: %d", rc);
+        /* UNWIND WHAT WAS ACQUIRED. nimble_port_init() succeeded above, so returning here
+         * without undoing it left the host partially initialised with nothing recording that
+         * fact: s_inited stays false, so a retry calls nimble_port_init() again on top of a
+         * live init and fails there instead -- one layer away from the cause, which is the
+         * same class of mislocated failure F7 is about. */
+        ESP_LOGE(TAG, "GATT registration failed: %d -- unwinding nimble_port_init()", rc);
+        nimble_port_deinit();
         return false;
     }
 
@@ -1009,12 +1015,20 @@ bool od_ble_get_identity_addr(uint8_t addr_out[6], uint8_t *addr_type_out)
     return true;
 }
 
-void od_ble_deinit(void)
+bool od_ble_deinit(void)
 {
     if (!s_inited) {
-        return;
+        return true;   /* already down: the caller's desired end state */
     }
-    ble_gap_adv_stop();
+    /* THE TEARDOWN BARRIER. Withdraw advertising intent and pump the controller to quiescence
+     * BEFORE stopping the host, so nothing can be advertising when the controller is released.
+     * od_ble_stop_advertising() does both and is bounded, so a stuck stop degrades to a logged
+     * warning rather than a hang -- teardown must always make progress.
+     *
+     * This replaces a bare ble_gap_adv_stop(). The difference is not the stack call, it is
+     * that INTENT is withdrawn first: a stop without that could be undone by the controller's
+     * next reconciliation, which is exactly the "stop does not mean stop" defect F4 names. */
+    od_ble_stop_advertising();
     /* nimble_port_stop() unblocks nimble_port_run() in the host task; nimble_port_deinit()
      * then tears the host down AND disables/releases the controller, which is the half that
      * od_ble_stop_advertising() never did and that esp_restart() does not do for us. */
@@ -1030,7 +1044,7 @@ void od_ble_deinit(void)
          * reports failure (NimBLE-Arduino/src/NimBLEDevice.cpp:1025); this is that behaviour.
          * State is left intact so it still describes reality. */
         ESP_LOGE(TAG, "nimble_port_stop() failed -- BLE left UP, state unchanged");
-        return;
+        return false;
     }
     nimble_port_deinit();
     /* Drop the retained characteristic value. The wrapper got this for free -- deinit
@@ -1058,6 +1072,7 @@ void od_ble_deinit(void)
     __atomic_store_n(&s_adv_ended_pending, (uint8_t)0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_conn_count, (uint8_t)0, __ATOMIC_RELEASE);
     ESP_LOGI(TAG, "NimBLE host stopped and controller released");
+    return true;
 }
 
 /* ------------------------------------------------- shared advertising HAL (od_hal_adv.h) ---
