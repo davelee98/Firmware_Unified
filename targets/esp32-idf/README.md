@@ -76,24 +76,46 @@ what licenses retiring the source repo:
    `delay(800)` rail settle in `pwrmgm()`.
 4. **`s3-e1004` still has no board fragment** — see § `s3-e1004` is blocked, not forgotten.
 
-### Phase C, still owed
+### Phase C — the ESP32 app-code work is DONE (2026-08-05)
 
-The Arduino shim is **not** gone: `compat/` is at 11 files by `compat/ratchet.sh`, down from
-the phase-B baseline of 21.
+`compat/ratchet.sh` reads **5**, down from the phase-B baseline of 21, across fifteen recorded
+steps. `compat/SHIM_BUDGET` carries one dated paragraph per step, including what each one
+found — several steps existed only because the shim was hiding a defect.
 
-**The endstate is "only the vendor adapter remains", not an empty directory** (decided
-2026-08-04). FastEPD needs a *permanent* compatibility layer — it is a vendored Arduino
-library and there is no version of it that does not want Arduino primitives. So `delay()`,
-`delayMicroseconds()`, `millis()` (all three with C++ linkage, for `bb_epaper.h`'s unmangled
-declaration and FastEPD's 19 `extern millis()` call sites) and `ledc_compat.h` survive phase C
-by decision. When the count reaches 0 they are extracted into the vendor adapter and owned
-there; the remainder of `compat/` is deleted with the ratchet and its workflow.
+**5 IS THE FLOOR, NOT A STALL.** The five files left — `main.cpp`, `display_service.cpp`,
+`buzzer_hw.cpp`, `device_control.cpp`, `encryption.cpp` — are counted **only for their
+`TARGET_NRF` arms**. Those arms do not compile on this target, so they cannot be verified here;
+converting them blind is the unverifiable edit MIGRATION.md warns against. They leave with the
+nRF target at migration step 4, and `compat/` is deletable at that moment.
 
-It is called an **adapter**, not a shim: in this repo "shim" means scheduled demolition, and
-using the word for something permanent would make the ratchet's vocabulary meaningless.
+**The permanent piece is `vendor/fastepd/`, and it is smaller than this section used to claim.**
+It is one header plus its storage — an Arduino `SPI` object over IDF's `spi_master` — because
+FastEPD's IT8951 transport is written against that object. It is called an **adapter**, not a
+shim: in this repo "shim" means scheduled demolition, and using the word for something
+permanent would make the ratchet's vocabulary meaningless. It lives outside `compat/` so that
+"delete `compat/`" stays unambiguous, and `ratchet.sh` excludes it from the count.
 
-`ratchet.sh`'s report-only `third_party/` list is that adapter's specification — read it as a
-definition of what must survive, not as a backlog.
+> **Corrected 2026-08-04.** This section previously said the adapter would also have to own
+> `delay()`, `delayMicroseconds()`, `millis()` and `ledc_compat.h` "for `bb_epaper.h`'s
+> unmangled declaration". That was written before `panel/od_bbep.cpp` landed. **bb_epaper needs
+> nothing from the shim** — it has our own IDF backend, its `arduino_io.inl` / `esphome_io.inl`
+> are never compiled, and its `<Arduino.h>` sits behind an `#ifdef ARDUINO` this build does not
+> define. FastEPD borrows exactly one loose symbol, `millis()`, for `arduino_io.inl`'s 19 call
+> sites; it defines `delay()` and `delayMicroseconds()` itself.
+>
+> `ratchet.sh`'s `third_party/` report was also described here as "that adapter's
+> specification". It is not — it is a text grep that does not evaluate `#ifdef`, and most of
+> what it lists is unreachable. The script now says so itself.
+
+**Containment.** `third_party/bb_epaper/src`, `third_party/FastEPD/src` and `vendor/fastepd` are
+all **off the component include path**; `main/CMakeLists.txt` grants each to a named list of
+translation units. Adding a consumer is a deliberate edit there. Verified by trying it: an
+unlisted file including any of the three fails to compile.
+
+**Still owed:** the `od_hal_panel` repoint. `hal/od_hal_panel.{h,c}` and the two backends under
+`panel/` exist and compile, but **nothing calls them yet** — `display_service.cpp` still drives
+`BBEPDISP` directly. That repoint is staged one path at a time per MIGRATION.md, and it is the
+point where hardware stops being optional.
 
 The count *can* still reach 0: the last three entries (`buzzer_hw.cpp`, `device_control.cpp`,
 `encryption.cpp`) are counted only for their `TARGET_NRF` arms, which leave at migration
@@ -283,16 +305,27 @@ measured.
 
 The S3 boards need no change: `default_8/16/32MB.csv` already carry `app0` + `app1`.
 
-## Layout (planned)
+## Layout
 
 ```
+build.sh                        ./build.sh [board...]  -- all boards if none given
 sdkconfig.defaults              common to all boards
 sdkconfig.defaults.<idf_target> per-chip, auto-selected by IDF
-boards/<board>.conf             per-board fragment
+sdkconfig.baselines/*.sdkconfig the reviewed effective config, gated by tools/
+boards/<board>.cmake            per-board fragment (NOT .conf -- CMake, set by build.sh)
 partitions/*.csv                per flash size
-build.sh                        build.sh <board> — mirrors the Zephyr target's build.sh
-compat/arduino_compat.h         TEMPORARY import shim; deleted during phase C
+main/CMakeLists.txt             the app component; also the per-source include grants
+src/                            imported application sources (from Firmware)
+hal/                            od_hal_{nvs,log,gpio,time,i2c,adc,panel} -- this target's HALs
+panel/                          od_bbep*.{cpp,inl} bb_epaper IDF backend; od_panel_* HAL backends
+ble/                            NimBLE C-API transport
+compat/                         TEMPORARY Arduino shim -- at its floor of 5; see SHIM_BUDGET
+vendor/fastepd/                 PERMANENT FastEPD adapter -- NOT a shim, does not die with compat/
+tools/                          host tests, sdkconfig baseline gate
 ```
+
+The two directories that are easy to confuse: **`compat/` is scheduled for deletion and
+`vendor/fastepd/` is not.** They are separate directories for exactly that reason.
 
 ## Toolchain
 

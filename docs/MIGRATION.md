@@ -177,9 +177,23 @@ Substitute three phases for steps 1–2, keeping steps 3–5 as written:
 
 **The shim is the biggest risk in this plan.** Temporary compatibility layers become permanent
 ones. Give it a mechanical ratchet rather than good intentions: a CI check that the number of
-files including `arduino_compat.h` only ever *decreases*, and remove the check together with
-the file when it reaches zero. The shim is scaffolding with a scheduled demolition, not a
-portability layer — if it is still present when the last subsystem lands, the port is not done.
+files including `arduino_compat.h` only ever *decreases*. The shim is scaffolding with a
+scheduled demolition, not a portability layer — if it is still present when the last subsystem
+lands, the port is not done.
+
+> **CORRECTED 2026-08-05, from doing it.** This paragraph said to "remove the check together
+> with the file when it reaches zero". **Zero is not reachable, and that is not a failure.**
+> The ratchet ran 21 -> 5 and 5 is the floor: those five files are counted only for their
+> `TARGET_NRF` arms, which do not compile on the ESP32 target and therefore cannot be verified
+> there. They leave with the nRF target at step 4, and `compat/` is deletable then.
+>
+> Separately, **FastEPD needs a *permanent* compatibility layer** — a vendored Arduino library
+> whose IT8951 transport is written against the Arduino `SPI` object. That surface lives in
+> `targets/esp32-idf/vendor/fastepd/`, outside `compat/` on purpose and excluded from the
+> count, so that "delete `compat/`" stays an unambiguous instruction rather than a judgement
+> call. It is deliberately **not** called a shim: in this repo "shim" means scheduled
+> demolition, and using the word for something permanent poisons it for the thing the ratchet
+> actually polices.
 
 ### The Silabs SDK is not imported as-is
 
