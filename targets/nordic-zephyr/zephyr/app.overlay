@@ -1,0 +1,45 @@
+/*
+ * Optional board defaults — runtime display pins come from OpenDisplay config.
+ */
+/ {
+	chosen {
+		zephyr,console = &uart20;
+	};
+
+	/*
+	 * Expose all 8 SAADC channels (board DTS channel@0..7 => AIN0..AIN7) so
+	 * the battery driver can pick one at runtime by index from the
+	 * configured battery_sense_pin (P1.0n => AINn).
+	 */
+	zephyr,user {
+		io-channels = <&adc 0>, <&adc 1>, <&adc 2>, <&adc 3>,
+			      <&adc 4>, <&adc 5>, <&adc 6>, <&adc 7>;
+	};
+};
+
+/*
+ * The display is driven by a GPIO bit-bang SPI on the OpenDisplay config pins
+ * (P2.1 CLK, P2.2 DATA). The board enables the spi00 SPIM peripheral on those
+ * same pads, so leaving it on lets the peripheral contend with the bit-bang
+ * output and corrupts the panel data. No firmware path uses the Zephyr SPI API,
+ * so keep the pins as plain GPIO.
+ */
+&spi00 {
+	status = "disabled";
+};
+
+/* Onboard IMU is unused on the ePaper breakout; skip its failing boot probe. */
+&lsm6ds3tr_c {
+	status = "disabled";
+};
+
+/*
+ * The board enables i2c22 on P1.10 (D4) and P1.11 (D5) as open-drain I2C with
+ * pull-ups. The display BUSY line is on D5/P1.11, so leaving i2c22 on pins BUSY
+ * high permanently (the I2C idle level) instead of following the panel — which
+ * makes every bbepWaitBusy() time out. No firmware path uses the Zephyr I2C API,
+ * so free the pin for GPIO use.
+ */
+&i2c22 {
+	status = "disabled";
+};
