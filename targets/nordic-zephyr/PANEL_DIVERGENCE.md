@@ -1,6 +1,11 @@
 # Panel-traffic divergence from `Firmware_NRF54` — 2026-08-05
 
-**Status:** open. Not hardware-verified. Read this before flashing a shipped panel.
+**Status: CLOSED 2026-08-05 — the newer vendored `bb_epaper` is ACCEPTED.** Option 1 of the
+three below is the decision. This document is now a record of what that accepts, not an open
+question.
+
+**Still not hardware-verified.** Closing the decision does not verify the outcome, and the
+verification list further down is unchanged. Read it before flashing a shipped panel.
 
 This target was imported from `Firmware_NRF54@0f19c0c` and now builds against this repo's
 **newer** vendored `bb_epaper` (76 panel enums vs 69, plus three documented `OD-PATCH`es).
@@ -36,10 +41,11 @@ On this target the panel now performs a **real busy poll, up to 30 seconds**. If
 is the reason the flag exists, every operation on this panel stalls for 30 s instead of 200 ms.
 Nothing here can tell the difference; a board can, immediately.
 
-## What this means
+## Verification still owed
 
-Do **not** read "the target builds" as "the target is safe on these panels". Before this target
-is flashed to anything shipped, on real hardware, old firmware versus new:
+Do **not** read "the target builds" or "the decision is closed" as "the target is safe on these
+panels". Before this target is flashed to anything shipped, on real hardware, old firmware
+versus new:
 
 - `EP42YR_400x300` first — confirm BUSY actually reaches idle, and time one wake/refresh cycle
   against the 200 ms the old build spent;
@@ -47,15 +53,32 @@ is flashed to anything shipped, on real hardware, old firmware versus new:
 - an SPI/CS trace around wake, full init, plane start, refresh and sleep, checking the number
   of full-init sequences matches the old build exactly.
 
-## The decision this needs
+## The decision — taken 2026-08-05
 
-Three options, none taken yet:
+**Option 1: accept the newer library.** One vendored copy for every target, no re-vendor, no
+re-opened vendored edits. The three options as originally framed:
 
-1. **Accept the newer library.** Cleanest long-term, one vendored copy, but it changes shipped
-   panel behaviour and needs all of the above verified first.
-2. **Re-vendor `bb_epaper` at the source repo's older revision** and re-apply the ESP32's needs
-   on top — trades this problem for the reverse one on the ESP32.
-3. **Port the `BBEP_SKIP_BUSY_WAIT` workaround forward** as a documented `OD-PATCH`, if the
-   `EP42YR` BUSY line really is broken. Narrow, but re-opens vendored edits.
+1. **Accept the newer library.** — **CHOSEN.**
+2. ~~Re-vendor `bb_epaper` at the source repo's older revision~~ — rejected; it trades this
+   problem for the reverse one on the ESP32, which is the target that has actually run.
+3. ~~Port the `BBEP_SKIP_BUSY_WAIT` workaround forward as a documented `OD-PATCH`~~ — not taken.
 
-Option 3 may be needed regardless of 1 or 2 — that depends on a fact only hardware can supply.
+### What accepting this accepts
+
+Stated explicitly, because option 1 does not make the differences go away — it decides to live
+with them:
+
+- The four panels above now receive the newer library's initialisation sequences. Where the
+  shipped firmware and this build disagree, **this build is now the intended behaviour**, not a
+  regression to be reverted.
+- **`EP42YR_400x300` keeps the real busy poll.** The `BBEP_SKIP_BUSY_WAIT` flag is not coming
+  back. If that panel's BUSY line does not reach idle, operations on it wait up to 30 s instead
+  of the source's fixed 200 ms. This is the sharpest consequence of the decision and it is
+  accepted along with the rest.
+
+### The one thing that would reopen this
+
+Hardware showing `EP42YR_400x300`'s BUSY line does not reach idle. That is a fact about the
+panel, not about the library version, and it would make option 3 necessary irrespective of which
+library is vendored. Reopen on that evidence and nothing else — a slow refresh that still
+completes is the new normal, not a trigger.
