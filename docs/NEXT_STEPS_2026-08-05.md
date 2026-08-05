@@ -21,8 +21,9 @@ target order and migration rules remain in [MIGRATION.md](MIGRATION.md), known d
    `shared/`.
 3. Promote `od_config.c` as the first **protocol-behavior** subsystem, closing F3 with tests.
 4. ~~Close the remaining ESP32 correctness findings in transport, event handoff, lifecycle
-   truth, secure erase, and mDNS.~~ **DEFERRED 2026-08-05** — F6/F8/F9/F10 are not being
-   worked. All three Highs are fixed; this is the Medium/Low tail. See Milestone 3.
+   truth, secure erase, and mDNS.~~ **DEFERRED 2026-08-05** — F6/F9/F10 are not being
+   worked; **F8 is CLOSED as WONT-FIX**. All three Highs are fixed; this is the Medium/Low
+   tail. See Milestone 3.
 5. Run the release acceptance matrix and explicitly record any hardware debt still accepted.
 6. Import nRF54L15 into `targets/nordic-zephyr/`, one subsystem at a time.
 7. Import EFR32BG22, using its no-kernel and 32 KB RAM limits as hard shared-core gates.
@@ -43,7 +44,7 @@ security decision run in parallel, with deadlines stated below.
 | Hardware defects | FastEPD pixel-path fix is not hardware-verified; `bbepWaitBusy` still blocks the loop | These remain named release risks, not invisible assumptions |
 | `shared/` | Source list empty | The next shared source establishes the real build/test pattern |
 | Host tests | Header canary, vector replay where Python permits it, and link-owner sanitizer tests | The first controller/config sources need real C unit suites and fakes |
-| Correctness review | **All three Highs fixed on `main`** (F1, F2, F3). F5 code half fixed; F4/F7 implemented but NOT closed (no hardware); **F6, F8, F9, F10 DEFERRED 2026-08-05** | Highs closed is not the same as the target being correctness-signed-off. See Milestone 3 for what stays exposed |
+| Correctness review | **All three Highs fixed on `main`** (F1, F2, F3). F5 code half fixed; F4/F7 implemented but NOT closed (no hardware); F6, F9, F10 deferred; **F8 CLOSED as WONT-FIX 2026-08-05** | Highs closed is not the same as the target being correctness-signed-off. See Milestone 3 for what stays exposed |
 | Nordic/Zephyr | README scaffold only | Real target import is migration step 2 |
 | Silabs | README scaffold only | Real target import is migration step 3 |
 | nRF52840 | Still part of the source `Firmware` tree and Bluefruit-based | Its guarded shim arms cannot be converted or deleted blindly on ESP32 |
@@ -377,8 +378,8 @@ and fuzz workflow.
 
 ## Milestone 3 — remaining ESP32 correctness closure — **DEFERRED 2026-08-05**
 
-**The remaining correctness fixes are deferred by decision.** F6, F8, F9 and F10 are not being
-worked; 3A's code half landed before the deferral (`1cfe78b`, PIPE rejected on LAN) and its
+**The remaining correctness fixes are deferred by decision.** F6, F9 and F10 are not being
+worked, and **F8 is closed as WONT-FIX** (see below); 3A's code half landed before the deferral (`1cfe78b`, PIPE rejected on LAN) and its
 header half was always upstream work.
 
 This is the third deferral recorded in this document in one day, so state the shape plainly
@@ -393,7 +394,7 @@ Named so the deferral is visible rather than implicit:
 
 | # | Sev | What remains true on shipped firmware |
 |---|---|---|
-| F8 | Med | **Secure erase reports success when the zero-write failed.** `od_hal_nvs.c` discards the result of the same-size zero blob write and its commit, and logs "zero-written and erased" unconditionally — including when no record existed. On failure the old entry containing the **AES master key** may remain recoverable from raw flash while the operator is told the wipe completed. This is the one with a security consequence, and it is the cheapest of the four to fix. |
+| ~~F8~~ | — | **CLOSED as WONT-FIX 2026-08-05.** Not deferred — no expiry, no review trigger, not coming back. See below. |
 | F9 | Med | WiFi event→loop handoff uses `volatile`, which is not synchronisation. Paired scalar-then-flag writes have no ordering, so the loop can act on a pending flag with a stale reason/channel/RSSI, and an unsynchronised `usingCachedAp` can miss the full-scan fallback after a cached BSSID fails. |
 | F10 | Low | The mDNS "400 ms floor" is inverted: a *changed* payload bypasses the floor entirely and an *unchanged* one re-announces once 400 ms elapse — the opposite of the stated policy, permitting multicast bursts on a battery device sharing its radio with BLE. |
 | F6 | Low\* | LAN response writes are not retried to completion. \*Rated Medium by the review; verification showed the accepted socket is blocking and the oversized two-write fallback is unreachable at current buffer sizes (642 B vs a 600 B maximum response), so the live risk is lower. It becomes Medium again the moment either fact changes. |
@@ -452,7 +453,36 @@ migration.
 - implement actual trailing-edge MSD announcement coalescing with a 400 ms floor; and
 - test cached-BSSID failure, low-RSSI roaming, event bursts, and repeated MSD changes.
 
-### 3D — storage and error truth: F8
+### F8 — CLOSED as WONT-FIX, 2026-08-05
+
+**Decision: the current secure-erase reporting is accepted as-is. No fix is planned.** This is
+recorded rather than deleted so that a future reader finds the decision instead of rediscovering
+the behaviour and filing it again.
+
+WHAT REMAINS TRUE IN THE CODE, stated once, factually:
+
+- `od_hal_nvs_secure_erase()` discards the results of the same-size zero-blob write
+  (`od_hal_nvs.c:157,165`) and its commit (`:168`), and logs
+  `"config record zero-written and erased"` unconditionally (`:179`) — including when no record
+  existed and when the record was larger than the static zero buffer, in which case the
+  overwrite is skipped entirely.
+- The returned status reflects only the erase and its commit.
+- `secureEraseConfig()` discards even that and logs `"Config securely erased"` unconditionally.
+
+So on a failure path the record holding the AES-128 master key from config packet `0x27` may
+remain recoverable from a raw flash dump while the log and the return value both report success.
+
+CONTEXT THAT MAKES THIS DEFENSIBLE, and which the original finding also noted: the HAL contract
+in `od_hal_nvs.h` already states the overwrite is **best-effort** on a log-structured store. NVS
+may write the zero blob to a fresh page and leave the original intact regardless of whether any
+call succeeded. Fixing F8 would make the *reporting* truthful; it would not make the erase
+guaranteed. Guaranteed erasure needs whole-partition destruction, which is a separate and larger
+decision.
+
+If that separate decision is ever taken, revisit this at the same time — truthful reporting is
+worth more once there is something true to report.
+
+### ~~3D — storage and error truth: F8~~ — superseded by the WONT-FIX above
 
 - propagate zero-write, commit, erase, and verification failures from secure erase;
 - never log or return success when any required destructive step failed;
