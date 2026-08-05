@@ -281,11 +281,37 @@ pull the rest of BLE into shared code.
 - repeated live MSD updates never show mixed revisions; and
 - injected stop/deinit failure is visible to the application and logs.
 
-### Exit gate
+### Status — 2026-08-05: steps 1-8 merged, EXIT GATE NOT MET
 
-F4 and F7 are marked resolved for ESP32 with host and hardware evidence. The shared controller
-API is frozen enough for later target adapters, but no claim is made that unimported targets
-have passed hardware tests.
+All eight merge-sequence steps are on `feat/f4-adv-control`:
+
+| Step | Commit | Note |
+|---|---|---|
+| 1-2 controller + host tests | `dcf584e` | first source in `shared/`; 14 cases, 103 checks, mutation-checked |
+| 3 target compiles it + ESP32 HAL | `841feb8` | the target had never consumed `shared/sources.cmake` at all |
+| 4 identity snapshot | `33bda80` | event bridge deferred into step 5, where it has a reader |
+| 5 loop owns advertising | `6d7b9c3` | `od_ble_advertise()`, `s_adv_wanted`, `s_msd` deleted |
+| 6 packing via the HAL | (in `6d7b9c3`/`8e18139`) | needed no work once `od_ble_advertise()` was gone |
+| 7 teardown barrier + F7 | `8e18139` | deinit reports; caller clears state only on success |
+| 8 other-target adapters | this commit | recorded as import requirements, not stubs |
+
+**The exit gate is NOT met, and F4/F7 are NOT closed.** It requires host *and hardware*
+evidence; only the host half exists. Specifically missing:
+
+- the Milestone 0 ADV/scan-response byte fixture, so there is **no evidence discovery bytes are
+  unchanged**. The packing code is shared with the path it replaced and was not edited, which
+  is an argument, not proof;
+- every item in this milestone's ESP32 acceptance list — cold boot, deep-sleep wake,
+  advertising across an EPD refresh, a genuinely failed connect, no restart after teardown
+  commits, repeated MSD updates without mixed revisions;
+- fault injection for the two failure paths F7 exists to report — `nimble_port_stop()` failing
+  and GATT registration failing after a successful `nimble_port_init()`. Neither is reachable
+  from a build.
+
+Step 8 is deliberately documentation rather than code: `targets/nordic-zephyr/` and
+`targets/efr32bg22-slc/` are one README each with no build system, so a "compile-tested fake"
+would have nothing to compile it and would rot unnoticed. The link failure a missing
+`od_hal_adv_*` produces is itself the guard.
 
 ## Milestone 2 — first protocol promotion: configuration
 
