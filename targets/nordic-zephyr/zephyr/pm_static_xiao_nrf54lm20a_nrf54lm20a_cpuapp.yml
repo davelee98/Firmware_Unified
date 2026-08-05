@@ -1,0 +1,6 @@
+# Pin settings after both MCUboot slots. Address matches the previous dynamic
+# layout so existing devices keep NVS data across rebuilds.
+settings_storage:
+  address: 0x1e3000
+  region: flash_primary
+  size: 0x2000

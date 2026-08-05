@@ -1,0 +1,76 @@
+/*
+ * LM20 board overlay (replaces auto-picked app.overlay for this board).
+ * Shared app defaults + LM20 pin conflicts + disable unused peripherals.
+ * nPM1300 is driven from OpenDisplay data_bus/sensor config (bit-bang I2C),
+ * so the board DT pmic-i2c tree is disabled to free P1.17/P1.18.
+ */
+/ {
+	chosen {
+		zephyr,console = &uart20;
+	};
+
+	zephyr,user {
+		io-channels = <&adc 0>, <&adc 1>, <&adc 2>, <&adc 3>,
+			      <&adc 4>, <&adc 5>, <&adc 6>, <&adc 7>;
+	};
+};
+
+/* OpenDisplay owns nPM1300 over config pins (preset: SCL 0xb1 / SDA 0xb2). */
+&pmic_i2c {
+	status = "disabled";
+};
+
+&pmic {
+	status = "disabled";
+};
+
+&pmic_charger {
+	status = "disabled";
+};
+
+/* D8/D10 (CLK/DATA) are P1.4/P1.6 — spi23 pads; free for bit-bang SPI. */
+&spi23 {
+	status = "disabled";
+};
+
+/* Harmless on LM20 D-header wiring; keep clear of P2.1/P2.2 if used. */
+&spi00 {
+	status = "disabled";
+};
+
+/* i2c22 is on D4/D5; BUSY is D5 — free it for GPIO. */
+&i2c22 {
+	status = "disabled";
+};
+
+/* Header UART on D6/D7 — unused by OpenDisplay; keep pads free. */
+&uart21 {
+	status = "disabled";
+};
+
+&lsm6ds3tr_c {
+	status = "disabled";
+};
+
+/* IMU TWIM — sensor node already disabled; drop the bus clocks too. */
+&i2c30 {
+	status = "disabled";
+};
+
+/* RGB LED PWM (P1.22/23/24) — OpenDisplay drives LEDs via config GPIOs if any. */
+&pwm20 {
+	status = "disabled";
+};
+
+/* USB-HS unused on battery ePaper builds (SERIAL path is uart20/RTT). */
+&usbhs {
+	status = "disabled";
+};
+
+&nfct {
+	status = "okay";
+};
+
+&pdm20 {
+	status = "disabled";
+};

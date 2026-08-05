@@ -1,0 +1,5 @@
+# Pin settings after both MCUboot slots (L15 flash map).
+settings_storage:
+  address: 0x163000
+  region: flash_primary
+  size: 0x2000
