@@ -21,7 +21,9 @@ build" until 2026-08-05; that is no longer true and the guidance below replaces 
   break. The other two targets — `nordic-zephyr`, `efr32bg22-slc` — are still **README-only**,
   so "compile all targets" means those 10 ESP32 boards.
 - **`shared/` is still empty, and that is still by design.** The first promotion
-  (`od_config.c`) has not happened — see docs/NEXT_STEPS.md item 5. So the ESP32 target holds
+  (`od_config.c`) has not happened — see docs/NEXT_STEPS.md item 5, which is historical but is
+  still where that choice is argued; note docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md proposes a
+  different first promotion and the conflict is unresolved. So the ESP32 target holds
   logic that is destined for `shared/core`, and touching it means reading MIGRATION.md first.
 - **The HALs are real now.** `targets/esp32-idf/hal/` implements od_hal_{nvs,log,gpio,time,
   i2c,adc,panel} against docs/SHARED_API_DESIGN.md. That document has been corrected ten times

@@ -190,7 +190,9 @@ cmake -S tests/host -B build -G Ninja && cmake --build build && ctest --test-dir
 - [docs/TOOLCHAINS.md](docs/TOOLCHAINS.md) — which toolchain each target uses and why
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the `shared`/`hal` boundary
 - [docs/MIGRATION.md](docs/MIGRATION.md) — migration order and per-target procedure
-- [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) — where the migration stands and what to do next, in order
+- [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) — **historical.** The migration sequence as of
+  2026-07-26; items 1-4 are closed and its forward-looking half is superseded. Read it for the
+  reasoning it records, not to decide what to do next
 - [docs/FOLLOWUPS.md](docs/FOLLOWUPS.md) — known defects and open items awaiting action,
   including host-side bugs the wire corpus found
 - [docs/BBEPAPER_IO_BACKENDS.md](docs/BBEPAPER_IO_BACKENDS.md) — how `bb_epaper` is ported to a

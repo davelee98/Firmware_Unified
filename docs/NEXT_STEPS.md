@@ -1,5 +1,27 @@
 # Next steps
 
+> **HISTORICAL DOCUMENT — as of 2026-08-05. Do not use this page to decide what to do next.**
+>
+> Written 2026-07-26 to sequence the work after the ESP32 phase-B port. Items 1-4 are all
+> closed and the phase-C branch has merged, so its forward-looking half describes a repository
+> state that no longer exists. It is kept for the reasoning it records — why zero was the wrong
+> shim target, why the C6 image does not fit 1.25 MB, why `od_config.c` is the first promotion
+> — not as a live plan.
+>
+> **What it does not know about**, all later than its last substantive edit:
+>
+> - the ten findings in [CORRECTNESS_REVIEW_2026-08-04.md](CORRECTNESS_REVIEW_2026-08-04.md).
+>   Two are fixed on `main` (F1, F2); eight are open, and F3 can still commit a malformed
+>   record to NVS.
+> - [F4_PORTABLE_BLE_LIFECYCLE_PLAN.md](F4_PORTABLE_BLE_LIFECYCLE_PLAN.md), whose
+>   implementation sequence puts `od_adv_control.c` into `shared/` **before** the `od_config.c`
+>   promotion this page calls item 5. That ordering conflict is unresolved.
+> - item 1 being closed **by decision rather than by a Gate 2 pass** (see below).
+>
+> Nothing has replaced it. [MIGRATION.md](MIGRATION.md) remains the plan and
+> [FOLLOWUPS.md](FOLLOWUPS.md) the defect list, but the repository currently has no live
+> *sequence* document — that gap is real and this banner is not a substitute for one.
+
 Where the migration stands after the ESP32 phase-B port, and what to do next, in order.
 Written 2026-07-26. Companion to [MIGRATION.md](MIGRATION.md) (the plan) and
 [FOLLOWUPS.md](FOLLOWUPS.md) (defects awaiting action); this file is the *sequence*.
