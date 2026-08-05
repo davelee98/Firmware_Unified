@@ -98,6 +98,19 @@ void od_ble_stop_advertising(void);
  * layer. `len` is the 16-byte MSD payload from the advert builder. */
 void od_ble_set_manufacturer_data(const uint8_t *msd, uint8_t len);
 
+/* Service advertising: publish stack facts into the shared controller and run ONE
+ * reconciliation step. Call every loop pass -- the controller decides whether anything is
+ * needed, and a caller that tries to decide for it is how two owners appear.
+ *
+ * start_allowed gates a NEW start only; it never stops a running advertisement. Pass false
+ * while an EPD refresh is in progress, so a restart waits for the panel rather than the
+ * advertisement being withdrawn mid-refresh.
+ *
+ * Returns true when this pass made a stack call, for logging. LOOP TASK ONLY -- never from a
+ * stack callback; that is the ownership rule the whole design rests on.
+ */
+bool od_ble_service_advertising(bool start_allowed);
+
 /* ------------------------------------------------------------------ connections */
 
 /* Number of live connections. This is the stack's peer count, maintained across the

@@ -344,11 +344,14 @@ void BleTransport::restartAdvertising() {
     // refresh / stack not up" deferral policy (see serviceBleAdvertisingRestart
     // in main.cpp). The delay mirrors the historical sequence.
     //
-    // vTaskDelay, not the shim's delay(): this file is written for this target, so there is
-    // no reason for it to be one of the files the shim ratchet counts.
-    vTaskDelay(pdMS_TO_TICKS(100));
+    // THE 100 ms SETTLE IS GONE, and its absence is the point. It existed because this used
+    // to issue ble_gap_adv_stop() and ble_gap_adv_start() back to back on the caller's task,
+    // racing the host. od_ble_restart_advertising() now only records INTENT; the stop/program/
+    // start sequence is reconciled one step per loop pass by od_ble_service_advertising(), so
+    // there is no back-to-back pair left to settle and nothing to sleep for. Blocking the loop
+    // task for 100 ms to no purpose was also stalling BLE RX and the panel.
     od_ble_restart_advertising();
-    od_log_info("BLE advertising restarted");
+    od_log_info("BLE advertising requested");
 }
 
 void BleTransport::stopAdvertising() {
