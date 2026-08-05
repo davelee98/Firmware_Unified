@@ -2,7 +2,7 @@
 
 Source repo: `Firmware` (https://github.com/OpenDisplay/Firmware.git)
 
-## Status: **runs on hardware** (ESP32-S3, 2026-08-03)
+## Status: **runs on hardware** (ESP32-S3; re-verified after phase C on 2026-08-05)
 
 All ten boards build, and the S3 has been flashed and exercised. This section used to say
 "Phase B in progress — configures, partially compiles, does not link" and carried a census of
@@ -19,6 +19,60 @@ than updated because a list of solved problems reads as a list of open ones.
 activated per shell). Each board produces one merged image flashed at offset 0; see
 [docs/BBEPAPER_IO_BACKENDS.md](../../docs/BBEPAPER_IO_BACKENDS.md) for the panel layer and
 `release/MANIFEST.txt` for the per-board chip and flash command.
+
+### Verified on hardware (s3-n16r8-extuart-debug, 2026-08-05) — after phase C
+
+Second and larger verification event, from a device log covering a full session on a **Seeed
+reTerminal E1001** (800x480, panel IC `0x003C`, bb_epaper path, no FastEPD). This is the run
+that retires most of phase C's hardware debt: steps 1-15 had **not** been on hardware before it.
+
+| | |
+|---|---|
+| Boot + config load | NVS (`od_hal_nvs`), full config dump, 1.0 |
+| Encrypted session | `0x0050` challenge/response, all later traffic encrypted |
+| Read config `0x0040` | 9 chunks, encrypted |
+| Write config `0x0041`/`0x0042` | 5 chunks, reloaded from storage |
+| Image push `0x0080`-`0x0082` | **4 pushes**, 96 000 B each, zlib 3.37-38.05x, 23.3-39.1 KB/s |
+| Panel refresh | 1.01 s full, x4 |
+| Panel cold bring-up | 1319 ms x4, no BUSY timeouts (899 rail + 201 initIO + 41 wake + 178 initSeq) |
+| I2C sensor probe | `od_hal_i2c_probe` — 0x44 (SHT40) and 0x51 present, three absent, correct |
+| Die temperature | `od_hal_adc_die_temp_c()` installs, range -10..80 C |
+| LED `0x0073`/`0x0075` | activate + stop |
+| Reboot `0x000F` | LAN/WiFi teardown, BLE deinit, clean `RTC_SW_CPU_RST` |
+| Deep sleep | entered on idle (40 s hold), 360 s configured |
+| **Button wake** | **buttons 1/2/3 and wake-from-deep-sleep all work** |
+
+**What this covers.** The whole BLE + panel + PMIC + GPIO arm: `od_hal_{nvs,log,gpio,time,i2c,
+adc}`, the 19 + 7 `pinMode`+`digitalWrite` glitch removals of steps 12/14, the AXP2101 I2C
+rewrite (step 14), the deep-sleep pin pass, and the GPIO interrupt path behind the buttons.
+
+**What it does NOT cover.** The **entire WiFi/LAN arm** — this unit has `WiFi: disabled` in
+`communication_modes`, so steps 9b-ii (station, six formerly-dead behaviours), 9b-iii (LAN
+sockets, TLS-PSK) and 9b-iv (mDNS) are still unexercised. Also untested: the E1004 dual-CS
+path (compiled out on every board) and FastEPD (this panel uses bb_epaper).
+
+#### Two defects the log exposes
+
+1. **The buzzer does not sound.** `W (41054) ledc: GPIO 45 is not usable, maybe conflict with
+   others`, repeating roughly every 100 ms for the duration of each `0x0077`. IDF's LEDC driver
+   refuses GPIO 45 — a strapping pin (`VDD_SPI`) that the flash/PSRAM configuration reserves on
+   this board — so `ledc_channel_config()` fails, `buzzerHwStart()` returns false, and no tone is
+   produced. The command still ACKs, so it looks successful from the client. Two things to
+   decide, both hardware questions: whether 45 is the right pin for this unit at all, and
+   whether a failed attach should stop retrying every tick instead of spamming the log.
+2. **`ble_gap_adv_start failed: 6` on the disconnect -> re-advertise path.** Six is
+   **`BLE_HS_ENOMEM`**, not `BLE_HS_EALREADY` (which is 2) — and `ble/od_ble_nimble.cpp` only
+   tolerates EALREADY, so this is a real failure being logged rather than a benign race. It
+   fires immediately after a disconnect, when the host has not yet released the connection's
+   memory. Advertising did not start on those attempts and nothing retries; the device is
+   invisible until the next event happens to restart it. Needs a bounded retry, not a wider
+   tolerance list.
+
+Also visible and worth a look: **five consecutive connections were refused ownership** at the
+start of the log ("Dropped write from non-owner h=1", each ending in a remote-terminated
+disconnect ~8 s later) before one succeeded with epoch `e=1` — the first epoch ever issued. A
+client that connects and cannot claim the slot wastes an 8 s session; the arbitration is doing
+what R3 says, but why the first five could not claim is unexplained.
 
 ### Verified on hardware (S3, 2026-08-03)
 
