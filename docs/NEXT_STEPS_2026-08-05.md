@@ -81,10 +81,11 @@ ran a strictly worse version of the same race — a `std::vector` advertisement 
 being done first because it is the right *first shared component*, not because it is the most
 dangerous open finding.
 
-**The consequence to keep in view:** F3 is High, and this ordering puts its closure in Milestone
+**The consequence to keep in view:** F3 is High, and this ordering put its closure in Milestone
 2, behind a Medium. Pulling F3's fix forward was considered and **rejected by decision on
-2026-08-05** — it closes with the config promotion. The exposure that creates, and the fact that
-the deferral currently has no review trigger, are recorded in Milestone 2.
+2026-08-05** — it was to close with the config promotion, and it did: **F3 is FIXED** in
+`96a29b8`. The deferral this paragraph previously described as having no review trigger is
+therefore discharged, not running. Milestone 2 records how.
 
 `od_config.c` is still first among subsystems that parse, store, or alter wire behavior. The
 config-first security rationale in the historical plan therefore remains intact.
@@ -283,7 +284,7 @@ pull the rest of BLE into shared code.
 - repeated live MSD updates never show mixed revisions; and
 - injected stop/deinit failure is visible to the application and logs.
 
-### Status — 2026-08-05: steps 1-8 merged, EXIT GATE NOT MET
+### Status — 2026-08-05: steps 1-8 merged; F4/F7 CLOSED, NOT VERIFIED
 
 All eight merge-sequence steps are on `feat/f4-adv-control`:
 
@@ -297,8 +298,11 @@ All eight merge-sequence steps are on `feat/f4-adv-control`:
 | 7 teardown barrier + F7 | `8e18139` | deinit reports; caller clears state only on success |
 | 8 other-target adapters | this commit | recorded as import requirements, not stubs |
 
-**The exit gate is NOT met, and F4/F7 are NOT closed.** It requires host *and hardware*
-evidence; only the host half exists. Specifically missing:
+**F4 and F7 are CLOSED by decision, on merged code — not verified.** The eight merge steps are
+done and the findings are discharged as tracking items (Milestone 3's disposition table records
+them as *CLOSED (code merged, evidence outstanding)*). Closing them did not produce the evidence
+this milestone's exit gate asked for: it requires host *and hardware* results, and only the host
+half exists. Still missing, unchanged by the closure:
 
 - the Milestone 0 ADV/scan-response byte fixture, so there is **no evidence discovery bytes are
   unchanged**. The packing code is shared with the path it replaced and was not edited, which
@@ -309,6 +313,10 @@ evidence; only the host half exists. Specifically missing:
 - fault injection for the two failure paths F7 exists to report — `nimble_port_stop()` failing
   and GATT registration failing after a successful `nimble_port_init()`. Neither is reachable
   from a build.
+
+Read "closed" as a tracking state and nothing else. It does not mean verified, and the list above
+does not shrink because the findings were closed — the evidence remains owed, and comes due in
+Milestone 4's hardware matrix.
 
 Step 8 is deliberately documentation rather than code: `targets/nordic-zephyr/` and
 `targets/efr32bg22-slc/` are one README each with no build system, so a "compile-tested fake"
