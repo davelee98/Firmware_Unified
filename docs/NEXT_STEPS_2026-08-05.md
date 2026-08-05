@@ -79,9 +79,10 @@ ran a strictly worse version of the same race — a `std::vector` advertisement 
 being done first because it is the right *first shared component*, not because it is the most
 dangerous open finding.
 
-**The consequence to keep in view:** F3 is High and reachable pre-auth, and this ordering puts
-its closure in Milestone 2, behind a Medium. That is acceptable only if F3's *fix* is not held
-hostage to the config promotion — see the note in Milestone 2.
+**The consequence to keep in view:** F3 is High, and this ordering puts its closure in Milestone
+2, behind a Medium. Pulling F3's fix forward was considered and **rejected by decision on
+2026-08-05** — it closes with the config promotion. The exposure that creates, and the fact that
+the deferral currently has no review trigger, are recorded in Milestone 2.
 
 `od_config.c` is still first among subsystems that parse, store, or alter wire behavior. The
 config-first security rationale in the historical plan therefore remains intact.
@@ -221,11 +222,12 @@ unreviewed assumption into every target.
    remains for this gate: state the interim **4,000-byte** ceiling in tests and host-facing
    documentation, and **add `shared/protocol/` to the sync tool's copy map before any bump**,
    since nothing currently detects drift between this vendored copy and canonical.
-6. **Land F3's `totalSize` enforcement as a target-local fix**, with the boundary vectors from
-   Milestone 2's list. See the note in Milestone 2 for why this does not wait for the promotion.
-7. **Propagate D1's promotion order into `CLAUDE.md` and `MIGRATION.md`.** Both currently name
-   `od_config.c` as the first `shared/` promotion. `CLAUDE.md` is loaded into context every
-   session, so a stale pointer there is the most expensive one in the repo.
+6. ~~Land F3's `totalSize` enforcement as a target-local fix~~ — **DEFERRED 2026-08-05 to
+   Milestone 2.** F3 is not fixed ahead of the config promotion; it closes with it. See the
+   deferral record in Milestone 2.
+7. ~~Propagate D1's promotion order into `CLAUDE.md` and `MIGRATION.md`~~ — **DONE 2026-08-05**
+   (commit `5cf6ded`). Both now name `od_adv_control.c` as the first `shared/` source, and
+   `CLAUDE.md` points at this document as the live sequence.
 
 ### Exit gate
 
@@ -291,15 +293,29 @@ Promote the config TLV parser and chunked-write assembly as one tested subsystem
 the known ESP32 `0x2A`/unknown-packet behavior while establishing the real shared-core vector
 and fuzz workflow.
 
-> **F3's FIX MUST NOT WAIT FOR THIS MILESTONE.** D1 puts a High, pre-auth-reachable
-> storage-integrity defect behind a Medium, which is tolerable only because the two are
-> separable. The `totalSize` enforcement F3 needs is local to `handleWriteConfig()` and
-> `handleWriteConfigChunk()` in `targets/esp32-idf/src/communication.cpp` — roughly thirty lines
-> of bounds checking, no `shared/` involvement. **Land it as a target-local fix with its vector
-> tests during Milestone 0**, then let this milestone promote logic that is already correct.
-> Coupling the fix to the promotion would leave malformed input able to commit an inconsistent
-> record to NVS for two milestones, and would leave the F2 fix delivering single-frame TLS
-> config writes only.
+> **F3 CLOSES HERE — DEFERRED 2026-08-05.** An earlier revision pulled F3's `totalSize`
+> enforcement forward into Milestone 0 as a ~30-line target-local fix. **That is reversed by
+> decision:** F3 is not fixed ahead of the config promotion. It closes with `od_config.c`, in
+> this milestone, behind Milestone 1.
+>
+> **What is exposed until then**, stated so the deferral is visible rather than implicit:
+>
+> - Malformed chunk sequences can commit a byte sequence inconsistent with the declared config
+>   to NVS. Storage is changed before any downstream CRC check rejects it.
+> - **On a device with encryption disabled the config-write path has no authentication gate at
+>   all** (`configWriteGate()` returns ALLOWED when `!isEncryptionEnabled()`), so any BLE or LAN
+>   client that can connect can reach it. With encryption enabled it needs either a session or
+>   `REWRITE_ALLOWED`.
+> - A 201-byte start frame is ACKed as an active transfer and never saved; a start frame longer
+>   than 202 bytes silently discards the excess.
+> - **F2 therefore delivers single-frame TLS config writes only.** Chunked TLS writes still
+>   traverse the unbounded reassembly path, so "TLS clients can write config" remains
+>   true-but-partial until this milestone.
+>
+> **This deferral has no review trigger yet.** D3 established that a kept deferral records an
+> owner, an expiry, the affected versions, and the release that removes the exposure; the same
+> applies here and none is set. Without them this rolls over silently — the exact failure D3
+> exists to prevent, now applying to a High rather than to the BG22 pair.
 
 ### Required behavior
 
