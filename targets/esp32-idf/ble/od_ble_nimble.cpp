@@ -239,16 +239,42 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
             }
             od_ble_evt_connect(event->connect.conn_handle);
         } else {
-            /* The connection attempt failed, so no link exists and no hook fires. Resuming
-             * advertising is stack housekeeping, not policy -- without it the device goes
-             * quiet after a failed connect and only a reboot brings it back.
+            /* A NON-ZERO STATUS DOES NOT MEAN "NO LINK". This branch used to assume it did --
+             * skip the hook, resume advertising -- and that assumption cost every first
+             * connection after a wake.
              *
-             * OD-INSTRUMENTATION: this branch was SILENT, which is why the defect took three
-             * captures to corner -- it is also a caller of od_ble_advertise(), so it is one
-             * candidate source of the "ble_gap_adv_start failed: 6" seen right after a wake. */
-            ESP_LOGW(TAG, "[instr] GAP CONNECT FAILED status=%d -- no link hook, re-advertising",
-                     event->connect.status);
-            od_ble_advertise();
+             * OBSERVED ON HARDWARE 2026-08-05: NimBLE delivers CONNECT with status 26,
+             * BLE_HS_EENCRYPT_KEY_SZ ("invalid encryption key size"), for a link that IS
+             * established. The proof is in the same log: the very next call to
+             * ble_gap_adv_start() returns BLE_HS_ENOMEM because the single connection slot is
+             * IN USE (CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1), and the link then completes an MTU
+             * exchange, carries a GATT write and produces a real DISCONNECT event. The
+             * application, never having been told, dropped that write as non-owner -- so the
+             * client saw a GATT server it could not use and gave up after ~8 s.
+             *
+             * ASK THE STACK INSTEAD OF INFERRING. ble_gap_conn_find() is authoritative: if a
+             * descriptor exists, the link is real and must be adopted exactly as a status-0
+             * connect would be. Only when it does not exist is this genuinely a failed attempt
+             * with nothing to own, which is the case the advertise-resume was written for. */
+            struct ble_gap_conn_desc desc;
+            const bool link_exists =
+                (ble_gap_conn_find(event->connect.conn_handle, &desc) == 0);
+            ESP_LOGW(TAG, "[instr] GAP CONNECT status=%d link_exists=%d",
+                     event->connect.status, (int)link_exists);
+            if (link_exists) {
+                if (s_conn_count < 0xFF) {
+                    __atomic_fetch_add(&s_conn_count, (uint8_t)1, __ATOMIC_RELEASE);
+                }
+                if (s_preferred_mtu) {
+                    ble_att_set_preferred_mtu(s_preferred_mtu);
+                }
+                od_ble_evt_connect(event->connect.conn_handle);
+            } else {
+                /* Genuinely no link. Resuming advertising is stack housekeeping, not policy --
+                 * without it the device goes quiet after a failed connect and only a reboot
+                 * brings it back. */
+                od_ble_advertise();
+            }
         }
         return 0;
 
