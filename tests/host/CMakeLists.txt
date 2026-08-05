@@ -58,6 +58,18 @@ add_executable(od_canary canary.c)
 target_link_libraries(od_canary od_shared)
 add_test(NAME canary COMMAND od_canary)
 
+# adv_control: the loop-owned advertising policy machine (correctness review F4) driven against
+# a scripted fake HAL. The fake supplies od_hal_adv_{program,start,stop} at LINK time, exactly
+# as a target does — shared/ binds its HAL at link time, so there is no injection seam to fake
+# around and the test exercises the real linkage.
+#
+# What this cannot prove, stated so a green run is not over-quoted: AD-record bytes, that
+# NimBLE accepts the call sequence, and that a target's callback-to-loop bridge publishes
+# coherently. Those need the Milestone 0 byte fixture and a board.
+add_executable(od_adv_control_test adv_control_test.c)
+target_link_libraries(od_adv_control_test od_shared)
+add_test(NAME adv_control COMMAND od_adv_control_test)
+
 # replay_vectors: the corpus replayed through py-opendisplay's public API. This is the
 # dual-stack half of the contract test — the same vectors will later run against the C
 # core, and a vector the two sides disagree on is exactly the host/firmware divergence

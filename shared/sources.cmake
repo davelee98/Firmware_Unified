@@ -13,13 +13,20 @@
 #
 # Paths are relative to this file's directory. Consumers prefix with ${OD_SHARED_DIR}.
 #
-# The list is EMPTY and that is correct: no target code is imported yet, and shared/core,
-# shared/hal and shared/compress hold placeholder READMEs on purpose (see CLAUDE.md).
-# The host build is green against an empty list by design — that is what makes every later
-# import a test-first change rather than a retrofit.
+# The list is no longer empty. core/od_adv_control.c is the first entry, landed with its host
+# tests (tests/host/adv_control_test.c), which were written against the header before the
+# implementation existed.
+#
+# WHY THE ADVERTISING CONTROLLER AND NOT THE CONFIG PARSER. Decided 2026-08-05
+# (docs/NEXT_STEPS_2026-08-05.md D1, docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md): it has no wire
+# surface and no vendor coupling, so it establishes the shared-source build and test pattern
+# without moving protocol state. It is a narrow infrastructure exception, NOT a reordering of
+# the subsystem sequence below — od_config.c is still the first subsystem that parses, stores,
+# or alters wire behaviour, and its pre-auth-attack-surface rationale is untouched.
 #
 # Order of arrival, per docs/MIGRATION.md § "Per-target procedure" step 4:
-#   core/od_config.c      config TLV parse + chunked assembly   (first — pre-auth surface)
+#   core/od_adv_control.c advertising/lifecycle policy          (LANDED — no wire surface)
+#   core/od_config.c      config TLV parse + chunked assembly   (next — pre-auth surface)
 #   core/od_dispatch.c    opcode dispatch, encryption gate
 #   core/od_xfer_direct.c 0x70/0x71/0x72
 #   core/od_xfer_partial.c 0x76
@@ -31,7 +38,7 @@
 get_filename_component(OD_SHARED_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
 
 set(OD_SHARED_SOURCES
-    # (empty — first entry lands with the first shared/core promotion)
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_adv_control.c"
 )
 
 # Public headers live alongside their sources; shared/protocol is the wire contract and is
@@ -39,4 +46,10 @@ set(OD_SHARED_SOURCES
 set(OD_SHARED_INCLUDE_DIRS
     "${OD_SHARED_DIR}"
     "${OD_SHARED_DIR}/protocol"
+    "${OD_SHARED_DIR}/core"
+    "${OD_SHARED_DIR}/hal"
 )
+# core/ and hal/ were missing until the first source landed and exposed it: with an empty
+# source list nothing ever included a shared header, so the gap could not present. Left as a
+# note rather than silently fixed, because it is the first evidence that this file's "green
+# against an empty list" property also means "unexercised against an empty list".
