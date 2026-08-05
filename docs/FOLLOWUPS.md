@@ -269,3 +269,88 @@ BUSY-wait timeout warning from 3.6) and `bb_epaper.h` (`delay(int)` → `delay(l
   locally (TOOLCHAINS § "All three toolchains are installed on this dev box") makes this less
   urgent, not less necessary: one machine with one set of versions is not a matrix.
 - **`\bString\b` grep scoping** — done. **Host compile** — done, this phase.
+
+---
+
+## 4. `Firmware_Unified` / ESP32 — an authentication refusal with no stated reason
+
+**Status:** open. **Evidence:** `verified` — reproduced from a device capture
+(`s3-n16r8-extuart-debug`, reTerminal E1001, firmware `0.1.0-45-gc5119eb-dirty`, 2026-08-05)
+and traced to source. Found while investigating an unrelated BLE connect defect.
+
+### Symptom
+
+Roughly twenty consecutive BLE sessions over ~60 s, each lasting about 3 seconds:
+
+```
+=== BLE CLIENT CONNECTED (ESP32) h=1 e=36 [owner] ===
+BLE notify subscription h=1: enabled
+[BLE][Q:0] URX 0x0050 (3 B): 00 50 00        <- AUTHENTICATE, step 1
+[BLE][Q:0] UTX 0x0050 (3 B): 00 50 03        <- AUTH_STATUS_NOT_CONFIG
+BLE notify subscription h=1: disabled
+=== BLE CLIENT DISCONNECTED (ESP32) h=1 reason=0x213 ===
+```
+
+repeating through epochs `e36`–`e54`. Every gated command was refused in the same window —
+`0x0040` READ CONFIG answered `00 40 FE` (`RESP_AUTH_REQUIRED`), `0x000F` REBOOT answered
+`00 0F FE`. The device was, from the client's point of view, permanently unusable.
+
+It stopped the instant an **unauthenticated** `0x0041`/`0x0042` WRITE CONFIG landed, and has
+worked since, including across a subsequent power-on reset.
+
+### What is actually happening
+
+**The firmware is behaving correctly.** `AUTH_STATUS_NOT_CONFIG` (`0x03`) is returned by
+`handleAuthenticate()` (`targets/esp32-idf/src/encryption.cpp:604`) when `isEncryptionEnabled()`
+is false, and that predicate (`encryption.cpp:231`) is:
+
+```c
+return (securityConfig.encryption_enabled == 1) &&
+       (encryption_key is not all-zero);
+```
+
+`config_parser.cpp:684` independently forces `encryption_enabled = 0` when the stored key is all
+zeros. So the device had **no usable encryption key**, said so, and refused to authenticate. That
+is the specified behaviour, not a defect.
+
+**The defect is that it never says why.** Compare the two refusals in the same capture:
+
+| Path | Log output |
+|---|---|
+| gated command without a session | `ERROR: [BLE] Command requires authentication (encryption enabled)` |
+| `0x0050` with no key configured | *(nothing)* |
+
+`handleAuthenticate()` sends the three-byte refusal and returns, with no `od_log_*` call on that
+branch. The only clue is a **debug-level** line emitted once at boot
+(`Security config: Encryption disabled (key is all zeros)`), which is absent from any capture
+that does not include the boot, and absent entirely on a non-debug build. A field engineer sees a
+client reconnecting every three seconds against a device that logs a healthy connect, a healthy
+subscribe, and nothing else.
+
+### Contributing factors, each separable
+
+1. **Silent refusal** — `encryption.cpp:604`. The one-line fix, and the only part that is
+   unambiguously this repo's to make.
+2. **The condition is permanent but the client retries forever** — ~20 attempts in 60 s with no
+   backoff. `AUTH_STATUS_NOT_CONFIG` cannot become true without a config write, so a client that
+   understands the code should stop and surface it. This belongs to the client, not here.
+3. **The state is reachable at all.** A device with `encryption_enabled` set and no key is
+   inert to every authenticated command. How this unit got there is not established — the
+   capture begins mid-session and does not include the boot that parsed that config.
+4. **Recovery depends on an unauthenticated write.** `0x0041`/`0x0042` is accepted with no
+   session, which is what rescued this device — and is simultaneously the asymmetry already
+   noted in `targets/esp32-idf/README.md`: config can be *written* by anyone in radio range but
+   not *read*. Whether that is deliberate provisioning policy or an oversight is an open
+   question for the wire contract, and it should be answered before either half is changed:
+   closing the write without providing another recovery path would make this state
+   unrecoverable over BLE.
+
+### Recommendation
+
+Fix (1) here — log the refusal with its reason, at a level that survives a non-debug build.
+Raise (2) with the client. Answer (4) in `DIVERGENCE_MATRIX.md` / the protocol before touching
+it. (3) needs a reproduction before it is chaseable.
+
+**Not fixed by the commit that found it**, because the useful part is the wire-contract question
+in (4), and because the symptom was encountered while chasing an unrelated BLE connect defect.
+
