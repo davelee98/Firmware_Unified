@@ -215,6 +215,21 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
 
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
+        /* OD-INSTRUMENTATION 2026-08-05 -- TEMPORARY, remove once the wake-connect defect is
+         * understood. Deliberately ESP_LOGW and not od_log: od_log drops records emitted from
+         * non-loop tasks under load (od_log.cpp's s_dropped path), and this callback runs on
+         * the NimBLE host task during a busy wake -- so an od_log line here could go missing
+         * and take the evidence with it. ESP_LOG writes straight to the port.
+         *
+         * WHAT THIS ANSWERS. On the first connection after a deep-sleep wake, the app's
+         * connect hook demonstrably does not run: od_ble_evt_connect() allocates an epoch as
+         * its first statement, for admitted and refused instances alike, yet the NEXT
+         * connection logged e=1 -- the first epoch of the boot. The same connection produced
+         * MTU and DISCONNECT events through THIS switch, so the callback was live. Those two
+         * facts do not sit together, and this line separates them: if it prints, the event
+         * arrived and the CONNECT case ran; if it does not, the event never reached us. */
+        ESP_LOGW(TAG, "[instr] GAP CONNECT h=%u status=%d",
+                 (unsigned)event->connect.conn_handle, event->connect.status);
         if (event->connect.status == 0) {
             if (s_conn_count < 0xFF) {
                 __atomic_fetch_add(&s_conn_count, (uint8_t)1, __ATOMIC_RELEASE);
@@ -226,12 +241,24 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
         } else {
             /* The connection attempt failed, so no link exists and no hook fires. Resuming
              * advertising is stack housekeeping, not policy -- without it the device goes
-             * quiet after a failed connect and only a reboot brings it back. */
+             * quiet after a failed connect and only a reboot brings it back.
+             *
+             * OD-INSTRUMENTATION: this branch was SILENT, which is why the defect took three
+             * captures to corner -- it is also a caller of od_ble_advertise(), so it is one
+             * candidate source of the "ble_gap_adv_start failed: 6" seen right after a wake. */
+            ESP_LOGW(TAG, "[instr] GAP CONNECT FAILED status=%d -- no link hook, re-advertising",
+                     event->connect.status);
             od_ble_advertise();
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT: {
+        /* OD-INSTRUMENTATION: pairs with the CONNECT line above so handles can be matched.
+         * A DISCONNECT for a handle that never produced a CONNECT line is the signature of
+         * the defect. */
+        ESP_LOGW(TAG, "[instr] GAP DISCONNECT h=%u reason=0x%04X",
+                 (unsigned)event->disconnect.conn.conn_handle,
+                 (unsigned)event->disconnect.reason);
         const uint8_t n = __atomic_load_n(&s_conn_count, __ATOMIC_ACQUIRE);
         if (n > 0) {
             __atomic_store_n(&s_conn_count, (uint8_t)(n - 1), __ATOMIC_RELEASE);
@@ -347,6 +374,18 @@ static void od_ble_advertise(void)
     adv.disc_mode = BLE_GAP_DISC_MODE_GEN;
 
     rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &adv, od_gap_event, NULL);
+    /* OD-INSTRUMENTATION: stamp EVERY start, with a sequence number, so the log shows whether
+     * od_gap_event was the live callback before the connection in question formed -- the
+     * "event arrived before we were listening" hypothesis. rc=6 is BLE_HS_ENOMEM and is
+     * EXPECTED while a client holds the single connection slot
+     * (CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1): connectable undirected advertising needs a free
+     * connection object. Logged, not silenced, because which CALLER produced it is the open
+     * question. */
+    {
+        static uint32_t s_adv_seq = 0;
+        ESP_LOGW(TAG, "[instr] adv_start #%u rc=%d%s", (unsigned)++s_adv_seq, rc,
+                 rc == BLE_HS_ENOMEM ? " (ENOMEM: connection slot in use -- expected)" : "");
+    }
     if (rc != 0 && rc != BLE_HS_EALREADY) {
         ESP_LOGE(TAG, "ble_gap_adv_start failed: %d", rc);
     }
