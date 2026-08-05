@@ -16,6 +16,8 @@
 #include "opendisplay_protocol.h"
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "nvs_flash.h"
 
 #include "nimble/nimble_port.h"
@@ -639,6 +641,34 @@ bool od_ble_init(const char *device_name)
 
     nimble_port_freertos_init(od_host_task);
     s_inited = true;
+
+    /* WAIT FOR HOST SYNC BEFORE RETURNING -- restored from NimBLEDevice::init(), which loops
+     * on m_synced (NimBLE-Arduino/src/NimBLEDevice.cpp:1008) before it returns.
+     *
+     * Without this, init() returns the instant the host TASK is created, while the controller
+     * has not yet synced and no identity address exists. Every caller reads that as "BLE is
+     * up". Advertising happens to be safe -- od_ble_advertise() defers behind s_adv_wanted and
+     * od_on_sync() starts it -- but od_ble_get_identity_addr() is NOT: it would hand back a
+     * zeroed address, and that address is published in the mDNS `mac` TXT record, which is how
+     * a host correlates the BLE and LAN identities of the same device. Publishing 00:00:.. is
+     * worse than publishing late.
+     *
+     * BOUNDED, unlike the wrapper's unbounded spin: a controller that never syncs is a dead
+     * radio, and hanging setup() forever is a worse failure than continuing without BLE. On a
+     * healthy part this returns in a few milliseconds. */
+    {
+        const uint32_t kSyncTimeoutMs = 2000;
+        uint32_t waited = 0;
+        while (!s_addr_resolved && waited < kSyncTimeoutMs) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+            waited += 5;
+        }
+        if (!s_addr_resolved) {
+            ESP_LOGE(TAG, "host did not sync within %u ms -- continuing, but the BLE identity "
+                          "address is not available yet", (unsigned)kSyncTimeoutMs);
+        }
+    }
+
     ESP_LOGI(TAG, "NimBLE up; GATT service registered, val_handle=%u",
              (unsigned)s_chr_val_handle);
     return true;
@@ -646,7 +676,10 @@ bool od_ble_init(const char *device_name)
 
 bool od_ble_is_ready(void)
 {
-    return s_inited;
+    /* Both halves: the stack is initialised AND the host has synced far enough to have an
+     * identity address. s_inited alone was true before sync, so this used to answer "ready"
+     * for a stack that could not yet name itself. */
+    return s_inited && s_addr_resolved;
 }
 
 bool od_ble_notify_handle(uint16_t conn_handle, const uint8_t *data, uint16_t len)
@@ -807,9 +840,21 @@ void od_ble_deinit(void)
     /* nimble_port_stop() unblocks nimble_port_run() in the host task; nimble_port_deinit()
      * then tears the host down AND disables/releases the controller, which is the half that
      * od_ble_stop_advertising() never did and that esp_restart() does not do for us. */
-    if (nimble_port_stop() == 0) {
-        nimble_port_deinit();
+    if (nimble_port_stop() != 0) {
+        /* THE STOP FAILED, SO THE STACK IS STILL UP. Clearing the flags here -- which this
+         * function used to do unconditionally -- would leave the firmware believing BLE was
+         * torn down while the host task and the controller remained allocated. The next
+         * od_ble_init() would then take its `if (s_inited) return true` early exit... except
+         * s_inited would be false, so it would try a fresh nimble_port_init() on top of a
+         * running stack and fail there instead, one layer away from the cause.
+         *
+         * NimBLEDevice::deinit() clears m_initialized only inside the successful branch and
+         * reports failure (NimBLE-Arduino/src/NimBLEDevice.cpp:1025); this is that behaviour.
+         * State is left intact so it still describes reality. */
+        ESP_LOGE(TAG, "nimble_port_stop() failed -- BLE left UP, state unchanged");
+        return;
     }
+    nimble_port_deinit();
     s_chr_val_handle = 0;
     s_addr_resolved  = false;
     s_inited         = false;
