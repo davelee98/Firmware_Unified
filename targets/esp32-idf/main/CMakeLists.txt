@@ -42,6 +42,9 @@ list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_nvs.c
                            ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_time.c
                            ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_i2c.c
                            ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_adc.c
+                           ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_panel.c
+                           ${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_bbep.cpp
+                           ${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_fastepd.cpp
                            ${CMAKE_CURRENT_LIST_DIR}/../ble/od_ble_nimble.cpp)
 
 # ble/od_ble_rx.cpp is GONE, not forgotten. It held od_ble_on_write(): the bounds check,
@@ -209,6 +212,12 @@ set_source_files_properties(${OD_SRC_DIR}/display_service.cpp
 set_source_files_properties(${OD_SRC_DIR}/display_fastepd.cpp
     TARGET_DIRECTORY ${COMPONENT_LIB}
     PROPERTIES INCLUDE_DIRECTORIES "${OD_FASTEPD_INC_DIR};${OD_FASTEPD_ADAPTER_DIR}")
+set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_fastepd.cpp
+    TARGET_DIRECTORY ${COMPONENT_LIB}
+    PROPERTIES INCLUDE_DIRECTORIES "${OD_FASTEPD_INC_DIR};${OD_FASTEPD_ADAPTER_DIR}")
+set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_bbep.cpp
+    TARGET_DIRECTORY ${COMPONENT_LIB}
+    PROPERTIES INCLUDE_DIRECTORIES "${OD_BBEP_INC_DIR}")
 set_source_files_properties(${OD_SRC_DIR}/boot_screen.cpp ${OD_SRC_DIR}/main.cpp
                             ${CMAKE_CURRENT_LIST_DIR}/../panel/od_bbep.cpp
                             ${OD_BBEP_ALL_SOURCES}

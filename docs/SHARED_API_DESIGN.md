@@ -153,6 +153,11 @@ split into start + `busy()` poll (the panel model, §3).
 > **Do not treat the uncorrected interfaces here as verified.** `od_hal_crypto`, `od_hal_radio`
 > and `od_hal_panel` have not been implemented against this document yet, and the base rate so
 > far is five corrections in five interfaces.
+>
+> **UPDATE 2026-08-04: `od_hal_panel` HAS now been implemented** — `targets/esp32-idf/hal/`
+> `od_hal_panel.{h,c}` plus `panel/od_panel_bbep.cpp` and `panel/od_panel_fastepd.cpp`. The
+> base rate held: **five more corrections**, listed at the end of that section. `od_hal_crypto`
+> and `od_hal_radio` remain unverified.
 
 ### `od_hal_time` — already exists in embryo
 
@@ -513,6 +518,35 @@ void od_hal_panel_sleep(void);
 void od_hal_panel_abort(void);
 void od_hal_panel_mark_deinitialized(void);             /* rail was cut behind our back */
 ```
+
+### Corrections from the first implementation (2026-08-04)
+
+Written against the interface above; these are what it got wrong, in the order they bit.
+
+1. **`DisplayConfig` has no `width`/`height`.** The fields are `pixel_width` and `pixel_height`.
+   The sketch's `caps.width/height` names are fine, but the mapping is not the identity it looks
+   like.
+2. **`supports_partial` needs BOTH halves, and the doc named neither.** `partial_update_support`
+   is what the *config declares over the wire*; whether the panel has a partial init sequence
+   compiled in is a separate fact (`bbep.pInitPart`). A config claiming partial on a panel that
+   cannot do it makes the core offer `0x76` and the panel ignore it — silently, which is the
+   exact failure this caps query exists to remove. The backend now requires both.
+3. **The ops table needs a `claims()` predicate.** "Selected once at `od_hal_panel_init` from
+   `panel_ic_type` and `display_technology`" reads as though the selector holds both backends'
+   panel lists. It cannot: the FastEPD panel IDs live in `src/protocol_pending.h`, which is
+   **C++** (it guards itself with a `static_assert`), while the selector must be plain C for
+   `shared/hal`. Each backend now answers for its own panels and the selector just asks in
+   order, with bb_epaper last as the fallback.
+4. **Correction 3 (no blocking refresh) is NOT satisfiable against FastEPD today.** It exposes
+   only `fastepd_wait_refresh(timeout_sec)`, which *blocks*; there is no "is it done" query to
+   poll. The backend degrades to a 0-second call, which is a genuine non-blocking check on the
+   IT8951 path but coarser than the contract promises. The real fix is exposing the ready-bit
+   predicate `it8951WaitForReady()` already computes. **bb_epaper satisfies it natively** —
+   `bbepRefresh()` issues the command and returns.
+5. **Correction 4 (symmetric errors) is unmet on one path, and the `int` return hides it.**
+   `fastepd_direct_write_chunk()` returns `void` and silently truncates a full frame buffer.
+   The HAL signature returns `int`, so the seam *looks* closed while the information does not
+   exist to fill it. Recorded at the call site rather than papered over.
 
 Because a single target legitimately has 2-3 panel backends (ESP32: bb_epaper + FastEPD +
 e1004; Silabs: bb_epaper only), this **one** interface is the place a function-pointer `struct
