@@ -35,7 +35,10 @@ public:
     // refresh, still connected, stack not up) belongs to the caller, not here.
     void restartAdvertising();
     void stopAdvertising();
-    void end();                    // full teardown; no-op on nRF
+    // Full teardown; no-op on nRF. RETURNS FALSE IF THE STACK IS STILL UP -- transport state
+    // is then left unchanged so it keeps describing reality (F7). A caller that ignores this
+    // and proceeds is asserting BLE is down when it may not be.
+    bool end();
 
     // --- state ---
     bool    isReady() const;       // stack initialised and usable

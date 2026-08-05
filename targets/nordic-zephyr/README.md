@@ -94,3 +94,36 @@ before step 4 is scheduled, because it determines whether step 4 is a port or a 
 nRF Connect SDK + west. **Pin an explicit NCS version** — the source repo's `ncs-env.sh` globs
 `~/ncs/v3.*` then `~/ncs/v2.*` and takes the first hit, which is not reproducible across
 machines or CI. Not currently installed on the primary dev box.
+
+## Required at import: the advertising HAL
+
+`shared/core/od_adv_control.c` is in `shared/sources.cmake`, so **the moment this target has a
+build that consumes that list, it must also supply `od_hal_adv_{program,start,stop}`** — see
+[shared/hal/od_hal_adv.h](../../shared/hal/od_hal_adv.h). They are link-time C functions; a
+target that lists the shared sources without implementing them fails at link with three
+undefined references, which is the intended failure and needs no extra guard.
+
+There is no compile-tested stub here on purpose. This directory holds one README and no build
+system, so a fake would have nothing to compile it and would rot unnoticed. The requirement is
+recorded instead, where whoever writes the first `CMakeLists.txt` will meet it.
+
+What the Zephyr adapter owes, beyond the three functions
+([docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md](../../docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md)):
+
+- **AD packing stays here.** `od_adv_control` never sees a PDU; it hands over a 16-byte MSD
+  snapshot and the target builds the advertising and scan-response records. Match the ESP32
+  layout unless a divergence is deliberate and recorded: flags + complete name + MSD in ADV,
+  the 128-bit service UUID in the scan response.
+- **`bt_le_adv_start` / `bt_le_adv_stop` are called from the application pump, not a callback.**
+  Bluetooth callbacks publish facts through a `k_msgq` or an equivalently coherent bridge and
+  return.
+- **A `k_work` item may bridge an API-context requirement, but must not own desired state or
+  restart policy.** Keeping policy in the application pump is what preserves the same ordering
+  against display refresh, transfer teardown and deep sleep that every other target has.
+- **nRF52840/Bluefruit: set `restartOnDisconnect(false)`.** The SoftDevice's automatic restart
+  is a second policy owner, and it is the reason the application still carries a
+  `restartsAdvertisingOnDisconnect()` divergence. Once this target owns the restart explicitly,
+  that divergence and its special-case branch in `serviceBleAdvertisingRestart()` are deleted.
+- **DFU entry clears start intent and reaches the stop barrier first**, then disconnects and
+  disables the SoftDevice. It must not depend on toggling the stack's auto-restart setting at
+  the right moment to avoid a race.

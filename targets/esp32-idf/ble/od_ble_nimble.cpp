@@ -15,6 +15,11 @@
 /* OD_BLE_MAX_FRAME -- the declared GATT value length, enforced in od_gatt_access(). */
 #include "opendisplay_protocol.h"
 
+/* The shared advertising HAL this file implements at the bottom, and OD_ADV_MSD_LEN. Both are
+ * plain-C shared headers; nothing from shared/ is called from here yet. */
+#include "od_hal_adv.h"
+#include "od_adv_control.h"
+
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -98,10 +103,71 @@ static const ble_uuid128_t od_svc_uuid = BLE_UUID128_INIT(OD_UUID_LE_BYTES);
 static const ble_uuid128_t od_chr_uuid = BLE_UUID128_INIT(OD_UUID_LE_BYTES);
 
 static uint16_t s_chr_val_handle = 0;
-static uint8_t  s_own_addr_type  = 0;
-static bool     s_addr_resolved  = false;   /* s_own_addr_type is meaningful only after sync */
 static uint16_t s_preferred_mtu  = 0;
 static bool     s_inited         = false;
+
+/* ------------------------------------------------------- the identity handoff (F4, part 1) ---
+ *
+ * s_own_addr_type and s_addr_resolved USED TO BE two plain file statics: written by
+ * od_on_sync() on the NimBLE HOST task, read by od_ble_is_ready(), od_ble_get_identity_addr()
+ * and the init spin on the LOOP task. That is a cross-context handoff of a flag and the
+ * payload it guards, with no ordering between them -- correctness review F4.
+ *
+ * WHAT WAS ACTUALLY AT RISK, stated precisely rather than inflated. On the S3 baselines both
+ * tasks are pinned to core 0 (CONFIG_BT_NIMBLE_PINNED_TO_CORE=0,
+ * CONFIG_ESP_MAIN_TASK_AFFINITY=0x0), and a context switch on one core is a full barrier -- so
+ * the reader could not in practice observe the flag without the payload. The defect is that
+ * NOTHING SAYS SO: it is undefined behaviour that happens to work, it depends on an affinity
+ * setting recorded nowhere near this code, and it breaks silently the day either task moves.
+ *
+ * The fix publishes both as ONE record behind a seqlock. The sequence is odd while a write is
+ * in progress and even-and-non-zero once a coherent snapshot exists, so a reader either gets a
+ * whole snapshot or knows to retry. Writer is single (the host task), which is what makes the
+ * cheap seqlock sound here.
+ *
+ * The counter doubles as the STACK GENERATION: it advances on every sync, so a later step can
+ * discard facts stamped with a generation the stack has since left behind. */
+struct od_ble_identity {
+    uint8_t addr_type;      /* BLE_OWN_ADDR_*, as ble_gap_adv_start() consumes it */
+};
+static struct od_ble_identity s_identity;
+static volatile uint32_t      s_identity_seq = 0;
+
+/* HOST TASK ONLY. */
+static void od_ble_publish_identity(uint8_t addr_type)
+{
+    const uint32_t seq = __atomic_load_n(&s_identity_seq, __ATOMIC_RELAXED);
+    __atomic_store_n(&s_identity_seq, seq + 1u, __ATOMIC_RELEASE);   /* odd: writing */
+    s_identity.addr_type = addr_type;
+    __atomic_store_n(&s_identity_seq, seq + 2u, __ATOMIC_RELEASE);   /* even: published */
+}
+
+/* Any task. False when no coherent snapshot exists yet. */
+static bool od_ble_read_identity(struct od_ble_identity *out)
+{
+    for (unsigned attempt = 0; attempt < 4u; ++attempt) {
+        const uint32_t s1 = __atomic_load_n(&s_identity_seq, __ATOMIC_ACQUIRE);
+        if (s1 == 0u || (s1 & 1u) != 0u) {
+            continue;   /* never published, or a write is in flight */
+        }
+        const struct od_ble_identity snap = s_identity;
+        const uint32_t s2 = __atomic_load_n(&s_identity_seq, __ATOMIC_ACQUIRE);
+        if (s1 == s2) {
+            if (out) {
+                *out = snap;
+            }
+            return true;
+        }
+    }
+    /* A single writer cannot starve a reader indefinitely; four attempts is generous. Failing
+     * closed reports "no identity yet", which every caller already handles. */
+    return false;
+}
+
+static bool od_ble_identity_valid(void)
+{
+    return od_ble_read_identity(NULL);
+}
 
 /* The characteristic's stored value: the last frame written to it. Serves both the write path
  * (as its flatten scratch) and the READ path, which hands it back the way NimBLE-Arduino's
@@ -116,28 +182,39 @@ static uint16_t s_chr_value_len  = 0;
  * answers that per handle. */
 static volatile uint8_t s_conn_count = 0;
 
-static char    s_name[32]  = "OpenDisplay";
-static uint8_t s_msd[32]   = {0};
-static uint8_t s_msd_len   = 0;
+static char s_name[32] = "OpenDisplay";
 
-/* Whether the application WANTS to be advertising, as distinct from whether the stack
- * currently is.
+/* ---------------------------------------------- advertising ownership (F4, part 2) ---
  *
- * Needed because the two events race in a way the caller cannot see. Host sync is
- * asynchronous -- there is no identity address, and therefore no possible advertisement,
- * until od_on_sync() runs some milliseconds after od_ble_init() returns -- while
- * BleTransport::begin() and startAdvertising() are consecutive statements on the loop task.
- * Without this flag, whichever happened second won: a startAdvertising() that landed before
- * sync did nothing at all and returned success, and the device stayed silent until something
- * else happened to restart it.
+ * ADVERTISING POLICY NOW LIVES ON THE LOOP TASK, in the shared controller. This file no
+ * longer decides when to advertise; it supplies the HAL at the bottom and publishes facts
+ * from the stack. s_adv_wanted, s_msd and s_msd_len are GONE -- their jobs are
+ * od_adv_control's `desired` and `msd`, which are owned by exactly one context.
  *
- * It also keeps stop() honest. od_ble_advertise() is re-entered from BLE_GAP_EVENT_CONNECT
- * (failed attempt) and BLE_GAP_EVENT_ADV_COMPLETE, both on the host task, so a stop requested
- * from the loop task would otherwise be undone by the next stack event -- and the deep-sleep
- * path depends on stop meaning stop. */
-static bool s_adv_wanted = false;
+ * What that removes: the old od_ble_advertise() was re-entered from BLE_GAP_EVENT_CONNECT
+ * (failed attempt), BLE_GAP_EVENT_ADV_COMPLETE and od_on_sync() -- all HOST task -- while the
+ * loop task wrote the same flag and MSD buffer through the public API. Two writers, no
+ * ordering, and a stack event able to restart advertising after the application had committed
+ * to stop for deep sleep. That last one is the reason this is worth the churn.
+ *
+ * s_adv is touched ONLY from the loop task. Nothing below this line may call into it from a
+ * callback -- that would recreate the defect with more code.
+ */
+static struct od_adv_control s_adv;
 
-static void od_ble_advertise(void);
+/* The one fact the stack must hand across: advertising is no longer running.
+ *
+ * Consume-once rather than a level, because "it ended" is an edge and the controller reacts by
+ * reconciling. Coalescing is safe: two ends before one drain state the same thing. */
+static volatile uint8_t s_adv_ended_pending = 0;
+
+bool od_ble_service_advertising(bool start_allowed);
+
+/* HOST TASK. The only advertising-related thing a callback may now do. */
+static void od_ble_note_adv_ended(void)
+{
+    __atomic_store_n(&s_adv_ended_pending, (uint8_t)1, __ATOMIC_RELEASE);
+}
 
 /* ------------------------------------------------------------------ GATT access */
 
@@ -266,6 +343,11 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGW(TAG, "[instr] GAP CONNECT h=%u status=%d",
                  (unsigned)event->connect.conn_handle, event->connect.status);
         if (event->connect.status == 0) {
+            /* A connection consumes the advertisement. Publishing the fact keeps the
+             * controller's view truthful; without it, it would still self-correct on the next
+             * pass (its stop returns ALREADY, which is success) but would issue a pointless
+             * stack call to get there. */
+            od_ble_note_adv_ended();
             if (s_conn_count < 0xFF) {
                 __atomic_fetch_add(&s_conn_count, (uint8_t)1, __ATOMIC_RELEASE);
             }
@@ -297,6 +379,7 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
             ESP_LOGW(TAG, "[instr] GAP CONNECT status=%d link_exists=%d",
                      event->connect.status, (int)link_exists);
             if (link_exists) {
+                od_ble_note_adv_ended();   /* the link consumed it -- see the status-0 case */
                 if (s_conn_count < 0xFF) {
                     __atomic_fetch_add(&s_conn_count, (uint8_t)1, __ATOMIC_RELEASE);
                 }
@@ -308,7 +391,7 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
                 /* Genuinely no link. Resuming advertising is stack housekeeping, not policy --
                  * without it the device goes quiet after a failed connect and only a reboot
                  * brings it back. */
-                od_ble_advertise();
+                od_ble_note_adv_ended();
             }
         }
         return 0;
@@ -477,7 +560,7 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
-        od_ble_advertise();
+        od_ble_note_adv_ended();
         return 0;
 
     default:
@@ -487,18 +570,16 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
 
 /* ------------------------------------------------------------------ advertising */
 
-static void od_ble_advertise(void)
+/* Pack the ADV and scan-response records from one MSD snapshot.
+ *
+ * EXTRACTED so there is exactly ONE implementation of the on-air layout. It is called both by
+ * od_ble_advertise() below (the current path) and by od_hal_adv_program() at the end of this
+ * file (the shared controller's path). Two packers would be free to drift, and the thing most
+ * likely to drift is the byte layout every host discovers this device by.
+ *
+ * Returns false only when the record cannot be set at all. */
+static bool od_ble_pack_adv_records(const uint8_t *msd, uint8_t msd_len)
 {
-    if (!s_adv_wanted) {
-        return;
-    }
-    if (!s_addr_resolved) {
-        /* Before sync there is no identity address to advertise from, and ble_gap_adv_start()
-         * would fail with a log line on every call. od_on_sync() retries once it has one --
-         * which is the whole reason the request is remembered rather than acted on. */
-        return;
-    }
-
     struct ble_hs_adv_fields fields;
     memset(&fields, 0, sizeof fields);
 
@@ -516,9 +597,9 @@ static void od_ble_advertise(void)
     fields.name = (uint8_t *)s_name;
     fields.name_len = (uint8_t)strlen(s_name);
     fields.name_is_complete = 1;
-    if (s_msd_len) {
-        fields.mfg_data = s_msd;
-        fields.mfg_data_len = s_msd_len;
+    if (msd_len) {
+        fields.mfg_data = (uint8_t *)msd;
+        fields.mfg_data_len = msd_len;
     }
 
     int rc = ble_gap_adv_set_fields(&fields);
@@ -534,7 +615,7 @@ static void od_ble_advertise(void)
         rc = ble_gap_adv_set_fields(&fields);
         if (rc != 0) {
             ESP_LOGE(TAG, "ble_gap_adv_set_fields failed: %d", rc);
-            return;
+            return false;
         }
     }
 
@@ -550,13 +631,26 @@ static void od_ble_advertise(void)
     rsp.num_uuids128 = 1;
     rsp.uuids128_is_complete = 1;
     ble_gap_adv_rsp_set_fields(&rsp);
+    return true;
+}
 
+/* Begin advertising with whatever records were last packed. Extracted alongside the packer,
+ * and for the same reason: od_hal_adv_start() must issue the identical call. */
+static int od_ble_start_now(void)
+{
     struct ble_gap_adv_params adv;
     memset(&adv, 0, sizeof adv);
     adv.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv.disc_mode = BLE_GAP_DISC_MODE_GEN;
 
-    rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &adv, od_gap_event, NULL);
+    struct od_ble_identity id;
+    if (!od_ble_read_identity(&id)) {
+        /* Unreachable from the callers below, which all gate on the identity first. Kept as a
+         * hard floor rather than an assert: advertising from an unresolved address is a silent
+         * on-air defect, not a crash. */
+        return BLE_HS_EAGAIN;
+    }
+    int rc = ble_gap_adv_start(id.addr_type, NULL, BLE_HS_FOREVER, &adv, od_gap_event, NULL);
     /* OD-INSTRUMENTATION: stamp EVERY start, with a sequence number, so the log shows whether
      * od_gap_event was the live callback before the connection in question formed -- the
      * "event arrived before we were listening" hypothesis. rc=6 is BLE_HS_ENOMEM and is
@@ -572,23 +666,27 @@ static void od_ble_advertise(void)
     if (rc != 0 && rc != BLE_HS_EALREADY) {
         ESP_LOGE(TAG, "ble_gap_adv_start failed: %d", rc);
     }
+    return rc;
 }
+
 
 /* ------------------------------------------------------------------ host lifecycle */
 
 static void od_on_sync(void)
 {
     ble_hs_util_ensure_addr(0);
-    if (ble_hs_id_infer_auto(0, &s_own_addr_type) != 0) {
+    uint8_t own_addr_type = 0;
+    if (ble_hs_id_infer_auto(0, &own_addr_type) != 0) {
         ESP_LOGE(TAG, "no usable BLE address");
         return;
     }
     /* Published to the LAN mDNS TXT record via od_ble_get_identity_addr(); a host correlating
      * BLE with LAN matches on it, so log which kind it is. */
-    s_addr_resolved = true;
+    /* Publish the whole record, THEN it becomes visible -- see the seqlock above. */
+    od_ble_publish_identity(own_addr_type);
     ESP_LOGI(TAG, "BLE identity address type: %s",
-             (s_own_addr_type == BLE_OWN_ADDR_PUBLIC) ? "public" : "static-random");
-    od_ble_advertise();
+             (own_addr_type == BLE_OWN_ADDR_PUBLIC) ? "public" : "static-random");
+    /* NO od_ble_advertise() here any more: the loop notices the identity and starts. */
 }
 
 static void od_on_reset(int reason)
@@ -662,7 +760,13 @@ bool od_ble_init(const char *device_name)
         rc = ble_gatts_add_svcs(od_svcs);
     }
     if (rc != 0) {
-        ESP_LOGE(TAG, "GATT registration failed: %d", rc);
+        /* UNWIND WHAT WAS ACQUIRED. nimble_port_init() succeeded above, so returning here
+         * without undoing it left the host partially initialised with nothing recording that
+         * fact: s_inited stays false, so a retry calls nimble_port_init() again on top of a
+         * live init and fails there instead -- one layer away from the cause, which is the
+         * same class of mislocated failure F7 is about. */
+        ESP_LOGE(TAG, "GATT registration failed: %d -- unwinding nimble_port_init()", rc);
+        nimble_port_deinit();
         return false;
     }
 
@@ -671,6 +775,12 @@ bool od_ble_init(const char *device_name)
         ble_att_set_preferred_mtu(s_preferred_mtu);
     }
 
+    /* DELIBERATELY NO od_adv_control_init(&s_adv) HERE. s_adv is a static, so it already
+     * holds exactly that function's postcondition -- all zero, "nothing wanted, nothing
+     * running" -- on the first init. On a RE-init it must not be re-run: od_ble_deinit() calls
+     * od_adv_stack_reset(), which preserves application intent precisely so a later init
+     * resumes advertising without the caller asking again. Re-initialising here would discard
+     * the intent the deinit just took care to keep. */
     nimble_port_freertos_init(od_host_task);
     s_inited = true;
 
@@ -679,8 +789,8 @@ bool od_ble_init(const char *device_name)
      *
      * Without this, init() returns the instant the host TASK is created, while the controller
      * has not yet synced and no identity address exists. Every caller reads that as "BLE is
-     * up". Advertising happens to be safe -- od_ble_advertise() defers behind s_adv_wanted and
-     * od_on_sync() starts it -- but od_ble_get_identity_addr() is NOT: it would hand back a
+     * up". Advertising happens to be safe -- the loop's pump defers until the identity exists
+     * -- but od_ble_get_identity_addr() is NOT: it would hand back a
      * zeroed address, and that address is published in the mDNS `mac` TXT record, which is how
      * a host correlates the BLE and LAN identities of the same device. Publishing 00:00:.. is
      * worse than publishing late.
@@ -691,11 +801,11 @@ bool od_ble_init(const char *device_name)
     {
         const uint32_t kSyncTimeoutMs = 2000;
         uint32_t waited = 0;
-        while (!s_addr_resolved && waited < kSyncTimeoutMs) {
+        while (!od_ble_identity_valid() && waited < kSyncTimeoutMs) {
             vTaskDelay(pdMS_TO_TICKS(5));
             waited += 5;
         }
-        if (!s_addr_resolved) {
+        if (!od_ble_identity_valid()) {
             ESP_LOGE(TAG, "host did not sync within %u ms -- continuing, but the BLE identity "
                           "address is not available yet", (unsigned)kSyncTimeoutMs);
         }
@@ -711,7 +821,7 @@ bool od_ble_is_ready(void)
     /* Both halves: the stack is initialised AND the host has synced far enough to have an
      * identity address. s_inited alone was true before sync, so this used to answer "ready"
      * for a stack that could not yet name itself. */
-    return s_inited && s_addr_resolved;
+    return s_inited && od_ble_identity_valid();
 }
 
 bool od_ble_notify_handle(uint16_t conn_handle, const uint8_t *data, uint16_t len)
@@ -810,30 +920,71 @@ void od_ble_link_params(uint16_t conn_handle, uint8_t *tx_phy_out, uint8_t *rx_p
 
 void od_ble_set_manufacturer_data(const uint8_t *msd, uint8_t len)
 {
-    if (!msd || len == 0 || len > sizeof(s_msd)) {
-        s_msd_len = 0;
+    /* EXACTLY 16 now, where this used to take anything up to 32. The controller carries the
+     * canonical MsdAdvertisement body as one fixed record, which is what lets the payload and
+     * its revision publish together; a variable length would reintroduce the array/length pair
+     * whose torn update is half of F4. Every caller in the tree already passes 16
+     * (display_service.cpp updatemsdata()). A wrong length is refused loudly rather than
+     * silently truncated -- a short MSD is a discovery failure that looks like a dead device. */
+    if (!msd || len != (uint8_t)OD_ADV_MSD_LEN) {
+        ESP_LOGE(TAG, "MSD must be exactly %u bytes (got %u) -- advertisement not updated",
+                 (unsigned)OD_ADV_MSD_LEN, (unsigned)len);
         return;
     }
-    memcpy(s_msd, msd, len);
-    s_msd_len = len;
+    od_adv_set_payload(&s_adv, msd);
 }
 
 void od_ble_restart_advertising(void)
 {
-    if (!s_inited) {
-        return;
-    }
-    /* Recorded BEFORE the attempt, so a call made before host sync is honoured by od_on_sync()
-     * rather than lost. This is also the only way advertising ever starts. */
-    s_adv_wanted = true;
-    ble_gap_adv_stop();
-    od_ble_advertise();
+    /* INTENT ONLY. No stack call happens here any more: od_ble_service_advertising() below
+     * does the work on the loop task. That is what makes a request landing before host sync
+     * simply wait rather than fail, and it is why this no longer needs to be told whether the
+     * stack is up. */
+    od_adv_request_start(&s_adv);
 }
 
 void od_ble_stop_advertising(void)
 {
-    s_adv_wanted = false;
-    ble_gap_adv_stop();
+    od_adv_request_stop(&s_adv);
+    /* Drive the stop to completion here rather than leaving it to the next loop pass. The
+     * deep-sleep and reboot paths call this and then proceed immediately, so a deferred stop
+     * would be a stop that had not happened yet. Bounded: RETRY (a busy controller) must not
+     * turn a teardown into a hang, so give up after a few passes and let the caller continue
+     * with the radio still up rather than block the loop.
+     *
+     * This is the seed of the teardown barrier; the full version with a timeout and truthful
+     * failure reporting is plan step 7, alongside F7. */
+    for (unsigned pass = 0; pass < 8u && !od_adv_is_quiescent(&s_adv); ++pass) {
+        (void)od_ble_service_advertising(true);
+    }
+    if (!od_adv_is_quiescent(&s_adv)) {
+        ESP_LOGW(TAG, "advertising did not reach quiescence in 8 passes");
+    }
+}
+
+bool od_ble_service_advertising(bool start_allowed)
+{
+    /* THE LOOP-SIDE PUMP -- the whole point of the ownership change. Facts in, one
+     * reconciliation step out, all on this task.
+     *
+     * Called every pass, not only when something looks pending: the controller is the thing
+     * that knows whether anything is needed, and a caller second-guessing it is how the old
+     * two-owner arrangement started. */
+    if (!s_inited) {
+        return false;
+    }
+
+    /* Facts. Each is a LEVEL read from an authoritative source, except the ended edge. */
+    if (od_ble_identity_valid()) {
+        od_adv_stack_ready(&s_adv);
+    }
+    od_adv_set_connection_count(&s_adv, od_ble_connected_count());
+    if (__atomic_exchange_n(&s_adv_ended_pending, (uint8_t)0, __ATOMIC_ACQUIRE)) {
+        od_adv_observe_ended(&s_adv);
+    }
+
+    const enum od_adv_process_result r = od_adv_process(&s_adv, start_allowed);
+    return r == OD_ADV_ACTED;
 }
 
 void od_ble_set_preferred_mtu(uint16_t mtu)
@@ -846,14 +997,15 @@ void od_ble_set_preferred_mtu(uint16_t mtu)
 
 bool od_ble_get_identity_addr(uint8_t addr_out[6], uint8_t *addr_type_out)
 {
-    if (!addr_out || !s_inited || !s_addr_resolved) {
+    struct od_ble_identity id;
+    if (!addr_out || !s_inited || !od_ble_read_identity(&id)) {
         return false;
     }
     /* s_own_addr_type is BLE_OWN_ADDR_* as ble_gap_adv_start() consumes it; ble_hs_id_copy_addr
      * wants a BLE_ADDR_* identity type. The two low values coincide (PUBLIC=0, RANDOM=1) and
      * only the RPA variants differ, which this build never selects. */
-    uint8_t id_type = (s_own_addr_type == BLE_OWN_ADDR_PUBLIC) ? BLE_ADDR_PUBLIC
-                                                               : BLE_ADDR_RANDOM;
+    uint8_t id_type = (id.addr_type == BLE_OWN_ADDR_PUBLIC) ? BLE_ADDR_PUBLIC
+                                                            : BLE_ADDR_RANDOM;
     if (ble_hs_id_copy_addr(id_type, addr_out, NULL) != 0) {
         return false;
     }
@@ -863,12 +1015,20 @@ bool od_ble_get_identity_addr(uint8_t addr_out[6], uint8_t *addr_type_out)
     return true;
 }
 
-void od_ble_deinit(void)
+bool od_ble_deinit(void)
 {
     if (!s_inited) {
-        return;
+        return true;   /* already down: the caller's desired end state */
     }
-    ble_gap_adv_stop();
+    /* THE TEARDOWN BARRIER. Withdraw advertising intent and pump the controller to quiescence
+     * BEFORE stopping the host, so nothing can be advertising when the controller is released.
+     * od_ble_stop_advertising() does both and is bounded, so a stuck stop degrades to a logged
+     * warning rather than a hang -- teardown must always make progress.
+     *
+     * This replaces a bare ble_gap_adv_stop(). The difference is not the stack call, it is
+     * that INTENT is withdrawn first: a stop without that could be undone by the controller's
+     * next reconciliation, which is exactly the "stop does not mean stop" defect F4 names. */
+    od_ble_stop_advertising();
     /* nimble_port_stop() unblocks nimble_port_run() in the host task; nimble_port_deinit()
      * then tears the host down AND disables/releases the controller, which is the half that
      * od_ble_stop_advertising() never did and that esp_restart() does not do for us. */
@@ -884,7 +1044,7 @@ void od_ble_deinit(void)
          * reports failure (NimBLE-Arduino/src/NimBLEDevice.cpp:1025); this is that behaviour.
          * State is left intact so it still describes reality. */
         ESP_LOGE(TAG, "nimble_port_stop() failed -- BLE left UP, state unchanged");
-        return;
+        return false;
     }
     nimble_port_deinit();
     /* Drop the retained characteristic value. The wrapper got this for free -- deinit
@@ -893,9 +1053,104 @@ void od_ble_deinit(void)
      * read the previous session's last frame back after a teardown and restart. */
     s_chr_value_len  = 0;
     s_chr_val_handle = 0;
-    s_addr_resolved  = false;
+    /* Invalidate the identity so nothing reads a departed stack's address: leave the counter
+     * ODD, which od_ble_read_identity() treats as "no coherent snapshot".
+     *
+     * DELIBERATELY NOT A RESET TO ZERO. The counter is also the stack generation, and a later
+     * step discards facts stamped with a generation the stack has left behind -- which only
+     * works if it never repeats a value. Zeroing here would restart generations at 2 after
+     * every deinit/init cycle and make a stale fact from the previous stack indistinguishable
+     * from a current one. `| 1` invalidates while staying monotonic. */
+    {
+        const uint32_t seq = __atomic_load_n(&s_identity_seq, __ATOMIC_RELAXED);
+        __atomic_store_n(&s_identity_seq, seq | 1u, __ATOMIC_RELEASE);
+    }
     s_inited         = false;
-    s_adv_wanted     = false;
+    /* The stack is gone: invalidate applied state but KEEP application intent, so a later
+     * init resumes advertising without the caller re-requesting it. */
+    od_adv_stack_reset(&s_adv);
+    __atomic_store_n(&s_adv_ended_pending, (uint8_t)0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_conn_count, (uint8_t)0, __ATOMIC_RELEASE);
     ESP_LOGI(TAG, "NimBLE host stopped and controller released");
+    return true;
 }
+
+/* ------------------------------------------------- shared advertising HAL (od_hal_adv.h) ---
+ *
+ * The target side of the portable advertising controller
+ * (shared/core/od_adv_control.c, docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md).
+ *
+ * WHY THESE LIVE HERE AND NOT IN hal/od_hal_adv.c, where every other HAL lives. They need
+ * this file's statics -- s_name, the identity snapshot, od_svc_uuid and od_gap_event --
+ * only way to reach those from hal/ would be accessors that duplicate the state the F4 work
+ * exists to consolidate. A second home for advertising state is the defect, not the fix.
+ *
+ * extern "C" because shared/ is plain C and binds its HAL at link time; this translation unit
+ * is C++.
+ *
+ * NOT YET CALLED BY ANYTHING. od_ble_advertise() and the NimBLE callbacks still own
+ * advertising exactly as before, so on-air behaviour is unchanged by this commit. Wiring the
+ * controller in -- the event bridge, then removing advertising from the callbacks -- is plan
+ * steps 4-7 and must not land before the Milestone 0 byte fixture exists to prove those bytes
+ * did not move.
+ */
+extern "C" {
+
+enum od_hal_adv_result od_hal_adv_program(const uint8_t msd[16])
+{
+    if (!s_inited) {
+        return OD_HAL_ADV_ERROR;
+    }
+    /* Before host sync there is no identity address, so a programmed record could not be
+     * advertised anyway. RETRY, not ERROR: this is ordinary startup timing and the controller
+     * must simply try again next pass. */
+    if (!od_ble_identity_valid()) {
+        return OD_HAL_ADV_RETRY;
+    }
+    return od_ble_pack_adv_records(msd, (uint8_t)OD_ADV_MSD_LEN) ? OD_HAL_ADV_OK
+                                                                 : OD_HAL_ADV_ERROR;
+}
+
+enum od_hal_adv_result od_hal_adv_start(void)
+{
+    if (!s_inited) {
+        return OD_HAL_ADV_ERROR;
+    }
+    if (!od_ble_identity_valid()) {
+        return OD_HAL_ADV_RETRY;
+    }
+    const int rc = od_ble_start_now();
+    if (rc == 0) {
+        return OD_HAL_ADV_OK;
+    }
+    if (rc == BLE_HS_EALREADY) {
+        return OD_HAL_ADV_ALREADY;
+    }
+    /* BLE_HS_ENOMEM here is NOT a fault. With CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1, connectable
+     * undirected advertising needs a free connection object, so a client holding the single
+     * slot makes this the EXPECTED result -- see the instrumentation note in od_ble_start_now().
+     * Reporting it as RETRY keeps the controller's state truthful and lets the disconnect
+     * resolve it, where ERROR would latch a fault on entirely normal operation. */
+    if (rc == BLE_HS_ENOMEM) {
+        return OD_HAL_ADV_RETRY;
+    }
+    return OD_HAL_ADV_ERROR;
+}
+
+enum od_hal_adv_result od_hal_adv_stop(void)
+{
+    if (!s_inited) {
+        return OD_HAL_ADV_ERROR;
+    }
+    const int rc = ble_gap_adv_stop();
+    if (rc == 0) {
+        return OD_HAL_ADV_OK;
+    }
+    /* Already stopped is the outcome the caller wanted. */
+    if (rc == BLE_HS_EALREADY) {
+        return OD_HAL_ADV_NOT_ACTIVE;
+    }
+    return OD_HAL_ADV_ERROR;
+}
+
+} /* extern "C" */

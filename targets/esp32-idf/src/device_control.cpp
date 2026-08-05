@@ -277,9 +277,19 @@ static void esp32_ble_deinit_before_restart() {
 #endif
     ble.stopAdvertising();
     od_hal_delay_ms(200);
-    ble.end();                    // clearAll: disables + releases the BT controller
+    // F7: THIS is the path where a failed teardown actually costs something. esp_restart()
+    // resets the CPU but NOT the controller, so if the stack is still up here, the next boot
+    // re-enters od_ble_init() against a live controller, nimble_port_init() fails, and BLE is
+    // dead for that entire boot with only a log line to explain it. The restart proceeds --
+    // refusing to reboot on this would be worse -- but the log now names the cause in advance
+    // instead of leaving the next boot's failure unexplained.
+    if (ble.end()) {              // clearAll: disables + releases the BT controller
+        od_log_info("BLE deinitialized before restart");
+    } else {
+        od_log_error("ERROR: BLE teardown FAILED before restart -- the controller is still "
+                     "enabled; expect nimble_port_init() to fail on the next boot");
+    }
     od_hal_delay_ms(100);
-    od_log_info("BLE deinitialized before restart");
 }
 #endif
 

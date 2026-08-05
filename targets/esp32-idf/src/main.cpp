@@ -37,6 +37,9 @@
  * `static HardwareSerial LogSerialPort` and hand it to od_log_init() as a `Stream *`; the
  * pin/UART defines and compat/HardwareSerial.h went with it. */
 #include "od_hal_log.h"
+/* od_ble_service_advertising(): the loop-side advertising pump (F4). ESP32-only -- the nRF
+ * target's stack re-arms advertising itself and has no equivalent seam yet. */
+#include "od_ble.h"
 #endif
 #include "od_hal_i2c.h"
 #include "od_hal_gpio.h"
@@ -1036,6 +1039,18 @@ void loop() {
         updatemsdata();
     }
     serviceBleAdvertisingRestart();   // no-op where the stack re-arms itself
+#ifdef TARGET_ESP32
+    // Reconcile advertising, every pass, on THIS task. The NimBLE callbacks no longer start or
+    // stop advertising -- they publish facts and this drives one step (F4).
+    //
+    // Unconditional by design. serviceBleAdvertisingRestart() above still owns the "should we
+    // WANT to advertise" decision and the pending-flag bookkeeping; this owns "given what is
+    // wanted and what the stack is doing, what is the single next action". The refresh gate is
+    // passed in rather than checked inside, because it is an application fact the BLE layer
+    // has no business knowing: while a refresh runs, a NEW start waits -- but a running
+    // advertisement is never withdrawn for it.
+    (void)od_ble_service_advertising(!epdRefreshInProgress);
+#endif
 
     // Session watchdogs. Shared as of Phase 4: these are transport-agnostic and
     // were ESP32-only for no reason other than living in the ESP32 loop arm, so
@@ -1263,9 +1278,16 @@ void enterDeepSleep(bool force, uint16_t overrideSleepSeconds) {
     woke_from_deep_sleep = true; // Will be true on next boot
     ble.stopAdvertising();
     od_hal_delay_ms(200);
-    ble.end();
+    // F7: report the truth. Deep sleep powers the digital core down, so a failed teardown does
+    // not strand the controller here the way it would before esp_restart() -- but "BLE
+    // deinitialized" printed unconditionally is how a failure this path CAN have became
+    // invisible. Sleep proceeds either way; the log now says which happened.
+    if (ble.end()) {
+        od_log_info("BLE deinitialized");
+    } else {
+        od_log_warn("BLE teardown FAILED -- sleeping anyway; the core powers down regardless");
+    }
     od_hal_delay_ms(100);
-    od_log_info("BLE deinitialized");
     // Host override (0x0053 payload) applies to this one cycle only: it is a
     // parameter, never stored, so an aborted or later sleep reverts to config.
     uint16_t sleepSeconds = overrideSleepSeconds ? overrideSleepSeconds

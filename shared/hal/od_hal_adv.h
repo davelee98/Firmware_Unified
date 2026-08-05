@@ -16,6 +16,14 @@
 
 #include <stdint.h>
 
+/* shared/ is plain C, but not every target is: the ESP32 implements this HAL inside a C++
+ * translation unit (ble/od_ble_nimble.cpp), because that is where the NimBLE state it needs
+ * lives. Without this guard those definitions get C++ linkage and fail to match the C caller
+ * in shared/core. The host tests are C-only and structurally cannot catch it. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Result of one HAL operation.
  *
  * ALREADY and NOT_ACTIVE are IDEMPOTENT SUCCESS, not faults -- a stop on something already
@@ -59,5 +67,9 @@ enum od_hal_adv_result od_hal_adv_start(void);
  * it can.
  */
 enum od_hal_adv_result od_hal_adv_stop(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* OD_HAL_ADV_H */

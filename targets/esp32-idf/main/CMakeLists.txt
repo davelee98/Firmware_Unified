@@ -7,6 +7,15 @@
 set(OD_SRC_DIR ${CMAKE_CURRENT_LIST_DIR}/../src)
 set(OD_LIB_DIR ${CMAKE_CURRENT_LIST_DIR}/../lib)
 
+# shared/ -- ONE source list, four consumers (shared/sources.cmake). This target is the first
+# to consume it; until 2026-08-05 it took only shared/protocol's headers, so a file added to
+# shared/ compiled on the host and nowhere else. That is exactly the gap the single list
+# exists to close: adding a shared source that no target compiles must be a build error here,
+# not an omission nobody notices.
+#
+# Sets OD_SHARED_SOURCES and OD_SHARED_INCLUDE_DIRS. Do not glob shared/ from this file.
+include(${CMAKE_CURRENT_LIST_DIR}/../../../shared/sources.cmake)
+
 file(GLOB OD_APP_SOURCES
     ${OD_SRC_DIR}/*.cpp
     ${OD_SRC_DIR}/*.c
@@ -46,6 +55,12 @@ list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_nvs.c
                            ${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_bbep.cpp
                            ${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_fastepd.cpp
                            ${CMAKE_CURRENT_LIST_DIR}/../ble/od_ble_nimble.cpp)
+
+# Shared sources. First entry is core/od_adv_control.c -- the portable advertising controller
+# (docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md). Compiled and linked here, but NOT yet called: the
+# NimBLE callbacks still own advertising, so this commit changes no on-air behaviour. Its
+# od_hal_adv_{program,start,stop} implementations are at the bottom of ble/od_ble_nimble.cpp.
+list(APPEND OD_APP_SOURCES ${OD_SHARED_SOURCES})
 
 # ble/od_ble_rx.cpp is GONE, not forgotten. It held od_ble_on_write(): the bounds check,
 # the RX hex log and the enqueue. All three now live in src/command_queue.cpp's
@@ -144,9 +159,11 @@ idf_component_register(
         # nor is ../vendor/fastepd. All three are granted per-source below. ../panel stays --
         # it is OUR code (the IDF backend), not a vendored tree.
         ${CMAKE_CURRENT_LIST_DIR}/../panel
-        # The wire contract, consumed directly from shared/ -- NOT copied into this target.
-        # This is the whole reason phase A left include/opendisplay_protocol.h behind.
-        ${CMAKE_CURRENT_LIST_DIR}/../../../shared/protocol
+        # shared/ -- the wire contract AND, since 2026-08-05, shared sources and their headers.
+        # Consumed directly, NOT copied into this target: that is the whole reason phase A left
+        # include/opendisplay_protocol.h behind. The list comes from shared/sources.cmake so
+        # this target cannot drift from the host build's view of shared/.
+        ${OD_SHARED_INCLUDE_DIRS}
     REQUIRES
         bt nvs_flash esp_timer driver esp_wifi esp_event mbedtls spiffs vfs esp_adc
         # esp_lcd: FastEPD drives the S3 LCD peripheral for parallel e-paper

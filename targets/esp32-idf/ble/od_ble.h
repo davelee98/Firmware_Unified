@@ -72,8 +72,17 @@ bool od_ble_init(const char *device_name);
  * (software-reset) boot re-enters od_ble_init() with a controller that is already enabled;
  * nimble_port_init() then fails and BLE comes up dead for the rest of that boot, with only
  * a log line to say so. Stopping advertising is NOT a substitute -- it does not touch the
- * controller at all. Not needed before deep sleep: that powers the digital core down. */
-void od_ble_deinit(void);
+ * controller at all. Not needed before deep sleep: that powers the digital core down.
+ *
+ * Withdraws advertising intent and pumps the controller to quiescence before stopping the
+ * host, so nothing is advertising when the controller is released.
+ *
+ * RETURNS FALSE WHEN THE STACK IS STILL UP. nimble_port_stop() can fail, and this reports that
+ * rather than swallowing it: on failure the host task and controller remain allocated and this
+ * file's state is left describing reality. A caller that clears its own readiness regardless
+ * makes the two layers disagree -- the upper one saying BLE is down while the lower one knows
+ * it is not -- which is correctness-review finding F7. Clear caller state only on true. */
+bool od_ble_deinit(void);
 
 /* True once the GATT server is registered and the host task is running. */
 bool od_ble_is_ready(void);
@@ -97,6 +106,19 @@ void od_ble_stop_advertising(void);
  * restarting under a live connection is a policy question the transport answers, not this
  * layer. `len` is the 16-byte MSD payload from the advert builder. */
 void od_ble_set_manufacturer_data(const uint8_t *msd, uint8_t len);
+
+/* Service advertising: publish stack facts into the shared controller and run ONE
+ * reconciliation step. Call every loop pass -- the controller decides whether anything is
+ * needed, and a caller that tries to decide for it is how two owners appear.
+ *
+ * start_allowed gates a NEW start only; it never stops a running advertisement. Pass false
+ * while an EPD refresh is in progress, so a restart waits for the panel rather than the
+ * advertisement being withdrawn mid-refresh.
+ *
+ * Returns true when this pass made a stack call, for logging. LOOP TASK ONLY -- never from a
+ * stack callback; that is the ownership rule the whole design rests on.
+ */
+bool od_ble_service_advertising(bool start_allowed);
 
 /* ------------------------------------------------------------------ connections */
 

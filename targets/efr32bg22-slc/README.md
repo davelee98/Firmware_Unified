@@ -200,3 +200,26 @@ What is **not** yet done is wiring `slc` to it: there is no `.slconf` in the pro
 `~/.uc/cli/cli.config` registers no SDK, so `slc generate` must be given
 `--sdk-package-path <the path above>` (or a project `.slconf`) to find it. That is a
 configuration step, not an install — do not record it as a missing prerequisite.
+
+## Required at import: the advertising HAL
+
+`shared/core/od_adv_control.c` is in `shared/sources.cmake`, so **the moment this target
+consumes that list it must supply `od_hal_adv_{program,start,stop}`** — see
+[shared/hal/od_hal_adv.h](../../shared/hal/od_hal_adv.h). Link-time C functions; omitting them
+fails at link with three undefined references, which is the intended failure.
+
+No compile-tested stub is committed here: this directory is one README with no build system, so
+a stub would have nothing to compile it and would rot unnoticed.
+
+**This target is the proof that the controller needs no kernel**, which is why it matters more
+here than anywhere else. `od_adv_control` is run-to-completion, statically allocated, allocates
+nothing and blocks on nothing, so the adapter is:
+
+- record BGAPI facts during the event callback — connection count, advertising ended, stack
+  ready — and return;
+- run `od_adv_process()` at the tail of the same superloop pass, after the handler returns;
+- keep AD-record construction and `sl_bt_legacy_advertiser_set_data` in the adapter.
+
+No RTOS queue, no work item, no synthetic task. If a future change to `shared/` makes that
+impossible — a scheduler, a heap allocation, a blocking wait, or a large automatic buffer —
+that is a defect in `shared/` to be corrected there, not worked around with a Silabs fork.

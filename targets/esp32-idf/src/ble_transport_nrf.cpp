@@ -281,9 +281,13 @@ void BleTransport::stopAdvertising() {
     Bluefruit.Advertising.stop();
 }
 
-void BleTransport::end() {
+bool BleTransport::end() {
     // No-op: the SoftDevice stays up for the life of the nRF firmware. Only the
     // ESP32 tears the controller down (deep sleep / pre-restart).
+    //
+    // Returns true because the caller's desired end state -- "do not proceed believing BLE is
+    // down when it is not" -- is satisfied: nothing was torn down and nothing claims it was.
+    return true;
 }
 
 bool BleTransport::isReady() const {
