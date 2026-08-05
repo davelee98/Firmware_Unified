@@ -80,6 +80,14 @@ add_executable(od_config_asm_test config_asm_test.c)
 target_link_libraries(od_config_asm_test od_shared)
 add_test(NAME config_asm COMMAND od_config_asm_test)
 
+# config_tlv: the config-blob walk and its CRC. The walk is the PRE-AUTH attack surface -- this
+# blob is parsed at boot from storage a client can write -- so the cases that matter are the
+# hostile ones, and the CRC is checked DIFFERENTIALLY against an independent transcription of
+# the shipped algorithm rather than against constants derived from the code under test.
+add_executable(od_config_tlv_test config_tlv_test.c)
+target_link_libraries(od_config_tlv_test od_shared)
+add_test(NAME config_tlv COMMAND od_config_tlv_test)
+
 # replay_vectors: the corpus replayed through py-opendisplay's public API. This is the
 # dual-stack half of the contract test — the same vectors will later run against the C
 # core, and a vector the two sides disagree on is exactly the host/firmware divergence
