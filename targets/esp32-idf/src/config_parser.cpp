@@ -6,7 +6,8 @@
 #include "encryption.h"
 #include "power_latch.h"
 #include "wifi_service.h"  // OPENDISPLAY_HAS_WIFI + lanActivePort()/lanTlsEnabled()
-#include <Arduino.h>
+
+#include <stdio.h>
 #include <string.h>
 
 #ifdef TARGET_NRF
@@ -19,7 +20,11 @@ using namespace Adafruit_LittleFS_Namespace;
  * is od_hal_nvs, shaped per docs/SHARED_API_DESIGN.md so the eventual promotion of this
  * subsystem into shared/core is a repoint rather than a rewrite. */
 #include "od_hal_nvs.h"
-#include <WiFi.h>
+/* The one network thing this file needs: the STA address, for a status log line. Included
+ * under TARGET_ESP32 rather than OPENDISPLAY_HAS_WIFI because the log line itself is not
+ * gated on WiFi being compiled in -- on a board without it, the lookup simply returns NULL
+ * and the line prints "?". esp_netif is part of IDF regardless. */
+#include "esp_netif.h"
 #endif
 
 #ifndef COMM_MODE_BLE
@@ -755,8 +760,17 @@ void printConfigSummary(){
             od_log_debug("  WiFi SSID: (configured)");  // credential; not logged verbatim
             if (wifiInitialized) {
                 if (wifiConnected) {
-                    String localIp = WiFi.localIP().toString();
-                    od_log_debug("  WiFi Status: Connected (IP: %s)", localIp.c_str());
+                    // Was WiFi.localIP().toString(). esp_netif directly: the Arduino
+                    // IPAddress/String round-trip existed only to format four bytes, and this
+                    // file is a config parser -- the pre-auth attack surface heading for
+                    // shared/core, where neither type may appear.
+                    char ipStr[16] = "?";
+                    esp_netif_t* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+                    esp_netif_ip_info_t ipInfo;
+                    if (sta != NULL && esp_netif_get_ip_info(sta, &ipInfo) == ESP_OK) {
+                        snprintf(ipStr, sizeof(ipStr), IPSTR, IP2STR(&ipInfo.ip));
+                    }
+                    od_log_debug("  WiFi Status: Connected (IP: %s)", ipStr);
                 } else {
                     od_log_debug("  WiFi Status: Disconnected");
                 }

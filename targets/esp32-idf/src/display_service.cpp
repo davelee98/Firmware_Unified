@@ -1,9 +1,26 @@
 #include "display_service.h"
 
+/* THE ESP32 HALF OF THIS FILE IS OFF THE SHIM (phase C step 14). The 41 Wire transactions and
+ * 13+4 read clusters went to od_hal_i2c, GPIO to od_hal_gpio, millis/delay to od_hal_time, and
+ * the one analogRead() to od_hal_adc.
+ *
+ * <Arduino.h> STAYS, guarded, and this file stays on the ratchet's list -- its TARGET_NRF arms
+ * still need it (epdBsPinLowIfNrf()'s pinMode/digitalWrite and prepareEpdRailForBoot()'s two
+ * delay(50) calls). Eight call sites, none of which compiles on this target, so none can be
+ * verified here. Same rule main.cpp, buzzer_hw.cpp, device_control.cpp and encryption.cpp are
+ * counted under; they leave together at MIGRATION step 4.
+ *
+ * Do NOT drop this include to make the number go down -- that is the laundered decrement
+ * compat/SHIM_BUDGET exists to catch. */
+#ifdef TARGET_NRF
 #include <Arduino.h>
+#endif
 #include <bb_epaper.h>
 #include <string.h>
-#include <Wire.h>
+#include "od_hal_i2c.h"
+#include "od_hal_gpio.h"
+#include "od_hal_time.h"
+#include "od_hal_adc.h"
 #include "structs.h"
 /* OD-PORT: two panel IC values this file compares against are missing from
  * shared/protocol/ -- they were added to Firmware's VENDORED copy of the wire contract
@@ -57,7 +74,7 @@ extern "C" {
 
 #ifdef TARGET_ESP32
 #include "wifi_service.h"
-#include <SPI.h>
+#include "od_bbep_stream.h"
 #endif
 
 #include "ble_transport.h"
@@ -99,7 +116,7 @@ volatile bool epdRefreshInProgress = false;
 // loop-side edge detector cannot see this transition, because loop() does not run
 // for the refresh's whole duration -- both edges happen inside the blocking
 // handler while wall-clock time passes. The activity clock has to be re-stamped AT
-// the transition or a naive millis()-lastStamp accrues the entire refresh and drops
+// the transition or a naive od_hal_uptime_ms()-lastStamp accrues the entire refresh and drops
 // an actively engaged client the instant loop() resumes.
 //
 // Re-stamping can only ever DELAY a drop, never cause a spurious one, which is why
@@ -147,7 +164,6 @@ struct PartialStreamContext {
 };
 
 void pwrmgm(bool onoff);
-String getChipIdHex();
 void bbepInitIO(BBEPDISP *pBBEP, uint8_t u8DC, uint8_t u8RST, uint8_t u8BUSY, uint8_t u8CS, uint8_t u8MOSI, uint8_t u8SCK, uint32_t u32Speed);
 void bbepWakeUp(BBEPDISP *pBBEP);
 void bbepSendCMDSequence(BBEPDISP *pBBEP, const uint8_t *pSeq);
@@ -241,13 +257,13 @@ static uint8_t e1004_panel_byte(uint8_t packed) {
 
 static void e1004_ccset_both(void) {
     uint8_t data = 0x01;
-    digitalWrite(bbep.iCS2Pin, LOW);
+    od_hal_gpio_write(bbep.iCS2Pin, false);
     bbep.iCSPin = bbep.iCS1Pin;
     bbepWriteCmdData(&bbep, 0xe0, &data, 1);
-    digitalWrite(bbep.iCS2Pin, HIGH);
+    od_hal_gpio_write(bbep.iCS2Pin, true);
     bbep.iCSPin = bbep.iCS1Pin;
     bbepWaitBusy(&bbep);
-    delay(10);
+    od_hal_delay_ms(10);
 }
 
 static uint32_t e1004_half_plane_bytes(void) {
@@ -263,22 +279,30 @@ bool e1004_begin_plane(void) {
     e1004OnLeftHalf = true;
     bbep.iCSPin = bbep.iCS1Pin;
     bbepStartDataStream(&bbep, UC8151_DTM1);
+    /* Payload now goes to the bb_epaper backend's SPI device, not the Arduino SPI object in
+     * vendor/fastepd. Those were TWO devices on SPI2_HOST -- see panel/od_bbep_stream.h.
+     * Opened after bbepStartDataStream() because that issues the controller's data-write
+     * command, which needs the backend's own CS framing. */
+    od_bbep_stream_begin(bbep.iCSPin);
     e1004StreamOpen = true;
     return true;
 }
 
 bool e1004_advance_to_cs2(void) {
     if (!e1004StreamOpen || !e1004OnLeftHalf) return false;
+    od_bbep_stream_end();          /* release CS1 before the command frames below */
     bbepEndDataStream(&bbep);
     e1004OnLeftHalf = false;
     e1004HalfBytesWritten = 0;
     bbep.iCSPin = bbep.iCS2Pin;
     bbepStartDataStream(&bbep, UC8151_DTM1);
+    od_bbep_stream_begin(bbep.iCSPin);   /* ...and hold CS2 for the right half */
     return true;
 }
 
 void e1004_end_plane(void) {
     if (!e1004StreamOpen) return;
+    od_bbep_stream_end();
     bbepEndDataStream(&bbep);
     bbep.iCSPin = bbep.iCS1Pin;
     e1004StreamOpen = false;
@@ -294,7 +318,7 @@ void e1004_write_stream_bytes(const uint8_t* data, uint16_t len) {
         uint16_t n = (uint16_t)(len - off);
         if (n > sizeof(scratch)) n = sizeof(scratch);
         for (uint16_t i = 0; i < n; i++) scratch[i] = e1004_panel_byte(data[off + i]);
-        SPI.writeBytes(scratch, n);
+        od_bbep_stream_write(scratch, n);
         off = (uint16_t)(off + n);
     }
     e1004HalfBytesWritten += len;
@@ -368,7 +392,7 @@ static void initBbepPanelSession() {
 #ifdef BBEP_T133A01
     if (e1004_panel_used()) {
         e1004InitPanel();
-        delay(200);
+        od_hal_delay_ms(200);
         return;
     }
 #endif
@@ -376,7 +400,7 @@ static void initBbepPanelSession() {
     bbepWakeUp(&bbep);
     bbepSendCMDSequence(&bbep, bbep.pInitFull);
     epdAlignCustomPartialRamMode();
-    delay(200);
+    od_hal_delay_ms(200);
 }
 
 // ---------------------------------------------------------------------------
@@ -433,11 +457,11 @@ static uint32_t epdKeepAliveWindowMs(void) {
 static void pwrmgmLockTake(void) {
     // The yield here is now belt-and-braces. It was load-bearing under the old
     // model: this ran on the Bluefruit callback task, which outranks the loop
-    // task holding the lock during the tick's ForceOff (SPI ops + delay(50)), so
+    // task holding the lock during the tick's ForceOff (SPI ops + od_hal_delay_ms(50)), so
     // a bare busy-spin starved the lower-priority holder forever on the single
     // core (priority-inversion livelock). With one task there is nothing to spin
-    // against, but delay(1) is vTaskDelay and stays correct if that ever changes.
-    while (__atomic_exchange_n(&pwrmgmLock, 1, __ATOMIC_ACQUIRE)) { delay(1); }
+    // against, but od_hal_delay_ms(1) is vTaskDelay and stays correct if that ever changes.
+    while (__atomic_exchange_n(&pwrmgmLock, 1, __ATOMIC_ACQUIRE)) { od_hal_delay_ms(1); }
 }
 static bool pwrmgmLockTryTake(void) {
     return __atomic_exchange_n(&pwrmgmLock, 1, __ATOMIC_ACQUIRE) == 0;
@@ -460,7 +484,7 @@ static void epdSessionForceOffLocked(void) {
 #endif
     } else {
         bbepSleep(&bbep, 1);
-        delay(50);
+        od_hal_delay_ms(50);
         /* Release the SPI bus and device now that the controller is asleep and no further
          * bytes are going out. Must be AFTER bbepSleep(), which still needs the bus to send
          * the sleep command, and BEFORE pwrmgm(false), which cuts the rail and parks the pins.
@@ -492,17 +516,17 @@ static bool epdRailUsesAxp2101(void) {
 static bool epdSessionAcquire(bool partialInit) {
     pwrmgmLockTake();
     bool cold;
-    const uint32_t tAcquire = millis();
+    const uint32_t tAcquire = od_hal_uptime_ms();
     if (pwrmgmState == PWR_OFF) {
         od_log_info("[EPD session] acquire: COLD bring-up");
         /* pwrmgm(true) FIRST, and timed: it asserts the panel rail, waits 800 ms for it to
          * settle, and -- when an AXP2101 PMIC is configured -- runs initAXP2101() over I2C.
          * That is the largest unattributed block on this path and it runs before any panel
          * byte moves, so a stall here must not be misread as a panel that will not answer. */
-        uint32_t tRail = millis();
+        uint32_t tRail = od_hal_uptime_ms();
         pwrmgm(true);   // -> PWR_ACTIVE (guarded; real transition)
         od_log_debug("[EPD cold] pwrmgm(on) %u ms (rail + 800 ms settle%s)",
-                     (unsigned)(millis() - tRail),
+                     (unsigned)(od_hal_uptime_ms() - tRail),
                      epdRailUsesAxp2101() ? " + AXP2101 I2C" : "");
         if (!epdSessionUsesFastepd()) {
             const DisplayConfig& d = globalConfig.displays[0];
@@ -521,23 +545,23 @@ static bool epdSessionAcquire(bool partialInit) {
                  * host times out. Naming the step that costs the time is the difference
                  * between reading a log and guessing. Cheap: four log lines per cold acquire,
                  * not per transfer. */
-                uint32_t tStep = millis();
+                uint32_t tStep = od_hal_uptime_ms();
                 bbepInitIO(&bbep, d.dc_pin, d.reset_pin, d.busy_pin, d.cs_pin, d.data_pin, d.clk_pin, 8000000);
-                od_log_debug("[EPD cold] bbepInitIO %u ms", (unsigned)(millis() - tStep));
+                od_log_debug("[EPD cold] bbepInitIO %u ms", (unsigned)(od_hal_uptime_ms() - tStep));
 
-                tStep = millis();
+                tStep = od_hal_uptime_ms();
                 bbepWakeUp(&bbep);
-                od_log_debug("[EPD cold] bbepWakeUp %u ms", (unsigned)(millis() - tStep));
+                od_log_debug("[EPD cold] bbepWakeUp %u ms", (unsigned)(od_hal_uptime_ms() - tStep));
 
                 const uint8_t* initSeq = partialInit ? (bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull)
                                                      : bbep.pInitFull;
-                tStep = millis();
+                tStep = od_hal_uptime_ms();
                 bbepSendCMDSequence(&bbep, initSeq);
                 od_log_debug("[EPD cold] initSeq (%s) %u ms",
-                             partialInit ? "partial" : "full", (unsigned)(millis() - tStep));
-                tStep = millis();
+                             partialInit ? "partial" : "full", (unsigned)(od_hal_uptime_ms() - tStep));
+                tStep = od_hal_uptime_ms();
                 epdAlignCustomPartialRamMode();
-                od_log_debug("[EPD cold] alignRamMode %u ms", (unsigned)(millis() - tStep));
+                od_log_debug("[EPD cold] alignRamMode %u ms", (unsigned)(od_hal_uptime_ms() - tStep));
                 epdSessionInitWasPartial = partialInit;
             }
         }
@@ -560,15 +584,15 @@ static bool epdSessionAcquire(bool partialInit) {
                 /* Same breakdown as the cold path. A WARM re-acquire skips the rail and the
                  * SPI bring-up, so if it ALSO stalls then the panel is not answering for a
                  * reason unrelated to power -- which is worth being able to tell apart. */
-                uint32_t tStep = millis();
+                uint32_t tStep = od_hal_uptime_ms();
                 bbepWakeUp(&bbep);
-                od_log_debug("[EPD warm] bbepWakeUp %u ms", (unsigned)(millis() - tStep));
+                od_log_debug("[EPD warm] bbepWakeUp %u ms", (unsigned)(od_hal_uptime_ms() - tStep));
                 const uint8_t* initSeq = partialInit ? (bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull)
                                                      : bbep.pInitFull;
-                tStep = millis();
+                tStep = od_hal_uptime_ms();
                 bbepSendCMDSequence(&bbep, initSeq);
                 od_log_debug("[EPD warm] initSeq (%s) %u ms",
-                             partialInit ? "partial" : "full", (unsigned)(millis() - tStep));
+                             partialInit ? "partial" : "full", (unsigned)(od_hal_uptime_ms() - tStep));
                 epdAlignCustomPartialRamMode();
                 epdSessionInitWasPartial = partialInit;
             }
@@ -579,7 +603,7 @@ static bool epdSessionAcquire(bool partialInit) {
      * small parts means the time is somewhere still uninstrumented -- which is exactly the
      * ambiguity the first instrumented build left, and the reason this line exists. */
     od_log_info("[EPD session] acquire done: %s, %u ms total",
-                cold ? "COLD" : "WARM", (unsigned)(millis() - tAcquire));
+                cold ? "COLD" : "WARM", (unsigned)(od_hal_uptime_ms() - tAcquire));
     pwrmgmLockGive();
     return cold;
 }
@@ -597,7 +621,7 @@ static void epdSessionRelease(bool refreshSuccess) {
         epdSessionForceOffLocked();
     } else {
         pwrmgmState = PWR_WARM;
-        pwrmgmOffDeadlineMs = millis() + window;
+        pwrmgmOffDeadlineMs = od_hal_uptime_ms() + window;
         // Controller stays AWAKE (no bbepSleep; is_awake stays 1); rail/SPI stay up.
         od_log_info("[EPD session] release: panel warm-idle, off in %u ms", (unsigned)window);
     }
@@ -614,7 +638,7 @@ void epdSessionTick(void) {
     if (pwrmgmState != PWR_WARM) return;   // fast pre-check (only WARM arms the timer)
     if (!pwrmgmLockTryTake()) return;      // held by a transfer -> skip this pass
     // Re-check under the lock: a transfer may have moved us out of WARM meanwhile.
-    if (pwrmgmState == PWR_WARM && (int32_t)(millis() - pwrmgmOffDeadlineMs) >= 0) {
+    if (pwrmgmState == PWR_WARM && (int32_t)(od_hal_uptime_ms() - pwrmgmOffDeadlineMs) >= 0) {
         od_log_info("[EPD session] keep-alive expired — powering panel off");
         epdSessionForceOffLocked();
     }
@@ -676,10 +700,10 @@ static const uint32_t TRANSFER_WATCHDOG_MS = 900000UL;   // 15 min (upload + ref
 
 void checkTransferTimeouts(void) {
     // No "&& startTime > 0" sentinel on either watchdog: each START sets the active
-    // flag and its millis() stamp in straight-line setup with no return between, so
+    // flag and its od_hal_uptime_ms() stamp in straight-line setup with no return between, so
     // the flag already implies a valid stamp. Zero is a legitimate stamp -- treating
     // it as "unset" would permanently disable the watchdog for a transfer that began
-    // in the ~1 ms window where millis() wraps through zero. Of order one in 10^9
+    // in the ~1 ms window where od_hal_uptime_ms() wraps through zero. Of order one in 10^9
     // transfers, so this is removing a special case from the invariant rather than
     // fixing a live risk.
     // Both branches route through the ONE teardown routine (CONNECTION_POLICY R6's
@@ -714,7 +738,7 @@ void checkTransferTimeouts(void) {
         (!lanOwnsTransfer && owner.who == OWNER_BLE);
 
     if (directWriteActive) {
-        uint32_t directWriteDuration = millis() - directWriteStartTime;
+        uint32_t directWriteDuration = od_hal_uptime_ms() - directWriteStartTime;
         if (directWriteDuration > TRANSFER_WATCHDOG_MS) {
             od_log_error("ERROR: Direct write timeout (%u ms) - aborting session", (unsigned)directWriteDuration);
             abortToKnownState("direct-write transfer watchdog", dropOwnersLink, owner);
@@ -723,7 +747,7 @@ void checkTransferTimeouts(void) {
     }
 
     if (partialCtx.active &&
-        (millis() - partialCtx.start_time) > TRANSFER_WATCHDOG_MS) {
+        (od_hal_uptime_ms() - partialCtx.start_time) > TRANSFER_WATCHDOG_MS) {
         od_log_error("ERROR: Partial write timeout - aborting session");
         abortToKnownState("partial transfer watchdog", dropOwnersLink, owner);
         return;
@@ -743,7 +767,7 @@ void checkTransferTimeouts(void) {
     //
     // Deliberately NOT a workInFlight term. A transfer whose transport is gone
     // cannot progress, so holding the loop awake for it burns power for work that
-    // will never happen -- on nRF a delay(1) gate is below the tickless threshold
+    // will never happen -- on nRF a od_hal_delay_ms(1) gate is below the tickless threshold
     // and spins rather than sleeping. Remove the state; do not idle on it.
     if (pipeState.active && !pipeState.error && !directWriteActive && !partialCtx.active) {
         od_log_error("ERROR: orphaned pipe session (no hardware half) - resetting");
@@ -928,7 +952,7 @@ bool waitforrefresh(int timeout){
     // error check stays valid at a 10 ms first poll. Loop bound scales x10
     // (timeout*100 iterations of 10 ms); dot cadence every 50 iters keeps ~0.5 s/dot.
     for (size_t i = 0; i < (size_t)(timeout * 100); i++){
-        delay(10);
+        od_hal_delay_ms(10);
         if(i % 50 == 0) od_log_raw(".");
         if(!bbepIsBusy(&bbep)){
             if(i == 0){
@@ -937,7 +961,7 @@ bool waitforrefresh(int timeout){
             }
             od_log_raw(".\n");
             od_log_info("Refresh took %.2f seconds", (float)i / 100);
-//            delay(200);   // EXTRA DELAY HERE IS UNNEEDED AND JUST SLOWS THINGS DOWN
+//            od_hal_delay_ms(200);   // EXTRA DELAY HERE IS UNNEEDED AND JUST SLOWS THINGS DOWN
             return true;
         }
     }
@@ -951,26 +975,51 @@ static int8_t s_wire_sda_pin = -1;
 static int8_t s_wire_scl_pin = -1;
 static uint32_t s_wire_clock_hz = 0;
 
+/* Bus bring-up, with compat/Wire.h's begin() semantics preserved EXACTLY (phase C step 14).
+ *
+ * A named three-line function over od_hal_i2c, not a re-implementation of the Arduino object:
+ * the difference matters, because the two behaviours below are load-bearing at call sites that
+ * were written against them.
+ *
+ *   1. ALREADY-UP WINS, whatever pins are asked for. The shim returned true without touching
+ *      hardware when the bus was up, and callers rely on that to be idempotent.
+ *   2. NO DEFAULT PINS. odI2cBegin(-1, -1, 100000u) with no arguments passed sda = scl = -1 and therefore
+ *      returned FALSE unless the bus happened to be up already. Two call sites below are
+ *      commented "Uses default I2C pins" -- THEY NEVER DID. That is a pre-existing defect,
+ *      translated faithfully rather than fixed: on a board where those paths matter, giving
+ *      them real pins changes which bus comes up and on which GPIOs, which is a hardware
+ *      question. Flagged here so it is findable.
+ */
+static bool odI2cBegin(int sda, int scl, uint32_t hz) {
+    if (od_hal_i2c_is_up()) {
+        return true;
+    }
+    if (sda < 0 || scl < 0) {
+        return false;
+    }
+    return od_hal_i2c_init((uint8_t)sda, (uint8_t)scl, hz);
+}
+
 static bool wireBeginForOpenDisplay(int sda, int scl, uint32_t hz) {
     // Do not pinMode() before begin on ESP32 — periman must hand pins to the I2C driver.
-    if (Wire.begin(sda, scl, hz)) {
-        Wire.setClock(hz);
+    if (odI2cBegin(sda, scl, hz)) {
+        od_hal_i2c_set_clock(hz);
         s_wire_sda_pin = (int8_t)sda;
         s_wire_scl_pin = (int8_t)scl;
         s_wire_clock_hz = hz;
         s_wire_open_display_ready = true;
         return true;
     }
-    if (hz > 100000u && Wire.begin(sda, scl, 100000u)) {
+    if (hz > 100000u && odI2cBegin(sda, scl, 100000u)) {
         od_log_info("NOTE: I2C fallback to 100kHz (SDA=GPIO%d SCL=GPIO%d)", sda, scl);
-        Wire.setClock(100000u);
+        od_hal_i2c_set_clock(100000u);
         s_wire_sda_pin = (int8_t)sda;
         s_wire_scl_pin = (int8_t)scl;
         s_wire_clock_hz = 100000u;
         s_wire_open_display_ready = true;
         return true;
     }
-    od_log_error("ERROR: Wire.begin failed (SDA=GPIO%d SCL=GPIO%d)", sda, scl);
+    od_log_error("ERROR: I2C bus init failed (SDA=GPIO%d SCL=GPIO%d)", sda, scl);
     return false;
 }
 #endif
@@ -995,7 +1044,7 @@ bool openDisplayI2cBusConfigured(void) {
 void invalidateOpenDisplayWire(void) {
 #ifdef TARGET_ESP32
     if (s_wire_open_display_ready) {
-        Wire.end();
+        od_hal_i2c_deinit();
     }
     s_wire_open_display_ready = false;
 #endif
@@ -1017,7 +1066,7 @@ bool initOrRestoreWireForBus(uint8_t bus_id) {
         return true;
     }
     if (s_wire_open_display_ready) {
-        Wire.end();
+        od_hal_i2c_deinit();
         s_wire_open_display_ready = false;
     }
     if (!wireBeginForOpenDisplay(sda, scl, hz)) {
@@ -1039,7 +1088,7 @@ void initOrRestoreWireForOpenDisplay(void) {
         return;
     }
     if (!s_wire_open_display_ready) {
-        if (Wire.begin()) {
+        if (odI2cBegin(-1, -1, 100000u)) {
             s_wire_open_display_ready = true;
         }
     }
@@ -1049,12 +1098,12 @@ void initOrRestoreWireForOpenDisplay(void) {
     }
     if (i2cDataBusValid(0)) {
         const struct DataBus& bus = globalConfig.data_buses[0];
-        pinMode(bus.pin_1, (bus.pullups & 0x01) ? INPUT_PULLUP : INPUT);
-        pinMode(bus.pin_2, (bus.pullups & 0x02) ? INPUT_PULLUP : INPUT);
+        od_hal_gpio_config_input(bus.pin_1, (bus.pullups & 0x01) != 0, false);
+        od_hal_gpio_config_input(bus.pin_2, (bus.pullups & 0x02) != 0, false);
     }
-    Wire.begin();
+    odI2cBegin(-1, -1, 100000u);
     if (i2cDataBusValid(0) && globalConfig.data_buses[0].bus_speed_hz > 0) {
-        Wire.setClock(globalConfig.data_buses[0].bus_speed_hz);
+        od_hal_i2c_set_clock(globalConfig.data_buses[0].bus_speed_hz);
     }
 #endif
 }
@@ -1079,16 +1128,16 @@ void initDataBuses(){
                 initOrRestoreWireForOpenDisplay();
                 #endif
                 #ifdef TARGET_NRF
-                pinMode(bus->pin_1, INPUT);
-                pinMode(bus->pin_2, INPUT);
+                od_hal_gpio_config_input(bus->pin_1, false, false);
+                od_hal_gpio_config_input(bus->pin_2, false, false);
                 if(bus->pullups & 0x01){
-                    pinMode(bus->pin_1, INPUT_PULLUP);
+                    od_hal_gpio_config_input(bus->pin_1, true, false);
                 }
                 if(bus->pullups & 0x02){
-                    pinMode(bus->pin_2, INPUT_PULLUP);
+                    od_hal_gpio_config_input(bus->pin_2, true, false);
                 }
-                Wire.begin(); // Uses default I2C pins
-                Wire.setClock(busSpeed);
+                odI2cBegin(-1, -1, 100000u); // Uses default I2C pins
+                od_hal_i2c_set_clock(busSpeed);
                 od_log_info("NOTE: nRF52840 using default I2C pins (config pins: SCL=%u, SDA=%u)", bus->pin_1, bus->pin_2);
                 #endif
                 od_log_info("I2C bus %u initialized: SCL=pin%u, SDA=pin%u, Speed=%uHz", i, bus->pin_1, bus->pin_2, (unsigned)busSpeed);
@@ -1118,20 +1167,16 @@ void initio(){
             bool invertBlue = (led->led_flags & 0x04) != 0;
             bool invertLed4 = (led->led_flags & 0x08) != 0;
                 if (led->led_1_r != 0xFF) {
-                    pinMode(led->led_1_r, OUTPUT);
-                    digitalWrite(led->led_1_r, invertRed ? HIGH : LOW);
+                    od_hal_gpio_config_output(led->led_1_r, (invertRed ? HIGH : LOW));
                 }
                 if (led->led_2_g != 0xFF) {
-                    pinMode(led->led_2_g, OUTPUT);
-                    digitalWrite(led->led_2_g, invertGreen ? HIGH : LOW);
+                    od_hal_gpio_config_output(led->led_2_g, (invertGreen ? HIGH : LOW));
                 }
                 if (led->led_3_b != 0xFF) {
-                    pinMode(led->led_3_b, OUTPUT);
-                    digitalWrite(led->led_3_b, invertBlue ? HIGH : LOW);
+                    od_hal_gpio_config_output(led->led_3_b, (invertBlue ? HIGH : LOW));
                 }
                 if (led->led_4 != 0xFF) {
-                    pinMode(led->led_4, OUTPUT);
-                    digitalWrite(led->led_4, invertLed4 ? HIGH : LOW);
+                    od_hal_gpio_config_output(led->led_4, (invertLed4 ? HIGH : LOW));
                 }
         }
         for (uint8_t i = 0; i < globalConfig.led_count; i++) {
@@ -1153,8 +1198,7 @@ void initio(){
     initPassiveBuzzers();
     od_log_info("[initio] >> pwr_pin"); od_log_flush();
     if(globalConfig.system_config.pwr_pin != 0xFF){
-    pinMode(globalConfig.system_config.pwr_pin, OUTPUT);
-    digitalWrite(globalConfig.system_config.pwr_pin, LOW);
+    od_hal_gpio_config_output(globalConfig.system_config.pwr_pin, false);
     }
     else{
         od_log_warn("Power pin not set");
@@ -1172,8 +1216,7 @@ void scanI2CDevices(){
     uint8_t deviceCount = 0;
     uint8_t foundDevices[128];
     for(uint8_t address = 0x08; address < 0x78; address++){
-        Wire.beginTransmission(address);
-        uint8_t error = Wire.endTransmission();
+        uint8_t error = (uint8_t)od_hal_i2c_probe(address);
         if(error == 0){
             foundDevices[deviceCount] = address;
             deviceCount++;
@@ -1242,10 +1285,9 @@ void initSensors(){
 }
 
 void initAXP2101(uint8_t busId){
-    pinMode(21, OUTPUT);
-    digitalWrite(21, LOW);
-    delay(100);
-    digitalWrite(21, HIGH);
+    od_hal_gpio_config_output(21, false);
+    od_hal_delay_ms(100);
+    od_hal_gpio_write(21, true);
     od_log_info("=== Initializing AXP2101 PMIC ===");
     if(busId >= globalConfig.data_bus_count){
         od_log_error("ERROR: Invalid bus ID %u (only %u buses configured)", busId, globalConfig.data_bus_count);
@@ -1260,123 +1302,104 @@ void initAXP2101(uint8_t busId){
         od_log_error("ERROR: Failed to (re)init I2C bus %u for AXP2101", busId);
         return;
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    uint8_t error = Wire.endTransmission();
+    uint8_t error = (uint8_t)od_hal_i2c_probe(AXP2101_SLAVE_ADDRESS);
     if(error != 0){
         od_log_error("ERROR: AXP2101 not found at address 0x%02X (error: %u)", AXP2101_SLAVE_ADDRESS, error);
         return;
     }
     od_log_debug("AXP2101 detected at address 0x%02X", AXP2101_SLAVE_ADDRESS);
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_POWER_STATUS);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx2 = (uint8_t)(AXP2101_REG_POWER_STATUS);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx2, 1);
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
-        if(Wire.available()){
-            uint8_t status = Wire.read();
+        uint8_t od_i2c_rx0 = 0;
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, &od_i2c_rx0, 1) == OD_HAL_I2C_OK) {
+            uint8_t status = od_i2c_rx0;
             od_log_debug("Power status: 0x%02X", status);
         }
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_DC_VOL0_CTRL);
-    Wire.write(0x12);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx3[2] = { (uint8_t)(AXP2101_REG_DC_VOL0_CTRL), (uint8_t)(0x12) };
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx3, 2);
     if(error == 0){
         od_log_debug("DCDC1 voltage set to 3.3V");
     } else {
         od_log_error("ERROR: Failed to set DCDC1 voltage");
     }
-    delay(10);
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_DC_ONOFF_DVM_CTRL);
-    error = Wire.endTransmission();
+    od_hal_delay_ms(10);
+    const uint8_t od_i2c_tx4 = (uint8_t)(AXP2101_REG_DC_ONOFF_DVM_CTRL);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx4, 1);
     uint8_t dcEnable = 0x00;
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
-        if(Wire.available()){
-            dcEnable = Wire.read();
+        uint8_t od_i2c_rx1 = 0;
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, &od_i2c_rx1, 1) == OD_HAL_I2C_OK) {
+            dcEnable = od_i2c_rx1;
         }
     }
     dcEnable |= 0x01;
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_DC_ONOFF_DVM_CTRL);
-    Wire.write(dcEnable);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx5[2] = { (uint8_t)(AXP2101_REG_DC_ONOFF_DVM_CTRL), (uint8_t)(dcEnable) };
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx5, 2);
     if(error == 0){
         od_log_debug("DCDC1 enabled (3.3V)");
     } else {
         od_log_error("ERROR: Failed to enable DCDC1");
     }
-    delay(10);
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_LDO_ONOFF_CTRL0);
-    error = Wire.endTransmission();
+    od_hal_delay_ms(10);
+    const uint8_t od_i2c_tx6 = (uint8_t)(AXP2101_REG_LDO_ONOFF_CTRL0);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx6, 1);
     uint8_t aldoEnable = 0x00;
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
-        if(Wire.available()){
-            aldoEnable = Wire.read();
+        uint8_t od_i2c_rx2 = 0;
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, &od_i2c_rx2, 1) == OD_HAL_I2C_OK) {
+            aldoEnable = od_i2c_rx2;
         }
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_LDO_VOL2_CTRL);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx7 = (uint8_t)(AXP2101_REG_LDO_VOL2_CTRL);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx7, 1);
     uint8_t aldo3VolReg = 0x00;
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
-        if(Wire.available()){
-            aldo3VolReg = Wire.read();
+        uint8_t od_i2c_rx3 = 0;
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, &od_i2c_rx3, 1) == OD_HAL_I2C_OK) {
+            aldo3VolReg = od_i2c_rx3;
         }
     }
     aldo3VolReg = (aldo3VolReg & 0xE0) | 0x1C;
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_LDO_VOL2_CTRL);
-    Wire.write(aldo3VolReg);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx8[2] = { (uint8_t)(AXP2101_REG_LDO_VOL2_CTRL), (uint8_t)(aldo3VolReg) };
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx8, 2);
     if(error == 0){
         od_log_debug("ALDO3 voltage set to 3.3V");
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_LDO_VOL3_CTRL);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx9 = (uint8_t)(AXP2101_REG_LDO_VOL3_CTRL);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx9, 1);
     uint8_t aldo4VolReg = 0x00;
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
-        if(Wire.available()){
-            aldo4VolReg = Wire.read();
+        uint8_t od_i2c_rx4 = 0;
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, &od_i2c_rx4, 1) == OD_HAL_I2C_OK) {
+            aldo4VolReg = od_i2c_rx4;
         }
     }
     aldo4VolReg = (aldo4VolReg & 0xE0) | 0x1C;
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_LDO_VOL3_CTRL);
-    Wire.write(aldo4VolReg);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx10[2] = { (uint8_t)(AXP2101_REG_LDO_VOL3_CTRL), (uint8_t)(aldo4VolReg) };
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx10, 2);
     if(error == 0){
         od_log_debug("ALDO4 voltage set to 3.3V");
     }
     aldoEnable |= 0x0C;
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_LDO_ONOFF_CTRL0);
-    Wire.write(aldoEnable);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx11[2] = { (uint8_t)(AXP2101_REG_LDO_ONOFF_CTRL0), (uint8_t)(aldoEnable) };
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx11, 2);
     if(error == 0){
         od_log_debug("ALDO3 and ALDO4 enabled (3.3V)");
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_POWER_WAKEUP_CTL);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx12 = (uint8_t)(AXP2101_REG_POWER_WAKEUP_CTL);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx12, 1);
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
-        if(Wire.available()){
-            uint8_t wakeupCtl = Wire.read();
+        uint8_t od_i2c_rx5 = 0;
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, &od_i2c_rx5, 1) == OD_HAL_I2C_OK) {
+            uint8_t wakeupCtl = od_i2c_rx5;
             od_log_debug("Wakeup control: 0x%02X", wakeupCtl);
             if(wakeupCtl & 0x01){
                 od_log_debug("Wakeup already enabled");
             } else {
-                Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-                Wire.write(AXP2101_REG_POWER_WAKEUP_CTL);
-                Wire.write(wakeupCtl | 0x01);
-                error = Wire.endTransmission();
+                const uint8_t od_i2c_tx13[2] = { (uint8_t)(AXP2101_REG_POWER_WAKEUP_CTL), (uint8_t)(wakeupCtl | 0x01) };
+                error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx13, 2);
                 if(error == 0){
                     od_log_debug("Wakeup enabled");
                 }
@@ -1388,25 +1411,21 @@ void initAXP2101(uint8_t busId){
 
 void readAXP2101Data(){
     od_log_info("=== Reading AXP2101 PMIC Data ===");
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    uint8_t error = Wire.endTransmission();
+    uint8_t error = (uint8_t)od_hal_i2c_probe(AXP2101_SLAVE_ADDRESS);
     if(error != 0){
         od_log_error("ERROR: AXP2101 not found at address 0x%02X", AXP2101_SLAVE_ADDRESS);
         return;
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_ADC_CHANNEL_CTRL);
-    Wire.write(0xFF);
-    error = Wire.endTransmission();
-    delay(10);
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_POWER_STATUS);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx15[2] = { (uint8_t)(AXP2101_REG_ADC_CHANNEL_CTRL), (uint8_t)(0xFF) };
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx15, 2);
+    od_hal_delay_ms(10);
+    const uint8_t od_i2c_tx16 = (uint8_t)(AXP2101_REG_POWER_STATUS);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx16, 1);
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)2);
-        if(Wire.available() >= 2){
-            uint8_t status1 = Wire.read();
-            uint8_t status2 = Wire.read();
+        uint8_t od_i2c_rx100[2] = { 0 };
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, od_i2c_rx100, 2) == OD_HAL_I2C_OK) {
+            uint8_t status1 = od_i2c_rx100[0];
+            uint8_t status2 = od_i2c_rx100[1];
             od_log_debug("Power Status 1: 0x%02X", status1);
             od_log_debug("Power Status 2: 0x%02X", status2);
             bool batteryPresent = (status1 & 0x20) != 0;
@@ -1417,62 +1436,57 @@ void readAXP2101Data(){
             od_log_debug("VBUS Present: %s", vbusPresent ? "Yes" : "No");
         }
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_PWRON_STATUS);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx17 = (uint8_t)(AXP2101_REG_PWRON_STATUS);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx17, 1);
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
-        if(Wire.available()){
-            uint8_t pwronStatus = Wire.read();
+        uint8_t od_i2c_rx6 = 0;
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, &od_i2c_rx6, 1) == OD_HAL_I2C_OK) {
+            uint8_t pwronStatus = od_i2c_rx6;
             od_log_debug("Power On Status: 0x%02X", pwronStatus);
         }
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_ADC_DATA_BAT_VOL_H);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx18 = (uint8_t)(AXP2101_REG_ADC_DATA_BAT_VOL_H);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx18, 1);
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)2);
-        if(Wire.available() >= 2){
-            uint8_t batVolH = Wire.read();
-            uint8_t batVolL = Wire.read();
+        uint8_t od_i2c_rx101[2] = { 0 };
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, od_i2c_rx101, 2) == OD_HAL_I2C_OK) {
+            uint8_t batVolH = od_i2c_rx101[0];
+            uint8_t batVolL = od_i2c_rx101[1];
             uint16_t batVolRaw = ((uint16_t)batVolH << 4) | (batVolL & 0x0F);
             float batVoltage = batVolRaw * 0.5;
             od_log_debug("Battery Voltage: %.1f mV (%.2f V)", batVoltage, batVoltage / 1000.0);
         }
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_ADC_DATA_VBUS_VOL_H);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx19 = (uint8_t)(AXP2101_REG_ADC_DATA_VBUS_VOL_H);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx19, 1);
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)2);
-        if(Wire.available() >= 2){
-            uint8_t vbusVolH = Wire.read();
-            uint8_t vbusVolL = Wire.read();
+        uint8_t od_i2c_rx102[2] = { 0 };
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, od_i2c_rx102, 2) == OD_HAL_I2C_OK) {
+            uint8_t vbusVolH = od_i2c_rx102[0];
+            uint8_t vbusVolL = od_i2c_rx102[1];
             uint16_t vbusVolRaw = ((uint16_t)vbusVolH << 4) | (vbusVolL & 0x0F);
             float vbusVoltage = vbusVolRaw * 1.7;
             od_log_debug("VBUS Voltage: %.1f mV (%.2f V)", vbusVoltage, vbusVoltage / 1000.0);
         }
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_ADC_DATA_SYS_VOL_H);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx20 = (uint8_t)(AXP2101_REG_ADC_DATA_SYS_VOL_H);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx20, 1);
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)2);
-        if(Wire.available() >= 2){
-            uint8_t sysVolH = Wire.read();
-            uint8_t sysVolL = Wire.read();
+        uint8_t od_i2c_rx103[2] = { 0 };
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, od_i2c_rx103, 2) == OD_HAL_I2C_OK) {
+            uint8_t sysVolH = od_i2c_rx103[0];
+            uint8_t sysVolL = od_i2c_rx103[1];
             uint16_t sysVolRaw = ((uint16_t)sysVolH << 4) | (sysVolL & 0x0F);
             float sysVoltage = sysVolRaw * 1.4;
             od_log_debug("System Voltage: %.1f mV (%.2f V)", sysVoltage, sysVoltage / 1000.0);
         }
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_BAT_PERCENT_DATA);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx21 = (uint8_t)(AXP2101_REG_BAT_PERCENT_DATA);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx21, 1);
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
-        if(Wire.available()){
-            uint8_t batPercent = Wire.read();
+        uint8_t od_i2c_rx7 = 0;
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, &od_i2c_rx7, 1) == OD_HAL_I2C_OK) {
+            uint8_t batPercent = od_i2c_rx7;
             if(batPercent <= 100){
                 od_log_debug("Battery Percentage: %u%%", batPercent);
             } else {
@@ -1480,13 +1494,12 @@ void readAXP2101Data(){
             }
         }
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_DC_ONOFF_DVM_CTRL);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx22 = (uint8_t)(AXP2101_REG_DC_ONOFF_DVM_CTRL);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx22, 1);
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
-        if(Wire.available()){
-            uint8_t dcEnable = Wire.read();
+        uint8_t od_i2c_rx8 = 0;
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, &od_i2c_rx8, 1) == OD_HAL_I2C_OK) {
+            uint8_t dcEnable = od_i2c_rx8;
             od_log_debug("DC Enable Status: 0x%02X", dcEnable);
             od_log_debug("  DCDC1: %s", (dcEnable & 0x01) ? "ON" : "OFF");
             od_log_debug("  DCDC2: %s", (dcEnable & 0x02) ? "ON" : "OFF");
@@ -1495,13 +1508,12 @@ void readAXP2101Data(){
             od_log_debug("  DCDC5: %s", (dcEnable & 0x10) ? "ON" : "OFF");
         }
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_LDO_ONOFF_CTRL0);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx23 = (uint8_t)(AXP2101_REG_LDO_ONOFF_CTRL0);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx23, 1);
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
-        if(Wire.available()){
-            uint8_t aldoEnable = Wire.read();
+        uint8_t od_i2c_rx9 = 0;
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, &od_i2c_rx9, 1) == OD_HAL_I2C_OK) {
+            uint8_t aldoEnable = od_i2c_rx9;
             od_log_debug("ALDO Enable Status: 0x%02X", aldoEnable);
             od_log_debug("  ALDO1: %s", (aldoEnable & 0x01) ? "ON" : "OFF");
             od_log_debug("  ALDO2: %s", (aldoEnable & 0x02) ? "ON" : "OFF");
@@ -1514,118 +1526,92 @@ void readAXP2101Data(){
 
 void powerDownAXP2101(){
     od_log_info("=== Powering Down AXP2101 PMIC Rails ===");
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    uint8_t error = Wire.endTransmission();
+    uint8_t error = (uint8_t)od_hal_i2c_probe(AXP2101_SLAVE_ADDRESS);
     if(error != 0){
         od_log_error("ERROR: AXP2101 not found at address 0x%02X (error: %u)", AXP2101_SLAVE_ADDRESS, error);
         return;
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_IRQ_ENABLE1);
-    Wire.write(0x00);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx25[2] = { (uint8_t)(AXP2101_REG_IRQ_ENABLE1), (uint8_t)(0x00) };
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx25, 2);
     if(error == 0){
-        Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-        Wire.write(AXP2101_REG_IRQ_ENABLE2);
-        Wire.write(0x00);
-        error = Wire.endTransmission();
+        const uint8_t od_i2c_tx26[2] = { (uint8_t)(AXP2101_REG_IRQ_ENABLE2), (uint8_t)(0x00) };
+        error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx26, 2);
     }
     if(error == 0){
-        Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-        Wire.write(AXP2101_REG_IRQ_ENABLE3);
-        Wire.write(0x00);
-        error = Wire.endTransmission();
+        const uint8_t od_i2c_tx27[2] = { (uint8_t)(AXP2101_REG_IRQ_ENABLE3), (uint8_t)(0x00) };
+        error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx27, 2);
     }
     if(error == 0){
-        Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-        Wire.write(AXP2101_REG_IRQ_ENABLE4);
-        Wire.write(0x00);
-        error = Wire.endTransmission();
+        const uint8_t od_i2c_tx28[2] = { (uint8_t)(AXP2101_REG_IRQ_ENABLE4), (uint8_t)(0x00) };
+        error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx28, 2);
     }
     if(error == 0){
-        Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-        Wire.write(AXP2101_REG_IRQ_STATUS1);
-        Wire.write(0xFF);
-        error = Wire.endTransmission();
+        const uint8_t od_i2c_tx29[2] = { (uint8_t)(AXP2101_REG_IRQ_STATUS1), (uint8_t)(0xFF) };
+        error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx29, 2);
     }
     if(error == 0){
-        Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-        Wire.write(AXP2101_REG_IRQ_STATUS2);
-        Wire.write(0xFF);
-        error = Wire.endTransmission();
+        const uint8_t od_i2c_tx30[2] = { (uint8_t)(AXP2101_REG_IRQ_STATUS2), (uint8_t)(0xFF) };
+        error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx30, 2);
     }
     if(error == 0){
-        Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-        Wire.write(AXP2101_REG_IRQ_STATUS3);
-        Wire.write(0xFF);
-        error = Wire.endTransmission();
+        const uint8_t od_i2c_tx31[2] = { (uint8_t)(AXP2101_REG_IRQ_STATUS3), (uint8_t)(0xFF) };
+        error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx31, 2);
     }
     if(error == 0){
-        Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-        Wire.write(AXP2101_REG_IRQ_STATUS4);
-        Wire.write(0xFF);
-        error = Wire.endTransmission();
+        const uint8_t od_i2c_tx32[2] = { (uint8_t)(AXP2101_REG_IRQ_STATUS4), (uint8_t)(0xFF) };
+        error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx32, 2);
         if(error == 0){
             od_log_debug("All IRQs disabled and status cleared");
         }
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_DC_ONOFF_DVM_CTRL);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx33 = (uint8_t)(AXP2101_REG_DC_ONOFF_DVM_CTRL);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx33, 1);
     uint8_t dcEnable = 0x00;
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
-        if(Wire.available()){
-            dcEnable = Wire.read();
+        uint8_t od_i2c_rx10 = 0;
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, &od_i2c_rx10, 1) == OD_HAL_I2C_OK) {
+            dcEnable = od_i2c_rx10;
         }
     }
     dcEnable &= 0x01;
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_DC_ONOFF_DVM_CTRL);
-    Wire.write(dcEnable);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx34[2] = { (uint8_t)(AXP2101_REG_DC_ONOFF_DVM_CTRL), (uint8_t)(dcEnable) };
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx34, 2);
     if(error == 0){
         od_log_debug("DC2-5 disabled (DC1 kept enabled)");
     } else {
         od_log_error("ERROR: Failed to disable DC2-5");
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_LDO_ONOFF_CTRL1);
-    Wire.write(0x00);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx35[2] = { (uint8_t)(AXP2101_REG_LDO_ONOFF_CTRL1), (uint8_t)(0x00) };
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx35, 2);
     if(error == 0){
         od_log_debug("BLDO1-2, CPUSLDO, DLDO1-2 disabled");
     } else {
         od_log_error("ERROR: Failed to disable BLDO/CPUSLDO/DLDO rails");
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_LDO_ONOFF_CTRL0);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx36 = (uint8_t)(AXP2101_REG_LDO_ONOFF_CTRL0);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx36, 1);
     uint8_t aldoEnable = 0x00;
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
-        if(Wire.available()){
-            aldoEnable = Wire.read();
+        uint8_t od_i2c_rx11 = 0;
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, &od_i2c_rx11, 1) == OD_HAL_I2C_OK) {
+            aldoEnable = od_i2c_rx11;
         }
     }
     aldoEnable &= ~0x0F;
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_LDO_ONOFF_CTRL0);
-    Wire.write(aldoEnable);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx37[2] = { (uint8_t)(AXP2101_REG_LDO_ONOFF_CTRL0), (uint8_t)(aldoEnable) };
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx37, 2);
     if(error == 0){
         od_log_debug("ALDO1-4 disabled");
     } else {
         od_log_error("ERROR: Failed to disable ALDO rails");
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_POWER_WAKEUP_CTL);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx38 = (uint8_t)(AXP2101_REG_POWER_WAKEUP_CTL);
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, &od_i2c_tx38, 1);
     uint8_t wakeupCtrl = 0x00;
     if(error == 0){
-        Wire.requestFrom(AXP2101_SLAVE_ADDRESS, (uint8_t)1);
-        if(Wire.available()){
-            wakeupCtrl = Wire.read();
+        uint8_t od_i2c_rx12 = 0;
+        if (od_hal_i2c_read(AXP2101_SLAVE_ADDRESS, &od_i2c_rx12, 1) == OD_HAL_I2C_OK) {
+            wakeupCtrl = od_i2c_rx12;
         }
     }
     if(!(wakeupCtrl & 0x04)) {
@@ -1638,19 +1624,15 @@ void powerDownAXP2101(){
         wakeupCtrl |= 0x10;
     }
     wakeupCtrl |= 0x80;
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_POWER_WAKEUP_CTL);
-    Wire.write(wakeupCtrl);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx39[2] = { (uint8_t)(AXP2101_REG_POWER_WAKEUP_CTL), (uint8_t)(wakeupCtrl) };
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx39, 2);
     if(error == 0){
         od_log_debug("AXP2101 wake-up configured and sleep mode enabled");
     } else {
         od_log_error("ERROR: Failed to configure AXP2101 sleep mode");
     }
-    Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-    Wire.write(AXP2101_REG_ADC_CHANNEL_CTRL);
-    Wire.write(0x00);
-    error = Wire.endTransmission();
+    const uint8_t od_i2c_tx40[2] = { (uint8_t)(AXP2101_REG_ADC_CHANNEL_CTRL), (uint8_t)(0x00) };
+    error = od_hal_i2c_write(AXP2101_SLAVE_ADDRESS, od_i2c_tx40, 2);
     if(error == 0){
         od_log_debug("All ADC channels disabled");
     } else {
@@ -1796,7 +1778,7 @@ void initDisplay(){
                 od_log_warn("Boot refresh failed on battery — re-powering panel and retrying");
                 touchResumeAfterEpdRefresh();
                 pwrmgm(false);
-                delay(200);
+                od_hal_delay_ms(200);
                 prepareEpdRailForBoot();
                 initBbepPanelSession();
                 bootOk = refreshBootScreenFull();
@@ -1855,21 +1837,20 @@ static float readBatteryVoltageUncached() {
     uint8_t sensePin = globalConfig.power_option.battery_sense_pin;
     uint8_t enablePin = globalConfig.power_option.battery_sense_enable_pin;
     uint16_t scalingFactor = globalConfig.power_option.voltage_scaling_factor;
-    pinMode(sensePin, INPUT);
+    od_hal_gpio_config_input(sensePin, false, false);
     if (enablePin != 0xFF) {
-        pinMode(enablePin, OUTPUT);
-        digitalWrite(enablePin, HIGH);
-        delay(10);
+        od_hal_gpio_config_output(enablePin, true);
+        od_hal_delay_ms(10);
     }
     const int numSamples = 10;
     uint32_t adcSum = 0;
     for (int i = 0; i < numSamples; i++) {
-        adcSum += analogRead(sensePin);
-        delay(2);
+        adcSum += od_hal_adc_read(sensePin);
+        od_hal_delay_ms(2);
     }
     uint32_t adcAverage = adcSum / numSamples;
     if (enablePin != 0xFF) {
-        digitalWrite(enablePin, LOW);
+        od_hal_gpio_write(enablePin, false);
     }
     if (scalingFactor > 0) return (adcAverage * scalingFactor) / (100000.0);
     return -1.0;
@@ -1880,18 +1861,18 @@ float readBatteryVoltage() {
     static uint32_t lastReadMs = 0;
     static float cachedVoltage = -1.0f;
     static bool haveReading = false;
-    if (haveReading && (uint32_t)(millis() - lastReadMs) < kBatteryVoltageTtlMs) {
+    if (haveReading && (uint32_t)(od_hal_uptime_ms() - lastReadMs) < kBatteryVoltageTtlMs) {
         return cachedVoltage;
     }
     cachedVoltage = readBatteryVoltageUncached();
-    lastReadMs = millis();
+    lastReadMs = od_hal_uptime_ms();
     haveReading = true;
     return cachedVoltage;
 }
 
 float readChipTemperature() {
 #ifdef TARGET_ESP32
-    return temperatureRead();
+    return od_hal_adc_die_temp_c();
 #elif defined(TARGET_NRF)
     int32_t tempRaw = 0;
     uint32_t err_code = sd_temp_get(&tempRaw);
@@ -1977,7 +1958,7 @@ static uint8_t  imgLogLastStep;      // last 5% step printed (pct/5)
 static uint16_t imgLogLastLen;       // length of most recent frame
 static uint8_t  imgLogLastHead[16];  // first bytes of most recent frame
 static uint8_t  imgLogLastHeadLen;   // valid bytes in imgLogLastHead
-static uint32_t imgLogStartMs;       // millis() at stream start (for throughput)
+static uint32_t imgLogStartMs;       // od_hal_uptime_ms() at stream start (for throughput)
 
 // Builds a space-separated "%02X" hex dump of up to sizeof(imgLogLastHead) bytes into buf.
 static void imgLogHex(char* buf, size_t bufSize, const uint8_t* data, uint8_t n) {
@@ -2003,7 +1984,7 @@ static void imageWriteLogReset(void) {
 
 static void imageWriteLogStart(uint32_t totalBytes) {
     imgLogTotalBytes = totalBytes;
-    imgLogStartMs = millis();
+    imgLogStartMs = od_hal_uptime_ms();
     // Whether the sender compressed is decided per transfer (START header flag), not
     // by config, so the transmission_modes dump at boot does not answer it. State the
     // active mode here: without it a slow push is ambiguous between "sent raw" and
@@ -2042,7 +2023,7 @@ static void imageWriteLogFinish(uint32_t written, uint32_t total) {
     char hex[64];
     imgLogHex(hex, sizeof(hex), imgLogLastHead, imgLogLastHeadLen);
     od_log_debug("DW final frame %u: %u bytes: %s", (unsigned)imgLogChunks, imgLogLastLen, hex);
-    uint32_t elapsedMs = millis() - imgLogStartMs;   // unsigned wrap-safe over one stream
+    uint32_t elapsedMs = od_hal_uptime_ms() - imgLogStartMs;   // unsigned wrap-safe over one stream
     char mode[48] = " raw";
     if (directWriteCompressed) {
         // On-wire bytes vs bytes handed to the panel: the ratio is the only direct
@@ -2218,7 +2199,7 @@ static void directWriteComputeGeometry(bool compressed) {
 static void directWriteActivatePanel(void) {
     directWriteActive = true;
     directWriteBytesWritten = 0;
-    directWriteStartTime = millis();
+    directWriteStartTime = od_hal_uptime_ms();
     imageWriteLogStart(directWriteTotalBytes);
     // Full-frame write: acquire the session with the FULL init sequence. A warm
     // re-acquire skips the ~900 ms rail bring-up + bbepInitIO (replaces the old
@@ -2390,7 +2371,7 @@ void handlePartialWriteStart(uint8_t* data, uint16_t len) {
     partialCtx.expected_stream_size = expectedLogicalSize;
     partialCtx.plane_size = planeBytes;
     partialCtx.current_plane = 0xFF;
-    partialCtx.start_time = millis();
+    partialCtx.start_time = od_hal_uptime_ms();
     imageWriteLogStart(expectedLogicalSize);
 
     partial_prepare_panel_ram();
@@ -2556,7 +2537,7 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
     // Portable as of Phase 3: nRF used to notify() inline from the BLE callback
     // task and so never needed this, but it now shares the ring and the loop task.
     serviceBleTx();
-    delay(20);
+    od_hal_delay_ms(20);
     epdRefreshInProgress = true;
     bool refreshSuccess = false;
     uint32_t newEtag = 0;
@@ -2929,7 +2910,7 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
         partialCtx.expected_stream_size = total_size;
         partialCtx.plane_size = planeBytes;
         partialCtx.current_plane = 0xFF;
-        partialCtx.start_time = millis();
+        partialCtx.start_time = od_hal_uptime_ms();
     }
 
     // Respond BEFORE panel bring-up: slow panels (Spectra/ACeP-class init can take
@@ -3416,16 +3397,16 @@ static bool partial_trigger_refresh(int refreshMode) {
 
 static void partial_prepare_panel_ram(void) {
     // Delta in ms since function entry, to profile where prep wall-clock goes.
-    uint32_t t0 = millis();
-    od_log_debug("[+%ums] EPD partial start: acquire panel session", (unsigned)(millis() - t0));
+    uint32_t t0 = od_hal_uptime_ms();
+    od_log_debug("[+%ums] EPD partial start: acquire panel session", (unsigned)(od_hal_uptime_ms() - t0));
     // Acquire subsumes pwrmgm(true) + bbepInitIO + bbepWakeUp + init-seq resend.
     // Warm re-acquire skips the ~900 ms rail bring-up + bbepInitIO (Phase 1).
     bool cold = epdSessionAcquire(true);
-    od_log_debug("[+%ums] after epdSessionAcquire (%s)", (unsigned)(millis() - t0), cold ? "cold" : "warm");
+    od_log_debug("[+%ums] after epdSessionAcquire (%s)", (unsigned)(od_hal_uptime_ms() - t0), cold ? "cold" : "warm");
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) {
         fastepd_partial_prepare(partialCtx.x, partialCtx.y, partialCtx.width, partialCtx.height);
-        od_log_debug("[+%ums] FastEPD partial prepare done", (unsigned)(millis() - t0));
+        od_log_debug("[+%ums] FastEPD partial prepare done", (unsigned)(od_hal_uptime_ms() - t0));
         return;
     }
 #endif
@@ -3440,9 +3421,9 @@ static void partial_prepare_panel_ram(void) {
     if (!fullFrame) {
         bbepFill(&bbep, BBEP_WHITE, PLANE_1);
         bbepFill(&bbep, BBEP_WHITE, PLANE_0);
-        od_log_debug("[+%ums] after fills (ran: sub-rect)", (unsigned)(millis() - t0));
+        od_log_debug("[+%ums] after fills (ran: sub-rect)", (unsigned)(od_hal_uptime_ms() - t0));
     } else {
-        od_log_debug("[+%ums] fills skipped (full-frame rect)", (unsigned)(millis() - t0));
+        od_log_debug("[+%ums] fills skipped (full-frame rect)", (unsigned)(od_hal_uptime_ms() - t0));
     }
 }
 
@@ -3488,3 +3469,19 @@ static void send_direct_write_nack(uint8_t opcode, uint8_t error, bool cleanupSt
     uint8_t errResponse[] = {RESP_NACK, opcode, error, 0x00};
     sendResponse(errResponse, sizeof(errResponse));
 }
+
+// See display_service.h for why this exists rather than main.cpp calling SPI.end() itself.
+//
+// The REAL implementation is in display_fastepd.cpp, which is the file that legitimately owns
+// the FastEPD vendor adapter. This is the fallback for boards that compile no FastEPD at all,
+// and it is a NO-OP BY PROOF rather than by assumption: the adapter's bus is only ever brought
+// up by SPI.beginTransaction(), whose only callers are FastEPD.inl and display_fastepd.cpp --
+// both compiled out here -- so compat SPI's _bus_ok is always false and the SPI.end() this
+// replaces could never have freed anything on such a board.
+//
+// Since the E1004 payload moved to od_bbep_stream_write() (2026-08-04), display_service.cpp
+// has no adapter dependency at all, which is why <SPI.h> is gone from it. The bb_epaper bus is
+// released by bbepDeInitIO(), called from the panel force-off path above.
+#if !defined(OPENDISPLAY_FASTEPD)
+void displayReleaseSpiBus(void) { }
+#endif

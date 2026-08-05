@@ -8,8 +8,12 @@
  * and never propagated to canonical. See protocol_pending.h; it is a debt with a
  * documented removal sequence, not a second home for wire constants. */
 #include "protocol_pending.h"
-#include <Arduino.h>
+/* No <Arduino.h>: this file never used one. Its only Arduino-shaped names -- SPISettings,
+ * MSBFIRST, SPI_MODE0 -- come from the FastEPD vendor adapter below, which is permanent and
+ * deliberately not counted by compat/ratchet.sh. Phase C step 15. */
 #include <SPI.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <string.h>
 #include <FastEPD.h>
 
@@ -175,7 +179,7 @@ static bool it8951_fullscreen_du(void) {
     uint8_t* rowbuf = mirror_x ? (uint8_t*)malloc(pitch) : nullptr;
     if (mirror_x && !rowbuf) return false;
 
-    gpio_set_level((gpio_num_t)st->u8CS, LOW);
+    gpio_set_level((gpio_num_t)st->u8CS, 0);   /* was Arduino LOW, which is this literal */
     SPI.beginTransaction(SPISettings(st->spi_frequency, MSBFIRST, SPI_MODE0));
     it8951WaitForReady(st);
     SPI.transfer16(0x0000);
@@ -191,11 +195,14 @@ static bool it8951_fullscreen_du(void) {
         } else {
             SPI.writeBytes(src, pitch);
         }
-        if ((row & 7) == 0) yield();
+        /* Was Arduino yield(), which the shim defined as exactly this. Keeps the loop task
+         * from starving its peers across a full-frame blit; NOT a delay, so the transfer
+         * rate is unchanged. */
+        if ((row & 7) == 0) taskYIELD();
     }
 
     SPI.endTransaction();
-    gpio_set_level((gpio_num_t)st->u8CS, HIGH);
+    gpio_set_level((gpio_num_t)st->u8CS, 1);   /* was Arduino HIGH */
     free(rowbuf);
 
     it8951WriteCmdCode(st, IT8951_TCON_LD_IMG_END);
@@ -432,6 +439,22 @@ bool fastepd_partial_refresh(int refresh_mode) {
     }
     g_epd.backupPlane();
     return true;
+}
+
+
+// The panel SPI bus release, called from main.cpp's deep-sleep teardown via
+// display_service.h. It lives HERE, not in display_service.cpp, because SPI is the FastEPD
+// vendor adapter's object and this is the file that owns it -- moving it is what took
+// display_service.cpp off the adapter entirely (main/CMakeLists.txt per-source grants).
+//
+// Early return when the parallel driver is in use: that path drives the S3 LCD peripheral and
+// never took the SPI bus. Behaviour is unchanged from when this lived in display_service.cpp.
+// display_service.cpp carries a no-op fallback for boards that compile no FastEPD.
+void displayReleaseSpiBus(void) {
+    if (fastepd_driver_used()) {
+        return;   // parallel driver: the SPI bus was never taken
+    }
+    SPI.end();
 }
 
 #endif

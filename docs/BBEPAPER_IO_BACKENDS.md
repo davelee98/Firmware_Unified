@@ -1,5 +1,22 @@
 # bb_epaper IO backends
 
+> **STATUS: THE OPEN DECISION IN THIS DOCUMENT IS CLOSED (2026-08-04).** An in-project IDF
+> backend was written: `targets/esp32-idf/panel/od_bbep_idf_io.inl`, selected by
+> `targets/esp32-idf/panel/od_bbep.cpp`, which replaces the vendored `bb_epaper.cpp` outright
+> rather than patching its `#ifdef` chain. `esp_generic.inl` is no longer used, and neither is
+> `arduino_io.inl`. **bb_epaper needs nothing from the Arduino shim on this target.**
+>
+> The analysis below is retained because it is what the backend was written against -- the
+> five-function contract, the +3 primitives, and the `esp_generic.inl` defect inventory are all
+> still the reference for anyone changing `od_bbep_idf_io.inl` or bumping the vendored tree.
+> Read the "which backend is selected" sections as HISTORY, not as current behaviour.
+>
+> Two things that changed as a result, recorded here because other docs assumed otherwise:
+> the permanent vendor adapter is **FastEPD's alone** (bb_epaper has no Arduino dependency),
+> and `third_party/bb_epaper/src` is **no longer on the component include path** -- it is
+> granted per-source in `main/CMakeLists.txt`. The destination is `od_hal_panel` with the
+> `od_panel_ops` vtable that `docs/SHARED_API_DESIGN.md` specifies.
+
 How `bb_epaper` is ported to a platform, what a backend must actually provide, which backend
 each OpenDisplay target uses, and what was wrong with the one the ESP32 target used.
 

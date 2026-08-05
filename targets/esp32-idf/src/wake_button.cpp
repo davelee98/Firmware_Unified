@@ -2,7 +2,6 @@
 
 #if defined(TARGET_ESP32)
 
-#include <Arduino.h>
 #include "esp_sleep.h"
 #include "soc/soc_caps.h"
 #include "driver/gpio.h"
@@ -122,7 +121,10 @@ void armButtonWakeSources() {
             od_log_debug("Wake: pin %u not wake-capable on this chip - timer-only for this button", c.pin);
             continue;
         }
-        if (digitalRead(c.pin) == (c.wakeHigh ? HIGH : LOW)) {
+        // gpio_get_level, not digitalRead: the shim's digitalRead WAS gpio_get_level with a
+        // validity guard, and esp_sleep_is_valid_wakeup_gpio() above has already established
+        // this pin is a real one. driver/gpio.h is included here already.
+        if (gpio_get_level((gpio_num_t)c.pin) == (c.wakeHigh ? 1 : 0)) {
             // Already at its wake level: arming would wake instantly and
             // ping-pong. The pin re-qualifies next sleep entry after release.
             od_log_debug("Wake: pin %u held at sleep entry - skipped this cycle", c.pin);

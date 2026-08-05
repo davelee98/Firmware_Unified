@@ -19,7 +19,6 @@ extern "C" {
 }
 
 extern struct GlobalConfig globalConfig;
-String getChipIdHex();
 
 BleTransport ble;
 

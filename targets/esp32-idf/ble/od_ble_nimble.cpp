@@ -16,11 +16,14 @@
 #include "opendisplay_protocol.h"
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "nvs_flash.h"
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
+#include "store/config/ble_store_config.h"
 #include "host/ble_uuid.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
@@ -100,6 +103,13 @@ static bool     s_addr_resolved  = false;   /* s_own_addr_type is meaningful onl
 static uint16_t s_preferred_mtu  = 0;
 static bool     s_inited         = false;
 
+/* The characteristic's stored value: the last frame written to it. Serves both the write path
+ * (as its flatten scratch) and the READ path, which hands it back the way NimBLE-Arduino's
+ * NimBLEAttValue did. One buffer, because NimBLE serialises host callbacks so a read can never
+ * overlap a write. */
+static uint8_t  s_chr_value[OD_BLE_MAX_FRAME];
+static uint16_t s_chr_value_len  = 0;
+
 /* The stack's peer count. Maintained here because NimBLE's C API offers no accessor for it;
  * written only from GAP events (host task), read from the loop task, hence atomic. It is a
  * COUNT, never a test for whether one particular link is up -- the transport's instance table
@@ -152,29 +162,54 @@ static int od_gatt_access(uint16_t conn_handle, uint16_t attr_handle,
         if (OS_MBUF_PKTLEN(ctxt->om) > OD_BLE_MAX_FRAME) {
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         }
-        /* Function-static rather than a stack array: this runs on the NimBLE host task, whose
+        /* File-static rather than a stack array: this runs on the NimBLE host task, whose
          * stack is sized by CONFIG_BT_NIMBLE_TASK_STACK_SIZE and has no room to spare for a
          * 256-byte frame buffer. Safe because NimBLE serialises host callbacks -- there is
          * never a second access in flight -- and because od_ble_evt_write() is contractually
-         * required to copy before returning. */
-        static uint8_t buf[OD_BLE_MAX_FRAME];
+         * required to copy before returning.
+         *
+         * It now doubles as the characteristic's stored value; see the READ case. */
         uint16_t len = 0;
-        int rc = ble_hs_mbuf_to_flat(ctxt->om, buf, sizeof(buf), &len);
+        int rc = ble_hs_mbuf_to_flat(ctxt->om, s_chr_value, sizeof(s_chr_value), &len);
         if (rc != 0) {
+            s_chr_value_len = 0;
             return BLE_ATT_ERR_INSUFFICIENT_RES;
         }
+        /* Retain it, exactly as NimBLECharacteristic::writeEvent() does with setValue()
+         * (NimBLE-Arduino/src/NimBLECharacteristic.cpp:334). See the READ case for why. */
+        s_chr_value_len = len;
         /* The handle travels with the frame. Without it the transport cannot tell an owner's
          * write from a gatecrasher's, and the non-owner filter -- which must run HERE, before
          * the bytes reach the RX ring, because during a ~16 s refresh no loop-side decision
          * runs at all -- would have nothing to decide on. */
-        od_ble_evt_write(conn_handle, buf, len);
+        od_ble_evt_write(conn_handle, s_chr_value, len);
         return 0;
     }
-    case BLE_GATT_ACCESS_OP_READ_CHR:
-        /* The characteristic is READ-able for discovery but carries no readable state; the
-         * data path is notify-only. Returning an empty value matches what the Arduino
-         * characteristic did with no value set. */
-        return 0;
+    case BLE_GATT_ACCESS_OP_READ_CHR: {
+        /* RETURN THE LAST WRITTEN VALUE, restoring NimBLE-Arduino behaviour (2026-08-05).
+         *
+         * This case used to return an empty value, claiming it "matches what the Arduino
+         * characteristic did with no value set". THAT PREMISE WAS WRONG: a value was always
+         * set, by every write. NimBLECharacteristic::writeEvent() calls setValue() on each
+         * write (NimBLECharacteristic.cpp:334) and the READ path appends the stored value with
+         * os_mbuf_append() (NimBLEServer.cpp:743). So under the shipped firmware, reading the
+         * characteristic returned the last command written to it; under this port it returned
+         * zero bytes.
+         *
+         * The primary data path is notify-based and unaffected either way -- this matters to
+         * diagnostic and third-party clients that read rather than subscribe.
+         *
+         * CONSEQUENCE WORTH KNOWING: the last frame written is readable by any connected
+         * client, with no authentication. That is the shipped behaviour being restored, not a
+         * new exposure, and with app-layer encryption enabled the retained bytes are AES-CCM
+         * ciphertext. With encryption disabled they are the plaintext command. If that is not
+         * wanted, the fix is to stop retaining rather than to keep diverging silently. */
+        if (s_chr_value_len == 0) {
+            return 0;
+        }
+        int rc = os_mbuf_append(ctxt->om, s_chr_value, s_chr_value_len);
+        return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
     default:
         return BLE_ATT_ERR_UNLIKELY;
     }
@@ -215,6 +250,21 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
 
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
+        /* OD-INSTRUMENTATION 2026-08-05 -- TEMPORARY, remove once the wake-connect defect is
+         * understood. Deliberately ESP_LOGW and not od_log: od_log drops records emitted from
+         * non-loop tasks under load (od_log.cpp's s_dropped path), and this callback runs on
+         * the NimBLE host task during a busy wake -- so an od_log line here could go missing
+         * and take the evidence with it. ESP_LOG writes straight to the port.
+         *
+         * WHAT THIS ANSWERS. On the first connection after a deep-sleep wake, the app's
+         * connect hook demonstrably does not run: od_ble_evt_connect() allocates an epoch as
+         * its first statement, for admitted and refused instances alike, yet the NEXT
+         * connection logged e=1 -- the first epoch of the boot. The same connection produced
+         * MTU and DISCONNECT events through THIS switch, so the callback was live. Those two
+         * facts do not sit together, and this line separates them: if it prints, the event
+         * arrived and the CONNECT case ran; if it does not, the event never reached us. */
+        ESP_LOGW(TAG, "[instr] GAP CONNECT h=%u status=%d",
+                 (unsigned)event->connect.conn_handle, event->connect.status);
         if (event->connect.status == 0) {
             if (s_conn_count < 0xFF) {
                 __atomic_fetch_add(&s_conn_count, (uint8_t)1, __ATOMIC_RELEASE);
@@ -224,14 +274,52 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
             }
             od_ble_evt_connect(event->connect.conn_handle);
         } else {
-            /* The connection attempt failed, so no link exists and no hook fires. Resuming
-             * advertising is stack housekeeping, not policy -- without it the device goes
-             * quiet after a failed connect and only a reboot brings it back. */
-            od_ble_advertise();
+            /* A NON-ZERO STATUS DOES NOT MEAN "NO LINK". This branch used to assume it did --
+             * skip the hook, resume advertising -- and that assumption cost every first
+             * connection after a wake.
+             *
+             * OBSERVED ON HARDWARE 2026-08-05: NimBLE delivers CONNECT with status 26,
+             * BLE_HS_EENCRYPT_KEY_SZ ("invalid encryption key size"), for a link that IS
+             * established. The proof is in the same log: the very next call to
+             * ble_gap_adv_start() returns BLE_HS_ENOMEM because the single connection slot is
+             * IN USE (CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1), and the link then completes an MTU
+             * exchange, carries a GATT write and produces a real DISCONNECT event. The
+             * application, never having been told, dropped that write as non-owner -- so the
+             * client saw a GATT server it could not use and gave up after ~8 s.
+             *
+             * ASK THE STACK INSTEAD OF INFERRING. ble_gap_conn_find() is authoritative: if a
+             * descriptor exists, the link is real and must be adopted exactly as a status-0
+             * connect would be. Only when it does not exist is this genuinely a failed attempt
+             * with nothing to own, which is the case the advertise-resume was written for. */
+            struct ble_gap_conn_desc desc;
+            const bool link_exists =
+                (ble_gap_conn_find(event->connect.conn_handle, &desc) == 0);
+            ESP_LOGW(TAG, "[instr] GAP CONNECT status=%d link_exists=%d",
+                     event->connect.status, (int)link_exists);
+            if (link_exists) {
+                if (s_conn_count < 0xFF) {
+                    __atomic_fetch_add(&s_conn_count, (uint8_t)1, __ATOMIC_RELEASE);
+                }
+                if (s_preferred_mtu) {
+                    ble_att_set_preferred_mtu(s_preferred_mtu);
+                }
+                od_ble_evt_connect(event->connect.conn_handle);
+            } else {
+                /* Genuinely no link. Resuming advertising is stack housekeeping, not policy --
+                 * without it the device goes quiet after a failed connect and only a reboot
+                 * brings it back. */
+                od_ble_advertise();
+            }
         }
         return 0;
 
     case BLE_GAP_EVENT_DISCONNECT: {
+        /* OD-INSTRUMENTATION: pairs with the CONNECT line above so handles can be matched.
+         * A DISCONNECT for a handle that never produced a CONNECT line is the signature of
+         * the defect. */
+        ESP_LOGW(TAG, "[instr] GAP DISCONNECT h=%u reason=0x%04X",
+                 (unsigned)event->disconnect.conn.conn_handle,
+                 (unsigned)event->disconnect.reason);
         const uint8_t n = __atomic_load_n(&s_conn_count, __ATOMIC_ACQUIRE);
         if (n > 0) {
             __atomic_store_n(&s_conn_count, (uint8_t)(n - 1), __ATOMIC_RELEASE);
@@ -264,6 +352,128 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
          * controller has finished. The hook re-reads both directions rather than trusting the
          * event's fields, so one log line describes the whole link. */
         od_ble_evt_link_negotiated(event->phy_updated.conn_handle, "PHY update");
+        return 0;
+
+    /* ------------------------------------------------- the rest of the wrapper's census
+     *
+     * NimBLE-Arduino's NimBLEServer::handleGapEvent covers 14 GAP events; phase B's C-API
+     * rewrite covered 6, and the gap produced a live regression (see REPEAT_PAIRING below).
+     * These five close the census. Each is the EQUIVALENT of what the wrapper did, translated
+     * into this target's idiom -- the wrapper dispatched to NimBLEServerCallbacks virtuals
+     * that this firmware has no counterpart for, so "equivalent" means the same information
+     * reaches the same place, not the same shape.
+     *
+     * All are host-task context and therefore flag-or-log only, exactly like the six above. */
+
+    case BLE_GAP_EVENT_CONN_UPDATE:
+        /* Wrapper: looked the connection up and called onConnParamsUpdate(peerInfo).
+         *
+         * The connection interval changed -- the central re-negotiated it, typically dropping
+         * from a fast transfer interval back to a slow idle one. This target already has the
+         * right reporter for that: the same one MTU and PHY changes use, so all three
+         * renegotiations produce one comparable line rather than three formats. That answers
+         * "why did throughput fall off mid-transfer", which was previously unanswerable. */
+        od_ble_evt_link_negotiated(event->conn_update.conn_handle, "connection update");
+        return 0;
+
+    case BLE_GAP_EVENT_NOTIFY_TX:
+        /* Wrapper: found the characteristic and called onStatus(chr, status), after letting an
+         * unacknowledged INDICATION pass silently (status 0 on an indication means "sent, ack
+         * still outstanding" -- the real result arrives in a second event).
+         *
+         * This target has ONE characteristic, so the lookup collapses. What matters is the
+         * status: a non-zero value means the notification did NOT go out, and this firmware
+         * runs its own BLE TX queue that has been unable to see that. Only failures are
+         * logged -- a line per successful notification would be one per frame of every
+         * transfer, which is exactly the kind of logging that hides the failures. */
+        if (event->notify_tx.indication && event->notify_tx.status == 0) {
+            return 0;   /* indication sent, ack outstanding -- not a result yet */
+        }
+        if (event->notify_tx.status != 0) {
+            ESP_LOGW(TAG, "notify TX failed: status=%d h=%u attr=%u",
+                     event->notify_tx.status,
+                     (unsigned)event->notify_tx.conn_handle,
+                     (unsigned)event->notify_tx.attr_handle);
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_IDENTITY_RESOLVED: {
+        /* Wrapper: resolved the peer and called onIdentity(peerInfo).
+         *
+         * The peer connected with a resolvable private address and the stack has now matched
+         * it to a bonded identity. Diagnostics only here -- this firmware identifies clients
+         * by its own link-owner epoch, not by BLE address -- but it is worth seeing, because
+         * it is the event that says "this peer IS bonded to us", which is the state the
+         * REPEAT_PAIRING path exists to repair. */
+        struct ble_gap_conn_desc desc;
+        if (ble_gap_conn_find(event->identity_resolved.conn_handle, &desc) == 0) {
+            ESP_LOGI(TAG, "identity resolved h=%u type=%u",
+                     (unsigned)event->identity_resolved.conn_handle,
+                     (unsigned)desc.peer_id_addr.type);
+        }
+        return 0;
+    }
+
+    case BLE_GAP_EVENT_NOTIFY_RX:
+        /* Wrapper: forwarded to NimBLEClient -- it supports the CENTRAL role and this event is
+         * a notification arriving FROM a peer.
+         *
+         * This build is peripheral-only and never subscribes to anything, so it cannot occur.
+         * Handled explicitly rather than left to fall through: an unhandled case returns 0 and
+         * is indistinguishable from success, which is precisely how eight missing events went
+         * unnoticed until one of them broke connections. If this ever fires, the assumption
+         * behind it has changed and the log will say so. */
+        ESP_LOGW(TAG, "NOTIFY_RX on a peripheral-only build (h=%u) -- unexpected",
+                 (unsigned)event->notify_rx.conn_handle);
+        return 0;
+
+    case BLE_GAP_EVENT_SCAN_REQ_RCVD:
+        /* Wrapper: routed to NimBLEAdvertising/NimBLEExtAdvertising, which for legacy
+         * advertising does no work beyond its own bookkeeping.
+         *
+         * DELIBERATELY SILENT. A scan request arrives from every scanning phone in radio
+         * range, several times a second; logging each one would bury the events that matter --
+         * the opposite of what this census is for. The case exists so the event is accounted
+         * for rather than falling through as an unknown. */
+        return 0;
+
+    /* ---------------------------------------------------------------- security
+     *
+     * THESE THREE WERE LOST IN THE PORT, and their absence is a REGRESSION against the
+     * shipped Arduino firmware. NimBLE-Arduino's NimBLEServer::handleGapEvent handles 14 GAP
+     * events; phase B's C-API rewrite covered 6. REPEAT_PAIRING is the one that reached the
+     * user: with a stale bond on the client, the wrapper deleted it and re-paired, while this
+     * port silently kept the mismatched keys and failed the same way on every attempt.
+     * Restored 2026-08-05 after the connect-stutter investigation. */
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        /* The peer is bonded to us but the keys no longer agree -- typically because the
+         * client kept a bond across a reflash, or the key sizes differ. Deleting our side and
+         * retrying is what the Arduino wrapper did and what every NimBLE peripheral example
+         * does; without it the condition is PERMANENT until a human forgets the device on the
+         * client, because nothing on this side can clear it. */
+        struct ble_gap_conn_desc desc;
+        if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
+            ble_store_util_delete_peer(&desc.peer_id_addr);
+            ESP_LOGW(TAG, "repeat pairing: stale bond deleted, retrying");
+        }
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
+
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        /* Observation only -- the app layer does its own AES-CCM and does not depend on link
+         * encryption (no characteristic carries an _ENC flag and CONFIG_BT_NIMBLE_SM_LVL=0).
+         * Logged because without it an encryption failure is INVISIBLE, which is precisely
+         * how the connect stutter stayed unexplained across three captures. */
+        ESP_LOGW(TAG, "encryption change: status=%d h=%u",
+                 event->enc_change.status, (unsigned)event->enc_change.conn_handle);
+        return 0;
+
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+        /* Should not fire: no IO capability is declared, so pairing is "just works". Logged
+         * rather than ignored so that if it ever DOES fire, it appears instead of the pairing
+         * silently stalling -- the same failure mode REPEAT_PAIRING had. */
+        ESP_LOGW(TAG, "passkey action requested (action=%u) -- unhandled, pairing will stall",
+                 (unsigned)event->passkey.params.action);
         return 0;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -347,6 +557,18 @@ static void od_ble_advertise(void)
     adv.disc_mode = BLE_GAP_DISC_MODE_GEN;
 
     rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &adv, od_gap_event, NULL);
+    /* OD-INSTRUMENTATION: stamp EVERY start, with a sequence number, so the log shows whether
+     * od_gap_event was the live callback before the connection in question formed -- the
+     * "event arrived before we were listening" hypothesis. rc=6 is BLE_HS_ENOMEM and is
+     * EXPECTED while a client holds the single connection slot
+     * (CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1): connectable undirected advertising needs a free
+     * connection object. Logged, not silenced, because which CALLER produced it is the open
+     * question. */
+    {
+        static uint32_t s_adv_seq = 0;
+        ESP_LOGW(TAG, "[instr] adv_start #%u rc=%d%s", (unsigned)++s_adv_seq, rc,
+                 rc == BLE_HS_ENOMEM ? " (ENOMEM: connection slot in use -- expected)" : "");
+    }
     if (rc != 0 && rc != BLE_HS_EALREADY) {
         ESP_LOGE(TAG, "ble_gap_adv_start failed: %d", rc);
     }
@@ -401,6 +623,37 @@ bool od_ble_init(const char *device_name)
     ble_hs_cfg.sync_cb  = od_on_sync;
     ble_hs_cfg.reset_cb = od_on_reset;
 
+    /* SECURITY MANAGER DEFAULTS -- RESTORED FROM NimBLE-Arduino 2026-08-05.
+     *
+     * THIS IS THE ROOT CAUSE OF THE CONNECT STUTTER, and it is an omission rather than a
+     * mistake: NimBLEDevice::init() sets all six of these explicitly
+     * (NimBLE-Arduino/src/NimBLEDevice.cpp:991-997) and phase B's C-API rewrite set NONE of
+     * them, silently inheriting ESP-IDF's defaults -- which ENABLE bonding and Secure
+     * Connections. So the shipped Arduino firmware never bonded, and this port started
+     * advertising bonding capability the moment it was flashed.
+     *
+     * The failure that follows is exact: a client accepts the offer and bonds; nothing here
+     * calls ble_store_config_init() and NVS persistence is off in every baseline, so the bond
+     * dies with the boot; the client keeps its half; the next connection presents keys this
+     * device no longer has and NimBLE reports the connect with BLE_HS_EENCRYPT_KEY_SZ (26).
+     * That is why it reproduced on the first connection after every deep-sleep wake.
+     *
+     * Nothing wants bonding here. No characteristic carries an _ENC or _AUTHEN flag
+     * (od_chrs above), CONFIG_BT_NIMBLE_SM_LVL is 0, and confidentiality and authentication
+     * are the application's job -- the 0x0050 challenge/response and per-frame AES-CCM, which
+     * work identically over an unencrypted link. Link-layer pairing buys this device nothing
+     * and costs it a connection failure class.
+     *
+     * Values are the wrapper's, field for field, deliberately: this is a restoration of
+     * shipped behaviour, not a new security policy. Changing any of them is a wire-visible
+     * decision about how the device pairs and belongs in DIVERGENCE_MATRIX.md. */
+    ble_hs_cfg.sm_io_cap         = BLE_HS_IO_NO_INPUT_OUTPUT;
+    ble_hs_cfg.sm_bonding        = 0;   /* do not offer to store keys */
+    ble_hs_cfg.sm_mitm           = 0;   /* no man-in-the-middle protection demanded */
+    ble_hs_cfg.sm_sc             = 0;   /* no Secure Connections */
+    ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC;
+
     ble_svc_gap_init();
     ble_svc_gatt_init();
 
@@ -420,6 +673,34 @@ bool od_ble_init(const char *device_name)
 
     nimble_port_freertos_init(od_host_task);
     s_inited = true;
+
+    /* WAIT FOR HOST SYNC BEFORE RETURNING -- restored from NimBLEDevice::init(), which loops
+     * on m_synced (NimBLE-Arduino/src/NimBLEDevice.cpp:1008) before it returns.
+     *
+     * Without this, init() returns the instant the host TASK is created, while the controller
+     * has not yet synced and no identity address exists. Every caller reads that as "BLE is
+     * up". Advertising happens to be safe -- od_ble_advertise() defers behind s_adv_wanted and
+     * od_on_sync() starts it -- but od_ble_get_identity_addr() is NOT: it would hand back a
+     * zeroed address, and that address is published in the mDNS `mac` TXT record, which is how
+     * a host correlates the BLE and LAN identities of the same device. Publishing 00:00:.. is
+     * worse than publishing late.
+     *
+     * BOUNDED, unlike the wrapper's unbounded spin: a controller that never syncs is a dead
+     * radio, and hanging setup() forever is a worse failure than continuing without BLE. On a
+     * healthy part this returns in a few milliseconds. */
+    {
+        const uint32_t kSyncTimeoutMs = 2000;
+        uint32_t waited = 0;
+        while (!s_addr_resolved && waited < kSyncTimeoutMs) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+            waited += 5;
+        }
+        if (!s_addr_resolved) {
+            ESP_LOGE(TAG, "host did not sync within %u ms -- continuing, but the BLE identity "
+                          "address is not available yet", (unsigned)kSyncTimeoutMs);
+        }
+    }
+
     ESP_LOGI(TAG, "NimBLE up; GATT service registered, val_handle=%u",
              (unsigned)s_chr_val_handle);
     return true;
@@ -427,7 +708,10 @@ bool od_ble_init(const char *device_name)
 
 bool od_ble_is_ready(void)
 {
-    return s_inited;
+    /* Both halves: the stack is initialised AND the host has synced far enough to have an
+     * identity address. s_inited alone was true before sync, so this used to answer "ready"
+     * for a stack that could not yet name itself. */
+    return s_inited && s_addr_resolved;
 }
 
 bool od_ble_notify_handle(uint16_t conn_handle, const uint8_t *data, uint16_t len)
@@ -588,9 +872,26 @@ void od_ble_deinit(void)
     /* nimble_port_stop() unblocks nimble_port_run() in the host task; nimble_port_deinit()
      * then tears the host down AND disables/releases the controller, which is the half that
      * od_ble_stop_advertising() never did and that esp_restart() does not do for us. */
-    if (nimble_port_stop() == 0) {
-        nimble_port_deinit();
+    if (nimble_port_stop() != 0) {
+        /* THE STOP FAILED, SO THE STACK IS STILL UP. Clearing the flags here -- which this
+         * function used to do unconditionally -- would leave the firmware believing BLE was
+         * torn down while the host task and the controller remained allocated. The next
+         * od_ble_init() would then take its `if (s_inited) return true` early exit... except
+         * s_inited would be false, so it would try a fresh nimble_port_init() on top of a
+         * running stack and fail there instead, one layer away from the cause.
+         *
+         * NimBLEDevice::deinit() clears m_initialized only inside the successful branch and
+         * reports failure (NimBLE-Arduino/src/NimBLEDevice.cpp:1025); this is that behaviour.
+         * State is left intact so it still describes reality. */
+        ESP_LOGE(TAG, "nimble_port_stop() failed -- BLE left UP, state unchanged");
+        return;
     }
+    nimble_port_deinit();
+    /* Drop the retained characteristic value. The wrapper got this for free -- deinit
+     * destroyed the NimBLECharacteristic and a later init built a fresh one with an empty
+     * NimBLEAttValue -- whereas this buffer is file-static and would otherwise let a client
+     * read the previous session's last frame back after a teardown and restart. */
+    s_chr_value_len  = 0;
     s_chr_val_handle = 0;
     s_addr_resolved  = false;
     s_inited         = false;

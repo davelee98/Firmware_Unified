@@ -1,64 +1,67 @@
-/* Wire.h -- Arduino TwoWire over ESP-IDF's i2c_master driver. TEMPORARY; part of the shim.
+/* Wire.h -- Arduino TwoWire over hal/od_hal_i2c. TEMPORARY; part of the shim.
  *
- * The largest API in the census after String: ~230 call sites across the sensor and touch
- * drivers (sht40, bq27220, touch_input). All of it is the same five-call idiom, which is why
- * a shim is worth writing here rather than rewriting 230 sites by hand during phase B:
+ * WHAT CHANGED IN PHASE C STEP 5: the bus mechanics moved to hal/od_hal_i2c.{h,c} and this
+ * became a thin adapter. Nothing about the bus behaviour changed -- the IDF calls, the
+ * timeouts, the device-handle cache and both hard-won fixes below are the same code, in one
+ * place instead of two.
+ *
+ * That move was FORCED, not cosmetic. IDF permits exactly one i2c_new_master_bus() per port.
+ * The sensor drivers converting to od_hal_i2c while display_service.cpp and touch_input.cpp
+ * still drive Wire would have meant two owners of one bus, which does not fail cleanly: it
+ * fails wherever the two disagree about who configured the pins. One owner, one adapter.
+ *
+ * ~230 call sites across the sensor and touch drivers, all the same five-call idiom:
  *
  *     Wire.beginTransmission(addr); Wire.write(...); Wire.endTransmission();
  *     Wire.requestFrom(addr, n);    while (Wire.available()) Wire.read();
  *
- * It lands on driver/i2c_master.h (IDF >= 5.2), NEVER the deprecated driver/i2c.h --
- * docs/TOOLCHAINS.md makes that an explicit floor for this target.
+ * The remaining users are touch_input.cpp (phase C step 6) and display_service.cpp (step 10,
+ * the AXP2101 PMIC and the bus lifecycle). This file disappears with them; the sensor drivers
+ * already left.
  *
- * The real destination is od_hal_i2c (docs/SHARED_API_DESIGN.md), and note what that
- * interface says: the core does not call I2C at all -- sensor and PMIC drivers are target
- * code. So these call sites do not migrate to shared/; they get rewritten against the IDF
- * driver directly when their driver is touched, and this shim disappears with them.
+ * TWO BEHAVIOURS THAT LOOK LIKE DETAIL AND ARE NOT. Both were found on hardware, both now live
+ * in od_hal_i2c, and both are documented here because this is where the Arduino semantics they
+ * implement are visible:
+ *
+ *   * A ZERO-LENGTH WRITE IS A PRESENCE PROBE. `beginTransmission(a); endTransmission();` with
+ *     no write() between is the universal Arduino "is anything at this address?", and
+ *     sensor_sht40.cpp's bus scan was exactly that. IDF's i2c_master_transmit() rejects size 0
+ *     outright, so nothing reached the bus -- no START, no address byte, no ACK to observe --
+ *     and mapping that refusal to "NACK on address" made every probe of every address report
+ *     absent, identically whether or not hardware was there. A connected SHT40 was
+ *     undetectable. Routed to od_hal_i2c_probe(), which is IDF's address-only primitive.
+ *
+ *   * endTransmission(false) MUST NOT SEND A STOP. It is the repeated-START register-read
+ *     idiom and sensor_bq27220.cpp depends on it. Discarding the flag turns it into
+ *     STOP + fresh START, which the BQ27220 does not accept for register reads -- it returns
+ *     whatever an unaddressed read yields, so the gauge produces plausible garbage instead of
+ *     a clean error. The staged bytes are held and the next requestFrom() emits both halves as
+ *     one od_hal_i2c_write_read().
  */
 
 #pragma once
 
 #include "arduino_compat.h"
-#include "driver/i2c_master.h"
-#include "esp_log.h"
+#include "od_hal_i2c.h"
 
 class TwoWire {
 public:
-    explicit TwoWire(int port = 0) : _port(port) {}
+    explicit TwoWire(int port = 0) { (void)port; }
 
     bool begin(int sda = -1, int scl = -1, uint32_t freq = 100000)
     {
-        if (_bus) {
+        if (od_hal_i2c_is_up()) {
             return true;
         }
         if (sda < 0 || scl < 0) {
             return false;
         }
-        _freq = freq ? freq : 100000;
-
-        i2c_master_bus_config_t cfg = {};
-        cfg.i2c_port                     = _port;
-        cfg.sda_io_num                   = (gpio_num_t)sda;
-        cfg.scl_io_num                   = (gpio_num_t)scl;
-        cfg.clk_source                   = I2C_CLK_SRC_DEFAULT;
-        cfg.glitch_ignore_cnt            = 7;
-        cfg.flags.enable_internal_pullup = true;
-
-        return i2c_new_master_bus(&cfg, &_bus) == ESP_OK;
+        return od_hal_i2c_init((uint8_t)sda, (uint8_t)scl, freq);
     }
 
-    void end()
-    {
-        releaseDevice();
-        if (_bus) {
-            i2c_del_master_bus(_bus);
-            _bus = nullptr;
-        }
-    }
+    void end() { od_hal_i2c_deinit(); }
 
-    /* Arduino lets setClock be called any time; IDF fixes the speed per device, so this only
-     * records the value and takes effect on the next device attach. */
-    void setClock(uint32_t freq) { _freq = freq ? freq : _freq; }
+    void setClock(uint32_t freq) { od_hal_i2c_set_clock(freq); }
 
     void beginTransmission(uint8_t addr)
     {
@@ -84,31 +87,17 @@ public:
         return written;
     }
 
-    /* Arduino returns 0 on success and non-zero on error -- the inverse of IDF's esp_err_t
-     * convention, and of this repo's own "0 ok, negative on failure". Callers were written
-     * against the Arduino sense, so that is what this returns. Getting this backwards would
-     * make every I2C error look like success.
-     *
-     * sendStop is HONOURED, not ignored. endTransmission(false) is the repeated-START
-     * register-read idiom:
-     *
-     *     beginTransmission(a); write(reg); endTransmission(false); requestFrom(a, n);
-     *
-     * and it is what sensor_bq27220.cpp uses. Discarding the flag turned that into
-     * STOP + fresh START, which the BQ27220 does not accept for register reads -- it returns
-     * whatever an unaddressed read yields, so the gauge produced plausible garbage instead of
-     * a clean error. IDF's repeated-START primitive is i2c_master_transmit_receive(), so
-     * sendStop == false defers the write and lets the next requestFrom() issue both halves
-     * as one transaction. */
-    /* Arduino return codes, which callers DO distinguish:
-     *   0 success, 1 data too long, 2 NACK on address, 3 NACK on data, 4 other error. */
+    /* Arduino's return codes, which callers DO distinguish, and which are the INVERSE of both
+     * IDF's esp_err_t convention and od_hal_i2c's:
+     *   0 success, 1 data too long, 2 NACK on address, 3 NACK on data, 4 other error.
+     * Getting this backwards would make every I2C error look like success, so the translation
+     * is here at the Arduino boundary and nowhere else. */
     uint8_t endTransmission(bool sendStop = true)
     {
         if (!sendStop) {
-            /* Hold the bytes; requestFrom() emits them with a repeated START. Arduino
-             * reports success here because nothing has been transmitted yet to fail.
-             * Checked before attach() so a staged write needs no device handle yet. */
-            if (!_bus) {
+            /* Hold the bytes; requestFrom() emits them with a repeated START. Arduino reports
+             * success because nothing has been transmitted yet to fail. */
+            if (!od_hal_i2c_is_up()) {
                 _txLen = 0;
                 return 4;
             }
@@ -117,81 +106,37 @@ public:
         }
         _pendingTx = false;
 
-        /* ZERO-LENGTH WRITE == A PRESENCE PROBE, and it must not go to
-         * i2c_master_transmit().
-         *
-         * `beginTransmission(addr); endTransmission();` with no write() in between is the
-         * universal Arduino way to ask "is anything at this address?" -- sensor_sht40.cpp's
-         * bus scan is exactly that. Under Arduino it emitted START + address + STOP and
-         * reported the address ACK.
-         *
-         * IDF's i2c_master_transmit() REJECTS size 0 outright:
-         *
-         *     ESP_RETURN_ON_FALSE((write_buffer != NULL) && (write_size > 0),
-         *                         ESP_ERR_INVALID_ARG, TAG,
-         *                         "i2c transmit buffer or size invalid");   i2c_master.c:1302
-         *
-         * so nothing reached the bus at all -- no START, no address byte, no ACK to observe --
-         * and the old code then mapped that refusal to 2 ("NACK on address"). Every probe of
-         * every address on every bus therefore reported "no device present", identically
-         * whether or not hardware was there, while the driver logged five
-         * "i2c transmit buffer or size invalid" errors that read as unrelated noise. A
-         * connected SHT40 was undetectable.
-         *
-         * i2c_master_probe() is IDF's primitive for precisely this: bus-level, address-only,
-         * no data phase. It takes the BUS handle, so the probe path needs no device
-         * registration -- which also stops the scan creating and tearing down a device handle
-         * per candidate address. */
         if (_txLen == 0) {
-            if (!_bus) {
-                return 4;
-            }
-            esp_err_t err = i2c_master_probe(_bus, _addr, kTimeoutMs);
-            if (err == ESP_OK) {
-                return 0;
-            }
-            /* ESP_ERR_NOT_FOUND is the real "nobody answered" and is the only thing that may
-             * report 2. Anything else (a bad argument, a bus fault, a timeout on a stuck bus)
-             * is 4 -- the distinction the old blanket `return 2` destroyed. */
-            return (err == ESP_ERR_NOT_FOUND) ? 2 : 4;
+            return mapProbe(od_hal_i2c_probe(_addr));
         }
 
-        if (!attach(_addr)) {
-            _txLen = 0;
-            return 4;
-        }
-        esp_err_t err = i2c_master_transmit(_dev, _tx, _txLen, kTimeoutMs);
+        const int rc = od_hal_i2c_write(_addr, _tx, (uint16_t)_txLen);
         _txLen = 0;
-        if (err == ESP_OK) {
-            return 0;
-        }
-        /* A real transfer that failed: the peer NACKed, or the bus misbehaved. Only report
-         * "NACK on address" for the errors that actually mean it. */
-        return (err == ESP_ERR_INVALID_ARG) ? 4 : 2;
+        return mapWrite(rc);
     }
 
-    /* Arduino's 3-arg form; its bool is "send a stop AFTER the read", which IDF's transaction
+    /* Arduino's 3-arg form; its bool is "send a STOP after the read", which the IDF transaction
      * API always does. Accepted and ignored -- unlike endTransmission's flag, which is not. */
     size_t requestFrom(uint8_t addr, size_t n, bool) { return requestFrom(addr, n); }
 
     size_t requestFrom(uint8_t addr, size_t n)
     {
         const bool haveRepeatedStart = _pendingTx && (addr == _addr);
-        const uint8_t txLen = _txLen;
+        const size_t txLen = _txLen;
         _pendingTx = false;
         _txLen = 0;
         _rxLen = 0;
         _rxPos = 0;
-        if (n > sizeof(_rx) || !attach(addr)) {
+        if (n == 0 || n > sizeof(_rx)) {
             return 0;
         }
-        esp_err_t err;
+        int rc;
         if (haveRepeatedStart && txLen > 0) {
-            err = i2c_master_transmit_receive(_dev, _tx, txLen, _rx, n, kTimeoutMs);
+            rc = od_hal_i2c_write_read(addr, _tx, (uint16_t)txLen, _rx, (uint16_t)n);
         } else {
-            err = i2c_master_receive(_dev, _rx, n, kTimeoutMs);
+            rc = od_hal_i2c_read(addr, _rx, (uint16_t)n);
         }
-        if (err != ESP_OK) {
+        if (rc != OD_HAL_I2C_OK) {
             return 0;
         }
         _rxLen = n;
@@ -209,44 +154,25 @@ public:
     }
 
 private:
-    static constexpr int kTimeoutMs = 100;
-
-    bool attach(uint8_t addr)
+    /* A probe distinguishes "nobody answered" (2) from every other failure (4); the difference
+     * is what tells a bus scan from a broken bus. */
+    static uint8_t mapProbe(int rc)
     {
-        if (!_bus) {
-            return false;
-        }
-        if (_dev && addr == _devAddr) {
-            return true;
-        }
-        releaseDevice();
-
-        i2c_device_config_t dcfg = {};
-        dcfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
-        dcfg.device_address  = addr;
-        dcfg.scl_speed_hz    = _freq;
-
-        if (i2c_master_bus_add_device(_bus, &dcfg, &_dev) != ESP_OK) {
-            _dev = nullptr;
-            return false;
-        }
-        _devAddr = addr;
-        return true;
+        if (rc == OD_HAL_I2C_OK)      return 0;
+        if (rc == OD_HAL_I2C_ENODEV)  return 2;
+        return 4;
     }
 
-    void releaseDevice()
+    /* A real transfer that failed: the peer NACKed, or the bus misbehaved. Only the argument
+     * error is "other"; everything else reports as an address NACK, matching what this shim
+     * reported before the mechanics moved. */
+    static uint8_t mapWrite(int rc)
     {
-        if (_dev) {
-            i2c_master_bus_rm_device(_dev);
-            _dev = nullptr;
-        }
+        if (rc == OD_HAL_I2C_OK)     return 0;
+        if (rc == OD_HAL_I2C_EINVAL) return 4;
+        return 2;
     }
 
-    int _port;
-    uint32_t _freq = 100000;
-    i2c_master_bus_handle_t _bus = nullptr;
-    i2c_master_dev_handle_t _dev = nullptr;
-    uint8_t _devAddr = 0xFF;
     uint8_t _addr = 0;
     /* Set by endTransmission(false): the staged bytes in _tx are a register selector waiting
      * for the matching requestFrom() to emit them with a repeated START. */

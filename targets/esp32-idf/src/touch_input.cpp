@@ -2,11 +2,13 @@
 #include "display_service.h"
 #include "structs.h"
 #include "od_log.h"
-#include <Arduino.h>
-#include <Wire.h>
+#include "od_hal_gpio.h"
+#include "od_hal_i2c.h"
+#include "od_hal_time.h"
 #include <string.h>
 
 #if defined(TARGET_ESP32)
+#include "esp_attr.h"      // IRAM_ATTR -- an IDF macro that arrived via <Arduino.h>
 #define TOUCH_ISR_ATTR IRAM_ATTR
 #else
 #define TOUCH_ISR_ATTR
@@ -62,32 +64,32 @@ static TouchRuntime s_touch_rt[4];
 static uint32_t s_last_touch_process_ms = 0;
 static uint8_t s_epd_refresh_suspend = 0;
 
-static void gt911_drain_wire(void) {
-    while (Wire.available()) {
-        (void)Wire.read();
-    }
-}
+// Was gt911_drain_wire(): `while (Wire.available()) Wire.read();`. That drained bytes left in
+// the SHIM's RX buffer after a partial read -- an artifact of Arduino's requestFrom()/read()
+// split, not anything on the bus. od_hal_i2c transfers are all-or-nothing, so there is no
+// residue to discard and nothing for this to do. Removed rather than left as an empty function,
+// but recorded here because its call sites read like bus recovery and were not.
 
+// repeated_start selects the bus framing, and BOTH forms are tried by gt911_read_reg() below
+// because GT911 clones differ: some accept only the repeated-START read, others only
+// STOP-then-START. That is why od_hal_i2c exposes write_read() and write()+read() separately
+// rather than one register-shaped call -- see od_hal_i2c.h.
 static bool gt911_read_reg_once(uint8_t addr7, uint16_t reg, uint8_t* buf, uint8_t len, bool reg_high_first, bool repeated_start) {
-    Wire.beginTransmission(addr7);
+    uint8_t sel[2];
     if (reg_high_first) {
-        Wire.write((uint8_t)(reg >> 8));
-        Wire.write((uint8_t)(reg & 0xFFu));
+        sel[0] = (uint8_t)(reg >> 8);
+        sel[1] = (uint8_t)(reg & 0xFFu);
     } else {
-        Wire.write((uint8_t)(reg & 0xFFu));
-        Wire.write((uint8_t)(reg >> 8));
+        sel[0] = (uint8_t)(reg & 0xFFu);
+        sel[1] = (uint8_t)(reg >> 8);
     }
-    if (Wire.endTransmission(repeated_start ? false : true) != 0) {
+    if (repeated_start) {
+        return od_hal_i2c_write_read(addr7, sel, sizeof(sel), buf, len) == OD_HAL_I2C_OK;
+    }
+    if (od_hal_i2c_write(addr7, sel, sizeof(sel)) != OD_HAL_I2C_OK) {
         return false;
     }
-    size_t n = Wire.requestFrom((int)addr7, (int)len);
-    if (n != (size_t)len) {
-        return false;
-    }
-    for (uint8_t i = 0; i < len; i++) {
-        buf[i] = (uint8_t)Wire.read();
-    }
-    return true;
+    return od_hal_i2c_read(addr7, buf, len) == OD_HAL_I2C_OK;
 }
 
 static volatile uint8_t s_touch_irq_mask = 0;
@@ -99,14 +101,11 @@ static void touch_disable_controller(uint8_t idx, TouchController* tc, TouchRunt
     rt->disabled = 1;
     rt->ok = 0;
     if (rt->int_irq_attached && tc->int_pin != 0xFF) {
-        int irq_num = digitalPinToInterrupt(tc->int_pin);
-        if (irq_num >= 0) {
-            detachInterrupt(irq_num);
-        }
+        od_hal_gpio_clear_irq(tc->int_pin);
         rt->int_irq_attached = 0;
-        noInterrupts();
+        od_hal_gpio_irq_lock();
         s_touch_irq_mask &= (uint8_t)~(1u << idx);
-        interrupts();
+        od_hal_gpio_irq_unlock();
     }
     od_log_warn("Touch[%u]: disabled (%s)", idx, reason);
 }
@@ -136,10 +135,7 @@ static void touch_detach_int_pin(uint8_t pin) {
     if (pin == 0xFF) {
         return;
     }
-    int irq_num = digitalPinToInterrupt(pin);
-    if (irq_num >= 0) {
-        detachInterrupt(irq_num);
-    }
+    od_hal_gpio_clear_irq(pin);
 }
 
 static void touch_detach_all_configured_ints(void) {
@@ -155,44 +151,48 @@ static void gt911_int_wake_before_irq(const TouchController* t) {
     if (t->int_pin == 0xFF) {
         return;
     }
-    pinMode(t->int_pin, OUTPUT);
-    digitalWrite(t->int_pin, HIGH);
-    delay(10);
-    pinMode(t->int_pin, INPUT_PULLUP);
+    od_hal_gpio_config_output(t->int_pin, true);
+    od_hal_delay_ms(10);
+    od_hal_gpio_config_input(t->int_pin, /*pull_up=*/true, /*pull_down=*/false);
 }
 
 static void attach_touch_int(uint8_t idx, uint8_t pin) {
     if (idx >= 4 || pin == 0xFF) {
         return;
     }
-    int irq_num = digitalPinToInterrupt(pin);
-    if (irq_num < 0) {
-        od_log_warn("Touch[%u]: digitalPinToInterrupt failed for GPIO %u — using poll only", idx, pin);
+    // FALLING, not edge-both: the GT911 asserts INT active-low, so an edge-both attachment
+    // would raise a spurious event on every release. This is why od_hal_gpio_config_irq() takes
+    // an edge where SHARED_API_DESIGN.md's sketch specified edge-both only.
+    od_hal_gpio_config_input(pin, /*pull_up=*/true, /*pull_down=*/false);
+    if (od_hal_gpio_config_irq(pin, OD_GPIO_EDGE_FALLING, s_touch_isrs[idx]) != 0) {
+        od_log_warn("Touch[%u]: IRQ attach failed for GPIO %u -- using poll only", idx, pin);
         return;
     }
-    pinMode(pin, INPUT_PULLUP);
-    attachInterrupt(irq_num, s_touch_isrs[idx], FALLING);
     s_touch_rt[idx].int_irq_attached = 1;
 }
 
 static bool gt911_write_reg(uint8_t addr7, uint16_t reg, const uint8_t* buf, uint8_t len, bool reg_high_first) {
     for (uint8_t attempt = 0; attempt < GT911_I2C_RETRIES; attempt++) {
-        Wire.beginTransmission(addr7);
+        // Selector + payload as one transmit. Bounded by the buffer below rather than by the
+        // shim's 64-byte staging area; no caller writes more than a handful of bytes.
+        uint8_t tx[2 + 32];
+        if ((size_t)len + 2u > sizeof(tx)) {
+            return false;
+        }
         if (reg_high_first) {
-            Wire.write((uint8_t)(reg >> 8));
-            Wire.write((uint8_t)(reg & 0xFFu));
+            tx[0] = (uint8_t)(reg >> 8);
+            tx[1] = (uint8_t)(reg & 0xFFu);
         } else {
-            Wire.write((uint8_t)(reg & 0xFFu));
-            Wire.write((uint8_t)(reg >> 8));
+            tx[0] = (uint8_t)(reg & 0xFFu);
+            tx[1] = (uint8_t)(reg >> 8);
         }
         for (uint8_t i = 0; i < len; i++) {
-            Wire.write(buf[i]);
+            tx[2 + i] = buf[i];
         }
-        if (Wire.endTransmission() == 0) {
+        if (od_hal_i2c_write(addr7, tx, (uint16_t)(2 + len)) == OD_HAL_I2C_OK) {
             return true;
         }
-        gt911_drain_wire();
-        delayMicroseconds(GT911_I2C_RETRY_DELAY_US);
+        od_hal_delay_us(GT911_I2C_RETRY_DELAY_US);
     }
     return false;
 }
@@ -202,13 +202,11 @@ static bool gt911_read_reg(uint8_t addr7, uint16_t reg, uint8_t* buf, uint8_t le
         if (gt911_read_reg_once(addr7, reg, buf, len, reg_high_first, true)) {
             return true;
         }
-        gt911_drain_wire();
-        delayMicroseconds(GT911_I2C_RETRY_DELAY_US);
+        od_hal_delay_us(GT911_I2C_RETRY_DELAY_US);
         if (gt911_read_reg_once(addr7, reg, buf, len, reg_high_first, false)) {
             return true;
         }
-        gt911_drain_wire();
-        delayMicroseconds(GT911_I2C_RETRY_DELAY_US);
+        od_hal_delay_us(GT911_I2C_RETRY_DELAY_US);
     }
     return false;
 }
@@ -243,32 +241,37 @@ static void gt911_hw_reset(const TouchController* t, bool int_low_for_addr_5d) {
     if (t->rst_pin == 0xFF) {
         return;
     }
+    // ORDER IS THE CONTRACT HERE, so every pinMode/digitalWrite stays a separate call --
+    // od_hal_gpio_set_mode_output() exists for exactly this. Both pads are made outputs BEFORE
+    // either is driven, and INT's level at RST's rising edge is what selects the controller's
+    // I2C address. Collapsing the pairs into config_output() would reorder the sequence and
+    // change which address the part answers on.
     if (t->int_pin == 0xFF) {
-        pinMode(t->rst_pin, OUTPUT);
-        digitalWrite(t->rst_pin, LOW);
-        delay(10);
-        digitalWrite(t->rst_pin, HIGH);
-        delay(60);
-        pinMode(t->rst_pin, OUTPUT);
-        digitalWrite(t->rst_pin, HIGH);
+        od_hal_gpio_set_mode_output(t->rst_pin);
+        od_hal_gpio_write(t->rst_pin, false);
+        od_hal_delay_ms(10);
+        od_hal_gpio_write(t->rst_pin, true);
+        od_hal_delay_ms(60);
+        od_hal_gpio_set_mode_output(t->rst_pin);
+        od_hal_gpio_write(t->rst_pin, true);
         return;
     }
-    delay(1);
-    pinMode(t->int_pin, OUTPUT);
-    pinMode(t->rst_pin, OUTPUT);
-    digitalWrite(t->int_pin, LOW);
-    digitalWrite(t->rst_pin, LOW);
-    delay(11);
-    digitalWrite(t->int_pin, int_low_for_addr_5d ? LOW : HIGH);
-    delayMicroseconds(110);
-    pinMode(t->rst_pin, OUTPUT);
-    digitalWrite(t->rst_pin, HIGH);
-    delay(6);
-    digitalWrite(t->int_pin, LOW);
-    delay(51);
-    pinMode(t->rst_pin, OUTPUT);
-    digitalWrite(t->rst_pin, HIGH);
-    pinMode(t->int_pin, INPUT_PULLUP);
+    od_hal_delay_ms(1);
+    od_hal_gpio_set_mode_output(t->int_pin);
+    od_hal_gpio_set_mode_output(t->rst_pin);
+    od_hal_gpio_write(t->int_pin, false);
+    od_hal_gpio_write(t->rst_pin, false);
+    od_hal_delay_ms(11);
+    od_hal_gpio_write(t->int_pin, !int_low_for_addr_5d);
+    od_hal_delay_us(110);
+    od_hal_gpio_set_mode_output(t->rst_pin);
+    od_hal_gpio_write(t->rst_pin, true);
+    od_hal_delay_ms(6);
+    od_hal_gpio_write(t->int_pin, false);
+    od_hal_delay_ms(51);
+    od_hal_gpio_set_mode_output(t->rst_pin);
+    od_hal_gpio_write(t->rst_pin, true);
+    od_hal_gpio_config_input(t->int_pin, /*pull_up=*/true, /*pull_down=*/false);
 }
 
 static uint8_t touch_bus_id(const TouchController* t) {
@@ -302,8 +305,7 @@ static void touch_apply_enable_pin(const TouchController* tc) {
     if (tc->enable_pin == 0 || tc->enable_pin == 0xFF) {
         return;
     }
-    pinMode(tc->enable_pin, OUTPUT);
-    digitalWrite(tc->enable_pin, HIGH);
+    od_hal_gpio_config_output(tc->enable_pin, true);
 }
 
 static uint8_t gt911_resolve_and_init(const TouchController* t, TouchRuntime* rt) {
@@ -313,11 +315,11 @@ static uint8_t gt911_resolve_and_init(const TouchController* t, TouchRuntime* rt
 
     if (want != 0 && want != 0xFF) {
         if (t->rst_pin != 0xFF) {
-            delay(GT911_PRE_RESET_DELAY_MS);
+            od_hal_delay_ms(GT911_PRE_RESET_DELAY_MS);
             gt911_hw_reset(t, want == a5d);
-            delay(GT911_POST_RESET_SETTLE_MS);
+            od_hal_delay_ms(GT911_POST_RESET_SETTLE_MS);
         } else {
-            delay(10);
+            od_hal_delay_ms(10);
         }
         if (gt911_probe_product(want, &rt->reg_high_first)) {
             return want;
@@ -327,15 +329,15 @@ static uint8_t gt911_resolve_and_init(const TouchController* t, TouchRuntime* rt
     }
 
     if (t->rst_pin != 0xFF) {
-        delay(GT911_PRE_RESET_DELAY_MS);
+        od_hal_delay_ms(GT911_PRE_RESET_DELAY_MS);
         gt911_hw_reset(t, true);
-        delay(GT911_POST_RESET_SETTLE_MS);
+        od_hal_delay_ms(GT911_POST_RESET_SETTLE_MS);
         if (gt911_probe_product(a5d, &rt->reg_high_first)) {
             return a5d;
         }
-        delay(GT911_PRE_RESET_DELAY_MS);
+        od_hal_delay_ms(GT911_PRE_RESET_DELAY_MS);
         gt911_hw_reset(t, false);
-        delay(GT911_POST_RESET_SETTLE_MS);
+        od_hal_delay_ms(GT911_POST_RESET_SETTLE_MS);
         if (gt911_probe_product(a14, &rt->reg_high_first)) {
             return a14;
         }
@@ -435,7 +437,7 @@ void touchResumeAfterEpdRefresh(void) {
         return;
     }
     invalidateOpenDisplayWire();
-    delay(GT911_POST_RESET_SETTLE_MS);
+    od_hal_delay_ms(GT911_POST_RESET_SETTLE_MS);
     for (uint8_t i = 0; i < globalConfig.touch_controller_count; i++) {
         TouchController* tc = &globalConfig.touch_controllers[i];
         TouchRuntime* rt = &s_touch_rt[i];
@@ -539,7 +541,7 @@ void initTouchInput(void) {
             }
             od_log_info("Touch[%u]: kept post-EPD GT911 @0x%02X%s%s", i, rt->addr7,
                         rt->reg_high_first ? " BE" : " LE", tc->int_pin != 0xFF ? " INT+poll" : " poll");
-            rt->last_poll_ms = millis();
+            rt->last_poll_ms = od_hal_uptime_ms();
             continue;
         }
         if (!touch_reinit_gt911(i, tc, rt)) {
@@ -565,7 +567,7 @@ void initTouchInput(void) {
             od_log_debug("Touch[%u]: INT attach failed — polling only", i);
         }
 #endif
-        rt->last_poll_ms = millis();
+        rt->last_poll_ms = od_hal_uptime_ms();
     }
 }
 
@@ -597,7 +599,7 @@ void processTouchInput(void) {
     if (transferActive() || s_epd_refresh_suspend > 0) {
         return;
     }
-    uint32_t now = millis();
+    uint32_t now = od_hal_uptime_ms();
     if ((uint32_t)(now - s_last_touch_process_ms) < TOUCH_PROCESS_MIN_INTERVAL_MS) {
         return;
     }
@@ -617,7 +619,7 @@ void processTouchInput(void) {
         bool timed_poll = false;
         if (irq_mode) {
             bool edge = (s_touch_irq_mask & (1u << i)) != 0;
-            line_low = (digitalRead(tc->int_pin) == LOW);
+            line_low = (od_hal_gpio_read(tc->int_pin) == 0);
             if (line_low && rt->i2c_fail_streak > 0 &&
                 (uint32_t)(now - rt->last_i2c_fail_ms) < TOUCH_I2C_FAIL_BACKOFF_MS) {
                 line_low = false;
@@ -629,9 +631,9 @@ void processTouchInput(void) {
             }
             if (edge) {
                 from_irq = true;
-                noInterrupts();
+                od_hal_gpio_irq_lock();
                 s_touch_irq_mask &= (uint8_t)~(1u << i);
-                interrupts();
+                od_hal_gpio_irq_unlock();
             }
         } else {
             timed_poll = (uint32_t)(now - rt->last_poll_ms) >= interval;

@@ -2,7 +2,7 @@
 
 Source repo: `Firmware` (https://github.com/OpenDisplay/Firmware.git)
 
-## Status: **runs on hardware** (ESP32-S3, 2026-08-03)
+## Status: **runs on hardware** (ESP32-S3; re-verified after phase C on 2026-08-05)
 
 All ten boards build, and the S3 has been flashed and exercised. This section used to say
 "Phase B in progress — configures, partially compiles, does not link" and carried a census of
@@ -19,6 +19,187 @@ than updated because a list of solved problems reads as a list of open ones.
 activated per shell). Each board produces one merged image flashed at offset 0; see
 [docs/BBEPAPER_IO_BACKENDS.md](../../docs/BBEPAPER_IO_BACKENDS.md) for the panel layer and
 `release/MANIFEST.txt` for the per-board chip and flash command.
+
+### Verified on hardware (s3-n16r8-extuart-debug, 2026-08-05) — after phase C
+
+Second and larger verification event, from a device log covering a full session on a **Seeed
+reTerminal E1001** (800x480, panel IC `0x003C`, bb_epaper path, no FastEPD). This is the run
+that retires most of phase C's hardware debt: steps 1-15 had **not** been on hardware before it.
+
+| | |
+|---|---|
+| Boot + config load | NVS (`od_hal_nvs`), full config dump, 1.0 |
+| Encrypted session | `0x0050` challenge/response, all later traffic encrypted |
+| Read config `0x0040` | 9 chunks, encrypted |
+| Write config `0x0041`/`0x0042` | 5 chunks, reloaded from storage |
+| Image push `0x0080`-`0x0082` | **4 pushes**, 96 000 B each, zlib 3.37-38.05x, 23.3-39.1 KB/s |
+| Panel refresh | 1.01 s full, x4 |
+| Panel cold bring-up | 1319 ms x4, no BUSY timeouts (899 rail + 201 initIO + 41 wake + 178 initSeq) |
+| I2C sensor probe | `od_hal_i2c_probe` — 0x44 (SHT40) and 0x51 present, three absent, correct |
+| Die temperature | `od_hal_adc_die_temp_c()` installs, range -10..80 C |
+| LED `0x0073`/`0x0075` | activate + stop |
+| Reboot `0x000F` | LAN/WiFi teardown, BLE deinit, clean `RTC_SW_CPU_RST` |
+| Deep sleep | entered on idle (40 s hold), 360 s configured |
+| **Button wake** | **buttons 1/2/3 and wake-from-deep-sleep all work** |
+
+**What this covers.** The BLE + panel + GPIO arm: `od_hal_{nvs,log,gpio,time,adc}`, the 19 + 7
+`pinMode`+`digitalWrite` glitch removals of steps 12/14, the deep-sleep pin pass, and the GPIO
+interrupt path behind the buttons. On I2C it covers `od_hal_i2c_init`, `od_hal_i2c_probe`
+(five addresses, correct present/absent) and the SHT40 sensor reads.
+
+**The AXP2101 PMIC path is NOT covered, despite being the bulk of step 14.** The path is gated
+on the *configuration* declaring a sensor of type `OD_SENSOR_TYPE_AXP2101` (`pwrmgm()` scans
+`globalConfig.sensors` for it). This unit declares one sensor, type `0x0004` — an SHT40 — so
+`initAXP2101()` is never reached and `pwrmgm(on)` takes the plain-GPIO rail branch instead,
+which is what *"rail + 800 ms settle"* in the log is. Consistent with that, the PMIC's address
+0x34 is never probed; the probes are 0x44, 0x45, 0x51, 0x55 and 0x6A.
+
+Note the claim carefully: **this says nothing about whether an AXP2101 is fitted to the board.**
+A log cannot show that, and the gate is a config check, not a hardware detection. What is
+certain is that the ~20 rewritten `Wire` transactions setting DCDC/ALDO enables and voltage
+set-points **have never executed**. Verifying them needs a unit whose config declares an
+AXP2101 sensor, so until then step 14 is only partly verified.
+
+**What it does NOT cover.** The **entire WiFi/LAN arm** — this unit has `WiFi: disabled` in
+`communication_modes`, so steps 9b-ii (station, six formerly-dead behaviours), 9b-iii (LAN
+sockets, TLS-PSK) and 9b-iv (mDNS) are still unexercised. Also untested: the E1004 dual-CS
+path (compiled out on every board) and FastEPD (this panel uses bb_epaper).
+
+#### GAP EVENT COVERAGE IS A PORT REGRESSION (found 2026-08-05)
+
+`NimBLEServer::handleGapEvent` in NimBLE-Arduino — the wrapper the shipped firmware uses —
+handles **14** GAP events. Phase B's rewrite against the raw NimBLE C API
+(`ble/od_ble_nimble.cpp`) covered **6**. The eight that were dropped:
+
+| Event | What the wrapper did |
+|---|---|
+| `REPEAT_PAIRING` | **deleted the stale bond and returned `RETRY`** |
+| `ENC_CHANGE` | observed the encryption result |
+| `PASSKEY_ACTION` | drove passkey exchange during pairing |
+| `CONN_UPDATE` | connection-parameter updates |
+| `NOTIFY_TX` | notification transmit completion |
+| `NOTIFY_RX`, `IDENTITY_RESOLVED`, `SCAN_REQ_RCVD` | central-role, privacy, diagnostics |
+
+`REPEAT_PAIRING` is the one that reached the user, as the connect stutter: with a stale bond on
+the client, the wrapper deleted it and re-paired, while this port kept the mismatched keys and
+failed identically on every attempt — **permanently**, because nothing on the device side could
+clear it.
+
+**All eight are now implemented and coverage is at parity: 14 of 14.** "Equivalent" means the
+same information reaches the same place, not the same shape — the wrapper dispatched to
+`NimBLEServerCallbacks` virtuals this firmware has no counterpart for. What each became:
+
+| Event | Here |
+|---|---|
+| `REPEAT_PAIRING` | deletes the stale bond, returns `RETRY` — behaviour, not logging |
+| `ENC_CHANGE` | logged; nothing depends on link encryption (`SM_LVL=0`, no `_ENC` flags) |
+| `PASSKEY_ACTION` | logged; cannot fire with no IO capability, but will not stall silently |
+| `CONN_UPDATE` | routed to the existing link reporter, so interval/MTU/PHY renegotiations all read alike — this is what answers "why did throughput drop mid-transfer" |
+| `NOTIFY_TX` | **failures only.** A non-zero status means the notification never went out, which the BLE TX queue could not previously see. Success is not logged: one line per frame per transfer would bury the failures |
+| `IDENTITY_RESOLVED` | logged — it is the event that says "this peer IS bonded to us" |
+| `NOTIFY_RX` | explicit, and warns: peripheral-only build, so it cannot occur |
+| `SCAN_REQ_RCVD` | deliberately silent — every scanning phone in range emits these several times a second |
+
+Two are accounted for rather than acted on (`NOTIFY_RX`, `SCAN_REQ_RCVD`), and that is the
+point: an unhandled case returns 0 and is indistinguishable from success, which is exactly how
+eight missing events went unnoticed until one of them broke connections.
+
+#### CORRECTION 2026-08-05: the SM defaults were NOT the root cause
+
+Hardware disproved it. The device was reflashed at `c5119eb` (which includes the SM restoration)
+and **`status=26` still occurs on most connections**. `sm_bonding = 0` did not remove it, so the
+bonding story below is wrong as a *cause*.
+
+**What 26 actually is.** It travels 1:1 with these, on every affected connection:
+
+```
+GAP CONNECT h=1 status=26
+NimBLE: ogf=0x08, ocf=0x0032, hci_err=0x21A : BLE_ERR_UNSUPP_REM_FEATURE
+2M PHY request rejected (rc=538, staying at 1M)
+DLE 251 request rejected (rc=538)
+```
+
+`538 = 0x21A = BLE_HS_HCI_ERR(0x1A)`, and **`26 = 0x1A`**. Both are the same HCI error —
+**Unsupported Remote Feature** — surfacing once raw in `connect.status` and once wrapped in the
+PHY/DLE rejections. It is a link-layer feature negotiation the peer refuses, and has nothing to
+do with encryption, bonding or key size. `BLE_HS_EENCRYPT_KEY_SZ` is 26 as well, which is what
+made the wrong reading plausible; the co-occurrence with `0x21A` is what settles it.
+
+Affected connections come up at 1M PHY and are refused DLE; unaffected ones negotiate 2M and a
+251-byte PDU. So this is peer-dependent, not device state.
+
+**The SM restoration stands anyway** — it returns the device to the shipped security posture and
+stops it offering bonding it cannot persist — but it fixed a latent divergence, not this bug.
+**What actually fixed the connect stutter is `1c2e2f5`**, adopting a link that exists whatever
+the status says: confirmed on hardware, `link_exists=1` followed by `CLIENT CONNECTED` with an
+epoch, and no `Dropped write from non-owner` anywhere in the capture.
+
+#### (superseded) the security-manager defaults
+
+Found 2026-08-05 by a second review specifically comparing behaviour against the wrapper, after
+the event census was already closed. `NimBLEDevice::init()` sets six `ble_hs_cfg.sm_*` fields
+explicitly (`NimBLE-Arduino/src/NimBLEDevice.cpp:991-997`); the C-API rewrite set **none** of
+them and silently inherited ESP-IDF's defaults, **which enable bonding and Secure Connections**:
+
+| | wrapper (shipped) | this port, before the fix |
+|---|---|---|
+| `sm_bonding` | **0** | 1 (IDF default) |
+| `sm_sc` | **0** | 1 (IDF default) |
+| `sm_mitm` | 0 | 0 |
+| `sm_io_cap` | `NO_INPUT_OUTPUT` | unset |
+
+So the shipped firmware **never bonded**, and this port began advertising bonding capability the
+moment it was flashed. The failure chain is exact: a client accepts and bonds → nothing calls
+`ble_store_config_init()` and NVS persistence is off in every baseline, so the bond dies with the
+boot → the client keeps its half → the next connection presents keys the device no longer has →
+NimBLE reports the connect with `BLE_HS_EENCRYPT_KEY_SZ` (26). That is why it reproduced on the
+first connection after **every deep-sleep wake**.
+
+Nothing here wants bonding: no characteristic carries an `_ENC`/`_AUTHEN` flag, `SM_LVL=0`, and
+authentication and confidentiality are the application's job (`0x0050` challenge/response plus
+per-frame AES-CCM, which work identically over an unencrypted link). The wrapper's values are
+restored field for field — a restoration of shipped behaviour, not a new security policy.
+
+**The general lesson, worth more than the individual events:** re-implementing a vendor wrapper
+means inheriting its whole surface, not just its dispatch. A partial `switch` fails silently —
+every unhandled event returns 0 and looks like success. **Unset configuration fails even more
+silently**: the port did not choose IDF's defaults, it simply never mentioned them, and the
+result was a security posture the shipped product never had.
+
+#### One defect and one warning the log exposes
+
+1. **A GPIO reservation conflict on the buzzer pin — noisy, but NOT a failure.**
+   `W (41054) ledc: GPIO 45 is not usable, maybe conflict with others`, repeating roughly every
+   100 ms for the duration of each `0x0077`. **The buzzer works** (confirmed on hardware); this
+   was first recorded here as "the buzzer does not sound", which was wrong. The warning is
+   informational: IDF's `_ledc_set_pin()` calls `esp_gpio_reserve()`, logs this line if the pin
+   was already reserved by something else, and then connects the output signal and returns
+   `ESP_OK` regardless (`esp_driver_ledc/src/ledc.c:809-820`). So `ledc_channel_config()`
+   succeeds and the tone plays.
+
+   What is real: **something else already holds GPIO 45's output reservation**, so two drivers
+   believe they own that pin, and the message repeats because the buzzer re-runs
+   `ledc_channel_config()` per note rather than attaching once. Neither breaks output today.
+   Worth finding the other owner before it does — a `LOG_LOCAL_LEVEL` bump is not the fix.
+2. **`ble_gap_adv_start failed: 6` is EXPECTED, and logged at the wrong level.** Six is
+   `BLE_HS_ENOMEM`, not `BLE_HS_EALREADY` (2), which is why the existing `rc != BLE_HS_EALREADY`
+   guard does not suppress it. But it is not a fault: **`CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1`**,
+   and connectable undirected advertising needs a free connection object. With the single slot
+   already taken by a live client, NimBLE has nothing to allocate and returns ENOMEM. It fires
+   because the MSD-publish path re-starts advertising to refresh the manufacturer data, which
+   happens while connected.
+   
+   So: nothing is broken, and the device is not left invisible — it cannot accept a second
+   connection anyway. What is wrong is that a routine, unavoidable condition is reported with
+   `ESP_LOGE`. The tolerance list should include ENOMEM-while-connected, and the remaining
+   genuine failures should stay loud. (First recorded here as "a real failure ... nothing
+   retries"; that was wrong.)
+
+Also visible and worth a look: **five consecutive connections were refused ownership** at the
+start of the log ("Dropped write from non-owner h=1", each ending in a remote-terminated
+disconnect ~8 s later) before one succeeded with epoch `e=1` — the first epoch ever issued. A
+client that connects and cannot claim the slot wastes an 8 s session; the arbitration is doing
+what R3 says, but why the first five could not claim is unexplained.
 
 ### Verified on hardware (S3, 2026-08-03)
 
@@ -56,13 +237,16 @@ what licenses retiring the source repo:
 
 ### Known defects, measured on hardware
 
-1. **FastEPD writes no pixels to an IT8951 panel.** All three
-   `it8951WriteFramebuffer{1,2,4}Bit` functions have unpatched `#ifdef ARDUINO` guards (9
-   sites) that fall through to nothing under IDF: no data preamble, and the row loop builds
-   each line and discards it. Commands, `LD_IMG_END` and `DisplayArea` all still run, so the
-   panel refreshes whatever was already in its RAM and every call reports success.
-   `third_party/NOTICE.md` claims "every affected guard" was patched — that claim is wrong.
-   S3-only (FastEPD is S3-only and PSRAM-mandatory), and only on IT8951/parallel panels.
+1. ~~**FastEPD writes no pixels to an IT8951 panel.**~~ **FIXED 2026-08-04, NOT YET
+   HARDWARE-VERIFIED.** All three `it8951WriteFramebuffer{1,2,4}Bit` functions had unpatched
+   `#ifdef ARDUINO` guards (9 sites) that fell through to nothing under IDF: no data preamble,
+   and the row loop built each line and discarded it. Commands, `LD_IMG_END` and `DisplayArea`
+   all still ran, so the panel refreshed whatever was already in its RAM and every call
+   reported success. The nine guards now carry `OD_FASTEPD_IDF_SPI` like the six on the
+   command path; confirmed in preprocessed output, where all three writers emit live
+   `SPI.writeBytes` calls. **A green build proves nothing here** — the defect's signature was
+   that every call already reported success, so this stays listed until an IT8951 panel is seen
+   to render. S3-only, IT8951-over-SPI only; the parallel ED103 path never went through it.
 2. **`bbepWaitBusy` blocks the loop task.** It polls with a bare `delay(20)` inside
    `bb_ep.inl`, so `serviceBleTx()` cannot run for the duration. A legitimate multi-second
    refresh therefore holds queued BLE responses in the TX ring until it finishes; this was the
@@ -73,12 +257,53 @@ what licenses retiring the source repo:
    `delay(800)` rail settle in `pwrmgm()`.
 4. **`s3-e1004` still has no board fragment** — see § `s3-e1004` is blocked, not forgotten.
 
-### Phase C, still owed
+### Phase C — the ESP32 app-code work is DONE (2026-08-05)
 
-The Arduino shim is **not** gone: `compat/` is at 21 files by `compat/ratchet.sh`, and two
-vendored libraries (bb_epaper via `bb_epaper.h`, FastEPD via `arduino_io.inl`) still depend on
-it, so it cannot be deleted even when the imported sources stop needing it. `protocol_pending.h`
-is also outstanding — two panel-IC wire values that belong in the canonical protocol header.
+`compat/ratchet.sh` reads **5**, down from the phase-B baseline of 21, across fifteen recorded
+steps. `compat/SHIM_BUDGET` carries one dated paragraph per step, including what each one
+found — several steps existed only because the shim was hiding a defect.
+
+**5 IS THE FLOOR, NOT A STALL.** The five files left — `main.cpp`, `display_service.cpp`,
+`buzzer_hw.cpp`, `device_control.cpp`, `encryption.cpp` — are counted **only for their
+`TARGET_NRF` arms**. Those arms do not compile on this target, so they cannot be verified here;
+converting them blind is the unverifiable edit MIGRATION.md warns against. They leave with the
+nRF target at migration step 4, and `compat/` is deletable at that moment.
+
+**The permanent piece is `vendor/fastepd/`, and it is smaller than this section used to claim.**
+It is one header plus its storage — an Arduino `SPI` object over IDF's `spi_master` — because
+FastEPD's IT8951 transport is written against that object. It is called an **adapter**, not a
+shim: in this repo "shim" means scheduled demolition, and using the word for something
+permanent would make the ratchet's vocabulary meaningless. It lives outside `compat/` so that
+"delete `compat/`" stays unambiguous, and `ratchet.sh` excludes it from the count.
+
+> **Corrected 2026-08-04.** This section previously said the adapter would also have to own
+> `delay()`, `delayMicroseconds()`, `millis()` and `ledc_compat.h` "for `bb_epaper.h`'s
+> unmangled declaration". That was written before `panel/od_bbep.cpp` landed. **bb_epaper needs
+> nothing from the shim** — it has our own IDF backend, its `arduino_io.inl` / `esphome_io.inl`
+> are never compiled, and its `<Arduino.h>` sits behind an `#ifdef ARDUINO` this build does not
+> define. FastEPD borrows exactly one loose symbol, `millis()`, for `arduino_io.inl`'s 19 call
+> sites; it defines `delay()` and `delayMicroseconds()` itself.
+>
+> `ratchet.sh`'s `third_party/` report was also described here as "that adapter's
+> specification". It is not — it is a text grep that does not evaluate `#ifdef`, and most of
+> what it lists is unreachable. The script now says so itself.
+
+**Containment.** `third_party/bb_epaper/src`, `third_party/FastEPD/src` and `vendor/fastepd` are
+all **off the component include path**; `main/CMakeLists.txt` grants each to a named list of
+translation units. Adding a consumer is a deliberate edit there. Verified by trying it: an
+unlisted file including any of the three fails to compile.
+
+**Still owed:** the `od_hal_panel` repoint. `hal/od_hal_panel.{h,c}` and the two backends under
+`panel/` exist and compile, but **nothing calls them yet** — `display_service.cpp` still drives
+`BBEPDISP` directly. That repoint is staged one path at a time per MIGRATION.md, and it is the
+point where hardware stops being optional.
+
+The count *can* still reach 0: the last three entries (`buzzer_hw.cpp`, `device_control.cpp`,
+`encryption.cpp`) are counted only for their `TARGET_NRF` arms, which leave at migration
+step 4.
+
+`protocol_pending.h` is also outstanding — two panel-IC wire values that belong in the
+canonical protocol header.
 
 ### Toolchain translation findings
 
@@ -261,16 +486,27 @@ measured.
 
 The S3 boards need no change: `default_8/16/32MB.csv` already carry `app0` + `app1`.
 
-## Layout (planned)
+## Layout
 
 ```
+build.sh                        ./build.sh [board...]  -- all boards if none given
 sdkconfig.defaults              common to all boards
 sdkconfig.defaults.<idf_target> per-chip, auto-selected by IDF
-boards/<board>.conf             per-board fragment
+sdkconfig.baselines/*.sdkconfig the reviewed effective config, gated by tools/
+boards/<board>.cmake            per-board fragment (NOT .conf -- CMake, set by build.sh)
 partitions/*.csv                per flash size
-build.sh                        build.sh <board> — mirrors the Zephyr target's build.sh
-compat/arduino_compat.h         TEMPORARY import shim; deleted during phase C
+main/CMakeLists.txt             the app component; also the per-source include grants
+src/                            imported application sources (from Firmware)
+hal/                            od_hal_{nvs,log,gpio,time,i2c,adc,panel} -- this target's HALs
+panel/                          od_bbep*.{cpp,inl} bb_epaper IDF backend; od_panel_* HAL backends
+ble/                            NimBLE C-API transport
+compat/                         TEMPORARY Arduino shim -- at its floor of 5; see SHIM_BUDGET
+vendor/fastepd/                 PERMANENT FastEPD adapter -- NOT a shim, does not die with compat/
+tools/                          host tests, sdkconfig baseline gate
 ```
+
+The two directories that are easy to confuse: **`compat/` is scheduled for deletion and
+`vendor/fastepd/` is not.** They are separate directories for exactly that reason.
 
 ## Toolchain
 
@@ -297,3 +533,29 @@ caller already did.
 requires (sdkconfig defaults, bootloader, startup code all move with it). The override exists
 for testing a candidate release or bisecting a toolchain regression — not for getting past a
 red build.
+
+### The sdkconfig baseline
+
+`sdkconfig.baselines/<board>.sdkconfig` records the **effective** configuration of every board,
+reviewed and checked in. `tools/sdkconfig_baseline.sh` diffs the live build against it:
+
+```bash
+tools/sdkconfig_baseline.sh              # every board that has been built
+tools/sdkconfig_baseline.sh --update     # re-record, in the SAME commit as the change
+```
+
+It exists because 77 behaviour-relevant settings differed from the Arduino build this target
+reproduces, and only **six** were ones the project had declared — the rest were IDF defaults
+inherited by never naming the symbol. Four of those were restored on 2026-08-04 (CPU frequency
+on the S3, tick rate, optimisation level, watchdog panic); the remainder are recorded in
+[docs/TOOLCHAINS.md](../../docs/TOOLCHAINS.md) as reviewed divergences.
+
+A setting you did not write does not appear in any file you can review, which is why this gates
+the whole config rather than a curated subset. CI checks one board per chip; the other six are
+gated only locally.
+
+**`sdkconfig.defaults` edits need a config regeneration.** IDF applies the defaults *only* when
+creating `build/<board>/sdkconfig`; once that file exists it is authoritative and edits to the
+defaults are silently ignored — the build succeeds and produces a binary with the old config.
+`build.sh` now deletes the generated file when any input is newer, so this is handled, but it is
+worth knowing when invoking `idf.py` directly.

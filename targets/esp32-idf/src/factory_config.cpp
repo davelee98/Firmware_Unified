@@ -1,7 +1,6 @@
 #include "factory_config.h"
 #include "communication.h"
 #include "od_log.h"
-#include <Arduino.h>
 #include <string.h>
 
 static uint16_t toolboxOuterCrc(const uint8_t* data, uint32_t bodyLen) {

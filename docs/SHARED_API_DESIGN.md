@@ -136,15 +136,63 @@ Each interface is a header of `extern` C declarations. The target provides the d
 failure, unless noted. No interface may block beyond a bounded busy-wait; anything long is
 split into start + `busy()` poll (the panel model, §3).
 
-### `od_hal_time` — already exists in embryo
+> ### Corrections from the first implementation (2026-08-04)
+>
+> **This section was written from *reading* the four repos. Five of its interfaces have now
+> been implemented for real, in `targets/esp32-idf/hal/`, during phase C of the ESP32 port —
+> and the sketch did not survive contact with the hardware in five places.** Each is corrected
+> below at the interface it affects, and each is marked **CORRECTED** with what was found.
+>
+> The pattern is worth stating once, because it will repeat when the Nordic and Silabs targets
+> are built: **the sketches are too narrow wherever a real driver needs the bus framing, the
+> pin ordering, or the failure signal to be visible.** Reading a driver shows you what it does;
+> implementing the interface underneath it shows you which distinctions it was relying on. Two
+> of the five were latent hardware defects rather than design opinions — a probe that could
+> never detect a device, and a register read that returned plausible garbage.
+>
+> **Do not treat the uncorrected interfaces here as verified.** `od_hal_crypto`, `od_hal_radio`
+> and `od_hal_panel` have not been implemented against this document yet, and the base rate so
+> far is five corrections in five interfaces.
+>
+> **UPDATE 2026-08-04: `od_hal_panel` HAS now been implemented** — `targets/esp32-idf/hal/`
+> `od_hal_panel.{h,c}` plus `panel/od_panel_bbep.cpp` and `panel/od_panel_fastepd.cpp`. The
+> base rate held: **five more corrections**, listed at the end of that section. `od_hal_crypto`
+> and `od_hal_radio` remain unverified.
 
-Promote `Firmware_NRF54/src/nrf54_zephyr_compat.h` verbatim (already `od_`-prefixed):
+### `od_hal_time` — already exists in embryo
 
 ```c
 uint32_t od_hal_uptime_ms(void);          /* monotonic; wrap-safe by subtraction */
 void     od_hal_delay_ms(uint32_t ms);    /* bounded busy/sleep; NOT a scheduler yield */
 void     od_hal_delay_us(uint32_t us);
 ```
+
+> **CORRECTED 2026-08-04 — "promote verbatim" is not available.** This section said to promote
+> `Firmware_NRF54/src/nrf54_zephyr_compat.h` *verbatim (already `od_`-prefixed)*. That file
+> actually declares:
+>
+> ```c
+> void     od_msleep(int32_t ms);
+> uint32_t od_uptime_get_32(void);
+> void     od_busy_wait(uint32_t usec);
+> ```
+>
+> Same three functions, **different names**, and `od_msleep` takes a *signed* count. The names
+> above are the ones `targets/esp32-idf/hal/od_hal_time.h` implements, and they win: `od_hal_*`
+> matches `od_hal_nvs`/`od_hal_gpio`/`od_hal_log`, and a prefix that means something is worth
+> a rename on one target. **Decide this before the Nordic import** — importing that repo
+> unchanged locks the disagreement in, and step 2 of MIGRATION.md is exactly that import.
+>
+> **Two contract points the sketch omitted, both learned from a defect:**
+>
+> * `od_hal_delay_ms` **must round up to whole ticks and never to zero.** A tick-quantised
+>   `vTaskDelay(pdMS_TO_TICKS(n))` returns *immediately* for any `n` below one tick period,
+>   turning a deliberate settle into a busy-spin. This cost the ESP32 target two live defects
+>   at a 100 Hz tick — `od_log_flush()`'s 5 ms settle became no settle, and a BLE teardown poll
+>   busy-spun at loop-task priority for its full bound. The requirement belongs in the contract
+>   rather than in each target's implementation notes.
+> * `od_hal_delay_ms(0)` sleeps one tick rather than yielding, which is *not* what Arduino's
+>   `delay(0)` did. Stated so a caller that means "yield" asks for a yield.
 
 `od_hal_delay_ms` maps to `k_msleep` / `vTaskDelay` / `sl_sleeptimer_delay_millisecond`. The
 core uses it **only** for short, bounded waits (e.g. the 20 ms TX-drain gap before a refresh,
@@ -161,16 +209,57 @@ encodings unchanged.
 
 ```c
 #define OD_PIN_UNUSED 0xFFu
-typedef void (*od_hal_gpio_irq_fn)(void);   /* ISR context: set a flag ONLY */
+typedef void (*od_hal_gpio_irq_fn)(void);        /* ISR context: set a flag ONLY */
+typedef void (*od_hal_gpio_irq_arg_fn)(void *);  /* same rule; arg is opaque to the HAL */
+typedef enum { OD_GPIO_EDGE_RISING, OD_GPIO_EDGE_FALLING, OD_GPIO_EDGE_BOTH }
+        od_hal_gpio_edge_t;
 
 bool od_hal_gpio_decode(uint8_t cfg, uint8_t *port_out, uint8_t *pin_out);
 void od_hal_gpio_config_output(uint8_t cfg, bool initial_high);
 void od_hal_gpio_config_input(uint8_t cfg, bool pull_up, bool pull_down);
-int  od_hal_gpio_config_irq(uint8_t cfg, od_hal_gpio_irq_fn handler);   /* edge-both */
+int  od_hal_gpio_config_irq(uint8_t cfg, od_hal_gpio_edge_t edge,
+                            od_hal_gpio_irq_fn handler);               /* CORRECTED: edge */
+int  od_hal_gpio_config_irq_arg(uint8_t cfg, od_hal_gpio_edge_t edge,
+                                od_hal_gpio_irq_arg_fn handler, void *arg);   /* ADDED */
+void od_hal_gpio_clear_irq(uint8_t cfg);                               /* ADDED */
+void od_hal_gpio_irq_enable(uint8_t cfg);                              /* ADDED: mask, */
+void od_hal_gpio_irq_disable(uint8_t cfg);                             /*   not detach */
+void od_hal_gpio_set_mode_output(uint8_t cfg);                         /* ADDED: no drive */
 void od_hal_gpio_write(uint8_t cfg, bool level_high);
 int  od_hal_gpio_read(uint8_t cfg);
 void od_hal_gpio_park(uint8_t cfg);        /* high-Z for deep sleep */
 ```
+
+> **CORRECTED 2026-08-04 - four additions, each forced by a driver.** Implemented in
+> `targets/esp32-idf/hal/od_hal_gpio.{h,c}` during phase C steps 3, 6 and 7.
+>
+> * **`config_irq` needs an EDGE.** The sketch specified edge-both with no mode argument. The
+>   GT911 touch controller asserts INT active-low and must be attached FALLING; edge-both
+>   raises a spurious event on every release.
+> * **`config_irq_arg` - an opaque argument handed back to the handler** (Arduino's
+>   `attachInterruptArg`). Without it, N buttons need N near-identical ISRs differing only in
+>   an index constant - the shape `touch_input.cpp` is stuck with and `device_control.cpp`
+>   avoids.
+> * **`irq_enable`/`irq_disable` - MASK without detaching**, distinct from `clear_irq()`.
+>   `device_control.cpp`'s button re-baselining disables every button interrupt, settles,
+>   re-reads the pins, re-enables. Detaching instead discards each handler *and its argument*,
+>   and re-attaching is where a wrong index lands one button's events on its neighbour.
+> * **`set_mode_output` - make a pad an output WITHOUT driving it.** `config_output()` cannot
+>   express this, and the GT911 hardware reset depends on the separation: it makes both INT and
+>   RST outputs *before* driving either, and INT's level at RST's rising edge selects the
+>   controller's I2C address (0x14 vs 0x5D). Collapsing the `pinMode`/`digitalWrite` pairs
+>   reorders that sequence and changes which address the part answers on.
+>
+> **`decode()` and `park()` are still unimplemented** - no caller has needed either, so neither
+> has been checked against hardware. `park()` is asserted by this document and by nothing else.
+>
+> **A gap this document does not yet cover.** Arduino's `noInterrupts()`/`interrupts()` appear
+> at several call sites heading for `shared/core`. The ESP32 target implements them as
+> `od_hal_gpio_irq_lock()`/`unlock()` over `portDISABLE_INTERRUPTS`, which is **per-core on
+> ESP32 and therefore not the global disable those callers assumed**. DESIGN_REVIEW
+> § "Big-picture soundness" already flags that `shared/core` has no global-disable primitive.
+> It needs one, with stated semantics, before any of those call sites is promoted - the current
+> spelling preserves existing behaviour rather than fixing it.
 
 ### `od_hal_spi`, `od_hal_i2c` — panel bus + sensors
 
@@ -186,9 +275,57 @@ almost nothing here — keep both minimal:
 int od_hal_spi_write(const uint8_t *data, uint32_t len);
 
 /* I2C: sensor drivers live in targets/; the core does not call I2C directly. */
-int od_hal_i2c_read(uint8_t addr, uint8_t reg, uint8_t *buf, uint16_t len);
+int od_hal_i2c_read (uint8_t addr, uint8_t reg, uint8_t *buf, uint16_t len);
 int od_hal_i2c_write(uint8_t addr, uint8_t reg, const uint8_t *buf, uint16_t len);
 ```
+
+> **CORRECTED 2026-08-04 - the register-oriented shape cannot express either driver.**
+> Implemented as `targets/esp32-idf/hal/od_hal_i2c.{h,c}` in phase C step 5, with primitives
+> instead:
+>
+> ```c
+> bool od_hal_i2c_init(uint8_t sda, uint8_t scl, uint32_t hz);   /* one bus handle per port */
+> void od_hal_i2c_deinit(void);
+> bool od_hal_i2c_is_up(void);
+> void od_hal_i2c_set_clock(uint32_t hz);
+> int  od_hal_i2c_probe(uint8_t addr);                           /* address only, no data */
+> int  od_hal_i2c_write(uint8_t addr, const uint8_t *buf, uint16_t len);
+> int  od_hal_i2c_read (uint8_t addr, uint8_t *buf, uint16_t len);
+> int  od_hal_i2c_write_read(uint8_t addr, const uint8_t *tx, uint16_t tx_len,
+>                            uint8_t *rx, uint16_t rx_len);      /* repeated START, no STOP */
+> ```
+>
+> **Why the sketch does not work.** The two real drivers need opposite bus framing, and
+> `read(addr, reg, ...)` picks one of them:
+>
+> * **SHT40**: write the command, **STOP**, wait ~9 ms for the conversion, then a bare read.
+>   There is no register to name, and the delay must sit *between two separate transactions*.
+> * **BQ27220**: write the selector then read with a **repeated START and no STOP** - a single
+>   transaction. Split into STOP + fresh START the gauge answers as if unaddressed and returns
+>   plausible garbage rather than an error.
+>
+> A register-shaped call gets the framing wrong for each, in opposite directions. The
+> primitives express both; the doc's two calls are expressible on top of them, and the reverse
+> is not.
+>
+> **Two further requirements, both learned from live defects:**
+>
+> * **A presence probe is its own primitive.** `beginTransmission(a); endTransmission();` with
+>   no payload is the universal "is anything at this address?", and IDF's
+>   `i2c_master_transmit()` **rejects a zero-length transfer outright** - nothing reaches the
+>   bus, so no START, no address byte, no ACK to observe. A scan built on a zero-length write
+>   reports every address absent whether or not hardware is present; a connected SHT40 was
+>   undetectable. `i2c_master_probe()` is the address-only primitive and takes the *bus*
+>   handle, so a scan needs no per-address device registration.
+> * **Bus lifecycle belongs in the interface.** IDF permits exactly one
+>   `i2c_new_master_bus()` per port, so whoever opens the bus owns it. This is not an ESP32
+>   quirk to hide: any target where two drivers can independently open a bus has the same
+>   problem, and it does not fail cleanly - it fails wherever the two disagree about who
+>   configured the pins.
+>
+> **GT911 clones differ in which framing they accept**, so `touch_input.cpp` tries the
+> repeated-START form and then the STOP-then-START form. That is a second, independent reason
+> both must be expressible.
 
 Note: `od_hal_i2c` should land on ESP-IDF's `driver/i2c_master.h` (IDF ≥ 5.2), never the
 deprecated `driver/i2c.h` (TOOLCHAINS.md).
@@ -267,6 +404,52 @@ signature/type. Silabs uses RTT, NRF54 RTT/UART, ESP32 `esp_log`. One line-sink:
 void od_hal_log(const char *line);   /* NUL-terminated, one line, no String */
 ```
 
+> **CORRECTED 2026-08-04 - a line sink alone is not implementable on both targets.**
+> `targets/esp32-idf/hal/od_hal_log.{h,c}` (phase C step 1) exposes four calls, not one:
+> `open()`, `is_open()`, `room()`, `write(buf,len)`, `flush()`.
+>
+> The reason is `room()`. On the nRF target, off-loop producers poll the port's free space and
+> **discard** the record rather than block - a producer at a higher priority than `loop()`
+> waiting on a stalled USB host is a priority inversion. That backoff needs a free-space
+> query, which a `void od_hal_log(const char*)` cannot provide, and a target that answers "yes,
+> always" turns the backoff into either a permanent stall or a permanent no-op.
+>
+> Narrowing to one line sink is a decision to take when the logger is promoted and both targets
+> are in front of you - not something to force now by specifying a contract one target cannot
+> honestly implement. The extra three calls all die inside `od_log.c`.
+>
+> Note also what the split buys structurally: the ESP32 port's `od_log` was handed a `Stream *`
+> (an Arduino type) purely as its port. Moving the *port* behind `od_hal_log` is what let
+> `od_log.h` stop including `<Arduino.h>` - a **port is not policy**, and that separation is
+> the general shape for any interface currently taking a vendor object.
+
+### `od_hal_adc` — MISSING from this document
+
+> **ADDED 2026-08-04.** Not specified here at all, and it should have been - not for the core,
+> which does not read analogue inputs, but because **two target drivers do** and IDF's oneshot
+> driver has a single ADC1 unit handle they must share. Implemented as
+> `targets/esp32-idf/hal/od_hal_adc.{h,c}` in phase C step 7:
+>
+> ```c
+> bool od_hal_adc_pin_readable(uint8_t pin);
+> void od_hal_adc_set_atten(uint8_t pin, od_hal_adc_atten_t atten);
+> void od_hal_adc_set_resolution(uint8_t bits);
+> int  od_hal_adc_read(uint8_t pin);            /* raw count, or 0 */
+> ```
+>
+> **`pin_readable()` is the part worth copying to other targets.** A zero reading is also a
+> legal reading, so a caller cannot infer failure from the value - and both callers here turn a
+> reading into something a host believes. The battery path scales it into the MSD advert, so 0
+> becomes a plausible **0.0 V** rather than the -1.0 "unknown" the same function returns when
+> no sense pin is configured. The ADC button ladder classifies 0 into its catch-all bottom
+> bucket, which reads as the last button permanently pressed. Both were live defects produced
+> by a `return 0` stub. Any HAL call whose failure value is indistinguishable from a valid
+> result needs a separate "can this work?" question.
+>
+> **ADC1 only, on ESP32.** ADC2 shares hardware with the WiFi radio on ESP32/S2/S3 and reads
+> fail with `ESP_ERR_TIMEOUT` whenever WiFi is up. A pin that maps to ADC2 is reported
+> unreadable rather than read unreliably - which is exactly what `pin_readable()` is for.
+
 **Every call site is bound by the no-secrets rule** (ARCHITECTURE.md § "Secrets are never
 logged verbatim"): presence and length, never content — for SSID/password (`0x26`),
 `security_config` (`0x27`), session and derived keys, nonces, MACs, and raw config/TLV
@@ -335,6 +518,35 @@ void od_hal_panel_sleep(void);
 void od_hal_panel_abort(void);
 void od_hal_panel_mark_deinitialized(void);             /* rail was cut behind our back */
 ```
+
+### Corrections from the first implementation (2026-08-04)
+
+Written against the interface above; these are what it got wrong, in the order they bit.
+
+1. **`DisplayConfig` has no `width`/`height`.** The fields are `pixel_width` and `pixel_height`.
+   The sketch's `caps.width/height` names are fine, but the mapping is not the identity it looks
+   like.
+2. **`supports_partial` needs BOTH halves, and the doc named neither.** `partial_update_support`
+   is what the *config declares over the wire*; whether the panel has a partial init sequence
+   compiled in is a separate fact (`bbep.pInitPart`). A config claiming partial on a panel that
+   cannot do it makes the core offer `0x76` and the panel ignore it — silently, which is the
+   exact failure this caps query exists to remove. The backend now requires both.
+3. **The ops table needs a `claims()` predicate.** "Selected once at `od_hal_panel_init` from
+   `panel_ic_type` and `display_technology`" reads as though the selector holds both backends'
+   panel lists. It cannot: the FastEPD panel IDs live in `src/protocol_pending.h`, which is
+   **C++** (it guards itself with a `static_assert`), while the selector must be plain C for
+   `shared/hal`. Each backend now answers for its own panels and the selector just asks in
+   order, with bb_epaper last as the fallback.
+4. **Correction 3 (no blocking refresh) is NOT satisfiable against FastEPD today.** It exposes
+   only `fastepd_wait_refresh(timeout_sec)`, which *blocks*; there is no "is it done" query to
+   poll. The backend degrades to a 0-second call, which is a genuine non-blocking check on the
+   IT8951 path but coarser than the contract promises. The real fix is exposing the ready-bit
+   predicate `it8951WaitForReady()` already computes. **bb_epaper satisfies it natively** —
+   `bbepRefresh()` issues the command and returns.
+5. **Correction 4 (symmetric errors) is unmet on one path, and the `int` return hides it.**
+   `fastepd_direct_write_chunk()` returns `void` and silently truncates a full frame buffer.
+   The HAL signature returns `int`, so the seam *looks* closed while the information does not
+   exist to fill it. Recorded at the call site rather than papered over.
 
 Because a single target legitimately has 2-3 panel backends (ESP32: bb_epaper + FastEPD +
 e1004; Silabs: bb_epaper only), this **one** interface is the place a function-pointer `struct

@@ -1,6 +1,12 @@
 /* Arduino LEDC (PWM) over IDF's ledc driver. TEMPORARY; part of the shim.
- * Used only by buzzer_hw.cpp. Arduino's 2.x API is channel-based; IDF wants an explicit
- * timer + channel pair, so the channel number is reused for both. */
+ * Arduino's 2.x API is channel-based; IDF wants an explicit timer + channel pair, so the
+ * channel number is reused for both.
+ *
+ * The last APP-code user, buzzer_hw.cpp, left in phase C step 4 (2026-08-04) and now calls
+ * driver/ledc.h directly. This file survives for third_party/FastEPD/src/FastEPD.inl alone
+ * (its front-light control: ledcSetup/ledcAttachPin/ledcWrite, 11 call sites), so it is pinned
+ * by a vendored library exactly as delay()/millis() are -- see compat/SHIM_BUDGET's endgame
+ * note. It cannot be deleted by clearing app code, and it is not counted against the budget. */
 #pragma once
 #include "arduino_compat.h"
 #include "driver/ledc.h"

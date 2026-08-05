@@ -11,15 +11,35 @@ versioned repos (`Firmware`, `Firmware_NRF54`, `Firmware_Silabs`, `Firmware_NRF`
 reimplemented the same wire protocol, config parsing, transfer state machines, compression,
 and session encryption.
 
-**Status: scaffold.** No target code is imported yet — the repo is docs, the two protocol
-headers, and a CI boundary check. Consequences for any task here:
+**Status: one target imported and running.** `targets/esp32-idf/` builds **10 boards** and has
+been flashed and exercised on an ESP32-S3 (2026-08-03). This file said "scaffold — nothing to
+build" until 2026-08-05; that is no longer true and the guidance below replaces it.
 
-- There is **nothing to build**. No PlatformIO/west/CMake project exists in `targets/*` yet.
-  To build or flash a target today, work in its original repo.
-- Most work is still *design*: deciding the `shared/core` API and the HAL contract before
-  code lands. Prefer editing docs over speculatively writing headers.
+- **`./build.sh` in `targets/esp32-idf/` builds everything.** It sources ESP-IDF itself (the
+  install is never on `PATH`). `tools/run_host_tests.sh` runs the host tests;
+  `compat/ratchet.sh` and `tools/sdkconfig_baseline.sh` are the two gates a change must not
+  break. The other two targets — `nordic-zephyr`, `efr32bg22-slc` — are still **README-only**,
+  so "compile all targets" means those 10 ESP32 boards.
+- **`shared/` is still empty, and that is still by design.** The first promotion
+  (`od_config.c`) has not happened — see docs/NEXT_STEPS.md item 5. So the ESP32 target holds
+  logic that is destined for `shared/core`, and touching it means reading MIGRATION.md first.
+- **The HALs are real now.** `targets/esp32-idf/hal/` implements od_hal_{nvs,log,gpio,time,
+  i2c,adc,panel} against docs/SHARED_API_DESIGN.md. That document has been corrected ten times
+  by contact with the implementations — trust the headers over the design doc where they
+  disagree, and fix the doc.
 - Do not treat the absence of a file as a bug to fix. `shared/core/`, `shared/hal/`,
-  `shared/compress/`, and `tools/` hold placeholder READMEs on purpose.
+  `shared/compress/` and `tools/` still hold placeholder READMEs on purpose.
+
+**The Arduino shim is nearly gone.** `compat/` is down to 5 counted files from 21, and **5 is
+the floor**, not a stall: those files are counted only for `TARGET_NRF` arms that do not
+compile on this target and leave with migration step 4. Do not "finish" them here — see
+`targets/esp32-idf/compat/SHIM_BUDGET`, which records every step and why.
+
+**`targets/esp32-idf/vendor/fastepd/` is NOT a shim and does not die with `compat/`.** It is the
+permanent FastEPD vendor adapter (an Arduino `SPI` object over IDF's `spi_master`), kept in its
+own directory precisely so that "delete `compat/` at the floor" stays unambiguous. It is off the
+component include path and granted per-source in `main/CMakeLists.txt`; so are both vendored
+panel libraries. Adding a consumer is a deliberate edit there, not an `#include`.
 
 ## The one rule
 
@@ -39,7 +59,10 @@ targets are imported.
 `shared/` is **plain C, not C++.** Two targets are C-only, so shared interfaces are
 link-time-bound `extern` C functions the target implements — never C++ virtual classes, and no
 function-pointer vtables except the one deliberate `od_panel_ops` exception (a single target
-legitimately has 2-3 panel backends); see docs/SHARED_API_DESIGN.md, consequence 1.
+legitimately has 2-3 panel backends); see docs/SHARED_API_DESIGN.md, consequence 1. **That
+exception is now used**: `targets/esp32-idf/hal/od_hal_panel.h` defines `struct od_panel_ops`
+with bb_epaper and FastEPD backends selected at runtime. It is the only vtable in the tree and
+must stay that way.
 Arduino's `String` must never appear.
 
 `third_party/` (top level, outside `shared/`) is the exception by design: `bb_epaper` picks its
@@ -107,9 +130,11 @@ are absent. An earlier version of this file did exactly that. Each needs activat
 | nRF Connect SDK / west | v3.3.1 / west v1.5.0 | `nrfutil toolchain-manager launch --ncs-version v3.3.1 -- <cmd>` |
 | Simplicity SDK | 2025.12.2 | `slt`; `slc` additionally needs the bundled Java on `PATH` |
 
-Nothing in *this repo* can be built locally regardless, because no target is imported yet —
-and only version strings have been run, not builds. **Do not claim a build passes without
-having run it.** See docs/TOOLCHAINS.md for the full table and the version pins these imply.
+**ESP-IDF is the only one of the three that has actually built anything here** — 10 boards, and
+an S3 that has run. For west and Simplicity SDK only version strings have been run, because
+`targets/nordic-zephyr/` and `targets/efr32bg22-slc/` contain nothing to build yet. **Do not
+claim a build passes without having run it.** See docs/TOOLCHAINS.md for the full table and the
+version pins these imply.
 
 ## Protocol header — do not hand-edit
 

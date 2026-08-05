@@ -16,6 +16,28 @@ a per-target fork. Do not "fix" this by moving it into `shared/`.
 
 ## bb_epaper
 
+> **RESOLVED 2026-08-04 -- bb_epaper needs NO Arduino surface on this target.** The open
+> decision below ("replacing `esp_generic.inl` with an in-project backend as the other two
+> targets already did") was taken: `targets/esp32-idf/panel/od_bbep.cpp` replaces the vendored
+> `bb_epaper.cpp` and supplies our own IDF backend, `panel/od_bbep_idf_io.inl`. Consequences
+> worth stating, because earlier notes across this repo assumed otherwise:
+>
+> * **Zero edits to vendored files.** The glue TU is replaced rather than its `#ifdef` chain
+>   patched, so there is no fifth `OD-PATCH` and nothing new joins the re-verify list.
+> * `arduino_io.inl` and `esphome_io.inl` are **never compiled**, and `bb_epaper.h`'s
+>   `#include <Arduino.h>` sits behind `#ifdef ARDUINO`, which this build does not define.
+> * Dropping the unused `BBEPAPER` C++ class removed the only consumer of `pinMode()` (13
+>   calls) and `millis()` (6), which is why the backend contract is nine functions, not eleven.
+>
+> **So the FastEPD vendor adapter is FastEPD's alone.** Any text claiming the permanent adapter
+> exists for both libraries, or that it must own `delay()`/`delayMicroseconds()`/`millis()`/
+> `ledc_compat.h`, predates this and is wrong.
+>
+> **`third_party/bb_epaper/src` is no longer on the component include path** (2026-08-04).
+> `main/CMakeLists.txt` grants it per-source; an unlisted file including `<bb_epaper.h>` fails
+> to compile. Same for `third_party/FastEPD/src`. This is containment, not abstraction -- the
+> destination is `od_hal_panel` / `od_panel_ops`.
+
 > **Backend analysis:** [docs/BBEPAPER_IO_BACKENDS.md](../docs/BBEPAPER_IO_BACKENDS.md) covers how
 > bb_epaper selects an IO backend, the five-function contract a backend must satisfy, a
 > function-by-function comparison of `esp_generic.inl` against `arduino_io.inl` (the backend the
@@ -157,12 +179,25 @@ The consequences were invisible to the build and to the boot log:
 IT8951-over-SPI panel is affected; the parallel ED103 path drives the S3 LCD peripheral and
 never went through this code.
 
-**The patch.** Every affected guard becomes
+**The patch.** All 15 guarded SPI blocks become
 `#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)`, and
 `targets/esp32-idf/main/CMakeLists.txt` sets `OD_FASTEPD_IDF_SPI=1` on `FastEPD.cpp` alone.
 The Arduino branch is reused verbatim because `targets/esp32-idf/compat/SPI.h` provides exactly
 that API over IDF's `spi_master`. Patched sites are marked `OD-PATCH` and all point at the
 explanatory note on `it8951WriteData()`.
+
+> **This section previously claimed "every affected guard" when only six were patched**, and
+> `targets/esp32-idf/README.md` § "Known defects" was right to call the claim wrong. The six
+> covered the command/data/read path — `it8951WriteCmdCode`, `it8951WriteData`,
+> `it8951WriteNData`, `it8951ReadData`, `it8951ReadNData`, and `SPI.begin` in
+> `bbepInitIT8951`. The **nine** in `it8951WriteFramebuffer{1,2,4}Bit` — three each: open
+> transaction, `SPI.writeBytes(d, iPitch)`, close transaction — were missed, which is exactly
+> the set that carries pixels. The result was a panel that accepted every command, performed a
+> real refresh, reported success, and displayed whatever was already in its RAM.
+>
+> Completed 2026-08-04; the count above is now the measured total, not a summary word.
+> Verified in preprocessed output rather than by reading the source: all three writers emit
+> live `SPI.writeBytes` calls where they previously preprocessed to an empty row loop.
 
 **Why not just define `ARDUINO`.** Tried, and rejected: it also selects FastEPD's Arduino
 font/`Print`/`PROGMEM` surface (`pgm_read_*`, `memcpy_P`, `ledcAttach`, `TwoWire::setTimeout`)
@@ -217,3 +252,45 @@ simultaneously required on any single board first."* The `platformio.ini` commen
 are not — only FastEPD's buffer/update APIs are used on those boards. **That assertion has not
 been verified against the code**, and it is the thing to check before trusting this arrangement
 on hardware.
+
+---
+
+## espressif/mdns — vendored under `targets/esp32-idf/components/mdns/`
+
+**Not under `third_party/`, and that is deliberate.** It is an ESP-IDF *component*: it must sit
+in a directory the IDF build system scans (`targets/esp32-idf/components/`) with its own
+`CMakeLists.txt` and `Kconfig`, and it is ESP32-only by construction. It is recorded here
+because this file is where vendored code is accounted for, not because of where it lives.
+
+| | |
+|---|---|
+| Author | Espressif Systems |
+| Upstream | https://github.com/espressif/esp-protocols — `components/mdns` |
+| Registry | https://components.espressif.com/components/espressif/mdns |
+| Version | **1.11.3** |
+| Upstream commit | `1a6e7191044b2faed61ece3dc6b06112e838fa8d` (from the component's own `idf_component.yml`) |
+| Archive | `espressif__mdns-v1.11.3.zip`, sha256 `4c2759bf02adbb1b97c81f39ef9c482dd60a4a5f155fd82586146e308535b2c0` |
+| Licence | **Apache-2.0** (see `LICENSE` in the tree) |
+| Vendored | 2026-08-04, at phase C step 9b-iv |
+| Requires | ESP-IDF `>= 5.0`; this repo pins v5.5.4 |
+
+**Why vendored rather than fetched.** ESP-IDF dropped `mdns` from its core components in v5.0,
+so it exists only in the Espressif component registry. Taking it via `main/idf_component.yml`
+would make the component manager — and therefore network access to the registry — a requirement
+of every clean build and every CI run, and this build has no managed components at all today.
+Vendoring keeps builds offline and byte-reproducible, at the cost of a copy to bump by hand.
+Decided 2026-08-04.
+
+**Pruned on the way in — 1.3 MB → 640 KB.** Kept the sources, `include/`, `private_include/`,
+`CMakeLists.txt`, `Kconfig`, `idf_component.yml` (the build reads it for `COMPONENT_VERSION`,
+which becomes `ESP_MDNS_VERSION_NUMBER`), `LICENSE`, `README.md`, `CHANGELOG.md`. Dropped
+`examples/`, `tests/` (host tests, unit tests, test apps — ~600 KB), the upstream refactoring
+notes (`refactor_2025.md`, `refactoring_details.md`, `mdns_diagram.md`), `.cz.yaml`, and
+`mem_prefix_script.py`. None is reachable from a firmware build.
+
+**No local patches.** The tree is byte-for-byte upstream 1.11.3 minus the pruning above. Keep it
+that way: configuration belongs in `sdkconfig.defaults`, not in edits here.
+
+**This device ADVERTISES ONLY — it never resolves.** There is no upstream build flag for that
+(the querier and browser compile in regardless), so it is expressed in configuration: see
+`sdkconfig.defaults` for the responder-only settings and what each one is worth.

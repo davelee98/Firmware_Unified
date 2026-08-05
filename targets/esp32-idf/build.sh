@@ -138,6 +138,31 @@ for b in "${BOARDS[@]}"; do
     echo "  $b"
     echo "=============================================================="
     [ "$CLEAN" = 1 ] && rm -rf "build/$b"
+
+    # Drop the generated sdkconfig when any input that produces it is newer.
+    #
+    # IDF applies sdkconfig.defaults ONLY when creating sdkconfig. Once the file exists it is
+    # authoritative, and edits to the defaults are silently ignored -- the build succeeds,
+    # reports no warning, and produces a binary with the OLD configuration. That cost a full
+    # ten-board build to notice on 2026-08-04 (the four restored values appeared to have no
+    # effect whatsoever, including an -Os change that did not move the image size by a single
+    # byte), and it would have been far worse to discover on hardware.
+    #
+    # Deleting is right rather than heavy-handed: this project has no interactive menuconfig
+    # workflow, so build/<board>/sdkconfig holds nothing a human authored. Its inputs -- the
+    # common defaults, the per-chip defaults, and the board fragment -- are the source of truth,
+    # and regenerating from them is exactly what should happen when one of them changes.
+    cfg="build/$b/sdkconfig"
+    if [ -f "$cfg" ]; then
+        for src in sdkconfig.defaults sdkconfig.defaults.* "boards/$b.sdkconfig" boards/_*.sdkconfig; do
+            if [ -f "$src" ] && [ "$src" -nt "$cfg" ]; then
+                echo "note: $src is newer than $cfg -- regenerating config" >&2
+                rm -f "$cfg"
+                break
+            fi
+        done
+    fi
+
     if idf.py -B "build/$b" -DSDKCONFIG="build/$b/sdkconfig" -DOD_BOARD="$b" build; then
         BUILT+=("$b")
     else

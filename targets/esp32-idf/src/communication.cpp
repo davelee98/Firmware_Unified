@@ -7,7 +7,8 @@
 #include "display_service.h"
 #include "od_log.h"
 
-#include <Arduino.h>
+#include "od_hal_time.h"
+#include <stdio.h>
 #include <string.h>
 
 #include "ble_transport.h"
@@ -136,7 +137,7 @@ static void noteAuthRejected(void) {
     od_log_warn("Auth abuse: %u consecutive unauthenticated commands - dropping link",
                 (unsigned)s_authRejectRun);
     s_authAbuseDropPending = true;
-    s_authAbuseDeadlineMs = millis() + OD_AUTH_ABUSE_FLUSH_MS;
+    s_authAbuseDeadlineMs = od_hal_uptime_ms() + OD_AUTH_ABUSE_FLUSH_MS;
     s_authAbuseDwellUntil = 0;
 }
 
@@ -169,11 +170,11 @@ void serviceBleAuthAbuseDisconnect(void) {
     // signal to wait on, so this drains, dwells about one connection interval to
     // give the radio a chance to send, and then drops.
     serviceBleTx();
-    const bool expired = (int32_t)(millis() - s_authAbuseDeadlineMs) >= 0;
+    const bool expired = (int32_t)(od_hal_uptime_ms() - s_authAbuseDeadlineMs) >= 0;
     if (!bleTxQueuePending() && s_authAbuseDwellUntil == 0) {
         uint16_t intervalMs = ble.connIntervalMs(owner.handle);
         if (intervalMs == 0) intervalMs = OD_AUTH_ABUSE_DWELL_FALLBACK_MS;
-        const uint32_t dwellEnd = millis() + intervalMs + 5u;   // +margin
+        const uint32_t dwellEnd = od_hal_uptime_ms() + intervalMs + 5u;   // +margin
         // Never past the hard deadline: a drain landing just before it yields a
         // short or zero dwell, which is the expiry case behaving as specified
         // rather than a contradiction.
@@ -181,7 +182,7 @@ void serviceBleAuthAbuseDisconnect(void) {
             ((int32_t)(dwellEnd - s_authAbuseDeadlineMs) > 0) ? s_authAbuseDeadlineMs : dwellEnd;
     }
     const bool dwelled = (s_authAbuseDwellUntil != 0) &&
-                         ((int32_t)(millis() - s_authAbuseDwellUntil) >= 0);
+                         ((int32_t)(od_hal_uptime_ms() - s_authAbuseDwellUntil) >= 0);
     if (!expired && !dwelled) return;   // keep draining next pass
 
     // One more pass if RX still holds frames. serviceBleRx() drains once per pass,
@@ -232,7 +233,6 @@ extern struct SecurityConfig securityConfig;
 extern chunked_write_state_t chunkedWriteState;
 extern uint8_t configReadResponseBuffer[128];
 extern uint8_t msd_payload[16];
-String getChipIdHex();
 float readBatteryVoltage();
 
 /** Mirror responses to BLE only when a central is connected; LAN responses go via opendisplay_lan_send_frame. */
@@ -472,18 +472,36 @@ void handleFirmwareVersion() {
     uint8_t major = getFirmwareMajor();
     uint8_t minor = getFirmwareMinor();
     uint8_t patch = getFirmwarePatch();
-    String shaStr = String(getFirmwareShaString());
-    if (shaStr.length() >= 2 && shaStr.charAt(0) == '"' && shaStr.charAt(shaStr.length() - 1) == '"') {
-        shaStr = shaStr.substring(1, shaStr.length() - 1);
+    // Was three String operations: strip surrounding quotes, trim, substitute a placeholder
+    // when empty. Done in place on a fixed buffer instead -- the SHA is at most 40 bytes on the
+    // wire and the response array below is sized for exactly that, so a growable string was
+    // never buying anything here.
+    char shaBuf[64];
+    snprintf(shaBuf, sizeof(shaBuf), "%s", getFirmwareShaString());
+    char* sha = shaBuf;
+    size_t shaChars = strlen(sha);
+    if (shaChars >= 2 && sha[0] == '"' && sha[shaChars - 1] == '"') {
+        sha[shaChars - 1] = '\0';
+        sha++;
+        shaChars -= 2;
     }
-    shaStr.trim();
-    const bool noShaCompiled = (shaStr.length() == 0 || shaStr == "\"\"");
-    if (noShaCompiled) {
-        shaStr = kFirmwareShaPlaceholder;
+    // trim(), both ends, matching Arduino's definition of whitespace closely enough for a
+    // build-stamped hex string.
+    while (shaChars > 0 && (unsigned char)sha[shaChars - 1] <= ' ') {
+        sha[--shaChars] = '\0';
+    }
+    while (shaChars > 0 && (unsigned char)sha[0] <= ' ') {
+        sha++;
+        shaChars--;
+    }
+    if (shaChars == 0) {
+        snprintf(shaBuf, sizeof(shaBuf), "%s", kFirmwareShaPlaceholder);
+        sha = shaBuf;
+        shaChars = strlen(sha);
     }
     od_log_info("Firmware version: %u.%u.%u", major, minor, patch);
-    od_log_info("SHA: %s", shaStr.c_str());
-    uint8_t shaLen = shaStr.length();
+    od_log_info("SHA: %s", sha);
+    uint8_t shaLen = (uint8_t)(shaChars > 255 ? 255 : shaChars);
     if (shaLen > 40) shaLen = 40;
     // [ACK][0x43][major][minor][shaLen][sha…][patch] — patch is trailing so
     // old hosts that stop after SHA keep working.
@@ -495,7 +513,7 @@ void handleFirmwareVersion() {
     response[offset++] = minor;
     response[offset++] = shaLen;
     for (uint8_t i = 0; i < shaLen && i < 40; i++) {
-        response[offset++] = shaStr.charAt(i);
+        response[offset++] = (uint8_t)sha[i];
     }
     response[offset++] = patch;
     sendResponse(response, offset);
@@ -552,16 +570,51 @@ void handleReadConfig() {
     }
 }
 
+// Outcome of "is this frame allowed to MUTATE stored configuration?".
+enum ConfigWriteGate {
+    CONFIG_WRITE_ALLOWED,        // proceed as-is
+    CONFIG_WRITE_ALLOWED_ERASE,  // proceed, but wipe the old record first (rewrite policy)
+    CONFIG_WRITE_DENIED,         // answer RESP_AUTH_REQUIRED
+};
+
+// THE single authorization predicate for config mutation. Both 0x0041 and its 0x0042
+// continuations ask it, because a second authorization decision taken in a handler must
+// apply the same origin rule the dispatcher applied -- and until this existed, it did
+// not. The dispatcher exempts ORIGIN_LAN_TLS from the app-layer gate (SECTION 9 rule 4:
+// the TLS handshake IS the authentication on that port and 0x0050 is NOT used there),
+// but handleWriteConfig() then re-tested the raw isEncryptionEnabled() && !isAuthenti-
+// cated() pair. isAuthenticated() is set only by a successful app-layer 0x0050 exchange
+// (encryption.cpp), which a conforming TLS client never sends -- so a client that had
+// already proved possession of the derived PSK could read config but not write it,
+// unless REWRITE_ALLOWED happened to be set. Encrypted WiFi supported half the workflow.
+//
+// Origin ALONE is not sufficient authority: it is paired with lanTlsSessionEstablished()
+// so the exemption tracks a completed handshake on the live socket rather than the
+// global encryption-enabled bit.
+static ConfigWriteGate configWriteGate(void) {
+#ifdef OPENDISPLAY_HAS_WIFI
+    if (g_commandOrigin == ORIGIN_LAN_TLS && lanTlsSessionEstablished()) {
+        return CONFIG_WRITE_ALLOWED;
+    }
+#endif
+    // BLE and plaintext LAN keep the pre-TLS rule unchanged.
+    if (!isEncryptionEnabled() || isAuthenticated()) {
+        return CONFIG_WRITE_ALLOWED;
+    }
+    const bool rewriteAllowed = (securityConfig.flags & (1 << 0)) != 0;
+    return rewriteAllowed ? CONFIG_WRITE_ALLOWED_ERASE : CONFIG_WRITE_DENIED;
+}
+
 void handleWriteConfig(uint8_t* data, uint16_t len) {
     if (len == 0) return;
-    if (isEncryptionEnabled() && !isAuthenticated()) {
-        bool rewriteAllowed = (securityConfig.flags & (1 << 0)) != 0;
-        if (!rewriteAllowed) {
-            noteAuthRejected();
-            uint8_t response[] = {RESP_ACK, (uint8_t)(CMD_CONFIG_WRITE & 0xFF), RESP_AUTH_REQUIRED};
-            sendResponseUnencrypted(response, sizeof(response));
-            return;
-        }
+    const ConfigWriteGate gate = configWriteGate();
+    if (gate == CONFIG_WRITE_DENIED) {
+        noteAuthRejected();
+        uint8_t response[] = {RESP_ACK, (uint8_t)(CMD_CONFIG_WRITE & 0xFF), RESP_AUTH_REQUIRED};
+        sendResponseUnencrypted(response, sizeof(response));
+        return;
+    }
+    if (gate == CONFIG_WRITE_ALLOWED_ERASE) {
         secureEraseConfig();
     }
     if (len > CONFIG_CHUNK_SIZE) {
@@ -616,16 +669,18 @@ void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
         sendResponse(errorResponse, sizeof(errorResponse));
         return;
     }
-    if (chunkedWriteState.receivedChunks == 1 && isEncryptionEnabled() && !isAuthenticated()) {
-        bool rewriteAllowed = (securityConfig.flags & (1 << 0)) != 0;
-        if (!rewriteAllowed) {
+    if (chunkedWriteState.receivedChunks == 1) {
+        const ConfigWriteGate gate = configWriteGate();
+        if (gate == CONFIG_WRITE_DENIED) {
             resetChunkedWriteState();
             noteAuthRejected();
             uint8_t response[] = {RESP_ACK, (uint8_t)(CMD_CONFIG_CHUNK & 0xFF), RESP_AUTH_REQUIRED};
             sendResponseUnencrypted(response, sizeof(response));
             return;
         }
-        secureEraseConfig();
+        if (gate == CONFIG_WRITE_ALLOWED_ERASE) {
+            secureEraseConfig();
+        }
     }
     if (len == 0 || len > CONFIG_CHUNK_SIZE || chunkedWriteState.receivedSize + len > MAX_CONFIG_SIZE || chunkedWriteState.receivedChunks >= MAX_CONFIG_CHUNKS) {
         resetChunkedWriteState();
@@ -794,7 +849,7 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
     // (any target) — it falls to default as an unknown command.
     switch (command) {
         case CMD_REBOOT:              // 0x000F
-            delay(100);
+            od_hal_delay_ms(100);
             reboot();
             break;
         case CMD_CONFIG_READ:         // 0x0040

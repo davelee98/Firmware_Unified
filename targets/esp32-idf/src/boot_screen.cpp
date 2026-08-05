@@ -1,5 +1,7 @@
 #include "boot_screen.h"
-#include <Arduino.h>
+/* No <Arduino.h>: this file never used one. It draws the boot screen through bb_epaper and
+ * display_service, formats with snprintf, and takes its time from neither -- the include was
+ * carried in from the source repo, where every translation unit had one. Phase C step 10. */
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -21,7 +23,8 @@ extern struct SecurityConfig securityConfig;
 extern BBEPDISP bbep;
 extern uint8_t staticRowBuffer[BOOT_ROW_BUFFER_SIZE];
 
-String getChipIdHex();
+void getChipIdHex(char* out, size_t out_size);
+#define OD_CHIP_ID_HEX_LEN 6
 uint8_t getFirmwareMajor();
 uint8_t getFirmwareMinor();
 uint8_t getFirmwarePatch();
@@ -653,20 +656,25 @@ bool writeBootScreenWithQr() {
     }
     const bool colorSwatchPlane1 = useBitplanes && numSwatches > 0;
 
-    String chipId = getChipIdHex();
-    if (chipId.length() < 6) {
-        chipId = String("000000").substring(0, 6 - chipId.length()) + chipId;
-    }
-    String last6 = chipId.substring(chipId.length() - 6);
-    for (size_t i = 0; i < last6.length(); i++) last6.setCharAt(i, (char)toupper(last6.charAt(i)));
+    // getChipIdHex() now guarantees exactly six uppercase hex digits, zero-padded, so the
+    // pad-to-six / take-last-six / uppercase dance this used to do is the contract instead of
+    // a convention at each call site. An empty result (buffer too small, or an unsupported
+    // target) leaves the three id bytes zero, which is what the old short-string path did too.
+    char last6[OD_CHIP_ID_HEX_LEN + 1] = {0};
+    getChipIdHex(last6, sizeof(last6));
 
     uint8_t payload[23] = {0};
     uint16_t res = globalConfig.displays[0].legacy_tag_type;
     payload[0] = (uint8_t)((res >> 8) & 0xFF);
     payload[1] = (uint8_t)(res & 0xFF);
-    payload[2] = (uint8_t)strtoul(last6.substring(0, 2).c_str(), nullptr, 16);
-    payload[3] = (uint8_t)strtoul(last6.substring(2, 4).c_str(), nullptr, 16);
-    payload[4] = (uint8_t)strtoul(last6.substring(4, 6).c_str(), nullptr, 16);
+    if (last6[0] != '\0') {
+        char pair[3] = {0};
+        for (uint8_t i = 0; i < 3; i++) {
+            pair[0] = last6[i * 2];
+            pair[1] = last6[i * 2 + 1];
+            payload[2 + i] = (uint8_t)strtoul(pair, nullptr, 16);
+        }
+    }
     if (securityConfig.flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN) {
         memcpy(&payload[5], securityConfig.encryption_key, 16);
     } else {
@@ -706,11 +714,11 @@ bool writeBootScreenWithQr() {
     char nameLine[32];
     char fwLine[32];
     if (useZoneLayout) {
-        snprintf(nameLine, sizeof(nameLine), "ID:   OD%s", last6.c_str());
+        snprintf(nameLine, sizeof(nameLine), "ID:   OD%s", last6);
         snprintf(fwLine, sizeof(fwLine), "FW:   OD ver %u.%u.%u",
                  (unsigned)getFirmwareMajor(), (unsigned)getFirmwareMinor(), (unsigned)getFirmwarePatch());
     } else {
-        snprintf(nameLine, sizeof(nameLine), "OD%s", last6.c_str());
+        snprintf(nameLine, sizeof(nameLine), "OD%s", last6);
         snprintf(fwLine, sizeof(fwLine), "FW:O %u.%u.%u",
                  (unsigned)getFirmwareMajor(), (unsigned)getFirmwareMinor(), (unsigned)getFirmwarePatch());
     }
@@ -741,10 +749,18 @@ bool writeBootScreenWithQr() {
     int middleScaleText;
     int pad;
     int fwKey1Gap = 0;
-    int modulePx;
-    int qrPx;
-    bool qrRight;
-    int qrX, qrY, availW, textY;
+    // All initialised at declaration. Each is assigned inside a layout branch and read behind
+    // the same condition, so the values here are never the ones used -- but GCC cannot prove
+    // that once bootQrPixelBlack()/bootLogoPixelBlack() are inlined, and rejects it under
+    // -Werror=maybe-uninitialized at -Os. That level was restored to match the reference build
+    // on 2026-08-04; -Og never reached this analysis, which is why a file untouched since the
+    // import suddenly had eight diagnostics. Only the RISC-V targets flagged the full set --
+    // the Xtensa inliner made different choices -- which is itself the argument for pinning
+    // rather than tracking the compiler's mood.
+    int modulePx = 0;
+    int qrPx = 0;
+    bool qrRight = false;
+    int qrX = 0, qrY = 0, availW = 0, textY = 0;
     const bool ultraHiResPanel = useZoneLayout && (w_log >= 1872 && h_log >= 1404);
     {
         const char* bootLinesFull[] = {
@@ -850,7 +866,13 @@ bool writeBootScreenWithQr() {
     uint16_t modelY = 0;
 
 #ifdef BOOT_HAS_LOGO
-    const uint8_t* logoBmp;
+    // Initialised, and read behind a null check below, although the only READ is already
+    // guarded by the same useZoneLayout that guards every assignment. GCC cannot prove that
+    // across the inlined bootLogoPixelBlack() and rejects it under -Werror=maybe-uninitialized
+    // at -Os -- which -Og did not reach, so this surfaced only when the optimisation level was
+    // restored to the reference build's (2026-08-04). The invariant was real but implicit; a
+    // logo layout that ever grows a fourth branch would break it silently. Now it cannot.
+    const uint8_t* logoBmp = nullptr;
     int logoW = 0, logoH = 0, logoStride = 0;
     int logoX = pad;
     int logoY = 8;
@@ -1013,7 +1035,8 @@ bool writeBootScreenWithQr() {
                     bootTextPixelBlack(lx, ly, (uint16_t)k2X,    k2Y,    k2,         (uint8_t)middleScaleText, w_log, textMaxX) ||
                     bootQrPixelBlack(lx, ly, qrX, qrY, qrPx, modulePx, quiet, qrSize, &qr)
 #ifdef BOOT_HAS_LOGO
-                    || (useZoneLayout && bootLogoPixelBlack(lx, ly, logoX, logoY, logoBmp, logoW, logoH, logoStride, (int)w_log))
+                    || (useZoneLayout && logoBmp != nullptr &&
+                        bootLogoPixelBlack(lx, ly, logoX, logoY, logoBmp, logoW, logoH, logoStride, (int)w_log))
 #endif
                     ;
                 if (black) {

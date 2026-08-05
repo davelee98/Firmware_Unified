@@ -17,6 +17,8 @@ page."** That is no longer true, and item 1 below is retired accordingly.
 | | |
 |---|---|
 | `shared/` | still empty — by design |
+| Arduino shim | **21 -> 5, and 5 is the FLOOR** (nRF-only arms; see item 4) |
+| HALs | od_hal_{nvs,log,gpio,time,i2c,adc,panel} implemented in `targets/esp32-idf/hal/` |
 | Host tests | green: 1 shared/ test + link_owner under ASan and TSan |
 | ESP32 target | 10 boards build; **S3 flashed and exercised** — see targets/esp32-idf/README.md § Verified on hardware |
 | Gate 2 | *mostly* met: uncompressed push and interrupted-transfer recovery still unexercised |
@@ -95,20 +97,30 @@ Three findings fell out of doing this, all fixed:
   `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME`. Disagreement between the two is now a
   configure-time error instead of a silently wrong flash layout.
 
-## 4. Phase C — drive `SHIM_BUDGET` from 22 to 0
+## 4. ~~Phase C — drive `SHIM_BUDGET` from 22 to 0~~ — **DONE 2026-08-05, and the target was not 0**
 
-The ratchet (`targets/esp32-idf/compat/ratchet.sh`) enforces that the number only falls.
-It reads 22, not the 21 of the phase-B baseline: adding the `*-extuart` boards revealed that
-`HardwareSerial.h` was missing from the pattern and `main.cpp` had never been counted. The
-shim did not grow — see compat/SHIM_BUDGET for why that distinction is recorded rather than
-quietly applied. Each
-step is a subsystem that stops needing Arduino, and MIGRATION.md forbids batching them: one at a
-time, each independently revertable.
+The ESP32 app-code work is finished. The budget went **21 -> 5** across fifteen recorded steps
+(`targets/esp32-idf/compat/SHIM_BUDGET` has one dated paragraph each, including what each step
+found). It started at 22 only because adding the `*-extuart` boards revealed `HardwareSerial.h`
+was missing from the ratchet's pattern — the shim did not grow, the metric did, and that
+distinction is recorded rather than quietly applied.
 
-Order them by what is also headed for `shared/core`, so the two jobs are one job — that is the
-argument TOOLCHAINS.md makes for why the Arduino removal and the `shared/` extraction are
-substantially the same work. When the budget reaches 0 and `arduino_compat.h` is gone, delete
-`compat/` and `.github/workflows/esp32-shim-ratchet.yml` together.
+**ZERO WAS THE WRONG TARGET, and this is the correction that matters most on this page.** Two
+things that were assumed to be temporary are not:
+
+- **Five files stay at the floor.** `main.cpp`, `display_service.cpp`, `buzzer_hw.cpp`,
+  `device_control.cpp` and `encryption.cpp` are counted **only for their `TARGET_NRF` arms**.
+  Those arms do not compile on this target, so they cannot be verified here; converting them
+  blind is exactly the unverifiable edit MIGRATION.md warns against. They leave with the nRF
+  target at **migration step 4**, and `compat/` is deletable at that moment — not before, and
+  not by finishing them early.
+- **FastEPD needs a permanent adapter.** It is a vendored Arduino library whose IT8951
+  transport is written against the Arduino `SPI` object; there is no version of it that is not.
+  That surface now lives in `targets/esp32-idf/vendor/fastepd/`, deliberately outside `compat/`
+  so the delete instruction stays unambiguous, and `ratchet.sh` no longer counts it.
+
+Earlier text here and in MIGRATION.md said to "delete `compat/` and the workflow together when
+the budget reaches 0". Read that as **when it reaches the floor and the nRF target has moved**.
 
 ## 5. Then, and only then: the first `shared/core` promotion
 

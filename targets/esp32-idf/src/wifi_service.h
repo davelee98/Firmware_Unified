@@ -1,6 +1,7 @@
 #ifndef WIFI_SERVICE_H
 #define WIFI_SERVICE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 // OPENDISPLAY_HAS_WIFI gates the entire WiFi/LAN transport surface (mDNS, TCP
@@ -85,6 +86,16 @@ void wifiLanDropOwnedSocket(void);
  * step 2). No-op when there is no session or the peer is still connected.
  */
 void wifiLanReapClosedSession(void);
+// True when the station is associated. main.cpp polls this to notice a dropped link.
+//
+// Replaces `WiFi.status() != WL_CONNECTED` at that call site: the WiFi stack is this file's
+// business, and main.cpp was reaching into it through the Arduino shim for one boolean.
+bool wifiLinkIsUp(void);
+
+// The station's IPv4 address as dotted-quad text, or "0.0.0.0" when there is none. Same
+// reason as wifiLinkIsUp(): main.cpp wants the string, not the WiFi stack.
+void wifiLocalIpStr(char* out, size_t out_size);
+
 void handleWiFiServer();
 
 // Re-associate to the strongest AP for the configured SSID after the link degrades
@@ -108,6 +119,11 @@ bool wifiLanClientConnected(void);
 uint16_t lanActivePort(void);
 /// True when the LAN channel is TLS-PSK rather than plaintext (= isEncryptionEnabled()).
 bool lanTlsEnabled(void);
+/// True while a TLS-PSK session on the accepted socket has COMPLETED its handshake.
+/// This -- not lanTlsEnabled(), which is only a configuration question -- is what
+/// authorizes a TLS-origin frame: SECTION 9 rule 4 makes the handshake the
+/// authentication on this transport.
+bool lanTlsSessionEstablished(void);
 // NOTE: this firmware deliberately never calls esp_wifi_set_ps(). WiFi and BLE share
 // one radio with software coex compiled in, and the coex arbiter needs WiFi's
 // modem-sleep windows to time-share the antenna with the always-on BLE advertiser.

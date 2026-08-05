@@ -1,8 +1,15 @@
-#include <Arduino.h>
+/* NO <Arduino.h>, <SPI.h> or <Wire.h> here (phase C step 11). This header defines the
+ * firmware's globals; it uses no Arduino type or function of its own, and the three includes
+ * were serving main.cpp -- its only consumer -- transitively. main.cpp now names its own
+ * dependency explicitly, which is the point: a header that pulls in a surface it does not use
+ * hides which file actually depends on it.
+ *
+ * <bb_epaper.h> below is NOT a back door. It includes <Arduino.h> only under #ifdef ARDUINO,
+ * which this build does not define (it takes the __LINUX__ branch), so nothing is laundered
+ * in through it. */
 #include "structs.h"
 #include "uzlib.h"
 #include <bb_epaper.h>
-#include <SPI.h>
 #include "encryption_state.h"
 #include "config_parser.h"
 #include "ble_transport.h"
@@ -29,7 +36,6 @@ using namespace Adafruit_LittleFS_Namespace;
 
 /* OD: config storage is NVS (hal/od_hal_nvs.h); LittleFS is gone from this target. */
 
-#include <Wire.h>
 
 #define MAX_BLOCKS 64
 // Text rendering constants
@@ -72,8 +78,6 @@ extern "C" {
 #include <esp_mac.h>
 #include <esp_timer.h>
 #include "esp_sleep.h"
-#include <WiFi.h>
-#include <ESPmDNS.h>
 
 // RTC memory variables for deep sleep state tracking (declared in main.cpp)
 extern bool advertising_timeout_active;
@@ -130,7 +134,6 @@ char wifiPassword[33] = {0};  // 32 bytes + null terminator
 uint8_t wifiEncryptionType = 0;  // 0x00=none, 0x01=WEP, 0x02=WPA, 0x03=WPA2, 0x04=WPA3
 bool wifiConfigured = false;  // True if WiFi config packet (0x26) was received and parsed
 #ifdef TARGET_ESP32
-#include <WiFi.h>
 // Small config-storage / status globals: kept on all ESP32 targets (config_parser
 // and the config-dump report reference them regardless of whether the WiFi
 // transport is compiled in). Trivial RAM cost.
@@ -150,8 +153,12 @@ uint16_t wifiServerPort = 2446;
 // (included above); its storage is reserved at boot by odLanReserveRxBuffer(),
 // in PSRAM where there is any. Size lives with the declaration as
 // OD_LAN_RX_BUFFER_SIZE -- do not reintroduce a literal here.
-WiFiServer wifiServer;
-WiFiClient wifiClient;
+//
+// The WiFiServer/WiFiClient objects that used to live here are GONE (phase C step
+// 9b-iii). They were globals only because main.h is where this firmware's globals
+// go; nothing outside wifi_service.cpp ever touched them, and they are now two
+// file-static lwIP descriptors there. wifiServerConnected stays public because
+// communication.cpp and the config-dump report do read it.
 bool wifiServerConnected = false;
 uint8_t* tcpReceiveBuffer = nullptr;
 uint32_t tcpReceiveBufferPos = 0;
@@ -198,7 +205,7 @@ void enterDeepSleep(bool force = false, uint16_t overrideSleepSeconds = 0);
 extern bool advertising_timeout_active;
 extern uint32_t advertising_start_time;
 #endif
-String getChipIdHex();
+void getChipIdHex(char* out, size_t out_size);   // see encryption.h for the contract
 
 // imageDataWritten + its opaque parameter typedefs come from communication.h.
 void sendResponse(uint8_t* response, uint16_t len);

@@ -4,8 +4,22 @@
 # This number may only ever go DOWN. Raising it is the failure mode the ratchet exists to
 # prevent -- see ratchet.sh and docs/MIGRATION.md § "The ESP32 import is different".
 #
-# Lower it with each subsystem that stops needing the shim; when it reaches 0 and
-# arduino_compat.h is deleted, remove this directory and the workflow that reads it.
+# Lower it with each subsystem that stops needing the shim.
+#
+# THE ENDSTATE IS "ONLY THE VENDOR ADAPTER REMAINS" (decided 2026-08-04), not an empty
+# directory. FastEPD needs a PERMANENT compatibility layer -- it is a vendored Arduino library
+# and there is no version of it that does not want Arduino primitives. So when this count
+# reaches 0, the surviving pieces (delay(), delayMicroseconds(), millis() with C++ linkage,
+# ledc_compat.h) are EXTRACTED into the vendor adapter and owned there; only what is left over
+# is deleted, along with the ratchet and its workflow.
+#
+# It is called an ADAPTER and not a shim on purpose. In this repo "shim" means scheduled
+# demolition -- that is the whole premise of this file -- and using the word for something
+# permanent would make the ratchet's own vocabulary meaningless.
+#
+# The count itself can still reach 0: the last three entries (buzzer_hw.cpp,
+# device_control.cpp, encryption.cpp) are counted only for their TARGET_NRF arms, which leave
+# at MIGRATION step 4. Reaching 0 is the trigger for the extraction, not a licence to delete.
 #
 # 21 = the phase-B baseline. It was 20 when the metric counted only arduino_compat.h/Arduino.h;
 # widening it to every shim header (Wire, SPI, WiFi, ledc, esp32-hal-gpio) found one more file.
@@ -52,4 +66,655 @@
 #
 # The first three are marked OD-PORT at the call sites so the next sync from Firmware can see
 # why those lines differ from the reference tree.
-21
+#
+# 20 = phase C step 1, 2026-08-04: the logger. src/od_log.h stopped including <Arduino.h>.
+#
+# It was picked first because it is the keystone, not because it is the smallest. od_log.h is
+# included by nearly every file in the target, so for as long as it pulled in <Arduino.h> it
+# was handing the Arduino surface to files that did not ask for it -- and any of those could
+# have "dropped the shim" by deleting its own include while still compiling on od_log.h's.
+# That is the laundering this file exists to catch, and the only way to stop it is at the
+# source. Six files include od_log.h without a shim header of their own; five are already
+# deliberately Arduino-free (link_owner, session_guard, command_queue, both ble_transports),
+# which is what made the blast radius small enough to go first.
+#
+# The only Arduino thing in the logger was the `Stream *` it was handed. A Stream is a PORT,
+# not policy, so the port moved to hal/od_hal_log.{h,c} -- opened by compile-time board choice
+# (IDF UART driver for the *-extuart boards, stdout for USB-CDC) -- and od_log.cpp's `Stream *`
+# became a plain bool. On nRF it had ALREADY been nothing but an initialised flag: the record
+# bytes there go out through tud_cdc_write(), never through the Stream.
+#
+# compat/HardwareSerial.h is DELETED with this step: main.cpp's OPENDISPLAY_LOG_UART path was
+# its only user, and that code is now od_hal_log's UART backend. The shim lost a whole header,
+# not just a caller.
+#
+# ONE FILE MOVED THE OTHER WAY, and it is the honest part. main.cpp lost <HardwareSerial.h>
+# and GAINED an explicit <Arduino.h>, so it stays counted. It still calls Serial.*, delay(),
+# pinMode() and digitalWrite(), and has always got them transitively through main.h -- so
+# letting the HardwareSerial removal take it off the list would have scored a decrement for a
+# file that is arguably the most Arduino-dependent in the target. 21 -> 20, one file, not two.
+#
+# Note for the endgame: delay(), delayMicroseconds() and millis() are shimmed with C++ linkage
+# and defined out-of-line in arduino_compat.cpp because two VENDORED libraries need them
+# externally (bb_epaper.h declares `void delay(long)` unmangled; FastEPD's arduino_io.inl has
+# an extern millis() with 19 call sites and no definition). They are pinned by third_party/,
+# not by app code.
+#
+# As of 2026-08-04 that is a DECISION rather than an obstacle: FastEPD keeps a permanent
+# compatibility layer, so these three plus ledc_compat.h become the vendor adapter. ratchet.sh's
+# report-only third-party list is that adapter's specification -- read it as a definition of
+# what must survive, not as a list of things to eliminate.
+#
+# 19 = phase C step 2, 2026-08-04: src/factory_config.cpp. A one-line removal, and recorded as
+# what it is -- bookkeeping that step 1 made TRUE, not work in its own right.
+#
+# The file uses no Arduino API at all. Its `#include <Arduino.h>` has been dead since the
+# import. Removing it BEFORE step 1 would have been the laundered decrement this file keeps
+# warning about: the include would have gone, the file would still have compiled, and it would
+# have compiled on the Arduino that od_log.h was dragging in behind it -- so the number would
+# have fallen while nothing changed. After step 1 the whole chain (factory_config.h ->
+# config_parser.h -> stdint.h, communication.h, od_log.h) is Arduino-free, so the build itself
+# is now the proof, which is the only reason this counts.
+#
+# The general rule this is the first instance of: a file whose only Arduino dependency was
+# transitive cannot be cleared until the header that supplied it is cleared. Expect more of
+# these to fall out for free as the real subsystems land -- and expect none of them to be
+# claimable before that.
+#
+# 17 = phase C step 3, 2026-08-04: the power latch and the wake-button armer, and with them the
+# GPIO/clock seam the rest of the leaf files will reuse -- hal/od_hal_gpio.{h,c} and
+# hal/od_hal_time.{h,c}, signatures taken from docs/SHARED_API_DESIGN.md rather than invented.
+#
+# TWO FILES IN ONE STEP, which MIGRATION.md's "do not batch subsystem swaps" allows only
+# because they are one subsystem: power_latch.cpp owns pwr_pin_2/pwr_pin_3, and wake_button.cpp
+# exists partly to refuse to arm those same two pins (arming the latch clock would clock the
+# rail off mid-sleep). Splitting them would have put a commit boundary through one hardware
+# interlock. They revert together for the same reason.
+#
+# wake_button.cpp was ONE LINE -- a digitalRead. The file already included driver/gpio.h and
+# was otherwise pure IDF (esp_sleep_*), and the shim's digitalRead was itself gpio_get_level
+# behind a validity guard, so it calls gpio_get_level directly rather than taking a HAL
+# dependency it does not need. Not every leaf needs the seam.
+#
+# power_latch.cpp is the real one: 11 pinMode, 9 digitalWrite, 4 delayMicroseconds, 2
+# digitalRead, 2 millis, 2 delay. Two notes on the translation, both about not changing
+# hardware behaviour by accident:
+#
+#   * pinMode(p, OUTPUT) + digitalWrite(p, X) collapses to od_hal_gpio_config_output(p, X),
+#     which is gpio_config() THEN gpio_set_level() -- the same two register writes in the same
+#     order. It is deliberately not one "configure at level" call: gpio_config() does not touch
+#     the output latch, so a merged version would change the glitch behaviour on a pin that was
+#     already driven the other way. On this file's hardware that glitch cuts the rail.
+#   * od_hal_delay_ms() keeps the shim's round-UP-to-whole-ticks arithmetic. At the default
+#     100 Hz tick a plain vTaskDelay(pdMS_TO_TICKS(5)) rounds to zero and returns immediately,
+#     turning a settle into a busy-spin.
+#
+# NOT hardware-verified, and this is the step where that matters most so far: the latch is the
+# path that can leave a unit unable to power on. Build-verified on five boards across four
+# chips only.
+#
+# 16 = phase C step 4, 2026-08-04: the buzzer. TWO files were converted, but only ONE leaves
+# the count -- src/buzzer_control.cpp. Read the rest of this entry before assuming that is a
+# mistake.
+#
+# src/buzzer_hw.cpp's ESP32 half is now Arduino-free: it drives IDF's ledc driver directly and
+# calls od_hal_gpio for the park-low. But the file also carries an ARDUINO_ARCH_NRF52 arm
+# (Bluefruit HardwarePWM) that needs pinMode/digitalWrite, so <Arduino.h> is still in the file
+# and the ratchet still counts it. That is CORRECT, and is left alone deliberately:
+#
+#   * the grep is textual by design -- what it measures is "files that still name Arduino",
+#     and this one does;
+#   * the alternative was declaring pinMode/digitalWrite rather than including Arduino, the
+#     trick od_log.cpp uses for millis(). Rejected here: that arm's linkage cannot be checked
+#     from this repo, and guessing wrong buys a decrement at the price of a link error on a
+#     target nobody can build yet;
+#   * deleting the nRF arm outright would score the decrement honestly, but it is a real
+#     divergence from the reference tree inside a commit about removing Arduino, and it makes
+#     the next sync conflict. That arm dies at migration step 4, where it is rewritten for
+#     Zephyr anyway.
+#
+# A LATENT DEFECT FELL OUT OF THIS, and it is why the step was worth doing carefully.
+# buzzer_hw.cpp forked on `#if ESP_ARDUINO_VERSION_MAJOR >= 3`: a 3.x pin-based LEDC path and a
+# 2.x channel-based one. That macro is defined NOWHERE under IDF, so the test was `0 >= 3` and
+# this target had silently been compiling the 2.x branch -- the one the reference firmware, on
+# Arduino core 3.x, does not take. compat/ledc_compat.h implements only the 2.x calls, which
+# corroborates it: the 3.x branch could never have linked.
+#
+# Consequence, now fixed: the 2.x branch computed the frequency as a double and handed it to a
+# uint32_t shim parameter, so it TRUNCATED where 3.x rounds -- up to 1 Hz flat, worst at the
+# bottom of the range. The fork is gone rather than resolved toward one side: there is one LEDC
+# peripheral and one way to drive it from IDF, and a version macro from a framework this target
+# no longer uses cannot select anything meaningful. Timer/channel selection is deliberately
+# UNCHANGED, oddities included (channel 7, `7 % LEDC_TIMER_MAX`, `7 % LEDC_CHANNEL_MAX`, which
+# land differently per chip), because that is what is flashed today.
+#
+# compat/ledc_compat.h SURVIVES. Its last app-code user just left, but FastEPD.inl's
+# front-light control uses ledcSetup/ledcAttachPin/ledcWrite at 11 sites. It is the third thing
+# now pinned by third_party/ rather than by our code, after delay() and millis().
+
+# 14 = phase C step 5, 2026-08-04: the I2C sensor drivers -- src/sensor_sht40.cpp and
+# src/sensor_bq27220.cpp -- onto a new hal/od_hal_i2c.{h,c}.
+#
+# THE SEAM HAD TO TAKE THE BUS WITH IT, and that is the interesting part. IDF permits exactly
+# one i2c_new_master_bus() per port. compat/Wire.h owned that handle, and touch_input.cpp
+# (step 6) and display_service.cpp (step 10, the AXP2101 PMIC plus the whole bus lifecycle)
+# still drive Wire. Converting the sensors to a HAL that opened its own bus would have meant
+# two owners of one port -- which does not fail cleanly, it fails wherever the two disagree
+# about who configured the pins.
+#
+# So od_hal_i2c owns the bus and compat/Wire.h became a thin ADAPTER over it. The bus
+# mechanics moved rather than being rewritten: same IDF calls, same timeouts, same
+# device-handle cache. What stayed in Wire.h is only the Arduino semantics -- the buffered
+# beginTransmission/write/endTransmission idiom and the 0/1/2/3/4 return encoding, which is
+# the INVERSE of both esp_err_t and od_hal_i2c's, and is translated at that boundary and
+# nowhere else.
+#
+# TWO HARDWARE-FOUND BEHAVIOURS CARRIED ACROSS DELIBERATELY. Both were already fixed in
+# Wire.h; neither is obvious from the call sites, and either would be easy to lose in a
+# rewrite:
+#
+#   * A ZERO-LENGTH WRITE IS A PRESENCE PROBE. IDF's i2c_master_transmit() rejects size 0
+#     outright, so a scan built on it never reaches the bus -- no START, no address byte, no
+#     ACK to observe -- and reports every address absent whether or not hardware is there. A
+#     connected SHT40 was undetectable. od_hal_i2c_probe() is the address-only primitive.
+#   * endTransmission(false) MUST NOT SEND A STOP. The BQ27220 register read is one
+#     transaction with a repeated START; split into STOP + fresh START it answers as if
+#     unaddressed, so the gauge returns plausible garbage rather than an error. That is
+#     od_hal_i2c_write_read().
+#
+# THE HAL'S SHAPE DIVERGES FROM docs/SHARED_API_DESIGN.md, and this is flagged rather than
+# quietly done. That sketch is register-oriented -- read(addr, reg, buf, len) -- and cannot
+# express either driver: the SHT40 measurement is write-command, STOP, wait ~9 ms, then a bare
+# read (no register, and the delay must sit between two transactions), while the BQ27220 is a
+# single repeated-START transaction. A register-shaped call gets the bus framing wrong for
+# each, in opposite directions. Primitives here; the doc's two calls are expressible on top,
+# the reverse is not. The sketch was written from reading, and this is what building it found.
+
+# 13 = phase C step 6, 2026-08-04: src/touch_input.cpp, the GT911 driver. It reuses step 5's
+# od_hal_i2c and brings the GPIO interrupt surface into hal/od_hal_gpio -- config_irq(),
+# clear_irq(), irq_lock()/unlock(), and set_mode_output().
+#
+# TWO PLACES WHERE docs/SHARED_API_DESIGN.md's SKETCH WAS TOO NARROW, both widened
+# deliberately and both for a reason the hardware supplies:
+#
+#   * config_irq() is specified as edge-both with no mode argument. The GT911 asserts INT
+#     active-low and is attached FALLING; edge-both would raise a spurious event on every
+#     release. The HAL takes an od_hal_gpio_edge_t.
+#   * set_mode_output() is not in the sketch at all, and exists because pinMode() and
+#     digitalWrite() are SEPARABLE and gt911_hw_reset() depends on the separation. It makes
+#     both INT and RST outputs BEFORE driving either, and INT's level at RST's rising edge is
+#     what selects the controller's I2C address (0x14 vs 0x5D). Collapsing those pairs into
+#     config_output(), which is what every other call site got, would reorder the sequence and
+#     change which address the part answers on. The whole reset function is therefore
+#     transcribed call-for-call rather than tidied.
+#
+# ONE FUNCTION DELETED, and it is worth knowing why it was not a bus operation.
+# gt911_drain_wire() was `while (Wire.available()) Wire.read();`, called on every I2C retry.
+# It drained bytes left in the SHIM's RX buffer after a partial read -- an artifact of
+# Arduino's requestFrom()/read() split, with nothing corresponding on the wire. od_hal_i2c
+# transfers are all-or-nothing, so there is no residue and nothing for it to do. Its call
+# sites read like bus recovery and never were.
+#
+# The read path keeps BOTH framings on purpose: gt911_read_reg() tries the repeated-START form
+# and then the STOP-then-START form, because GT911 clones differ in which they accept. That is
+# the second consumer of od_hal_i2c exposing write_read() and write()+read() separately rather
+# than one register-shaped call.
+#
+# NOT hardware-verified, and touch is the subsystem where that is hardest to reason about from
+# a build: an address-selection sequence that comes out wrong produces a controller that simply
+# never answers, which looks identical to absent hardware.
+
+# 12 = phase C step 7, 2026-08-04: src/device_control.cpp -- buttons, LEDs, the ADC ladder and
+# DFU entry -- plus a new hal/od_hal_adc.{h,c} and the rest of the GPIO interrupt surface.
+#
+# ONE FILE LEAVES THE COUNT, NOT TWO, and the same rule as buzzer_hw.cpp is why.
+# device_control.h drops <Arduino.h>, which it used for uint8_t alone, and leaves.
+# device_control.cpp's ESP32 half is now entirely od_hal_adc/od_hal_gpio/od_hal_time -- its
+# only shim header, esp32-hal-gpio.h, is gone -- but its TARGET_NRF arm still calls
+# pinMode/attachInterrupt/detachInterrupt, so it GAINS a guarded <Arduino.h> and stays counted.
+# 13 -> 12. The alternative was a decrement for a file that still names Arduino, which is the
+# laundering this file exists to catch.
+#
+# hal/od_hal_adc is NOT in docs/SHARED_API_DESIGN.md at all -- the core does not read analogue
+# inputs. It exists because two TARGET drivers do (this file's button ladder and
+# display_service.cpp's battery sense) and IDF's oneshot driver has ONE ADC1 unit handle:
+# adc_oneshot_new_unit() on an already-open unit fails, so two owners would mean whichever
+# initialised second silently read nothing. Same forced-consolidation as step 5's I2C bus. The
+# shim's analogRead/analogSetPinAttenuation/analogReadResolution are now forwarders, because
+# display_service.cpp still calls them until step 10.
+#
+# WHY THAT MATTERS MORE HERE THAN IT LOOKS. Both callers turn a reading into something a host
+# believes. readBatteryVoltageUncached() scales it and publishes it in the MSD advert, so 0
+# becomes a plausible 0.0 V rather than the -1.0 "unknown" the same function returns when no
+# sense pin is configured. The ladder classifies 0 into its catch-all bottom bucket, which
+# reads as the last button permanently pressed. That is exactly what the original `return 0`
+# ADC stub produced, and it is why od_hal_adc exposes pin_readable() as a separate question
+# instead of leaving callers to infer failure from a value that is also a legal reading. The
+# ladder now warns once at registration when its pin is not ADC1-capable.
+#
+# ADC1 ONLY, carried across deliberately: ADC2 shares hardware with the WiFi radio on
+# ESP32/S2/S3 and reads fail with ESP_ERR_TIMEOUT whenever WiFi is up, which these boards run.
+#
+# The GPIO HAL gained config_irq_arg() -- Arduino's attachInterruptArg, which is what lets four
+# buttons share one ISR instead of the four near-identical ones touch_input.cpp was stuck with
+# -- and irq_enable/irq_disable, which MASK without detaching. That distinction is load-bearing
+# for this file: its button re-baselining disables every button interrupt, settles, re-reads the
+# pins and re-enables. Detaching instead would discard each handler AND its index argument, and
+# re-attaching is where a wrong index lands one button's events on its neighbour.
+#
+# One simplification worth naming, since it removes a state the pad used to pass through:
+# `pinMode(pin, INPUT)` followed by a conditional `pinMode(pin, INPUT_PULLUP/PULLDOWN)` became
+# a single od_hal_gpio_config_input(pin, pullup, pulldown). The intermediate pull-less
+# configuration existed only because Arduino had no combined form. The pad ends in the same
+# state.
+#
+# NOT hardware-verified. Buttons, LEDs, battery voltage and DFU entry all sit behind this.
+
+# 11 = phase C step 8, 2026-08-04: src/encryption.h. The last Arduino String on an INTERFACE.
+#
+# `String getChipIdHex()` was the one remaining place Arduino's String appeared in a
+# declaration rather than inside a function body, and CLAUDE.md forbids it in shared/ outright.
+# It becomes `void getChipIdHex(char* out, size_t out_size)` with a stated contract: exactly six
+# uppercase hex digits, zero-padded, NUL-terminated. Every caller was already padding to six by
+# hand, so the contract replaces a convention that each site re-implemented.
+#
+# A TOO-SMALL BUFFER YIELDS AN EMPTY STRING, NOT A TRUNCATED ONE, and that is a deliberate
+# choice rather than defensive habit: the host keys the device on its advertised name, so a
+# shortened id is not a degraded id -- it is a DIFFERENT device. Empty fails visibly; truncated
+# fails as a stranger appearing in Home Assistant.
+#
+# Three DEAD forward declarations went with it -- communication.cpp, display_service.cpp and
+# ble_transport_nrf.cpp each declared the function and never called it.
+#
+# encryption.cpp's ESP32 half also came off the shim (millis, ESP.getEfuseMac, and
+# checkResetPin's pinMode/digitalRead/delay), but the FILE stays counted: its TARGET_NRF arm
+# still needs <Arduino.h> for random() and its own pinMode calls. Same rule as buzzer_hw.cpp and
+# device_control.cpp. 12 -> 11, one file.
+#
+# ESP.getEfuseMac() -> esp_efuse_mac_get_default(), with the little-endian packing written out
+# explicitly rather than tidied. The Arduino call returned the six factory bytes packed into a
+# uint64_t with MAC byte 0 in the LOW byte, and both call sites shift that value to select a
+# subrange. One feeds the AUTH device id and the other the advertised device NAME -- a
+# different packing is a different device to the host, and the fleet is keyed on both.
+#
+# NOT hardware-verified. The device name and the AUTH device id both derive from the changed
+# code, and getting either wrong presents as a new device rather than a broken one -- which is
+# exactly the failure mode the S3 MAC pinning in sdkconfig.defaults.esp32s3 exists to prevent.
+
+# 9 = phase C step 9a, 2026-08-04: src/communication.cpp and src/config_parser.cpp -- the two
+# small members of the WiFi/LAN group. wifi_service.cpp, the large one, is step 9b.
+#
+# NEITHER WAS REALLY A WiFi FILE, which is why they are worth separating from the step's
+# headline. communication.cpp's shim dependency was 4 millis(), 3 delay() and one String; its
+# <WiFi.h> had already gone in phase B, and the comment recording that is still there.
+# config_parser.cpp's was a single WiFi.localIP().toString() for a status log line, plus
+# <Arduino.h> for the same String.
+#
+# The String work is the part worth noting. handleFirmwareVersion() used three String
+# operations -- strip surrounding quotes, trim, substitute a placeholder when empty -- on a
+# build-stamped SHA that is at most 40 bytes on the wire, into a response array already sized
+# for exactly that. Rewritten in place on a fixed buffer: the growable string was never buying
+# anything, and communication.cpp is a dispatcher heading for shared/core, where String is
+# forbidden outright.
+#
+# config_parser.cpp matters more than its one line suggests: it is the PRE-AUTH ATTACK SURFACE
+# and the first planned shared/core promotion (NEXT_STEPS item 5). Neither IPAddress nor String
+# may appear there, so the esp_netif call replaces a type round-trip that existed only to
+# format four bytes.
+#
+# One build-only defect found here, and it is the kind a single-board build hides: the
+# esp_netif.h include was first guarded on OPENDISPLAY_HAS_WIFI while the code using IP2STR sits
+# under plain TARGET_ESP32. s3-n16r8 built fine; esp32-n4 -- the one board that compiles no WiFi
+# surface at all -- did not. The guard is now TARGET_ESP32, and the lookup simply returns NULL
+# on a board without WiFi, printing "?".
+
+# 9 (UNCHANGED) = phase C step 9b-iii, 2026-08-04: src/wifi_service.cpp's LAN data path off
+# WiFiServer/WiFiClient and onto lwIP descriptors, and src/main.h off <WiFi.h> entirely.
+#
+# THE COUNT DOES NOT MOVE AND THAT IS CORRECT. wifi_service.cpp still includes <Arduino.h> and
+# <ESPmDNS.h>, so it is still a shim user; it leaves at step 9b-iv. main.h was already counted
+# for its other shim includes. What this step does move is the SHIM ITSELF: compat/WiFi.h is
+# DELETED -- the first shim header to go rather than shrink. Nothing in targets/ or third_party/
+# includes it.
+#
+# Two file-static ints replace the two Arduino objects. WiFiServer/WiFiClient were already lwIP
+# sockets underneath; the classes added an object identity this file never needed, because there
+# is exactly one listener and at most one peer BY DESIGN (R3 refuses a second client rather than
+# evicting the incumbent). The globals lived in main.h only because that is where this
+# firmware's globals live -- nothing outside wifi_service.cpp ever touched them.
+#
+# ONE REAL DEFECT FOUND, in startLanServer(). Arduino's WiFiServer::begin() returns early when a
+# socket already exists, so restartWiFiLanAfterReconnect() -- which runs after a WiFi config
+# change and after a reconnect -- rebound nothing. Switching encryption on or off moves the LAN
+# port (plaintext base, TLS base+1), so the device went on listening on the OLD port while
+# logging the new one, until a reboot. startLanServer() now closes the listener before binding.
+#
+# The mbedTLS BIO ctx is still a POINTER (&s_lanClientFd), not the fd by value, for the reason
+# the old code passed &wifiClient: mbedTLS holds it for the life of the ssl context and the
+# descriptor changes when one session ends and another is admitted.
+#
+# WL_* / wl_status_t went too -- Arduino's names for values this file both produces and
+# consumes, and which nothing outside it ever saw. Now OD_WIFI_*, same numeric values so a log
+# line still compares the same against old firmware.
+#
+# NOT hardware-verified. This is the LAN DATA PATH: accept, TLS handshake BIO, frame reads and
+# frame writes all changed at once, and a LAN regression is invisible on a BLE-only bench --
+# every board here builds and advertises identically with LAN completely broken. Needs a real
+# host push over both plaintext and TLS-PSK, a second client refused while one is connected,
+# and a config change that flips encryption (to exercise the rebind above).
+
+# 8 = phase C step 9b-iv, 2026-08-04: src/wifi_service.cpp and src/main.h off <ESPmDNS.h> and
+# <Arduino.h>. compat/ESPmDNS.h DELETED. wifi_service.cpp -- the largest file in the WiFi
+# group and the last of it -- finally leaves the count. 9 -> 8, one file.
+#
+# THE SHIM'S MDNSResponder WAS ENTIRELY NO-OPS. begin() returned true, addService() and
+# addServiceTxt() did nothing whatsoever. This target has therefore never advertised anything
+# since the import, while logging nine TXT records as though it had. The shim was honest about
+# it -- "if the mdns component is not present in the build, these become no-ops rather than a
+# build failure" -- and it was not present, because ESP-IDF dropped mdns from core in v5.0.
+# Same shape as 9b-ii's WiFiClass, and the same lesson: a no-op that compiles is
+# indistinguishable from a feature that works.
+#
+# So this step needed a DEPENDENCY before it could need a translation. espressif/mdns 1.11.3 is
+# vendored at targets/esp32-idf/components/mdns in its own commit, configured advertise-only
+# (this device announces; it never resolves or browses). Provenance in third_party/NOTICE.md,
+# configuration and its reasoning in sdkconfig.defaults.
+#
+# THE UNDERSCORES ARE THE TRAP. Arduino's ESPmDNS took "opendisplay"/"tcp" and prefixed them
+# itself; the IDF API takes "_opendisplay"/"_tcp" as written. Carrying the Arduino spelling
+# across would have advertised `opendisplay.tcp.local` -- a name no client looks for, failing
+# exactly like mDNS not working at all, which is the state we are leaving.
+#
+# Three behaviour changes beyond the translation, each because the target is now real:
+#   - The six identity/capability TXT keys are registered as ONE array at add time, not as six
+#     follow-up calls. Against a real responder the latter is six record mutations and up to
+#     six re-announcements for a record never once advertised complete.
+#   - restartLanService() replaces the service record rather than appending. The port MOVES
+#     when encryption is toggled (plaintext base, TLS base+1).
+#   - opendisplay_lan_teardown() now stops the responder, so a reboot sends a goodbye. The
+#     shim's end() was a no-op like everything else, so clients kept a cached record pointing
+#     at a rebooting device and retried the port through the whole restart.
+#
+# The 400 ms floor on the msd TXT update was already there and now MATTERS: every TXT change
+# re-announces on the multicast group, and this device shares its antenna with BLE.
+#
+# Arduino String went with it (deviceName, mac) and so did millis()/delay() -> od_hal_time,
+# which is what actually drops the <Arduino.h> include.
+#
+# Cost: +33,648 bytes of flash on each S3 board. The five non-WiFi boards are BYTE-IDENTICAL,
+# confirming the linker discards the component where main never references it.
+#
+# NOT hardware-verified, and unusually here the bench test is easy and worth doing FIRST:
+# `avahi-browse -r _opendisplay._tcp` on the LAN should show the device, its port, and all
+# seven TXT keys. Nothing about this has ever worked on this target, so there is no regression
+# risk -- only the question of whether the advertisement is correct.
+
+# 7 = phase C step 11, 2026-08-04: src/main.h -- <Arduino.h>, <SPI.h> and <Wire.h> all three.
+# 8 -> 7, one file. (Step 10, src/boot_screen.cpp, is deliberately still open: its include is
+# vestigial and it can go at any time.)
+#
+# MAIN.H USED NONE OF THEM. It is the header that defines this firmware's globals, and it has
+# no Arduino type or call of its own -- the three includes were serving main.cpp, its ONLY
+# consumer, transitively. That is worth stating because it is the honest version of a decrement
+# the ratchet cannot distinguish from laundering by itself: the surface did not move to another
+# file, it was never used here.
+#
+# main.cpp then failed to compile on three call sites it had been getting through main.h, which
+# is the whole reason the include had to be named rather than deleted:
+#   - TWO Wire.end() -> od_hal_i2c_deinit(). compat/Wire.h's end() IS exactly that call, so this
+#     is a real removal, not a rename.
+#   - ONE SPI.end() -> stays, and main.cpp now includes <SPI.h> explicitly. It is NOT a one-line
+#     HAL call: compat/SPI.h's end() releases the device AND frees the bus using ownership state
+#     (_owns_bus) that only the shim holds, and there is no od_hal_spi. Naming the include costs
+#     nothing on the count -- main.cpp is already counted for <Arduino.h> -- and hiding it in a
+#     header would have been the laundering this file exists to catch.
+#
+# CHECKED FOR A BACK DOOR: main.h still includes <bb_epaper.h>, which is itself on the
+# third_party shim list. It includes <Arduino.h> only under #ifdef ARDUINO, and this build does
+# not define ARDUINO (it takes the __LINUX__ branch -- see main/CMakeLists.txt on why defining
+# ARDUINO was rejected). So nothing is laundered in through it.
+#
+# All 10 images are BYTE-IDENTICAL to the previous commit. Expected, and the point: Wire.end()
+# already compiled to od_hal_i2c_deinit(), so this step changes what the source DEPENDS on
+# without changing what it generates. Nothing here needs hardware verification.
+
+# 6 = phase C step 10, 2026-08-04: src/boot_screen.cpp. 7 -> 6, one file.
+#
+# THE INCLUDE WAS PURELY VESTIGIAL -- the file never used a single Arduino symbol. 1087 lines
+# and `#include <Arduino.h>` was the only occurrence of the string "Arduino" in it. It draws
+# through bb_epaper and display_service, formats with snprintf, and reads no clock; the include
+# came in from the source repo, where every translation unit had one.
+#
+# Done AFTER step 11 rather than before, despite being the smaller change, because a file that
+# is on the list for no reason is worse than one that is on it for a real reason: it makes the
+# remaining count read as more work than it is. Now every file left is on the list because it
+# genuinely depends on the shim.
+#
+# All 10 images BYTE-IDENTICAL to the previous commit. Nothing to verify on hardware -- there is
+# no behaviour here to change. -Os and the -Wmaybe-uninitialized fixes this file needed are
+# earlier work and unaffected.
+
+# 6 (UNCHANGED) = phase C step 12, 2026-08-04: src/main.cpp's ESP32 half off the shim.
+#
+# THE COUNT DOES NOT MOVE, AND THE FLOOR JUST WENT UP FROM 3 TO 4. main.cpp keeps a GUARDED
+# <Arduino.h> because 78 of its Arduino call sites are TARGET_NRF-only: the OPENDISPLAY_BOOT_DIAG
+# Serial.* tracing, the LED_GREEN/LED_BLUE CDC-wait loop, and powerDownExternalFlash()'s
+# bit-banged SPI. None compiles on this target, so none can be VERIFIED here, and converting
+# them blind is the unverifiable edit MIGRATION.md warns against. Same rule buzzer_hw.cpp,
+# device_control.cpp and encryption.cpp are counted under; main.cpp now joins them, and all four
+# leave at MIGRATION step 4. Earlier notes in this file said the floor was 3 -- that was written
+# before this file's nRF arms had been counted. It is 4.
+#
+# What actually moved, all of it ESP32-live (~82 sites):
+#   pinMode/digitalWrite/digitalRead -> od_hal_gpio      (100 calls)
+#   millis/delay/delayMicroseconds   -> od_hal_time      (40 calls)
+#   ESP.getFreeHeap/getMinFreeHeap/getFreePsram -> heap_caps_* directly. The shim accessors were
+#     DEFINED as exactly those calls, and two of four fields on each log line already used
+#     heap_caps_*, so one line was sourcing one pool through two spellings.
+#   One Arduino String (the git-SHA stamp) -> fixed buffer, as communication.cpp got in 9a.
+#   SPI.end() -> displayReleaseSpiBus() in display_service.cpp. It belongs there on OWNERSHIP
+#     grounds: compat/SPI.h's end() frees the bus using _owns_bus state only that layer sets up,
+#     and whether the bus is owned at all depends on its FastEPD driver selection. Same shape as
+#     main.cpp asking wifi_service for the link state instead of reaching into esp_wifi (9b-ii).
+#   Serial.begin(115200) -> #ifndef TARGET_ESP32. It was ALREADY a no-op here (the IDF console
+#     driver is up before setup()); making that structural rather than a comment is what removed
+#     the last ESP32-reachable Serial call.
+#
+# 19 pinMode(X,OUTPUT)+digitalWrite(X,V) PAIRS BECAME ONE CALL, and that is a deliberate
+# BEHAVIOUR CHANGE. The Arduino pair drives the pin low before driving it to the wanted level;
+# od_hal_gpio_config_output(pin, level) sets the level with the mode, which is the glitch the
+# HAL was written to avoid. These are display reset/CS/power pins, so the glitch was real. It is
+# strictly safer to remove, but it IS a change and it is why this step needs hardware.
+#
+# ONE PRE-EXISTING BUG FOUND AND DELIBERATELY NOT FIXED: ws_pp_init() contains
+# `pinMode(7, LOW)` -- a LEVEL where a MODE belongs. LOW is 0, and the shim treats anything not
+# OUTPUT as input, so pin 7 has shipped as an INPUT while the surrounding code and the very next
+# line intend it driven low. Translated faithfully to config_input(7,false,false). This is the
+# deep-sleep low-power pin pass; flipping input to output changes what the pin does to the rail
+# it is attached to. Whether it should be config_output(7,false) is a HARDWARE question for
+# whoever owns that board, not a tidy-up.
+#
+# Flash: every board SHRANK 3.5-4 KB (the merged pairs and the dropped shim inlines).
+#
+# PROOF THAT NOTHING ESP32-REACHABLE WAS MISSED: <Arduino.h> is now behind #ifdef TARGET_NRF and
+# main.h no longer supplies it, so any remaining ESP32-reachable Arduino call in this file is an
+# UNDECLARED-IDENTIFIER ERROR, not a silent fallback. All 10 boards compile.
+#
+# NOT hardware-verified, and this one needs it: 19 glitch removals on panel power/reset/CS pins
+# and a full deep-sleep pin pass. Wake from deep sleep, refresh a panel, and check current draw.
+
+# 6 (UNCHANGED) = 2026-08-04, not a step: the FastEPD VENDOR ADAPTER is created and contained,
+# and three documents that described a bb_epaper problem which no longer exists are corrected.
+#
+# THE CORRECTION FIRST, because it was actively misleading. Earlier text in this file, in
+# ratchet.sh and in third_party/NOTICE.md said the permanent adapter would have to own delay(),
+# delayMicroseconds(), millis() and ledc_compat.h "because the vendored libraries link against
+# them". That was written before panel/od_bbep.cpp landed. bb_epaper needs NOTHING from the
+# shim: od_bbep.cpp replaces the vendored bb_epaper.cpp with our own IDF backend, so
+# arduino_io.inl and esphome_io.inl are never compiled, bb_epaper.h's <Arduino.h> is behind an
+# #ifdef ARDUINO this build does not define, and dropping the unused BBEPAPER C++ class removed
+# the only consumer of pinMode() and millis(). ratchet.sh was also PRINTING that dead list and
+# calling it "the vendor adapter's specification" -- it specified nothing.
+#
+# THE ADAPTER IS ONE HEADER AND ITS STORAGE: vendor/fastepd/{SPI.h, fastepd_adapter.cpp}, for
+# FastEPD's IT8951 transport, which is written against the Arduino SPI object. It is OUTSIDE
+# compat/ on purpose, so that "delete compat/ at the floor" stays an unambiguous instruction
+# rather than a judgement call, and ratchet.sh now excludes vendor/ from the count -- counting
+# it would turn a ratchet on temporary code into a tax on permanent code.
+# SPIClass SPI moved out of compat/arduino_compat.cpp with it; while that definition lived in
+# the shim's TU, the adapter could not be taken off the global include path.
+#
+# CONTAINMENT, which is the substance. Three directories left the component include path:
+# third_party/bb_epaper/src, third_party/FastEPD/src, and vendor/fastepd. Each is now granted
+# per-source in main/CMakeLists.txt. Before this, ANY file in the component could reach a
+# vendor panel API or acquire an Arduino SPI dependency by typing one include.
+# VERIFIED, not assumed: adding <SPI.h>, <bb_epaper.h> or <FastEPD.h> to an unlisted file
+# (src/communication.cpp) fails to compile in all three cases.
+#
+# THIS IS CONTAINMENT, NOT ABSTRACTION. The vendor types still appear in the listed files:
+# display_service.cpp drives a raw BBEPDISP, display_fastepd.cpp drives a FASTEPD. The
+# destination is od_hal_panel with the od_panel_ops vtable -- the ONE deliberate function-
+# pointer exception CLAUDE.md allows, and it allows it for exactly this reason: this target
+# legitimately has two panel backends. Only then does the per-source list collapse to the two
+# backend files.
+#
+# ONE LEAK LEFT, and it is not FastEPD's: display_service.cpp is granted the ADAPTER because its
+# E1004 dual-CS pixel stream calls SPI.writeBytes(). That opens a second device on SPI2_HOST --
+# the host panel/od_bbep_idf_io.inl already owns -- which is why bbepDeInitIO() logs "another
+# device is still attached". TWO OWNERS OF ONE SPI HOST. It belongs on the bb_epaper backend;
+# moving it removes both the grant and the double ownership. That is phase C step 13.
+#
+# All 10 boards build; every image BYTE-IDENTICAL. Nothing to verify on hardware: this changes
+# only which files may SEE a header, plus one global's translation unit.
+
+# 6 (UNCHANGED) = 2026-08-04, phase C step 13: ONE OWNER OF SPI2_HOST, and display_service.cpp
+# off the FastEPD vendor adapter.
+#
+# THE BUG: panel/od_bbep_idf_io.inl calls spi_bus_initialize(SPI2_HOST) and registers a device
+# there. The E1004 dual-controller panel's pixel payload went out through the Arduino SPI
+# object in vendor/fastepd/SPI.h, which registers its OWN device on the SAME host. Two drivers,
+# two device handles, one bus -- in shipped firmware. It was visible in the log: bbepDeInitIO()
+# warns "another device is still attached" and then CANNOT re-attach the SCLK/MOSI pads, which
+# is the exact failure its own comment describes (a healthy peripheral wired to nothing, every
+# transfer returning ESP_OK, and the screen never changing).
+#
+# Only the PAYLOAD was misrouted. e1004_begin_plane/advance_to_cs2/end_plane/ccset_both were
+# already on the bb_epaper backend via bbepStartDataStream/bbepEndDataStream/bbepWriteCmdData.
+# One function, e1004_write_stream_bytes(), was on the wrong device.
+#
+# FIX: panel/od_bbep_stream.{h} + implementation in od_bbep_idf_io.inl --
+# od_bbep_stream_begin/write/end, writing on the handle that file already owns.
+#
+# DELIBERATELY NOT bbepWriteData(), which would have been a one-line change. That deasserts CS
+# on every call (bb_epaper's per-row framing); the E1004 holds CS across a whole half-plane.
+# Changing the wire behaviour AND the device owner in one step would leave any hardware failure
+# with two candidate causes. These three preserve CS framing bit-for-bit: begin asserts, write
+# transmits with CS untouched, end deasserts. Collapsing to bbepWriteData is a later
+# simplification to consider once this is confirmed on a panel.
+#
+# displayReleaseSpiBus() MOVED to display_fastepd.cpp, the file that legitimately owns the
+# adapter. display_service.cpp keeps a no-op fallback for boards compiling no FastEPD, and that
+# no-op is CORRECT BY PROOF rather than assumption: the adapter's bus is only brought up by
+# SPI.beginTransaction(), whose only callers are FastEPD.inl and display_fastepd.cpp -- both
+# compiled out on those boards -- so compat SPI's _bus_ok was always false there and the
+# SPI.end() it replaces could never have freed anything.
+#
+# RESULT: display_service.cpp has NO adapter dependency, and main/CMakeLists.txt no longer
+# grants it vendor/fastepd. VERIFIED: adding <SPI.h> to display_service.cpp now fails to
+# compile. The adapter is reachable only from FastEPD.cpp, FastEPD's Group5.cpp,
+# display_fastepd.cpp and its own storage TU -- all four genuinely FastEPD.
+#
+# NOT hardware-verified, and this is the panel data path on the E1004. Every board still builds
+# with the E1004 stream completely broken. Needs a real E1004 refresh: both halves, correct
+# geometry, and a deep-sleep wake afterwards to confirm bbepDeInitIO() no longer warns and the
+# pads re-attach.
+
+# 6 (UNCHANGED) = phase C step 14, 2026-08-04: src/display_service.cpp's ESP32 half off the
+# shim. The largest Arduino surface in the target -- 207 Wire references -- is gone.
+#
+# THE COUNT DOES NOT MOVE, for the same reason as step 12: this file keeps a GUARDED
+# <Arduino.h> because its TARGET_NRF arms still need it -- epdBsPinLowIfNrf()'s
+# pinMode/digitalWrite and prepareEpdRailForBoot()'s two delay(50) calls, 8 call sites, none
+# compilable or verifiable here. It joins main.cpp, buzzer_hw.cpp, device_control.cpp and
+# encryption.cpp, all of which leave at MIGRATION step 4.
+#
+# What moved (70 ESP32-live sites plus the I2C surface):
+#   41 Wire write transactions  -> od_hal_i2c_write / od_hal_i2c_probe
+#   17 read clusters            -> od_hal_i2c_read
+#   begin/setClock/end          -> odI2cBegin() / od_hal_i2c_set_clock / od_hal_i2c_deinit
+#   GPIO                        -> od_hal_gpio (7 pinMode+digitalWrite pairs merged)
+#   millis/delay                -> od_hal_time
+#   analogRead                  -> od_hal_adc_read
+#   temperatureRead             -> od_hal_adc_die_temp_c (NEW; see below)
+#
+# WRITE-THEN-READ IS DELIBERATELY **NOT** od_hal_i2c_write_read(). Every read here does
+# endTransmission() -- a STOP -- before requestFrom(), and od_hal_i2c.h warns explicitly that
+# the two are not interchangeable ("the BQ27220 does not accept STOP + fresh START ... getting
+# this wrong produces plausible garbage rather than an error"). Converted as write() then
+# read() so the bus framing is bit-for-bit what shipped. There are zero endTransmission(false)
+# calls in this file, so no site wanted a repeated START.
+#
+# temperatureRead() MOVED to hal/od_hal_adc.c as od_hal_adc_die_temp_c(), verbatim, with the
+# shim left as a forwarder for the nRF arm. Same reason analogRead moved in step 7: IDF
+# installs ONE temperature_sensor handle, so the HAL must own it or two installers fight
+# silently. The -999.0f sentinel is preserved -- it is what the callers and the nRF path
+# already agree on, and changing it would change what the device reports on the wire.
+#
+# ONE PRE-EXISTING DEFECT FOUND, TRANSLATED NOT FIXED: compat/Wire.h's begin() has NO DEFAULT
+# PINS -- Wire.begin() with no arguments passes sda = scl = -1 and returns FALSE unless the bus
+# is already up. Two call sites are commented "Uses default I2C pins". THEY NEVER DID. odI2cBegin()
+# preserves that exactly and says so; giving those paths real pins changes which bus comes up on
+# which GPIOs, which is a hardware question for whoever owns those boards.
+#
+# 7 pinMode(X,OUTPUT)+digitalWrite(X,V) pairs became one od_hal_gpio_config_output(X, level)
+# call -- the same deliberate glitch removal as step 12, and the same caveat: these are panel
+# and rail control pins.
+#
+# THE COUNT IS NOW AT ITS FLOOR under the current ratchet pattern. All six remaining files are
+# either nRF-arm-only (five) or a permanent adapter consumer (display_fastepd.cpp includes
+# vendor/fastepd/SPI.h, which does not die). Whether the pattern should stop counting the
+# adapter is an open question -- see the note at the top of ratchet.sh.
+#
+# All 10 boards build and every one SHRANK (~1 KB). NOT hardware-verified, and the exposure is
+# real: this is the AXP2101 PMIC path (rail enables, voltage set-points, battery reads) plus 7
+# GPIO glitch removals. Needs a battery board -- power-on, a panel refresh, and a battery
+# voltage reading that is not obviously wrong.
+
+# 5 = phase C step 15, 2026-08-04: <SPI.h> stops being counted, and src/display_fastepd.cpp
+# leaves the list. 6 -> 5, one file. THIS IS THE FLOOR.
+#
+# TWO SEPARATE THINGS, and they must not be conflated:
+#
+# 1. A DEFINITION CHANGE, WHICH IS NOT PROGRESS. ratchet.sh no longer counts <SPI.h>, because
+#    it is no longer a shim header -- it is vendor/fastepd/SPI.h, the PERMANENT FastEPD
+#    adapter. Counting it pinned the floor one file above where the migration can actually
+#    finish: display_fastepd.cpp includes it and always will, so the budget could never reach
+#    the point where compat/ is deletable, which is the one question this check exists to
+#    answer. Measured both ways: 6 under the old pattern, 6 under the new one. THE NUMBER DID
+#    NOT MOVE on the definition change alone. Same discipline as the phase-B WIDENING, which is
+#    also recorded above -- a ratchet that cannot tell a redefinition from work is not a ratchet.
+#
+#    Risk this creates, and the mitigation: a genuine shim SPI header could reappear under
+#    compat/ and every file including it would silently drop off the count. ratchet.sh now
+#    FAILS HARD if compat/SPI.h exists. Verified: exit 1 with it present, 0 without.
+#
+# 2. THE ACTUAL DECREMENT, which is unrelated to (1). display_fastepd.cpp's <Arduino.h> was
+#    VESTIGIAL -- like boot_screen.cpp's in step 10. Its only Arduino-shaped names (SPISettings,
+#    MSBFIRST, SPI_MODE0) come from the adapter, not from Arduino.h. Three real dependencies
+#    surfaced when the include went, all trivially equivalent:
+#      LOW / HIGH  -> the literals 0 / 1, at two gpio_set_level() calls that were already
+#                     calling IDF directly.
+#      yield()     -> taskYIELD(), which is verbatim what compat/arduino_compat.h defined it as.
+#    All 10 images are BYTE-IDENTICAL, which is the proof that none of the three changed
+#    anything.
+#
+# THE FLOOR IS 5, AND IT IS REACHED. The five files left -- main.cpp, display_service.cpp,
+# buzzer_hw.cpp, device_control.cpp, encryption.cpp -- are counted ONLY for their TARGET_NRF
+# arms. None of those arms compiles on this target, so none can be verified here; converting
+# them blind is the unverifiable edit MIGRATION.md warns against. They leave with the nRF
+# target at MIGRATION step 4, and compat/ is deletable at that moment, not before.
+#
+# Phase C's ESP32 app-code work is therefore DONE. What remains under targets/esp32-idf/ is
+# nRF-arm code and the permanent adapter. Nothing to verify on hardware in THIS step; the
+# outstanding hardware debt is steps 12, 13 and 14.
+5

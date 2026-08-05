@@ -3,8 +3,8 @@
 #include "display_service.h"
 #include "od_log.h"
 
-#include <Arduino.h>
-#include <Wire.h>
+#include "od_hal_i2c.h"
+#include "od_hal_time.h"
 
 extern struct GlobalConfig globalConfig;
 extern uint8_t dynamicreturndata[11];
@@ -58,14 +58,16 @@ static bool sht40_ensure_bus(const SensorData* s) {
     return initOrRestoreWireForBus(sht40_bus_id(s));
 }
 
+// err_out keeps Arduino's endTransmission() encoding (0 ok, 2 address NACK, 4 other) because
+// it is reported straight into a log line and, on the failure path, into the sensor's error
+// byte -- a value a host may already be matching on. Translating at this one site rather than
+// letting od_hal_i2c's codes leak into the wire-visible byte.
 static bool sht40_write_cmd(uint8_t addr7, uint8_t cmd, uint8_t* err_out) {
-    Wire.beginTransmission(addr7);
-    Wire.write(cmd);
-    uint8_t err = Wire.endTransmission();
+    const int rc = od_hal_i2c_write(addr7, &cmd, 1);
     if (err_out) {
-        *err_out = err;
+        *err_out = (rc == OD_HAL_I2C_OK) ? 0u : ((rc == OD_HAL_I2C_EINVAL) ? 4u : 2u);
     }
-    return err == 0;
+    return rc == OD_HAL_I2C_OK;
 }
 
 static bool sht40_read_measurement(uint8_t addr7, int16_t* temp_centi, uint16_t* rh_centi, uint8_t* err_out) {
@@ -76,17 +78,20 @@ static bool sht40_read_measurement(uint8_t addr7, int16_t* temp_centi, uint16_t*
         }
         return false;
     }
-    delay(SHT40_MEASURE_DELAY_MS);
-    int n = Wire.requestFrom(addr7, (size_t)6, true);
-    if (n != 6) {
+    // The command is a SEPARATE transaction from the read, with a STOP and this delay between:
+    // the SHT40 needs the conversion time before it will answer. Not a repeated-START read --
+    // that is the BQ27220's idiom, and it is why od_hal_i2c exposes both rather than one
+    // register-shaped call (see od_hal_i2c.h).
+    od_hal_delay_ms(SHT40_MEASURE_DELAY_MS);
+    uint8_t b[6];
+    if (od_hal_i2c_read(addr7, b, sizeof(b)) != OD_HAL_I2C_OK) {
         if (err_out) {
-            *err_out = (uint8_t)(n < 0 ? 0xFEu : (uint8_t)n);
+            // 0xFE was the "requestFrom returned negative" code; a short read cannot happen
+            // through the HAL, which is all-or-nothing, so the partial-count values that used
+            // to be reported here no longer arise.
+            *err_out = 0xFEu;
         }
         return false;
-    }
-    uint8_t b[6];
-    for (int i = 0; i < 6; i++) {
-        b[i] = Wire.read();
     }
     if (sht40_crc8(b, 2) != b[2]) {
         if (err_out) {
@@ -129,7 +134,7 @@ static bool read_sht40_sample(const SensorData* sensor, int16_t* temp_centi, uin
         if (pass > 0) {
             invalidateOpenDisplayWire();
             sht40_ensure_bus(sensor);
-            delay(2);
+            od_hal_delay_ms(2);
         }
         for (uint8_t i = 0; i < sizeof(candidates); i++) {
             uint8_t addr = candidates[i];
@@ -166,9 +171,13 @@ static void sht40_probe_bus_once(uint8_t bus_id) {
     }
     const uint8_t addrs[] = {0x44u, 0x45u, 0x51u, 0x55u, 0x6Au};
     for (uint8_t i = 0; i < sizeof(addrs); i++) {
-        Wire.beginTransmission(addrs[i]);
-        uint8_t err = Wire.endTransmission();
-        od_log_debug("I2C bus %u probe 0x%02X err=%u", bus_id, addrs[i], err);
+        // An address-only probe. Under Wire this was a zero-length write, which IDF rejects
+        // outright -- nothing reached the bus and every address reported absent whether or not
+        // hardware was there, which made a connected SHT40 undetectable. od_hal_i2c_probe() is
+        // the address-only primitive; see od_hal_i2c.h.
+        const int rc = od_hal_i2c_probe(addrs[i]);
+        od_log_debug("I2C bus %u probe 0x%02X rc=%d%s", bus_id, addrs[i], rc,
+                     rc == OD_HAL_I2C_OK ? " (present)" : "");
     }
 }
 
@@ -225,7 +234,7 @@ void initSht40Sensors(void) {
             sht40_write_cmd(0x44, SHT40_CMD_SOFT_RESET, nullptr);
             sht40_write_cmd(0x45, SHT40_CMD_SOFT_RESET, nullptr);
         }
-        delay(2);
+        od_hal_delay_ms(2);
     }
     for (uint8_t i = 0; i < globalConfig.sensor_count; i++) {
         const SensorData* s = &globalConfig.sensors[i];
@@ -242,10 +251,10 @@ void pollSht40SensorsForMsd(void) {
     static bool logged_fail = false;
     static uint32_t lastPollMs = 0;
     static bool havePolled = false;
-    if (havePolled && (uint32_t)(millis() - lastPollMs) < kSht40MsdPollTtlMs) {
+    if (havePolled && (uint32_t)(od_hal_uptime_ms() - lastPollMs) < kSht40MsdPollTtlMs) {
         return;
     }
-    lastPollMs = millis();
+    lastPollMs = od_hal_uptime_ms();
     havePolled = true;
     for (uint8_t i = 0; i < globalConfig.sensor_count; i++) {
         const SensorData* s = &globalConfig.sensors[i];

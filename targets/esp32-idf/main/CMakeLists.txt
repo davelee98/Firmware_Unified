@@ -24,12 +24,27 @@ list(APPEND OD_APP_SOURCES
 
 # The Arduino shim. TEMPORARY -- removed in phase C together with compat/ and its ratchet.
 list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../compat/arduino_compat.cpp
-                           ${CMAKE_CURRENT_LIST_DIR}/../compat/wifi_compat.cpp
                            ${CMAKE_CURRENT_LIST_DIR}/../compat/app_main.cpp)
+
+# The FastEPD vendor adapter's storage. NOT part of the shim above and not removed with it --
+# see ../vendor/fastepd/SPI.h and the scoping block further down.
+list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../vendor/fastepd/fastepd_adapter.cpp)
 
 # Target HAL implementations. od_hal_nvs is the first: config storage moved off LittleFS onto
 # NVS (2026-07-25), written to the shared/hal signature so promotion is a repoint.
+# od_hal_log is the second (2026-08-04, phase C): it owns the log PORT so od_log.h could stop
+# including <Arduino.h>. Its backend is a compile-time choice on OPENDISPLAY_LOG_UART.
+# od_hal_gpio and od_hal_time are the third (2026-08-04, phase C step 3): the pin/clock seam
+# the power-latch, buzzer and button files share. Signatures are SHARED_API_DESIGN.md's.
 list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_nvs.c
+                           ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_log.c
+                           ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_gpio.c
+                           ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_time.c
+                           ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_i2c.c
+                           ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_adc.c
+                           ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_panel.c
+                           ${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_bbep.cpp
+                           ${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_fastepd.cpp
                            ${CMAKE_CURRENT_LIST_DIR}/../ble/od_ble_nimble.cpp)
 
 # ble/od_ble_rx.cpp is GONE, not forgotten. It held od_ble_on_write(): the bounds check,
@@ -55,6 +70,9 @@ set(OD_TP_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../third_party)
 # board, Group5 comes from FastEPD and bb_epaper's copy is excluded; otherwise only bb_epaper
 # is compiled and the question does not arise. No --allow-multiple-definition anywhere.
 file(GLOB OD_BBEP_SOURCES ${OD_TP_DIR}/bb_epaper/src/*.cpp)
+# Kept unfiltered: every bb_epaper TU needs its own header directory on its include path, and
+# which ones are COMPILED depends on the board branch below. Grant on the superset.
+set(OD_BBEP_ALL_SOURCES ${OD_BBEP_SOURCES})
 
 # bb_epaper.cpp is EXCLUDED and replaced by ../panel/od_bbep.cpp.
 #
@@ -117,13 +135,15 @@ idf_component_register(
     SRCS ${OD_APP_SOURCES}
     INCLUDE_DIRS
         ${OD_SRC_DIR}
+        # NOTE: ../vendor/fastepd is deliberately ABSENT here -- see the scoping block below.
         ${CMAKE_CURRENT_LIST_DIR}/../compat
         ${CMAKE_CURRENT_LIST_DIR}/../hal
         ${CMAKE_CURRENT_LIST_DIR}/../ble
         ${OD_LIB_DIR}/uzlib/src
-        ${CMAKE_CURRENT_LIST_DIR}/../../../third_party/bb_epaper/src
+        # NOTE: neither third_party/bb_epaper/src nor third_party/FastEPD/src is here, and
+        # nor is ../vendor/fastepd. All three are granted per-source below. ../panel stays --
+        # it is OUR code (the IDF backend), not a vendored tree.
         ${CMAKE_CURRENT_LIST_DIR}/../panel
-        ${CMAKE_CURRENT_LIST_DIR}/../../../third_party/FastEPD/src
         # The wire contract, consumed directly from shared/ -- NOT copied into this target.
         # This is the whole reason phase A left include/opendisplay_protocol.h behind.
         ${CMAKE_CURRENT_LIST_DIR}/../../../shared/protocol
@@ -131,7 +151,89 @@ idf_component_register(
         bt nvs_flash esp_timer driver esp_wifi esp_event mbedtls spiffs vfs esp_adc
         # esp_lcd: FastEPD drives the S3 LCD peripheral for parallel e-paper
         esp_lcd esp_psram
+        # mdns: vendored under ../components/mdns (ESP-IDF dropped it from core in v5.0).
+        # Listed UNCONDITIONALLY even though only OPENDISPLAY_ENABLE_WIFI boards call it.
+        # Gating it on the board would make the component list board-dependent, and IDF
+        # resolves REQUIRES before the board fragment's defines exist; the boards that do
+        # not use it never reference a symbol, so the linker discards the archive and they
+        # pay nothing. Verified by comparing esp32-n4's image size across this change.
+        mdns
 )
+
+# ---------------------------------------------------------------------------------------
+# PANEL LIBRARIES AND THE FASTEPD ADAPTER ARE OUT OF GLOBAL SCOPE
+# ---------------------------------------------------------------------------------------
+# Three directories that used to sit on the component's include path and no longer do:
+#
+#   third_party/bb_epaper/src   the bb_epaper panel library
+#   third_party/FastEPD/src     the FastEPD panel library
+#   vendor/fastepd              THE FASTEPD VENDOR ADAPTER -- an Arduino SPI object over IDF's
+#                               spi_master. Permanent, not a shim: FastEPD's IT8951 transport
+#                               is written against that object and there is no version of it
+#                               that is not. compat/ dies; this does not.
+#
+# While they were global, ANY source in the component could reach a vendor panel API, or
+# acquire an Arduino SPI dependency, by typing one include. Each is now granted to a NAMED LIST
+# of translation units, so gaining a consumer is an explicit edit here rather than a side
+# effect of an include line. Verified by adding <SPI.h> to an unlisted file: it fails to
+# compile, which is the property this block exists to create.
+#
+# THIS IS CONTAINMENT, NOT ABSTRACTION, and the difference matters. The vendor types still
+# appear in the listed files -- display_service.cpp drives a raw BBEPDISP, display_fastepd.cpp
+# drives a FASTEPD. The destination is od_hal_panel with the od_panel_ops vtable that
+# docs/SHARED_API_DESIGN.md specifies and CLAUDE.md names as the ONE deliberate function-pointer
+# exception, precisely because this target legitimately has two panel backends. Then the lists
+# below collapse to the two backend files and nothing else sees a vendor header at all.
+#
+# bb_epaper needs NOTHING from vendor/fastepd: panel/od_bbep.cpp replaces the vendored
+# bb_epaper.cpp with our own IDF backend (panel/od_bbep_idf_io.inl), so arduino_io.inl and
+# esphome_io.inl are never compiled and bb_epaper.h's <Arduino.h> sits behind an #ifdef ARDUINO
+# this build does not define.
+set(OD_FASTEPD_ADAPTER_DIR ${CMAKE_CURRENT_LIST_DIR}/../vendor/fastepd)
+set(OD_BBEP_INC_DIR        ${OD_TP_DIR}/bb_epaper/src)
+set(OD_FASTEPD_INC_DIR     ${OD_TP_DIR}/FastEPD/src)
+
+# Per-file grants. A file appears once, with every directory it needs -- the INCLUDE_DIRECTORIES
+# source property REPLACES rather than appends, so a second set_source_files_properties() call
+# on the same file would silently drop the first grant.
+#
+#   display_service.cpp   bb_epaper ONLY. It held an adapter grant until 2026-08-04, for the
+#                         E1004 dual-CS pixel stream, which opened a SECOND device on
+#                         SPI2_HOST -- the host panel/od_bbep_idf_io.inl already owns. That
+#                         payload now goes through od_bbep_stream_write(), so there is ONE
+#                         owner of the host and this file has no adapter dependency at all.
+#                         Do not re-add it: <SPI.h> here means a second bus owner is back.
+#   display_fastepd.cpp   FastEPD + adapter. FastEPD glue by definition.
+#   boot_screen.cpp,      bb_epaper only -- both draw through BBEPDISP.
+#   main.cpp              (main.h defines the `BBEPDISP bbep` global.)
+set_source_files_properties(${OD_SRC_DIR}/display_service.cpp
+    TARGET_DIRECTORY ${COMPONENT_LIB}
+    PROPERTIES INCLUDE_DIRECTORIES "${OD_BBEP_INC_DIR}")
+set_source_files_properties(${OD_SRC_DIR}/display_fastepd.cpp
+    TARGET_DIRECTORY ${COMPONENT_LIB}
+    PROPERTIES INCLUDE_DIRECTORIES "${OD_FASTEPD_INC_DIR};${OD_FASTEPD_ADAPTER_DIR}")
+set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_fastepd.cpp
+    TARGET_DIRECTORY ${COMPONENT_LIB}
+    PROPERTIES INCLUDE_DIRECTORIES "${OD_FASTEPD_INC_DIR};${OD_FASTEPD_ADAPTER_DIR}")
+set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_bbep.cpp
+    TARGET_DIRECTORY ${COMPONENT_LIB}
+    PROPERTIES INCLUDE_DIRECTORIES "${OD_BBEP_INC_DIR}")
+set_source_files_properties(${OD_SRC_DIR}/boot_screen.cpp ${OD_SRC_DIR}/main.cpp
+                            ${CMAKE_CURRENT_LIST_DIR}/../panel/od_bbep.cpp
+                            ${OD_BBEP_ALL_SOURCES}
+    TARGET_DIRECTORY ${COMPONENT_LIB}
+    PROPERTIES INCLUDE_DIRECTORIES "${OD_BBEP_INC_DIR}")
+set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/../vendor/fastepd/fastepd_adapter.cpp
+    TARGET_DIRECTORY ${COMPONENT_LIB}
+    PROPERTIES INCLUDE_DIRECTORIES "${OD_FASTEPD_ADAPTER_DIR}")
+if(OD_BOARD IN_LIST OD_FASTEPD_BOARDS)
+    set_source_files_properties(${OD_TP_DIR}/FastEPD/src/FastEPD.cpp
+        TARGET_DIRECTORY ${COMPONENT_LIB}
+        PROPERTIES INCLUDE_DIRECTORIES "${OD_FASTEPD_INC_DIR};${OD_FASTEPD_ADAPTER_DIR}")
+    set_source_files_properties(${OD_TP_DIR}/FastEPD/src/Group5.cpp
+        TARGET_DIRECTORY ${COMPONENT_LIB}
+        PROPERTIES INCLUDE_DIRECTORIES "${OD_FASTEPD_INC_DIR}")
+endif()
 
 # Board defines from boards/<board>.cmake. These are the surviving half of the source repo's
 # build_flags: the -D flags that are genuinely application configuration, as opposed to the

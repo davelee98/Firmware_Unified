@@ -1,29 +1,42 @@
-/* SPI.h -- Arduino SPI over IDF's spi_master. TEMPORARY; part of the shim.
+/* SPI.h -- Arduino SPI over IDF's spi_master.
  *
- * Only the methods the imported sources actually call are provided --
- * begin/beginTransaction/transfer/transfer16/writeBytes/endTransaction/end.
+ * THE FASTEPD VENDOR ADAPTER. Not a shim, and not scheduled for demolition (decided
+ * 2026-08-04). "Shim" in this repo means temporary scaffolding with a demolition date;
+ * this is permanent, because FastEPD is a vendored Arduino library whose IT8951 transport is
+ * written against the Arduino SPI object and there is no version of it that is not.
+ *
+ * IT IS DELIBERATELY NOT ON THE GLOBAL INCLUDE PATH. main/CMakeLists.txt grants
+ * vendor/fastepd/ to a NAMED LIST of translation units and to nothing else, so this file
+ * cannot be picked up by accident the way it could when it lived in compat/ -- where every
+ * source in the component could see it and any new file could quietly acquire an Arduino SPI
+ * dependency. Adding a consumer is now an explicit edit to that list, which is the point.
+ *
+ * Contains: begin/beginTransaction/transfer/transfer16/writeBytes/endTransaction/end -- only
+ * the methods the vendored sources actually call.
+ *
+ * KNOWN CONSUMERS, and each is a deliberate entry on the CMake list:
+ *
+ *   - third_party/FastEPD/src/FastEPD.inl  -- the whole IT8951 command/data/read protocol.
+ *                                             This is what the adapter EXISTS for.
+ *   - src/display_fastepd.cpp              -- the IT8951 row blit. FastEPD glue by definition.
+ *   - src/display_service.cpp              -- the E1004 dual-CS pixel stream. THE ONE LEAK
+ *                                             LEFT, and not FastEPD's: see the SPI2_HOST note
+ *                                             below. Removing it is phase C step 13.
  *
  * HISTORY, because the previous version of this comment caused a real defect: it claimed
  * "the panel SPI does NOT come through here: bb_epaper drives its own bus via its esp_idf
  * backend, which is why this is so small", and on that basis every method was an empty stub
  * (transfer() returned its argument, writeBytes() did nothing). The claim is true of
- * bb_epaper and false of everything else. These are real users:
+ * bb_epaper and false of everything else. With a stubbed transfer16() the IT8951 handshake
+ * reads all zeros and every pixel write is discarded, while the panel's GPIO-driven
+ * reset/busy handshake still looks healthy -- a failure that only appears on hardware.
  *
- *   - third_party/FastEPD/src/FastEPD.inl  -- the whole IT8951 command/data/read protocol
- *   - src/display_fastepd.cpp              -- the IT8951 row blit
- *   - src/display_service.cpp              -- the E1004 dual-CS pixel stream
- *
- * With a stubbed transfer16() the IT8951 handshake reads all zeros and every pixel write is
- * discarded, while the panel's GPIO-driven reset/busy handshake still looks healthy -- a
- * failure that only appears on hardware. bb_epaper genuinely does not come through here; it
- * keeps its own esp_idf backend and its own bus, unchanged.
- *
- * CS is NOT managed here. Every caller drives its own chip-select with gpio_set_level()
- * around the transaction (FastEPD does this because the IT8951 needs CS held across a
- * preamble/argument pair), so the device is registered with spics_io_num = -1.
- *
- * The real destination is od_hal_spi (docs/SHARED_API_DESIGN.md), which the core needs
- * almost nothing from -- the panel path stays target code.
+ * SPI2_HOST IS CLAIMED TWICE, AND THAT IS A KNOWN HAZARD. This adapter calls
+ * spi_bus_initialize(SPI2_HOST) and so does panel/od_bbep_idf_io.inl, which owns the
+ * bb_epaper bus. bbepDeInitIO() already logs "another device is still attached" when the
+ * E1004 path holds a device here. Two owners of one host is not something the adapter can fix
+ * from inside; it is resolved by taking display_service.cpp's E1004 stream off this file and
+ * onto the bb_epaper backend that already owns that bus.
  */
 #pragma once
 /* Deliberately does NOT include arduino_compat.h. FastEPD's arduino_io.inl defines its own

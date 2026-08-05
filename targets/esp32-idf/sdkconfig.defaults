@@ -56,3 +56,84 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=60
 # it the encrypted LAN port silently fails to build.
 CONFIG_MBEDTLS_PSK_MODES=y
 CONFIG_MBEDTLS_KEY_EXCHANGE_PSK=y
+
+# ---------------------------------------------------------------------------------------
+# Restored to the Arduino build's values (2026-08-04). Not preferences -- unchosen drift.
+# ---------------------------------------------------------------------------------------
+# Found by diffing this target's EFFECTIVE sdkconfig against the precompiled Arduino core
+# sdkconfigs the reference firmware links (~/.platformio/packages/framework-arduinoespressif32-
+# libs/<chip>/sdkconfig). 77 behaviour-relevant differences on the S3, of which only six were
+# ones this project had declared. The rest are IDF defaults inherited by saying nothing -- and
+# a difference nobody declared is a defect in the port, not a configuration choice.
+#
+# tools/sdkconfig_baseline.sh now gates the whole effective config so this class of drift
+# surfaces as a diff to approve rather than as behaviour discovered months later.
+
+# TICK RATE. IDF defaults to 100 Hz; the Arduino core ships 1000 Hz, so portTICK_PERIOD_MS was
+# 1 in the reference firmware and became 10 here. That is not merely coarser -- it silently
+# breaks every sub-10 ms wait: pdMS_TO_TICKS(2) evaluates to ZERO ticks, and vTaskDelay(0)
+# yields without blocking. src/session_guard.cpp's R3a link-down poll is exactly this case, so
+# it has been busy-spinning at loop-task priority through every BLE teardown on this target
+# while working correctly on the shipped firmware. Fixing the tick rate fixes the whole class
+# at the root, and makes every existing short-delay call site mean what its author wrote.
+CONFIG_FREERTOS_HZ=1000
+
+# OPTIMIZATION. The Arduino core builds -Os (SIZE); this target inherited IDF's -Og (DEBUG).
+# Nobody chose a debug build -- it is what happens when the symbol is never named. Restoring
+# -Os also matters for a shipped board: c6-n4 has 23% slot headroom against 62-81% elsewhere.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# TASK WATCHDOG: PANIC, i.e. reset, not just log. The Arduino build panics; this target
+# inherited log-only, so a wedged loop() never recovers. That backstop matters MORE here than
+# upstream, because bbepWaitBusy() can hold the loop task for 16-30 s on a panel that will not
+# answer (README known defects, item 2). Timeout stays 60 s -- see the note above, where IDF's
+# [1,60] cap forced it.
+CONFIG_ESP_TASK_WDT_PANIC=y
+
+# ...and DO NOT watch the CPU1 idle task, which the Arduino build also does not. Enabling
+# PANIC while watching an idle task the reference never watched would not restore its
+# behaviour, it would invent a new reset source. The two settings are one decision.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=n
+
+# ---------------------------------------------------------------------------------------
+# mDNS -- ADVERTISE ONLY. This device announces `_opendisplay._tcp` so Home Assistant can
+# find it; it NEVER resolves a name or browses for a service (decided 2026-08-04).
+# ---------------------------------------------------------------------------------------
+# The component has no responder-only build flag -- mdns_querier.c and mdns_browser.c compile
+# in regardless -- so "advertise only" is expressed here, in what the responder is sized for.
+# Every value below is a REDUCTION from the component's default; nothing is enabled.
+#
+# Applies on every board, including the five that compile no WiFi surface at all. That is
+# harmless: the component is only linked where main references it (see main/CMakeLists.txt).
+
+# ONE service: _opendisplay._tcp. Default is 10. Adding a second would need this raised, and
+# the wire contract (SECTION 9 rule 6) defines exactly one.
+CONFIG_MDNS_MAX_SERVICES=1
+
+# ONE interface: the WiFi station. Default is 3 (STA + AP + Ethernet). This device is never an
+# AP and has no Ethernet, and the count is static RAM in the responder's per-interface state.
+CONFIG_MDNS_MAX_INTERFACES=1
+CONFIG_MDNS_PREDEF_NETIF_STA=y
+CONFIG_MDNS_PREDEF_NETIF_AP=n
+
+# CONSOLE CLI DEFAULTS TO **y** UPSTREAM -- an interactive mdns command set on the device
+# console, with a `console` component dependency behind it. There is no console on a battery
+# e-paper tag, and a CLI that can add and remove service records is attack surface on a device
+# whose whole LAN authentication story is the TLS-PSK on the data port.
+CONFIG_MDNS_ENABLE_CONSOLE_CLI=n
+
+# One instance per service type. Default y allows several, which only costs bookkeeping here.
+CONFIG_MDNS_MULTIPLE_INSTANCE=n
+
+# Reverse (in-addr.arpa) lookups stay OFF -- already the default, stated because it is exactly
+# the "resolve" half of mDNS that this device does not do.
+CONFIG_MDNS_RESPOND_REVERSE_QUERIES=n
+
+# NOT SET, DELIBERATELY, and each is a measure-first item:
+#   CONFIG_MDNS_TASK_STACK_SIZE (4096) -- mDNS runs its own FreeRTOS task. Trim only against a
+#     measured high-water mark; a stack overflow here presents as a crash on an incoming query.
+#   CONFIG_MDNS_MEMORY_ALLOC_SPIRAM -- tempting on the S3, but the mDNS task also serves
+#     packets from the lwIP context, and moving its allocations to PSRAM has cache-coherency
+#     implications that need testing rather than reasoning.
+#   CONFIG_MDNS_TIMER_PERIOD_MS (100) -- the announcement/retransmit tick. Lengthening it is a
+#     radio-duty-cycle win on battery, but it also slows first discovery after a wake.
