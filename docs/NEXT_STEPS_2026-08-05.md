@@ -100,38 +100,52 @@ Confirmed as accepted debt. The two paths stay named in Milestone 4's hardware m
 reported `ACCEPTED-UNRUN` until someone runs them — not omitted, and not inferred from the
 compressed-push result that did pass.
 
-### D3 — no silent security-deferral rollover — **RE-TAKEN 2026-08-05: DEFERRED**
+### D3 — BG22 security defects — **CLOSED 2026-08-05: resolved by the shared promotion**
 
-The recommendation was to hotfix now. **The decision is to defer**, and the point of D3 was that
-the deferral be taken deliberately rather than inherited. It has been.
+**Decision: closed. These are fixed when the session/dispatch code becomes shared, not before,
+and not separately.** The earlier deferral -- with four UNSET review-trigger fields -- is
+superseded by this closure. There is nothing left tracking here.
 
-What is being deferred, named exactly so it is not re-litigated from memory (MIGRATION.md
-§ "Risks to watch"):
+WHY THIS IS A CLOSURE AND NOT A DEFERRAL. A deferral needs an expiry because nothing else makes
+it come back. This has a mechanism instead: `shared/core` replaces the Silabs session and
+dispatch implementations, and **the shared implementations cannot land carrying these defects**
+-- the shared dispatcher gates on `sec_enabled()` and clears the session on config save, because
+that is what the other two targets already do and what the divergence matrix already selects as
+the winning behaviour. Fixing them is not additional work scheduled for later; it is a property
+of the promotion itself.
 
-- the **`<31 byte` plaintext authentication bypass**, and
-- **a session surviving a key change**.
+That mechanism is already written down and is not a promise made here:
 
-Both are Silabs-specific and both are on **shipped, field-updatable** hardware: `.gbl` through
-the AppLoader is the update path HA actually ships, so these are reachable by a release rather
-than a bench visit. That is what made the original "expensive to fix early" justification stop
-applying, and it still does not apply — deferring now is a decision to leave a reachable
-authentication bypass in the field until migration step 3, which is milestones away.
+- **`DIVERGENCE_MATRIX.md` §1.5a** -- the `<31 byte` bypass. Resolution recorded as: *"shared
+  dispatcher must gate on `sec_enabled()`, never on frame length."* NRF54's mid-session
+  plaintext rejection is named as the correct model.
+- **`DIVERGENCE_MATRIX.md` §2.4** -- session survives a key change. Resolution recorded as:
+  *"Firmware/NRF54 behaviour wins"* -- `clear_session()` on every save path.
+- **`MIGRATION.md` § "Risks to watch"** already requires these be **Gate 1 test cases, not
+  TODOs**, so the promotion cannot pass its own gate while they stand.
 
-That is a legitimate call to make; it is recorded here so it is visible rather than implicit.
+WHAT REMAINS TRUE IN THE FIELD UNTIL THEN, recorded because closing a tracking item does not
+change a shipped device:
 
-**This deferral is incomplete as recorded.** D3 requires four fields for a kept deferral and
-none is yet set:
+- `opendisplay_pipe.c:1238` gates authentication on `frame_len >= 31u`. A shorter frame skips
+  the session check and the decrypt entirely and reaches `dispatch()` on line 1251. REBOOT,
+  DEEP_SLEEP, LED, BUZZER and CONFIG_READ are all short enough.
+- No `clear_session()` on any config-save path, so rotating the encryption key does not evict a
+  live session.
+- BG22 is the one fleet with a working `.gbl` field-update path, so whenever the shared code
+  lands it reaches deployed units without a bench visit. That is the same fact that made the
+  deferral uncomfortable and it is what makes this closure workable.
 
-| Field | Value |
-|---|---|
-| Owner | **UNSET** |
-| Expiry date | **UNSET** |
-| Affected released versions | **UNSET** — needs the shipped BG22 version list |
-| Release expected to remove the exposure | **UNSET** — nominally migration step 3 (Milestone 6) |
+**ONE DISCREPANCY FOR WHOEVER WRITES THE GATE 1 TEST.** §1.5a characterises the exposure as
+requiring a live session -- *"once any client authenticates"* -- because `dispatch()` only blocks
+when there is no session. The code at `:1238-1251` appears broader than that: for
+`frame_len < 31` the `if` is false, so the session check never runs at all and the frame
+dispatches with or without a session. Write the test for the broader reading and let it decide
+which is right; if the broader reading holds, §1.5a understates it.
 
-Until these are filled in, the deferral has no review trigger and will roll over silently, which
-is the exact failure D3 exists to prevent. Fill them in or the milestone-0 exit gate ("the BG22
-security choice has an owner and deadline") is not met.
+Milestone 0's exit gate item *"the BG22 security choice has an owner and deadline"* is satisfied
+by this closure rather than by filling the fields: the choice is made and its removal is bound to
+migration step 3 rather than to a date.
 
 ### D4 — target-specific policy decisions precede shared APIs
 
@@ -217,10 +231,10 @@ unreviewed assumption into every target.
    D4) and both repo documents already state them correctly, so no repo edit is needed. What
    this leaves is not a decision but two work items: the missing PIPE origin gate (F5, Milestone
    3A) and an upstream correction to the canonical header's eviction text (parallel work).
-4. ~~Re-take the BG22 security-hotfix decision~~ — **DONE 2026-08-05: deferred** (D3). The
-   decision itself is made; what remains for this gate is recording the owner, expiry date,
-   affected released versions, and the release that removes the exposure. Without those the
-   deferral has no review trigger.
+4. ~~Re-take the BG22 security-hotfix decision~~ — **DONE 2026-08-05: CLOSED** (D3). Resolved
+   by the shared session/dispatch promotion, which cannot land carrying these defects
+   (DIVERGENCE_MATRIX §1.5a, §2.4 are Gate 1 test cases). No owner/expiry needed — the removal
+   is bound to migration step 3, not to a date.
 5. ~~Decide the 20-versus-21 chunk count~~ — **DONE 2026-08-05: it becomes 21** (D4). What
    remains for this gate: state the interim **4,000-byte** ceiling in tests and host-facing
    documentation, and **add `shared/protocol/` to the sync tool's copy map before any bump**,
@@ -237,7 +251,9 @@ unreviewed assumption into every target.
 - the ADV/scan-response byte fixture exists;
 - the corpus schema is fixed and non-empty config captures exist;
 - every D4 item has one named behavior rather than two competing descriptions; and
-- the BG22 security choice has an owner and deadline.
+- ~~the BG22 security choice has an owner and deadline~~ — **MET 2026-08-05 by closure**: D3 is
+  closed as resolved-by-promotion, so the removal is bound to migration step 3 rather than to a
+  date. No owner or expiry is outstanding.
 
 Protocol capture may continue after this gate, but the specific surface about to be replaced
 must be captured before its replacement lands.
@@ -570,7 +586,7 @@ becomes expensive.
 | Canonical `MAX_CONFIG_CHUNKS` | Raise 20 → 21 upstream in `../opendisplay-protocol` (D4, confirmed 2026-08-05), then propagate with `--push` | Blocked by the header freeze; raise the issue/PR now so it lands the moment the freeze lifts |
 | Canonical eviction text | **Correct LAN rule (3) upstream in `../opendisplay-protocol`: refusal, not eviction** (D4, confirmed 2026-08-05). Blocked by the header freeze, so raise it as an issue/PR now and land it when the freeze lifts | Before any host is written to the current text — every day it stands, a conforming client may be built expecting eviction |
 | Three-toolchain CI | Design reproducible IDF/NCS/Simplicity builds, not merely a local matrix | Before the second target is called imported |
-| BG22 security | Hotfix or explicitly re-accept with owner/expiry | During Milestone 0 |
+| ~~BG22 security~~ | **CLOSED 2026-08-05** (D3) — resolved by the shared session/dispatch promotion; DIVERGENCE_MATRIX §1.5a and §2.4 are Gate 1 test cases, so the promotion cannot pass carrying them | — |
 | OTA | Scope ESP32 `esp_ota` and host SMP/mcumgr support | Before promising field updates for S3 or Nordic |
 | `s3-e1004` | Re-vendor the correct panel fork and fix SPI initialization | Before claiming all source ESP32 variants are supported |
 
