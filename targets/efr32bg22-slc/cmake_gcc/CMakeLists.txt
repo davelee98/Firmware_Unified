@@ -37,8 +37,20 @@ if(NOT "${OD_SL_APPLICATION_VERSION}" STREQUAL "")
   target_compile_definitions(slc PUBLIC "SL_APPLICATION_VERSION=${OD_SL_APPLICATION_VERSION}u")
 endif()
 
-# Silicon Labs application properties (vendored; no Conan SDK_PATH).
+# Silicon Labs application properties.
+#
+# NOT IMPORTED. Like segger_rtt, this two-file vendored tree has no top-level
+# home in this repo and the migration plan does not mention it; where it belongs
+# is an open decision, not an oversight. The path below is unchanged from the
+# source repo so that the fix is a one-line repoint once that is settled.
 set(OPD_APP_PROPERTIES_DIR "${CMAKE_CURRENT_LIST_DIR}/../third_party/silabs_app_properties")
+if(NOT EXISTS "${OPD_APP_PROPERTIES_DIR}/app_properties.c")
+  message(FATAL_ERROR
+    "third_party/silabs_app_properties was not imported (see the import commit).\n"
+    "It supplies app_properties.c, which the Gecko Bootloader/AppLoader reads to\n"
+    "validate the application -- so it is required for the .gbl OTA path, not\n"
+    "optional. Source: Firmware_Silabs/third_party/silabs_app_properties/.")
+endif()
 target_sources(slc PRIVATE "${OPD_APP_PROPERTIES_DIR}/app_properties.c")
 target_include_directories(slc PUBLIC
   "${OPD_APP_PROPERTIES_DIR}"

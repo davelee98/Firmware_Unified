@@ -15,6 +15,29 @@ cmake_gcc/build/
 *.slps
 artifact/
 
+# ...EXCEPT these three. They live in autogen/ and carry the "Automatically-generated"
+# banner, but they are HAND-EDITED and `slc generate` REVERTS both edits (found
+# 2026-08-05 by regenerating and diffing -- see targets/efr32bg22-slc/README.md
+# § "autogen/ is not entirely generated"). Nothing else holds these values, so if
+# they are not committed they are lost:
+#
+#   linkerfile.ld  FLASH ORIGIN 0x12000 LEN 0x44000 (above the Gecko Bootloader +
+#                  AppLoader) plus BOOTLOADER_RESET_REGION. Regenerated it links at
+#                  0x0 over the bootloader, which destroys the .gbl OTA path -- the
+#                  only field-update path any OpenDisplay target has.
+#   gatt_db.c/.h   the GATT trimmed to GAP + Device Name. Regenerated it restores the
+#                  stock Silabs Device Information Service and MOVES gattdb_device_name
+#                  from handle 3 to 11 -- a wire-visible change on shipped hardware.
+#
+# This is a stopgap that keeps the facts in git. The real fix is to move both edits
+# somewhere they are not shadowed by a generator; until then, do not "clean up" these
+# negations.
+!targets/efr32bg22-slc/autogen/
+targets/efr32bg22-slc/autogen/*
+!targets/efr32bg22-slc/autogen/linkerfile.ld
+!targets/efr32bg22-slc/autogen/gatt_db.c
+!targets/efr32bg22-slc/autogen/gatt_db.h
+
 # Nordic SDK (targets/nrf52-sdk)
 _build/
 
