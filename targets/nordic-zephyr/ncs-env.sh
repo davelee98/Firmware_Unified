@@ -4,13 +4,24 @@
 
 NCS_ROOT="${NCS_ROOT:-${NCS_DIR:-}}"
 
+# THE NCS VERSION IS PINNED, NOT DISCOVERED.
+#
+# This used to glob `$HOME/ncs/v3.* $HOME/ncs/v2.*` and take the first hit. That is not
+# reproducible: it silently selects whatever the developer happens to have installed, in shell
+# glob order, so two machines with different SDKs build different firmware from the same commit
+# and neither is told. It also quietly accepted a v2.x SDK for a target that needs v3.x.
+#
+# OD_NCS_VERSION is the single pin (docs/TOOLCHAINS.md). Override NCS_ROOT explicitly to build
+# against something else -- deliberately, and visibly in your shell history, rather than by
+# accident of what is on disk.
+OD_NCS_VERSION="${OD_NCS_VERSION:-v3.3.1}"
+
 find_ncs_root() {
-  local d
-  for d in "$HOME"/ncs/v3.* "$HOME"/ncs/v2.*; do
-    [[ -d "$d/nrf" && -d "$d/zephyr" ]] || continue
+  local d="$HOME/ncs/${OD_NCS_VERSION}"
+  if [[ -d "$d/nrf" && -d "$d/zephyr" ]]; then
     echo "$d"
     return 0
-  done
+  fi
   return 1
 }
 
@@ -29,7 +40,8 @@ if [[ -n "${NCS_ROOT}" && "${NCS_ROOT}" == *"/toolchains/"* ]]; then
 fi
 
 if [[ -z "${NCS_ROOT}" ]]; then
-  echo "Set NCS_ROOT=~/ncs/v3.x.x or install the SDK via nRF Connect." >&2
+  echo "NCS ${OD_NCS_VERSION} not found at ~/ncs/${OD_NCS_VERSION}." >&2
+  echo "Install it via nRF Connect, or set NCS_ROOT / OD_NCS_VERSION explicitly." >&2
   return 1 2>/dev/null || exit 1
 fi
 
