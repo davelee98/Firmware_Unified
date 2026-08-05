@@ -47,13 +47,18 @@ that retires most of phase C's hardware debt: steps 1-15 had **not** been on har
 interrupt path behind the buttons. On I2C it covers `od_hal_i2c_init`, `od_hal_i2c_probe`
 (five addresses, correct present/absent) and the SHT40 sensor reads.
 
-**The AXP2101 PMIC path is NOT covered, despite being the bulk of step 14.** The PMIC lives at
-I2C address **0x34**, and this unit never probes it — the log's probes are 0x44, 0x45, 0x51,
-0x55 and 0x6A. This board switches its panel rail with a plain GPIO instead (`Power Pin: 11`,
-`PWR_PIN` flag set), which is why `pwrmgm(on)` reports *"rail + 800 ms settle"* rather than
-running `initAXP2101()`. So the 41 rewritten `Wire` transactions that set DCDC/ALDO enables and
-voltage set-points have still never executed. **They need a unit with an AXP2101** — a battery
-board — and until then step 14 is only partly verified.
+**The AXP2101 PMIC path is NOT covered, despite being the bulk of step 14.** The path is gated
+on the *configuration* declaring a sensor of type `OD_SENSOR_TYPE_AXP2101` (`pwrmgm()` scans
+`globalConfig.sensors` for it). This unit declares one sensor, type `0x0004` — an SHT40 — so
+`initAXP2101()` is never reached and `pwrmgm(on)` takes the plain-GPIO rail branch instead,
+which is what *"rail + 800 ms settle"* in the log is. Consistent with that, the PMIC's address
+0x34 is never probed; the probes are 0x44, 0x45, 0x51, 0x55 and 0x6A.
+
+Note the claim carefully: **this says nothing about whether an AXP2101 is fitted to the board.**
+A log cannot show that, and the gate is a config check, not a hardware detection. What is
+certain is that the ~20 rewritten `Wire` transactions setting DCDC/ALDO enables and voltage
+set-points **have never executed**. Verifying them needs a unit whose config declares an
+AXP2101 sensor, so until then step 14 is only partly verified.
 
 **What it does NOT cover.** The **entire WiFi/LAN arm** — this unit has `WiFi: disabled` in
 `communication_modes`, so steps 9b-ii (station, six formerly-dead behaviours), 9b-iii (LAN
