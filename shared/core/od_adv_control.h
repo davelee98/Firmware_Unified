@@ -35,6 +35,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* See od_hal_adv.h: shared/ is plain C, but the ESP32 target consumes these headers from
+ * C++ translation units. Without the guard the C++ side gets C++ linkage and does not match
+ * the C definitions in shared/core. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* The canonical MsdAdvertisement body: the bytes after the company id. Fixed by the wire
  * contract, not by this controller -- see shared/protocol/opendisplay_structs.h. */
 #define OD_ADV_MSD_LEN 16u
@@ -127,5 +134,9 @@ enum od_adv_process_result od_adv_process(struct od_adv_control *s, bool start_a
  * Pump events and process() until this holds, or until a bounded target timeout reports
  * failure, BEFORE releasing the host and controller. */
 bool od_adv_is_quiescent(const struct od_adv_control *s);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* OD_ADV_CONTROL_H */

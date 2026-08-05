@@ -15,6 +15,11 @@
 /* OD_BLE_MAX_FRAME -- the declared GATT value length, enforced in od_gatt_access(). */
 #include "opendisplay_protocol.h"
 
+/* The shared advertising HAL this file implements at the bottom, and OD_ADV_MSD_LEN. Both are
+ * plain-C shared headers; nothing from shared/ is called from here yet. */
+#include "od_hal_adv.h"
+#include "od_adv_control.h"
+
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -487,18 +492,16 @@ static int od_gap_event(struct ble_gap_event *event, void *arg)
 
 /* ------------------------------------------------------------------ advertising */
 
-static void od_ble_advertise(void)
+/* Pack the ADV and scan-response records from one MSD snapshot.
+ *
+ * EXTRACTED so there is exactly ONE implementation of the on-air layout. It is called both by
+ * od_ble_advertise() below (the current path) and by od_hal_adv_program() at the end of this
+ * file (the shared controller's path). Two packers would be free to drift, and the thing most
+ * likely to drift is the byte layout every host discovers this device by.
+ *
+ * Returns false only when the record cannot be set at all. */
+static bool od_ble_pack_adv_records(const uint8_t *msd, uint8_t msd_len)
 {
-    if (!s_adv_wanted) {
-        return;
-    }
-    if (!s_addr_resolved) {
-        /* Before sync there is no identity address to advertise from, and ble_gap_adv_start()
-         * would fail with a log line on every call. od_on_sync() retries once it has one --
-         * which is the whole reason the request is remembered rather than acted on. */
-        return;
-    }
-
     struct ble_hs_adv_fields fields;
     memset(&fields, 0, sizeof fields);
 
@@ -516,9 +519,9 @@ static void od_ble_advertise(void)
     fields.name = (uint8_t *)s_name;
     fields.name_len = (uint8_t)strlen(s_name);
     fields.name_is_complete = 1;
-    if (s_msd_len) {
-        fields.mfg_data = s_msd;
-        fields.mfg_data_len = s_msd_len;
+    if (msd_len) {
+        fields.mfg_data = (uint8_t *)msd;
+        fields.mfg_data_len = msd_len;
     }
 
     int rc = ble_gap_adv_set_fields(&fields);
@@ -534,7 +537,7 @@ static void od_ble_advertise(void)
         rc = ble_gap_adv_set_fields(&fields);
         if (rc != 0) {
             ESP_LOGE(TAG, "ble_gap_adv_set_fields failed: %d", rc);
-            return;
+            return false;
         }
     }
 
@@ -550,13 +553,19 @@ static void od_ble_advertise(void)
     rsp.num_uuids128 = 1;
     rsp.uuids128_is_complete = 1;
     ble_gap_adv_rsp_set_fields(&rsp);
+    return true;
+}
 
+/* Begin advertising with whatever records were last packed. Extracted alongside the packer,
+ * and for the same reason: od_hal_adv_start() must issue the identical call. */
+static int od_ble_start_now(void)
+{
     struct ble_gap_adv_params adv;
     memset(&adv, 0, sizeof adv);
     adv.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv.disc_mode = BLE_GAP_DISC_MODE_GEN;
 
-    rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &adv, od_gap_event, NULL);
+    int rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER, &adv, od_gap_event, NULL);
     /* OD-INSTRUMENTATION: stamp EVERY start, with a sequence number, so the log shows whether
      * od_gap_event was the live callback before the connection in question formed -- the
      * "event arrived before we were listening" hypothesis. rc=6 is BLE_HS_ENOMEM and is
@@ -572,6 +581,24 @@ static void od_ble_advertise(void)
     if (rc != 0 && rc != BLE_HS_EALREADY) {
         ESP_LOGE(TAG, "ble_gap_adv_start failed: %d", rc);
     }
+    return rc;
+}
+
+static void od_ble_advertise(void)
+{
+    if (!s_adv_wanted) {
+        return;
+    }
+    if (!s_addr_resolved) {
+        /* Before sync there is no identity address to advertise from, and ble_gap_adv_start()
+         * would fail with a log line on every call. od_on_sync() retries once it has one --
+         * which is the whole reason the request is remembered rather than acted on. */
+        return;
+    }
+    if (!od_ble_pack_adv_records(s_msd, s_msd_len)) {
+        return;
+    }
+    (void)od_ble_start_now();
 }
 
 /* ------------------------------------------------------------------ host lifecycle */
@@ -899,3 +926,83 @@ void od_ble_deinit(void)
     __atomic_store_n(&s_conn_count, (uint8_t)0, __ATOMIC_RELEASE);
     ESP_LOGI(TAG, "NimBLE host stopped and controller released");
 }
+
+/* ------------------------------------------------- shared advertising HAL (od_hal_adv.h) ---
+ *
+ * The target side of the portable advertising controller
+ * (shared/core/od_adv_control.c, docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md).
+ *
+ * WHY THESE LIVE HERE AND NOT IN hal/od_hal_adv.c, where every other HAL lives. They need
+ * this file's statics -- s_name, s_own_addr_type, od_svc_uuid and od_gap_event -- and the
+ * only way to reach those from hal/ would be accessors that duplicate the state the F4 work
+ * exists to consolidate. A second home for advertising state is the defect, not the fix.
+ *
+ * extern "C" because shared/ is plain C and binds its HAL at link time; this translation unit
+ * is C++.
+ *
+ * NOT YET CALLED BY ANYTHING. od_ble_advertise() and the NimBLE callbacks still own
+ * advertising exactly as before, so on-air behaviour is unchanged by this commit. Wiring the
+ * controller in -- the event bridge, then removing advertising from the callbacks -- is plan
+ * steps 4-7 and must not land before the Milestone 0 byte fixture exists to prove those bytes
+ * did not move.
+ */
+extern "C" {
+
+enum od_hal_adv_result od_hal_adv_program(const uint8_t msd[16])
+{
+    if (!s_inited) {
+        return OD_HAL_ADV_ERROR;
+    }
+    /* Before host sync there is no identity address, so a programmed record could not be
+     * advertised anyway. RETRY, not ERROR: this is ordinary startup timing and the controller
+     * must simply try again next pass. */
+    if (!s_addr_resolved) {
+        return OD_HAL_ADV_RETRY;
+    }
+    return od_ble_pack_adv_records(msd, (uint8_t)OD_ADV_MSD_LEN) ? OD_HAL_ADV_OK
+                                                                 : OD_HAL_ADV_ERROR;
+}
+
+enum od_hal_adv_result od_hal_adv_start(void)
+{
+    if (!s_inited) {
+        return OD_HAL_ADV_ERROR;
+    }
+    if (!s_addr_resolved) {
+        return OD_HAL_ADV_RETRY;
+    }
+    const int rc = od_ble_start_now();
+    if (rc == 0) {
+        return OD_HAL_ADV_OK;
+    }
+    if (rc == BLE_HS_EALREADY) {
+        return OD_HAL_ADV_ALREADY;
+    }
+    /* BLE_HS_ENOMEM here is NOT a fault. With CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1, connectable
+     * undirected advertising needs a free connection object, so a client holding the single
+     * slot makes this the EXPECTED result -- see the instrumentation note in od_ble_start_now().
+     * Reporting it as RETRY keeps the controller's state truthful and lets the disconnect
+     * resolve it, where ERROR would latch a fault on entirely normal operation. */
+    if (rc == BLE_HS_ENOMEM) {
+        return OD_HAL_ADV_RETRY;
+    }
+    return OD_HAL_ADV_ERROR;
+}
+
+enum od_hal_adv_result od_hal_adv_stop(void)
+{
+    if (!s_inited) {
+        return OD_HAL_ADV_ERROR;
+    }
+    const int rc = ble_gap_adv_stop();
+    if (rc == 0) {
+        return OD_HAL_ADV_OK;
+    }
+    /* Already stopped is the outcome the caller wanted. */
+    if (rc == BLE_HS_EALREADY) {
+        return OD_HAL_ADV_NOT_ACTIVE;
+    }
+    return OD_HAL_ADV_ERROR;
+}
+
+} /* extern "C" */
