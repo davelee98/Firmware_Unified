@@ -42,9 +42,18 @@ that retires most of phase C's hardware debt: steps 1-15 had **not** been on har
 | Deep sleep | entered on idle (40 s hold), 360 s configured |
 | **Button wake** | **buttons 1/2/3 and wake-from-deep-sleep all work** |
 
-**What this covers.** The whole BLE + panel + PMIC + GPIO arm: `od_hal_{nvs,log,gpio,time,i2c,
-adc}`, the 19 + 7 `pinMode`+`digitalWrite` glitch removals of steps 12/14, the AXP2101 I2C
-rewrite (step 14), the deep-sleep pin pass, and the GPIO interrupt path behind the buttons.
+**What this covers.** The BLE + panel + GPIO arm: `od_hal_{nvs,log,gpio,time,adc}`, the 19 + 7
+`pinMode`+`digitalWrite` glitch removals of steps 12/14, the deep-sleep pin pass, and the GPIO
+interrupt path behind the buttons. On I2C it covers `od_hal_i2c_init`, `od_hal_i2c_probe`
+(five addresses, correct present/absent) and the SHT40 sensor reads.
+
+**The AXP2101 PMIC path is NOT covered, despite being the bulk of step 14.** The PMIC lives at
+I2C address **0x34**, and this unit never probes it — the log's probes are 0x44, 0x45, 0x51,
+0x55 and 0x6A. This board switches its panel rail with a plain GPIO instead (`Power Pin: 11`,
+`PWR_PIN` flag set), which is why `pwrmgm(on)` reports *"rail + 800 ms settle"* rather than
+running `initAXP2101()`. So the 41 rewritten `Wire` transactions that set DCDC/ALDO enables and
+voltage set-points have still never executed. **They need a unit with an AXP2101** — a battery
+board — and until then step 14 is only partly verified.
 
 **What it does NOT cover.** The **entire WiFi/LAN arm** — this unit has `WiFi: disabled` in
 `communication_modes`, so steps 9b-ii (station, six formerly-dead behaviours), 9b-iii (LAN
