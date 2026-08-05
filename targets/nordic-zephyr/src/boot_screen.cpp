@@ -90,19 +90,19 @@ static float boot_read_chip_temperature(void)
   return opendisplay_ble_get_chip_temperature();
 }
 
-static void bbep_set_addr_window(BBEPAPER *epd, int x, int y, int cx, int cy)
+static void bbep_set_addr_window(BBEPDISP *epd, int x, int y, int cx, int cy)
 {
-  epd->setAddrWindow(x, y, cx, cy);
+  bbepSetAddrWindow(epd, x, y, cx, cy);
 }
 
-static void bbep_start_write(BBEPAPER *epd, int plane)
+static void bbep_start_write(BBEPDISP *epd, int plane)
 {
-  epd->startWrite(plane);
+  bbepStartWrite(epd, plane);
 }
 
-static void bbep_write_data(BBEPAPER *epd, uint8_t *data, int len)
+static void bbep_write_data(BBEPDISP *epd, uint8_t *data, int len)
 {
-  epd->writeData(data, len);
+  bbepWriteData(epd, data, len);
 }
 
 typedef struct { char c; uint8_t col[5]; } BootGlyph5x7;
@@ -571,7 +571,7 @@ static bool bootLayoutFit(uint16_t w, uint16_t h, uint16_t h_full, int blockH, i
 // De-interleave one bit of the packed 2bpp row into a 1bpp plane row (MSB-first)
 // and stream it. planeRow scratch is separate so wide gray4 panels cannot overflow
 // the 2bpp row buffer (pitch2bpp + planePitch can exceed 680 B).
-static void writeGray4PlaneRow(BBEPAPER *epd, const uint8_t* row2bpp, int pitch2bpp, int planePitch, uint16_t w, int bitSel) {
+static void writeGray4PlaneRow(BBEPDISP *epd, const uint8_t* row2bpp, int pitch2bpp, int planePitch, uint16_t w, int bitSel) {
     uint8_t* planeRow = s_gray4_plane_scratch;
     memset(planeRow, 0x00, planePitch);
     for (uint16_t x = 0; x < w; x++) {
@@ -612,7 +612,7 @@ static void bootGray4FillSwatchCodes(uint16_t panelIc, uint8_t out[4]) {
     }
 }
 
-bool writeBootScreenWithQr(BBEPAPER &epd) {
+bool writeBootScreenWithQr(BBEPDISP &epd) {
     const struct GlobalConfig *cfg = boot_cfg();
     if (cfg == NULL || cfg->display_count == 0u) {
       return false;

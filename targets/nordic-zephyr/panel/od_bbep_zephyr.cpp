@@ -58,3 +58,41 @@
 /* Vendored, unmodified. */
 #include "bb_ep.inl"
 #include "bb_ep_gfx.inl"
+
+/* ------------------------------------------------------------------ the composite helpers ---
+ *
+ * See od_bbep_zephyr.h for why these are not one-liners. Both are transcribed from the
+ * vendored/source class methods so the wire behaviour is unchanged by dropping the class.
+ */
+#include "od_bbep_zephyr.h"
+
+void od_bbep_wake(BBEPDISP *pBBEP)
+{
+    /* Transcribed from BBEPAPER::wake(), third_party/bb_epaper/src/bb_epaper.cpp:713. */
+    bbepWakeUp(pBBEP);
+    if (pBBEP->iFlags & (BBEP_7COLOR | BBEP_4COLOR)) {
+        /* These controllers cannot accept data until the full init sequence has been sent. */
+        bbepSendCMDSequence(pBBEP, pBBEP->pInitFull);
+        if (pBBEP->iFlags & BBEP_SPLIT_BUFFER) {   /* dual-cable EPD: second controller */
+            pBBEP->iCSPin = pBBEP->iCS2Pin;
+            bbepSendCMDSequence(pBBEP, pBBEP->pInitFull);
+            pBBEP->iCSPin = pBBEP->iCS1Pin;        /* restore: not tidy-up, see the header */
+        }
+    }
+}
+
+void od_bbep_send_panel_init_full(BBEPDISP *pBBEP)
+{
+    /* Transcribed from the method Firmware_NRF54 added to its vendored copy,
+     * Firmware_NRF54/third_party/bb_epaper/src/bb_epaper.cpp:732. Note the guard differs from
+     * od_bbep_wake() above -- 7COLOR only, not 7COLOR|4COLOR -- and that asymmetry is
+     * reproduced deliberately rather than harmonised. */
+    bbepSendCMDSequence(pBBEP, pBBEP->pInitFull);
+    if (pBBEP->iFlags & BBEP_7COLOR) {
+        if (pBBEP->iFlags & BBEP_SPLIT_BUFFER) {
+            pBBEP->iCSPin = pBBEP->iCS2Pin;
+            bbepSendCMDSequence(pBBEP, pBBEP->pInitFull);
+            pBBEP->iCSPin = pBBEP->iCS1Pin;
+        }
+    }
+}

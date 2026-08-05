@@ -12,6 +12,7 @@
 #include "nrf54_gpio.h"
 #include "nrf54_zephyr_compat.h"
 #include "bb_epaper.h"
+#include "od_bbep_zephyr.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -23,7 +24,9 @@ void bbepSendCMDSequence(BBEPDISP *pBBEP, const uint8_t *pSeq);
 
 #define OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE 256u
 
-static BBEPAPER s_epd;
+/* Raw BBEPDISP, not the vendored BBEPAPER C++ class -- see panel/od_bbep_zephyr.h. The class is
+ * not compiled on this target, exactly as on esp32-idf. */
+static BBEPDISP s_epd;
 static bool s_active;
 static uint32_t s_total_bytes;
 static uint32_t s_written_bytes;
@@ -129,7 +132,7 @@ static bool wait_for_refresh(uint32_t timeout_ms)
   uint32_t elapsed = 0;
   bool saw_busy = false;
   while (elapsed < timeout_ms) {
-    bool busy = s_epd.isBusy();
+    bool busy = bbepIsBusy(&s_epd);
     if (busy) {
       saw_busy = true;
     } else if (saw_busy) {
@@ -138,7 +141,7 @@ static bool wait_for_refresh(uint32_t timeout_ms)
     od_msleep(50);
     elapsed += 50;
   }
-  return saw_busy && !s_epd.isBusy();
+  return saw_busy && !bbepIsBusy(&s_epd);
 }
 
 static uint32_t parse_be_u32(const uint8_t *data)
@@ -158,7 +161,7 @@ static void partial_cleanup(void)
     return;
   }
   if (s_partial_panel_up) {
-    s_epd.sleep(DEEP_SLEEP);
+    bbepSleep(&s_epd, DEEP_SLEEP);
     display_power_set(false);
     s_partial_panel_up = false;
   }
@@ -199,17 +202,17 @@ static void partial_set_ep397_ram_y(BBEPDISP *pBBEP, int ty, int cy)
   int ramYStart = (pBBEP->native_height - 1) - ty;
   int ramYEnd = (pBBEP->native_height - 1) - yLast;
 
-  s_epd.writeCmd(SSD1608_SET_RAMYPOS);
+  bbepWriteCmd(&s_epd, SSD1608_SET_RAMYPOS);
   uc[0] = (uint8_t)(ramYStart & 0xff);
   uc[1] = (uint8_t)(ramYStart >> 8);
   uc[2] = (uint8_t)(ramYEnd & 0xff);
   uc[3] = (uint8_t)(ramYEnd >> 8);
-  s_epd.writeData(uc, 4);
+  bbepWriteData(&s_epd, uc, 4);
 
-  s_epd.writeCmd(SSD1608_SET_RAMYCOUNT);
+  bbepWriteCmd(&s_epd, SSD1608_SET_RAMYCOUNT);
   uc[0] = (uint8_t)(ramYStart & 0xff);
   uc[1] = (uint8_t)(ramYStart >> 8);
-  s_epd.writeData(uc, 2);
+  bbepWriteData(&s_epd, uc, 2);
 }
 
 static void partial_set_ep426_ram_y(BBEPDISP *pBBEP, int ty, int cy)
@@ -217,17 +220,17 @@ static void partial_set_ep426_ram_y(BBEPDISP *pBBEP, int ty, int cy)
   uint8_t uc[4];
   int yLast = ty + cy - 1;
 
-  s_epd.writeCmd(SSD1608_SET_RAMYPOS);
+  bbepWriteCmd(&s_epd, SSD1608_SET_RAMYPOS);
   uc[0] = (uint8_t)ty;
   uc[1] = (uint8_t)(ty >> 8);
   uc[2] = (uint8_t)yLast;
   uc[3] = (uint8_t)(yLast >> 8);
-  s_epd.writeData(uc, 4);
+  bbepWriteData(&s_epd, uc, 4);
 
-  s_epd.writeCmd(SSD1608_SET_RAMYCOUNT);
+  bbepWriteCmd(&s_epd, SSD1608_SET_RAMYCOUNT);
   uc[0] = (uint8_t)ty;
   uc[1] = (uint8_t)(ty >> 8);
-  s_epd.writeData(uc, 2);
+  bbepWriteData(&s_epd, uc, 2);
   (void)pBBEP;
 }
 
@@ -241,23 +244,23 @@ static void partial_set_pixel_ram_x(BBEPDISP *pBBEP, int x, int cx)
     px1 = (pBBEP->native_width - 1) - (x + cx - 1);
   }
 
-  s_epd.writeCmd(SSD1608_SET_RAMXPOS);
+  bbepWriteCmd(&s_epd, SSD1608_SET_RAMXPOS);
   uc[0] = (uint8_t)(px0 & 0xff);
   uc[1] = (uint8_t)((px0 >> 8) & 0xff);
   uc[2] = (uint8_t)(px1 & 0xff);
   uc[3] = (uint8_t)(px1 >> 8);
-  s_epd.writeData(uc, 4);
+  bbepWriteData(&s_epd, uc, 4);
 
-  s_epd.writeCmd(SSD1608_SET_RAMXCOUNT);
+  bbepWriteCmd(&s_epd, SSD1608_SET_RAMXCOUNT);
   uc[0] = (uint8_t)(px0 & 0xff);
   uc[1] = (uint8_t)(px0 >> 8);
-  s_epd.writeData(uc, 2);
+  bbepWriteData(&s_epd, uc, 2);
 }
 
 static void partial_set_addr_window(BBEPDISP *pBBEP, int x, int y, int cx, int cy)
 {
   if (!panel_skips_bbep_set_addr_window(pBBEP)) {
-    s_epd.setAddrWindow(x, y, cx, cy);
+    bbepSetAddrWindow(&s_epd, x, y, cx, cy);
     return;
   }
 
@@ -269,11 +272,11 @@ static void partial_set_addr_window(BBEPDISP *pBBEP, int x, int y, int cx, int c
     partial_set_pixel_ram_x(pBBEP, x, cx);
   } else {
     int tx = x / 8;
-    s_epd.writeCmd(SSD1608_SET_RAMXPOS);
+    bbepWriteCmd(&s_epd, SSD1608_SET_RAMXPOS);
     uc[0] = (uint8_t)tx;
     uc[1] = (uint8_t)(tx + ((cx - 1) >> 3));
-    s_epd.writeData(uc, 2);
-    s_epd.writeCmd2(SSD1608_SET_RAMXCOUNT, (uint8_t)tx);
+    bbepWriteData(&s_epd, uc, 2);
+    bbepCMD2(&s_epd, SSD1608_SET_RAMXCOUNT, (uint8_t)tx);
   }
 
   if (panel_uses_ep426_x_decrement(pBBEP)) {
@@ -281,18 +284,18 @@ static void partial_set_addr_window(BBEPDISP *pBBEP, int x, int y, int cx, int c
   } else if (panel_uses_ep397_y_decrement(pBBEP)) {
     partial_set_ep397_ram_y(pBBEP, ty, cy);
   } else {
-    s_epd.writeCmd(SSD1608_SET_RAMYPOS);
+    bbepWriteCmd(&s_epd, SSD1608_SET_RAMYPOS);
     uc[0] = (uint8_t)ty;
     uc[1] = (uint8_t)(ty >> 8);
     uc[2] = (uint8_t)(ty + cy - 1);
     uc[3] = (uint8_t)((ty + cy - 1) >> 8);
-    s_epd.writeData(uc, 4);
+    bbepWriteData(&s_epd, uc, 4);
     uc[0] = (uint8_t)ty;
     uc[1] = (uint8_t)(ty >> 8);
-    s_epd.writeCmd(SSD1608_SET_RAMYCOUNT);
-    s_epd.writeData(uc, 2);
+    bbepWriteCmd(&s_epd, SSD1608_SET_RAMYCOUNT);
+    bbepWriteData(&s_epd, uc, 2);
   }
-  s_epd.wait();
+  bbepWaitBusy(&s_epd);
 }
 
 static bool partial_write_stream_bytes(uint8_t *data, uint32_t len)
@@ -308,8 +311,8 @@ static bool partial_write_stream_bytes(uint8_t *data, uint32_t len)
       if (targetPlane == PLANE_0 && s_partial.bytes_written != s_partial.plane_size) {
         return false;
       }
-      partial_set_addr_window(&s_epd._bbep, s_partial.x, s_partial.y, s_partial.width, s_partial.height);
-      s_epd.startWrite(targetPlane);
+      partial_set_addr_window(&s_epd, s_partial.x, s_partial.y, s_partial.width, s_partial.height);
+      bbepStartWrite(&s_epd, targetPlane);
       s_partial.current_plane = targetPlane;
     }
 
@@ -319,7 +322,7 @@ static bool partial_write_stream_bytes(uint8_t *data, uint32_t len)
     if (chunk > len - offset) {
       chunk = len - offset;
     }
-    s_epd.writeData(data + offset, (int)chunk);
+    bbepWriteData(&s_epd, data + offset, (int)chunk);
     s_partial.bytes_written += chunk;
     offset += chunk;
   }
@@ -376,18 +379,18 @@ static bool partial_trigger_refresh(int refresh_mode)
   if (refresh_mode < 0 || refresh_mode > 3) {
     refresh_mode = REFRESH_PARTIAL;
   }
-  if (panel_skips_reinit_on_partial_refresh(&s_epd._bbep)) {
-    if (panel_uses_ep397_y_decrement(&s_epd._bbep)) {
+  if (panel_skips_reinit_on_partial_refresh(&s_epd)) {
+    if (panel_uses_ep397_y_decrement(&s_epd)) {
       static const uint8_t u8cmdz3[4] = { 0xf7, 0xd7, 0xff, 0 };
-      s_epd.writeCmd2(SSD1608_DISP_CTRL2, u8cmdz3[refresh_mode]);
+      bbepCMD2(&s_epd, SSD1608_DISP_CTRL2, u8cmdz3[refresh_mode]);
     } else {
       static const uint8_t u8cmd[4] = { 0xf7, 0xc7, 0xff, 0xc0 };
-      s_epd.writeCmd2(SSD1608_DISP_CTRL2, u8cmd[refresh_mode]);
+      bbepCMD2(&s_epd, SSD1608_DISP_CTRL2, u8cmd[refresh_mode]);
     }
-    s_epd.writeCmd(SSD1608_MASTER_ACTIVATE);
+    bbepWriteCmd(&s_epd, SSD1608_MASTER_ACTIVATE);
     return wait_for_refresh(60000u);
   }
-  (void)s_epd.refresh(refresh_mode, false);
+  (void)bbepRefresh(&s_epd, refresh_mode);
   return wait_for_refresh(60000u);
 }
 
@@ -405,20 +408,20 @@ static bool partial_prepare_panel_ram(void)
   }
 
   display_power_set(true);
-  s_epd = BBEPAPER();
-  if (s_epd.setPanelType(panel) != BBEP_SUCCESS) {
+  memset(&s_epd, 0, sizeof(s_epd));
+  if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
     display_power_set(false);
     return false;
   }
-  s_epd.setRotation((int)d->rotation * 90);
-  s_epd.initIO(d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
-  s_epd.wake();
+  bbepSetRotation(&s_epd, (int)d->rotation * 90);
+  bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
+  od_bbep_wake(&s_epd);
   {
-    const uint8_t *init_seq = s_epd._bbep.pInitPart ? s_epd._bbep.pInitPart : s_epd._bbep.pInitFull;
-    bbepSendCMDSequence(&s_epd._bbep, init_seq);
+    const uint8_t *init_seq = s_epd.pInitPart ? s_epd.pInitPart : s_epd.pInitFull;
+    bbepSendCMDSequence(&s_epd, init_seq);
   }
-  s_epd.fillScreen(BBEP_WHITE, PLANE_1);
-  s_epd.fillScreen(BBEP_WHITE, PLANE_0);
+  bbepFill(&s_epd, BBEP_WHITE, PLANE_1);
+  bbepFill(&s_epd, BBEP_WHITE, PLANE_0);
   s_partial_panel_up = true;
   return true;
 }
@@ -430,7 +433,7 @@ static bool partial_write_to_panel(int refresh_mode)
   }
   od_msleep(20);
   bool ok = partial_trigger_refresh(refresh_mode);
-  s_epd.sleep(DEEP_SLEEP);
+  bbepSleep(&s_epd, DEEP_SLEEP);
   display_power_set(false);
   s_partial_panel_up = false;
   return ok;
@@ -628,7 +631,7 @@ extern "C" void opendisplay_display_abort(void)
 {
   partial_cleanup();
   if (s_active) {
-    s_epd.sleep(DEEP_SLEEP);
+    bbepSleep(&s_epd, DEEP_SLEEP);
   }
   display_power_set(false);
   s_active = false;
@@ -680,13 +683,13 @@ static int dw_stream_raw_bytes(const uint8_t *payload, uint32_t payload_len)
     if (chunk == 0u) {
       break;
     }
-    s_epd.writeData((uint8_t *)(void *)p, (int)chunk);
+    bbepWriteData(&s_epd, (uint8_t *)(void *)p, (int)chunk);
     p += chunk;
     left -= chunk;
     s_written_bytes += chunk;
     remaining -= chunk;
     if (bitplanes && !s_plane2_started && s_plane_size > 0u && s_written_bytes >= s_plane_size) {
-      s_epd.startWrite(PLANE_1);
+      bbepStartWrite(&s_epd, PLANE_1);
       s_plane2_started = true;
     }
   }
@@ -746,24 +749,24 @@ extern "C" void opendisplay_display_boot_apply(void)
   if (panel == EP_PANEL_UNDEFINED) {
     return;
   }
-  s_epd = BBEPAPER();
+  memset(&s_epd, 0, sizeof(s_epd));
   display_power_set(true);
-  if (s_epd.setPanelType(panel) != BBEP_SUCCESS) {
+  if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
     display_power_set(false);
     return;
   }
-  s_epd.setRotation((int)d->rotation * 90);
-  s_epd.initIO(d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
-  s_epd.wake();
-  s_epd.sendPanelInitFull();
+  bbepSetRotation(&s_epd, (int)d->rotation * 90);
+  bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
+  od_bbep_wake(&s_epd);
+  od_bbep_send_panel_init_full(&s_epd);
   if ((d->transmission_modes & TRANSMISSION_MODE_CLEAR_ON_BOOT) == 0u) {
     if (!writeBootScreenWithQr(s_epd)) {
-      s_epd.fillScreen(BBEP_WHITE);
+      bbepFill(&s_epd, BBEP_WHITE, PLANE_DUPLICATE);
     }
-    (void)s_epd.refresh(REFRESH_FULL, false);
+    (void)bbepRefresh(&s_epd, REFRESH_FULL);
     (void)wait_for_refresh(60000u);
   }
-  s_epd.sleep(DEEP_SLEEP);
+  bbepSleep(&s_epd, DEEP_SLEEP);
   display_power_set(false);
 }
 
@@ -792,22 +795,22 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
   opendisplay_display_abort();
   dw_init_mark("after abort");
   display_power_set(true);
-  s_epd = BBEPAPER();
-  if (s_epd.setPanelType(panel) != BBEP_SUCCESS) {
+  memset(&s_epd, 0, sizeof(s_epd));
+  if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
     printf("[OD] dw start err setPanelType panel=%d\r\n", panel);
     display_power_set(false);
     return -3;
   }
   dw_init_mark("after setPanelType");
 
-  s_epd.setRotation((int)d->rotation * 90);
-  s_epd.initIO(d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
+  bbepSetRotation(&s_epd, (int)d->rotation * 90);
+  bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
   dw_init_mark("after initIO");
-  s_epd.wake();
+  od_bbep_wake(&s_epd);
   dw_init_mark("after wake (reset + busy)");
-  s_epd.sendPanelInitFull();
+  od_bbep_send_panel_init_full(&s_epd);
   dw_init_mark("after pInitFull");
-  s_epd.setAddrWindow(0, 0, d->pixel_width, d->pixel_height);
+  bbepSetAddrWindow(&s_epd, 0, 0, d->pixel_width, d->pixel_height);
   dw_init_mark("after setAddrWindow");
 
   s_color_scheme = d->color_scheme;
@@ -820,7 +823,7 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
     opendisplay_color_direct_write_total_bytes(d->pixel_width, d->pixel_height, s_color_scheme);
   {
     int sp = opendisplay_color_start_plane(s_color_scheme);
-    s_epd.startWrite(sp == 0 ? PLANE_0 : PLANE_1);
+    bbepStartWrite(&s_epd, sp == 0 ? PLANE_0 : PLANE_1);
   }
   dw_init_mark("after startWrite");
 
@@ -1011,10 +1014,10 @@ extern "C" int opendisplay_display_direct_write_end_refresh(const uint8_t *paylo
   }
 
   printf("[OD] dw refresh start mode=%d\r\n", refresh_mode);
-  (void)s_epd.refresh(refresh_mode, false);
+  (void)bbepRefresh(&s_epd, refresh_mode);
   bool ok = wait_for_refresh(60000u);
-  printf("[OD] dw refresh done ok=%d busy=%d\r\n", (int)ok, (int)s_epd.isBusy());
-  s_epd.sleep(DEEP_SLEEP);
+  printf("[OD] dw refresh done ok=%d busy=%d\r\n", (int)ok, (int)bbepIsBusy(&s_epd));
+  bbepSleep(&s_epd, DEEP_SLEEP);
   s_active = false;
   s_dw_compressed = false;
   s_dw_decompressed_total = 0;
