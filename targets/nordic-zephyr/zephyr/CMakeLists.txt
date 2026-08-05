@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.13.1)
 
 set(PROJECT_ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
-set(THIRD_PARTY_DIR ${PROJECT_ROOT}/third_party)
+# third_party is the REPO-LEVEL vendored tree, shared by every target -- not a per-target copy.
+# The source repo had its own third_party/ beside src/; importing that would have made this
+# repo's "one vendored copy for all targets" rule a fiction. ../../.. is the repo root.
+set(THIRD_PARTY_DIR ${PROJECT_ROOT}/../../third_party)
+set(PANEL_DIR ${PROJECT_ROOT}/panel)
 set(SRC_DIR ${PROJECT_ROOT}/src)
 set(GEN_DIR ${SRC_DIR}/generated)
 
@@ -65,6 +69,7 @@ add_custom_target(factory_config_gen DEPENDS ${FACTORY_GEN_STAMP})
 target_include_directories(app PRIVATE
   ${SRC_DIR}
   ${THIRD_PARTY_DIR}/bb_epaper/src
+  ${PANEL_DIR}
   ${THIRD_PARTY_DIR}/uzlib/src
   ${GEN_DIR}
 )
@@ -146,7 +151,8 @@ target_sources(app PRIVATE
   ${SRC_DIR}/factory_config.c
   ${GEN_DIR}/factory_config_data.c
   ${SRC_DIR}/qr/qrcode.c
-  ${THIRD_PARTY_DIR}/bb_epaper/src/bb_epaper.cpp
+  # OUR glue TU, not the vendored bb_epaper.cpp -- see panel/od_bbep_zephyr.cpp for why.
+  ${PANEL_DIR}/od_bbep_zephyr.cpp
   ${THIRD_PARTY_DIR}/bb_epaper/src/Group5.cpp
   ${THIRD_PARTY_DIR}/uzlib/src/od_zlib_stream.c
 )
