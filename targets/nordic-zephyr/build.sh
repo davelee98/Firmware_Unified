@@ -15,6 +15,15 @@ export PROFILE
 source "${SCRIPT_DIR}/ncs-env.sh"
 
 CMAKE_ARGS=(-DBOARD_ROOT="${SCRIPT_DIR}")
+
+# nRF52840 keeps the Adafruit bootloader; the nRF54 boards use MCUboot (Milestone 7). The
+# choice lives in a sysbuild Kconfig file, which cannot be overridden from CMake or -D, so the
+# right file is selected here. Without this an xiao_ble build fails at configure with
+# "required nodelabel not found: slot0_partition" -- upstream xiao_ble ships pm_static.yml for
+# the Adafruit layout and has no MCUboot partitions.
+if [[ "${BOARD}" == xiao_ble* ]]; then
+  CMAKE_ARGS+=(-DSB_CONF_FILE="${SCRIPT_DIR}/zephyr/sysbuild_adafruit.conf")
+fi
 if [[ "${PROFILE}" == "uart" ]]; then
   CMAKE_ARGS+=(-DEXTRA_CONF_FILE="${APP_DIR}/prj_uart.conf")
 fi

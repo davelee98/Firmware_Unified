@@ -10,8 +10,23 @@ set(SRC_DIR ${PROJECT_ROOT}/src)
 set(GEN_DIR ${SRC_DIR}/generated)
 
 list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_LIST_DIR}/prj_ncs.conf)
-list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_LIST_DIR}/prj_cs.conf)
 
+# NO prj_cs.conf HERE. Channel Sounding is an nRF54L radio feature and the nRF52840 has none, so
+# appending it unconditionally made every CS symbol report "assigned y but got n" -- fatal in a
+# build that promotes Kconfig warnings to errors. It now lives in boards/<board>.conf for the two
+# nRF54 boards.
+#
+# GUARDING THE APPEND ON ${BOARD} DOES NOT WORK, and the attempt is worth recording because the
+# failure is silent: BOARD is EMPTY here. find_package(Zephyr) sets it, and that runs on line 41,
+# after EXTRA_CONF_FILE has been assembled. `if(NOT BOARD MATCHES ...)` therefore always takes
+# the true branch. The pre-existing lm20 guard below has exactly the same defect -- it has never
+# fired -- which is why prj_lm20_extra.conf's content is ALSO mirrored into
+# boards/xiao_nrf54lm20a_nrf54lm20a_cpuapp.conf. That mirroring is what has been carrying it.
+
+# DEAD BRANCH, left only as a marker: BOARD is empty here (see above), so this has never fired.
+# Its content is applied via boards/xiao_nrf54lm20a_nrf54lm20a_cpuapp.conf, whose own header
+# already said "also mirrored ... for sysbuild". Removing the file it references would be the
+# tidier fix; it is left in place so this change alters no nRF54 behaviour.
 if(BOARD MATCHES ".*lm20.*")
   list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_LIST_DIR}/prj_lm20_extra.conf)
 endif()
