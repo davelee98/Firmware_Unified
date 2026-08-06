@@ -69,10 +69,17 @@ static void od_emit(const char *text)
 		locked = (k_mutex_lock(&s_lock, K_MSEC(OD_LOG_LOCK_MS)) == 0);
 	}
 
-	/* ONE call, not a run of writes. The buffer is already complete, so this is the whole
-	 * record; printf is the same path every existing call site in this target already uses,
-	 * so delivery behaviour is unchanged. */
-	od_log_raw("%s", text);
+	/*
+	 * printf(), NOT od_log_raw(). od_log_raw() calls od_emit(), so routing this through it
+	 * is unbounded recursion -- od_emit -> od_log_raw -> od_emit -> ... at 256 bytes of
+	 * stack per frame. It got that way because the mechanical printf->od_log_* conversion
+	 * was run across src/ INCLUDING THIS FILE, which is the one file it must never touch.
+	 *
+	 * ONE call, not a run of writes: the buffer is already the complete record, and printf
+	 * is the same path every call site in this target used before the conversion, so
+	 * delivery behaviour is unchanged.
+	 */
+	printf("%s", text);
 
 	if (locked) {
 		k_mutex_unlock(&s_lock);

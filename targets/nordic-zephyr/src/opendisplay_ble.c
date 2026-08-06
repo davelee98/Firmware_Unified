@@ -446,7 +446,13 @@ static void log_msd(const char *tag)
 	for (unsigned i = 0; i < MSD_PAYLOAD_LEN; i++) {
 		od_log_raw(" %02X", msd_payload[i]);
 	}
-	od_log_info("");
+	/*
+	 * od_log_raw(), NOT od_log_info(""). This terminates the hex line built by the
+	 * od_log_raw() calls above; od_log_info("") would emit a whole HEADERED record --
+	 * appending "[SSSS.mmm|C0] I: " to the end of the MSD dump instead of ending the line.
+	 * It was printf("\r\n") before the conversion, and only od_log_raw() preserves that.
+	 */
+	od_log_raw("\r\n");
 #endif
 }
 
