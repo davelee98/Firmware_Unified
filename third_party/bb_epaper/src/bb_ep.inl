@@ -1,4 +1,4 @@
-//
+ //
 // bb_epaper
 // Written by Larry Bank (bitbank@pobox.com)
 // Project started 9/11/2024
@@ -1147,32 +1147,6 @@ const uint8_t epd42yr_init_fast[] PROGMEM =
    0
 };
 
-// created new epd42yr2.  init sequence identical to the epd266yr 184x300 except resolution set to 400x300.  does not support fast update.  
-const uint8_t epd42yr2_init_full[] PROGMEM = /* OD-PATCH: was a duplicate epd42yr_init_full */
-{
-0x02, 0x4d, 0x78,
-   0x03, 0x00, 0x0f, 0x09,
-   0x07, 0x01, 0x07, 0x00, 0x22, 0x78, 0x0a, 0x22,
-   0x04, 0x03, 0x10, 54, 0x44,
-   0x08, 0x06, 0x0f, 0x0a, 0x2f, 0x25 ,0x22, 0x2e, 0x21,
-   0x02, 0x30, 0x08,
-   0x02, 0x41, 0x00,
-   0x02, 0x50, 0x37,
-   0x03, 0x60, 0x02, 0x02,
-   0x05, UC8151_TRES, 0x01, 144, 0x01, 44, // resolution (400x300)
-   0x05, 0x65, 0x00, 0x00, 0x00, 0x00,
-   0x02, 0xe7, 0x1c,
-   0x02, 0xe3, 0x22,
-   0x02, 0xe0, 0x00,
-   0x02, 0xb4, 0xd0,
-   0x02, 0xb5, 0x03,
-   0x02, 0xe9, 0x01,
-   0x01, 0x04, // power on
-   BUSY_WAIT,
-   0
-};
-
-
 //
 // This is the 'fast' update of approx 11 seconds
 // The slow (18-25 second) update is not worth implementing
@@ -1506,14 +1480,15 @@ const uint8_t epd154_init_sequence_full[] PROGMEM =
     0x01, 0x12, // sw reset
     BUSY_WAIT,
     0x04, 0x01, 199, 0x00, 0x00, // driver output control
-    0x02, 0x11, 0x03, // data entry mode
-    0x03, 0x44, 0x00, 0x18,
-    0x05, 0x45, 0x00, 0x00, 0xc7, 0x00,
+    SET_ORIENTATION,
+//    0x02, 0x11, 0x03, // data entry mode
+//    0x03, 0x44, 0x00, 0x18,
+//    0x05, 0x45, 0x00, 0x00, 0xc7, 0x00,
     0x02, 0x3c, 0x05, // border waveform
     0x02, 0x18, 0x80, // read temp sensor
     //    0x03, 0x21, 0x00, 0x80, // display update control
-    0x02, 0x4e, 0x00,
-    0x03, 0x4f, 0x00, 0x00,
+//    0x02, 0x4e, 0x00,
+//    0x03, 0x4f, 0x00, 0x00,
     BUSY_WAIT,
     0x00 // end of table
 };
@@ -1670,7 +1645,8 @@ const uint8_t epd154z_init_full[] PROGMEM =
 {
    0x01, 0x12, // soft reset
    BUSY_WAIT,
-   0x02, 0x11, 0x03,
+    SET_ORIENTATION,
+//   0x02, 0x11, 0x03,
    0x02, 0x3c, 0x01,
    0x00
 };
@@ -1714,14 +1690,15 @@ const uint8_t epd213z_init_full[] PROGMEM =
    0x01, 0x12, // soft reset
    BUSY_WAIT,
    0x04, 0x01, 0xf9, 0x00, 0x00,
-   0x02, 0x11, 0x03,
-   0x03, 0x44, 0x00, 0x0f,
-   0x05, 0x45, 0x00, 0x00, 0xf9, 0x00,
+    SET_ORIENTATION,
+//   0x02, 0x11, 0x03,
+//   0x03, 0x44, 0x00, 0x0f,
+//   0x05, 0x45, 0x00, 0x00, 0xf9, 0x00,
    0x02, 0x3c, 0x01,
    BUSY_WAIT,
    0x02, 0x18, 0x80,
-   0x02, 0x4e, 0x00,
-   0x03, 0x4f, 0x00, 0x00,
+//   0x02, 0x4e, 0x00,
+//   0x03, 0x4f, 0x00, 0x00,
    BUSY_WAIT,
    0 // end
 }; /* epd213z_init_full */
@@ -1787,13 +1764,14 @@ const uint8_t epd29z_init_full[] PROGMEM =
 {
     BUSY_WAIT,
     0x04, 0x01,0x27,0x01,0x00,
-    0x02, 0x11, 0x03,
-    0x03, 0x44, 0x00, 0x0f,
-    0x05, 0x45, 0x00, 0x00, 0x27, 0x01,
+    SET_ORIENTATION,
+//    0x02, 0x11, 0x03,
+//    0x03, 0x44, 0x00, 0x0f,
+//    0x05, 0x45, 0x00, 0x00, 0x27, 0x01,
+//    0x02, 0x4e, 0x00,
+//    0x03, 0x4f, 0x00, 0x00,
     0x02, 0x3c, 0x01,
     0x02, 0x18, 0x80,
-    0x02, 0x4e, 0x00,
-    0x03, 0x4f, 0x00, 0x00,
     BUSY_WAIT,
     0, // end
 }; /* epd29z_init_full */
@@ -2828,6 +2806,93 @@ const uint8_t epd368_init_part[] PROGMEM =
 }; // epd368_init_part
 
 // 1-bit full update mode
+const uint8_t epd426b_init_full[] PROGMEM =
+{
+    1, SSD1608_SW_RESET,
+    BUSY_WAIT,
+    4, 0x01, 0xdf, 0x01, 0x02,
+    2, 0x11, 0x03,
+    5, 0x44, 0x00, 0x00, 0x1f, 0x03,
+    5, 0x45, 0x00, 0x00, 0xdf, 0x01,
+    3, 0x4e, 0x00, 0x00,
+    3, 0x4f, 0x00, 0x00,
+    2, 0x3c, 0x01,
+    2, 0x18, 0x80,
+    11, 0x37, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+    2, 0x22, 0xcf,
+    2, 0x21, 0x00,
+    2, 0x3f, 0x07,
+    2, 0x03, 0x17,
+    4, 0x04, 0x41, 0xa8, 0x32,
+    2, 0x2c, 0x40,
+    6, 0x0c, 0xae, 0xc7, 0xc3, 0xc0, 0x40,
+    2, 0x46, 0xe7,
+    BUSY_WAIT,
+    2, 0x3c, 0xc0,
+    106, 0x32, // custom LUT
+	0x84, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x48, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x19, 0x0A, 0x19, 0x02, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00,
+	0x33, 0x33, 0x33, 0x33, 0x33,
+    0
+};
+
+const uint8_t epd426b_init_part[] PROGMEM =
+{
+    1, SSD1608_SW_RESET,
+    BUSY_WAIT,
+    4, 0x01, 0xdf, 0x01, 0x02,
+    2, 0x11, 0x03,
+    5, 0x44, 0x00, 0x00, 0x1f, 0x03,
+    5, 0x45, 0x00, 0x00, 0xdf, 0x01,
+    3, 0x4e, 0x00, 0x00,
+    3, 0x4f, 0x00, 0x00,
+    2, 0x3c, 0x01,
+    2, 0x18, 0x80,
+    11, 0x37, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00,
+    2, 0x22, 0xcf,
+    2, 0x21, 0x00,
+    2, 0x3f, 0x07,
+    2, 0x03, 0x17,
+    4, 0x04, 0x41, 0xa8, 0x32,
+    2, 0x2c, 0x40,
+    6, 0x0c, 0xae, 0xc7, 0xc3, 0xc0, 0x40,
+    2, 0x46, 0xe7,
+    BUSY_WAIT,
+    2, 0x3c, 0xc0,
+    106, 0x32, // custom LUT
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x19, 0x01, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 
+	0x33, 0x33, 0x33, 0x33, 0x33, 
+    0
+};
+
+// 1-bit full update mode
 const uint8_t epd426_init_full[] PROGMEM =
 {   
     0x01, SSD1608_SW_RESET, 
@@ -2838,12 +2903,13 @@ const uint8_t epd426_init_full[] PROGMEM =
     0x04, 0x01, 0xdf, 0x01, 0x02, // driver output control
 //    0x03, 0x21, 0x40, 0x00, // display update control
     0x02, 0x3c, 0x01, // border waveform
-    0x02, 0x11, 0x02, // data entry mode
-    0x05, 0x44, 0x1f, 0x03, 0x00, 0x00, // ram start/end
-    0x05, 0x45, 0x00, 0x00, 0xdf, 0x01,
-    0x03, 0x4e, 0x1f, 0x03,
-    0x03, 0x4f, 0x00, 0x00,
-    BUSY_WAIT, 
+    SET_ORIENTATION,
+//    0x02, 0x11, 0x02, // data entry mode
+//    0x05, 0x44, 0x1f, 0x03, 0x00, 0x00, // ram start/end
+//    0x05, 0x45, 0x00, 0x00, 0xdf, 0x01,
+//    0x03, 0x4e, 0x1f, 0x03,
+//    0x03, 0x4f, 0x00, 0x00,
+    BUSY_WAIT,
     0x00 // end of table
 };
 
@@ -3006,14 +3072,15 @@ const uint8_t epd42b_init_sequence_full[] PROGMEM =
     
     0x04, 0x01, 0x2b, 0x01, 0x00, // driver output control
     0x03, 0x21, 0x40, 0x00, // display update control
-    0x02, 0x11, 0x03, // data entry mode
-    0x03, 0x44, 0x00, 0x31, // ram start/end
-    0x05, 0x45, 0x00, 0x00, 0x2b, 0x01,
+    SET_ORIENTATION,
+//    0x02, 0x11, 0x03, // data entry mode
+//    0x03, 0x44, 0x00, 0x31, // ram start/end
+//    0x05, 0x45, 0x00, 0x00, 0x2b, 0x01,
     0x02, 0x3c, 0x05, // border waveform
     0x02, 0x18, 0x80, // read built-in temp sensor
     
-    0x02, 0x4e, 0x00,
-    0x03, 0x4f, 0x00, 0x00,
+//    0x02, 0x4e, 0x00,
+//    0x03, 0x4f, 0x00, 0x00,
     BUSY_WAIT,
     0x00 // end of table
 };
@@ -3138,12 +3205,12 @@ const uint8_t epd213_122x250_init_sequence_part[] PROGMEM = {
 //    0
 //};
 
-const uint8_t epd583_init_sequence_full[] PROGMEM = {
+const uint8_t epd583_init_full[] PROGMEM = {
     2, UC8151_PSR, 0x9f,
     6, UC8151_PWR, 0x03, 0x00, 0x2b, 0x2b, 0x2b,
     1, UC8151_PON,
     BUSY_WAIT,
-    4, UC8151_BTST, 0x17, 0x17, 0x17,
+    4, UC8151_BTST, 0x17, 0x17, 0x17, 
     2, UC8151_PFS, 0x00,
     2, UC8151_TSE, 0x00,
     2, UC8151_TCON, 0x22,
@@ -3152,6 +3219,197 @@ const uint8_t epd583_init_sequence_full[] PROGMEM = {
     5, UC8151_TRES, 0x02, 0x88, 0x01, 0xe0,
     2, UC8151_VDCS, 0x12,
     0
+};
+
+const uint8_t epd583_init_fast[] PROGMEM = {
+    0x05, UC8151_PWR, 0x07, 0x07, 0x3f, 0x3f,
+//    0x02, 0x82, 0x26, // VCOM DC
+    0x01, UC8151_PON, // power on
+    BUSY_WAIT,
+    0x02, UC8151_PSR, 0x3f, // from register
+    0x05, UC8151_TRES, 0x02, 136, 0x01, 0xe0,
+    0x03, UC8151_CDI, 0x29, 0x07, // VCOM Data interval
+    0x02, 0x15, 0x00,
+//    0x02, 0x30, 0x3c, // PLL (frame rate)
+    0x02, UC8151_TCON, 0x22,
+    0x2b, UC8151_LUT_VCOM, // VCOM LUT
+    0x00, 34, 1, 34, 1, 0x01,
+    0x00, 34, 1, 0, 0, 0x01, // These need to be 00 (off)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // and have the same number
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // of frames as the other
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // LUTs in this update
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x2b, UC8151_LUT_WW, // WW LUT
+    0x04, 34, 1, 34, 1, 0x01,
+    0x80, 34, 1, 0, 0, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x2b, UC8151_LUT_BW,
+    0x04, 34, 1, 34, 1, 0x01,
+    0x80, 34, 1, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x2b, UC8151_LUT_WB,
+    0x84, 34, 1, 34, 1, 0x01,
+    0x00, 34, 1, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x2b, UC8151_LUT_BB,
+    0x84, 34, 1, 34, 1, 0x01,
+    0x00, 34, 1, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x2b, UC8151_LUT_VCOM2,
+    0x00, 34, 1, 34, 1, 0x01,
+    0x00, 34, 1, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    BUSY_WAIT,
+    0x00 // end of table
+};
+
+const uint8_t epd583_init_part[] PROGMEM = {
+    0x05, UC8151_PWR, 0x07, 0x07, 0x3f, 0x3f,
+//    0x02, 0x82, 0x26, // VCOM DC
+    0x01, UC8151_PON, // power on
+    BUSY_WAIT,
+    0x02, UC8151_PSR, 0x3f, // from register
+    0x05, UC8151_TRES, 0x02, 136, 0x01, 0xe0,
+    0x03, UC8151_CDI, 0x29, 0x07, // VCOM Data interval
+    0x02, 0x15, 0x00,
+//    0x02, 0x30, 0x3c, // PLL (frame rate)
+    0x02, UC8151_TCON, 0x22,
+    0x2b, UC8151_LUT_VCOM, // VCOM LUT
+    0x00, 30, 1, 30, 1, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x2b, UC8151_LUT_WW, // WW LUT
+    0x00, 30, 1, 30, 1, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x2b, UC8151_LUT_BW,
+    0x80, 30, 1, 30, 1, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x2b, UC8151_LUT_WB,
+    0x04, 30, 1, 30, 1, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   0x2b, UC8151_LUT_BB,
+    0x00, 30, 1, 30, 1, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x2b, UC8151_LUT_VCOM2,
+    0x00, 30, 1, 30, 1, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    BUSY_WAIT,
+    0x00 // end of table
+};
+const uint8_t epd583g_init_full[] PROGMEM = {
+    6, UC8151_PWR, 0x07, 0x07, 0x3f, 0x3f, 0x03,
+    1, UC8151_PON,
+    BUSY_WAIT,
+    2, UC8151_PSR, 0x3f,
+    5, UC8151_TRES, 0x02, 136, 0x01, 0xe0,
+    2, 0x15, 0x00,
+    3, UC8151_CDI, 0x00, 0x07,
+    2, UC8151_TCON, 0x22,
+    3, 0x50, 0x00, 0x07, // VCOM LUTBD (00=white border, 30=black border)
+    2, UC8151_VDCS, 0x12, // VCOM DC
+    43, 0x20, // LUT 0~3 gray
+    0x00, 0x0A, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x14, 0x14, 0x0a, 0x00, 0x01,
+    0x00, 0x19, 0x0f, 0x00, 0x00, 0x01,
+    0x00, 0x20, 0x01, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    43, 0x21, // WW
+    0x40, 0x0A, 0x00, 0x00, 0x00, 0x01,
+    0x90, 0x14, 0x14, 0x0a, 0x00, 0x01,
+    0x20, 0x14, 0x0A, 0x0a, 0x00, 0x01,
+    0xA0, 0x13, 0x0A, 0x04, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    43, 0x23, // BW
+    0x40, 0x0A, 0x00, 0x00, 0x00, 0x01,
+    0x90, 0x19, 0x19, 0x00, 0x00, 0x01,
+    0x10, 0x19, 0x0F, 0x00, 0x00, 0x01,
+    0x99, 0x11, 0x04, 0x06, 0x06, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    43, 0x22, // WB
+    0x40, 0x0A, 0x00, 0x00, 0x00, 0x01,
+    0x90, 0x19, 0x19, 0x00, 0x00, 0x01,
+    0x10, 0x19, 0x0F, 0x00, 0x00, 0x01,
+    0x99, 0x10, 0x06, 0x08, 0x03, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    43, 0x24, // BB
+    0x40, 0x0A, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x12, 0x12, 0x0e, 0x00, 0x01,
+    0x40, 0x12, 0x16, 0x00, 0x00, 0x01,
+    0x50, 0x23, 0x01, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    43, 0x25, // Border LUT
+    0x40, 0x0A, 0x00, 0x00, 0x00, 0x01,
+    0x90, 0x14, 0x14, 0x00, 0x00, 0x01,
+    0x10, 0x14, 0x0A, 0x00, 0x00, 0x01,
+    0xA0, 0x13, 0x0A, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    2, 0xe0, 0x00, // CCSET
+    2, 0x41, 0x00, // TSE
+    1, 0x04, // Power on
+    BUSY_WAIT,
+    0 // end
 };
 
 const uint8_t epd42_init_sequence_full[] PROGMEM = {
@@ -3510,11 +3768,13 @@ const uint8_t epd397_init_full[] PROGMEM = {
     6, 0x0c, 0xae, 0xc7, 0xc3, 0xc0, 0x80,
     4, 0x01, 0xdf, 0x01, 0x02, // driver output control (height-1)
     2, 0x3c, 0x01, // border color
-    2, 0x11, 0x01, // data entry mode
-    5, 0x44, 0x00, 0x00, 0x1f, 0x03, // set RAM x start/end
-    5, 0x45, 0xdf, 0x01, 0x00, 0x00, // set RAM y start/end
-    3, 0x4e, 0x00, 0x00, // RAM x address
-    3, 0x4f, 0x00, 0x00, // RAM y address
+    SET_ORIENTATION,
+//    2, 0x11, 0x01, // data entry mode
+//    5, 0x44, 0x00, 0x00, 0x1f, 0x03, // set RAM x start/end
+//    5, 0x45, 0xdf, 0x01, 0x00, 0x00, // set RAM y start/end
+//    3, 0x4e, 0x00, 0x00, // RAM x address
+//    3, 0x4f, 0x00, 0x00, // RAM y address
+    3, 0x21, 0x40, 0x00, // display update control
     BUSY_WAIT,
     0 // end
 };
@@ -3530,6 +3790,7 @@ const uint8_t epd397_init_fast[] PROGMEM = {
     5, 0x45, 0xdf, 0x01, 0x00, 0x00, // set RAM y start/end
     3, 0x4e, 0x00, 0x00, // RAM x address
     3, 0x4f, 0x00, 0x00, // RAM y address
+    3, 0x21, 0x40, 0x00, // display udpate control
     BUSY_WAIT,
     2, 0x18, 0x80,
     2, 0x1a, 0x6a, // fast mode (1.5s)
@@ -3548,6 +3809,7 @@ const uint8_t epd397_init_part[] PROGMEM = {
     5, 0x45, 0xdf, 0x01, 0x00, 0x00, // set RAM y start/end
     3, 0x4e, 0x00, 0x00, // RAM x address
     3, 0x4f, 0x00, 0x00, // RAM y address
+    3, 0x21, 0, 0, // display update control
     BUSY_WAIT,
     0 // end
 };
@@ -3559,7 +3821,7 @@ const uint8_t epd75_init_sequence_full[] PROGMEM = {
     2, UC8151_PSR, 0x1f,
     5, UC8151_TRES, 0x03, 0x20, 0x01, 0xe0,
     2, 0x15, 0x00, 
-    3, UC8151_CDI, 0x21, 0x07,
+    3, UC8151_CDI, 0x29, 0x07,
     2, UC8151_TCON, 0x22,
     0
 };
@@ -3624,6 +3886,53 @@ const uint8_t epd73_init[] PROGMEM = {
     2, 0xe6, 0x00, // TSSET
     1, UC8151_PON, // power on
     BUSY_WAIT,
+    0
+};
+// Spectra 6 13.3" 1200x1600 6-color init sequence
+const uint8_t epd133_spectra_init[] PROGMEM = {
+    CMD_CS1, // main controller only
+    10, 0x74, 0x00, 0x0C, 0x0C, 0xD9, 0xDD, 0xDD, 0x15, 0x15, 0x55, // undocumented cmd
+    EPD_DELAY, 10, // 10ms delay
+    CMD_CS1_CS2, // send the following commands to both controllers
+    7, 0xf0, 0x49, 0x55, 0x13, 0x5D, 0x05, 0x10, // undocumented cmd
+    EPD_DELAY, 10, // 10ms delay
+    3, 0x00, 0xDF, 0x69, // PSR_V
+    EPD_DELAY, 10, // 10ms delay
+    CMD_CS1, // main only
+    4, 0xa5, 0x44, 0x54, 0x00, // DCDC
+    EPD_DELAY, 10, // 10ms delay
+    CMD_CS1_CS2, // both
+    2, 0x50, 0x37, // CDI
+    EPD_DELAY, 10, // 10ms delay
+    3, 0x60, 0x03, 0x03, // R60?
+    EPD_DELAY, 10, // 10ms delay
+    2, 0x86, 0x10, // r86?
+    EPD_DELAY, 10, // 10ms delay
+    2, 0xe3, 0x22, // PWS (power saving)
+    EPD_DELAY, 10, // 10ms delay
+    5, 0x61, 0x04, 0xB0, 0x03, 0x20, // TRES
+    EPD_DELAY, 10, // 10ms delay
+    CMD_CS1, // main only
+    7, 0x01, 0x0F, 0x00, 0x28, 0x2C, 0x28, 0x38, // PWR
+    EPD_DELAY, 10,
+    2, 0xb6, 0x07, // RB6?
+    EPD_DELAY, 10,
+    3, 0x06, 0xE0, 0x20, // BTST_P_V
+    EPD_DELAY, 10,
+    2, 0xb7, 0x01, // RB7?
+    EPD_DELAY, 10,
+    3, 0x05, 0xE0, 0x20, // BTST_N_V
+    EPD_DELAY, 10,
+    2, 0xb0, 0x01, // RB0?
+    EPD_DELAY, 10,
+    2, 0xb1, 0x02, // RB1?
+    EPD_DELAY, 10,
+    CMD_CS1_CS2, // both
+    1, 0x04, // Power On
+    BUSY_WAIT,
+    2, 0xe0, 0x01, // CCSET
+    BUSY_WAIT,
+    CMD_CS1,
     0
 };
 // Spectra 6 (GDEP073E01) 800x480 7-color init sequence
@@ -3796,7 +4105,7 @@ const EPD_PANEL panelDefs[] PROGMEM = {
     {184, 360, 0, epd266yr_init_sequence_full, NULL, NULL, BBEP_4COLOR, BBEP_CHIP_UC81xx, u8Colors_4clr_v2}, // EP266YR_184x360
     {128, 296, 0, epd29yr_init_sequence_full, NULL, NULL, BBEP_4COLOR, BBEP_CHIP_UC81xx, u8Colors_4clr}, // EP29YR_128x296
     {168, 384, 0, epd29yrh_init_sequence_full, NULL, NULL, BBEP_4COLOR, BBEP_CHIP_UC81xx ,u8Colors_4clr}, // EP29YR_168x384
-    {648, 480, 0, epd583_init_sequence_full, NULL, NULL, 0, BBEP_CHIP_UC81xx, u8Colors_2clr}, // EP583_648x480
+    {648, 480, 0, epd583_init_full, epd583_init_fast, epd583_init_part, BBEP_NEEDS_EXTRA_INIT, BBEP_CHIP_UC81xx, u8Colors_2clr}, // EP583_648x480
     {128, 296, 0, epd293_init_sequence_full, epd293_init_sequence_fast, epd296_init_sequence_part, BBEP_PARTIAL2, BBEP_CHIP_SSD16xx, u8Colors_2clr}, // EP296_128x296 Waveshare 2.9" V2 B/W
     {152, 296, 0, epd26r_init_sequence_full, NULL, NULL, BBEP_3COLOR, BBEP_CHIP_SSD16xx, u8Colors_3clr}, // EP26R_152x296 Solum ESL harvested 2.6" panel B/W/R
 //    {540, 960, 0, (const uint8_t *)epd47_it8951_init, NULL, NULL, 0, BBEP_CHIP_IT8951}, // EP47_540x960 = M5Paper (original)
@@ -3828,8 +4137,7 @@ const EPD_PANEL panelDefs[] PROGMEM = {
     {184, 360, 0, epd266yr_init_full, epd266yr_init_fast, NULL, BBEP_4COLOR, BBEP_CHIP_UC81xx, u8Colors_4clr_v2}, // EP266YR2_184x360
 // 60
     {400, 300, 0, epd42yr_init_full, epd42yr_init_fast, NULL, BBEP_4COLOR, BBEP_CHIP_UC81xx, u8Colors_4clr_v2}, // EP42YR_400x300
-    {400, 300, 0, epd42yr2_init_full, NULL, NULL, BBEP_4COLOR, BBEP_CHIP_UC81xx, u8Colors_4clr_v2}, // EP42YR2_400x300 -- to work with solum 4.2" ESL
-    //    {792, 272, 0, epd579yr_init_full, epd579yr_init_fast, NULL, BBEP_4COLOR, BBEP_CHIP_UC81xx, u8Colors_4clr_v2}, // EP579YR_792x272
+//    {792, 272, 0, epd579yr_init_full, epd579yr_init_fast, NULL, BBEP_4COLOR, BBEP_CHIP_UC81xx, u8Colors_4clr_v2}, // EP579YR_792x272
     {160, 296, 0, epd215yr_init_full, epd215yr_init_full, NULL, BBEP_4COLOR, BBEP_CHIP_UC81xx, u8Colors_4clr_v2}, // EP215YR_160x296
     {680, 480, 0, epd1085_init_full, NULL, NULL, 0, BBEP_CHIP_UC81xx, u8Colors_2clr}, // EP1085_1360x480
     {240, 320, 0, epd31_init_full, epd31_init_fast, epd31_init_part, 0, BBEP_CHIP_UC81xx, u8Colors_2clr}, // EP31_240x320
@@ -3844,7 +4152,10 @@ const EPD_PANEL panelDefs[] PROGMEM = {
     {400, 600, 0, epd40_spectra_init, NULL, NULL, BBEP_7COLOR, BBEP_CHIP_UC81xx, u8Colors_spectra}, // EP40_SPECTRA_400x600 GDEP040E01 Spectra 6 4" 400x600
     {176, 264, 0, badger2350_init_full, badger2350_init_fast, badger2350_init_part, BBEP_NEEDS_EXTRA_INIT, BBEP_CHIP_SSD16xx, u8Colors_2clr}, // EP27_176x264
     {176, 264, 0, badger2350g_init_full, badger2350g_init_fast, NULL, BBEP_NEEDS_EXTRA_INIT | BBEP_4GRAY, BBEP_CHIP_SSD16xx, u8Colors_4gray},// EP27_176x264_4GRAY
-};
+    {800, 480, 0, epd426b_init_full, epd426b_init_full, epd426b_init_part, BBEP_NEEDS_EXTRA_INIT, BBEP_CHIP_SSD16xx, u8Colors_2clr}, // EP426B_800x480
+    {648, 480, 0, epd583g_init_full, NULL, NULL, BBEP_4GRAY | BBEP_NEEDS_EXTRA_INIT, BBEP_CHIP_UC81xx, u8Colors_4gray}, // EP583_648x480_4GRAY
+    {1200, 1600, 0, epd133_spectra_init, NULL, NULL, BBEP_7COLOR | BBEP_SPLIT_BUFFER, BBEP_CHIP_UC81xx, u8Colors_spectra}, // EP133_SPECTRA_1200x1600 Spectra6 13.3" 1200x1600
+ };
 //
 // Set the e-paper panel type
 // This must be called before any other bb_epaper functions
@@ -3867,6 +4178,7 @@ int bbepSetPanelType(BBEPDISP *pBBEP, int iPanel)
             break;
     }
 
+    pBBEP->cs_mode = CMD_CS1;
     pBBEP->x_offset = panelDefs[iPanel].x_offset;
     pBBEP->chip_type = panelDefs[iPanel].chip_type;
     pBBEP->iFlags = panelDefs[iPanel].flags;
@@ -3982,6 +4294,7 @@ void bbepWaitBusy(BBEPDISP *pBBEP)
 {
     int iTimeout = 0;
     int iMaxTime = 5000; // for B/W panels
+    //long l = millis();
 
     if (!pBBEP) return;
     if (pBBEP->iBUSYPin == 0xff) return;
@@ -3989,7 +4302,7 @@ void bbepWaitBusy(BBEPDISP *pBBEP)
     uint8_t busy_idle =  (pBBEP->chip_type == BBEP_CHIP_UC81xx) ? HIGH : LOW;
     delay(1); // some panels need a short delay before testing the BUSY line
     if (pBBEP->iFlags & (BBEP_3COLOR | BBEP_4COLOR | BBEP_7COLOR)) {
-        iMaxTime = 30000; // multi-color panels can take a long time
+        iMaxTime = 35000; // multi-color panels can take a long time
     }
     while (iTimeout < iMaxTime) {
         if (digitalRead(pBBEP->iBUSYPin) == busy_idle) break;
@@ -4009,14 +4322,16 @@ void bbepWaitBusy(BBEPDISP *pBBEP)
      *
      * Log-only: the signature is unchanged and no caller behaviour changes, so this cannot
      * itself break a working panel. Returning a status and making every call site handle it
-     * is the real fix and belongs upstream. */
-#ifdef ESP_PLATFORM
+     * is the real fix and belongs upstream.
+     *
+     * RE-APPLIED at the 5dccfbb re-vendor: still unfixed upstream. */
     if (iTimeout >= iMaxTime) {
-        ESP_LOGW("bbep", "BUSY wait TIMED OUT after %d ms (pin %d never read %s) -- "
-                         "the panel is not responding; commands may not be reaching it",
-                 iMaxTime, (int)pBBEP->iBUSYPin, busy_idle ? "HIGH" : "LOW");
-    }
+#ifdef ESP_PLATFORM
+        ESP_LOGW("bb_epaper", "bbepWaitBusy: BUSY still asserted after %d ms -- continuing anyway",
+                 iMaxTime);
 #endif
+    }
+    //Serial0.printf("total wait time = %dms\n", (int)(millis() - l));
 } /* bbepWaitBusy() */
 //
 // Return if panel is busy
@@ -4039,7 +4354,7 @@ void bbepWakeUp(BBEPDISP *pBBEP)
     if (pBBEP->iRSTPin == 0xff) return;
 
     digitalWrite(pBBEP->iRSTPin, LOW);
-    delay(10);
+    delay(20);
     digitalWrite(pBBEP->iRSTPin, HIGH);
     delay(20);
     bbepWaitBusy(pBBEP);
@@ -4052,11 +4367,17 @@ void bbepSetAddrWindow(BBEPDISP *pBBEP, int x, int y, int cx, int cy)
     uint8_t uc[12];
     int i, tx, ty;
 
-// DEBUG - for TRMNL mini 180 degree rotated display
-    if (pBBEP->type == EP397_800x480 || pBBEP->type == EP397_800x480_4GRAY || pBBEP->type == EP426_800x480 || pBBEP->type == EP426_800x480_4GRAY) return;
     if (!pBBEP) return;
     if (pBBEP->iFlags & (BBEP_4COLOR | BBEP_7COLOR)) return;
+
+    if (x == 0 && y == 0 && cx == pBBEP->native_width && cy == pBBEP->native_height) {
+//        Serial.println("Skipping bbepSetAddrWindow");
+        return; // no need to set the address window
+    }
     
+    // DEBUG - for TRMNL mini 180 degree rotated display
+//        if (pBBEP->type == EP397_800x480 || pBBEP->type == EP397_800x480_4GRAY || pBBEP->type == EP426_800x480 || pBBEP->type == EP426_800x480_4GRAY) return;
+
 #ifdef FUTURE
     if (pBBEP->chip_type == BBEP_CHIP_IT8951) {
         uint16_t u16Temp[6];
@@ -4155,12 +4476,10 @@ void bbepSleep(BBEPDISP *pBBEP, int bDeep)
     if (!pBBEP) return;
     if (pBBEP->chip_type == BBEP_CHIP_UC81xx) {
         if (pBBEP->iFlags & BBEP_7COLOR) {
-            bbepCMD2(pBBEP, UC8151_POFF, 0x00); // power off
-            if (pBBEP->iFlags & BBEP_SPLIT_BUFFER) { // dual cable EPD
-               pBBEP->iCSPin = pBBEP->iCS2Pin;
-               bbepCMD2(pBBEP, UC8151_POFF, 0x00); // second controller
-               pBBEP->iCSPin = pBBEP->iCS1Pin;
+            if (pBBEP->iFlags & BBEP_SPLIT_BUFFER) {
+                pBBEP->cs_mode = CMD_CS1_CS2;
             }
+            bbepCMD2(pBBEP, UC8151_POFF, 0x00); // power off
         } else if (pBBEP->iFlags & BBEP_4COLOR) {
             bbepCMD2(pBBEP, 0x02, 0x00); // power off
             bbepWaitBusy(pBBEP);
@@ -4240,6 +4559,107 @@ void bbepMakeLUTs(BBEPDISP *pBBEP)
     } else { // SSD16xx
     }
 } /* bbepMakeLUTs() */
+
+//
+// Set the orienation/size of the panel
+// so that we can support optional 180 degree rotation
+// without hacking the init sequences of all panels
+//
+void bbepSetFlip180(BBEPDISP *pBBEP)
+{
+    uint8_t u8[4];
+    
+    if (pBBEP->chip_type == BBEP_CHIP_UC81xx) {
+    } else {
+        // SSD16xx
+        if (pBBEP->flip180) {
+            if (pBBEP->native_width == 800) { // non-shifted x values
+                bbepCMD2(pBBEP, 0x11, 0x1);
+                bbepWriteData(pBBEP, u8, 1);
+                bbepWriteCmd(pBBEP, 0x44); // x RAM start/end
+                u8[0] = u8[1] = 0;
+                u8[2] = (uint8_t)(pBBEP->native_width-1);
+                u8[3] = (uint8_t)((pBBEP->native_width-1)>>8);
+                bbepWriteData(pBBEP, u8, 4);
+                
+                bbepWriteCmd(pBBEP, 0x4e); // x RAM counter
+                u8[0] = u8[1] = 0;
+                bbepWriteData(pBBEP, u8, 2);
+                bbepWriteCmd(pBBEP, 0x45); // y RAM start/end
+                u8[0] = (uint8_t)(pBBEP->native_height-1);
+                u8[1] = (uint8_t)((pBBEP->native_height-1)>>8);
+                u8[2] = u8[3] = 0;
+                bbepWriteData(pBBEP, u8, 4);
+
+                bbepWriteCmd(pBBEP, 0x4f); // y RAM counter
+                u8[0] = (uint8_t)(pBBEP->native_height-1);
+                u8[1] = (uint8_t)((pBBEP->native_height-1)>>8);
+                bbepWriteData(pBBEP, u8, 2);
+           } else {
+                bbepCMD2(pBBEP, 0x11, 0x0);
+                bbepWriteCmd(pBBEP, 0x44); // x RAM start/end
+                u8[0] = (pBBEP->native_width-1)/8;
+                u8[1] = 0;
+                bbepWriteData(pBBEP, u8, 2);
+                
+                bbepWriteCmd(pBBEP, 0x4e); // x RAM counter
+                u8[0] = (pBBEP->native_width-1)/8;
+                bbepWriteData(pBBEP, u8, 1);
+               bbepWriteCmd(pBBEP, 0x45); // y RAM start/end
+               u8[0] = (uint8_t)(pBBEP->native_height-1);
+               u8[1] = (uint8_t)((pBBEP->native_height-1)>>8);
+               u8[2] = u8[3] = 0;
+               bbepWriteData(pBBEP, u8, 4);
+
+               bbepWriteCmd(pBBEP, 0x4f); // y RAM counter
+               u8[0] = (uint8_t)(pBBEP->native_height-1);
+               u8[1] = (uint8_t)((pBBEP->native_height-1)>>8);
+               bbepWriteData(pBBEP, u8, 2);
+            }
+        } else { // orientation 0
+            if (pBBEP->native_width == 800) { // non-shifted version
+                bbepCMD2(pBBEP, 0x11, 0x2);
+                bbepWriteCmd(pBBEP, 0x44); // x RAM start/end
+                u8[0] = (uint8_t)(pBBEP->native_width-1);
+                u8[1] = (uint8_t)((pBBEP->native_width-1)>>8);
+                u8[2] = u8[3] = 0;
+                bbepWriteData(pBBEP, u8, 4);
+                
+                bbepWriteCmd(pBBEP, 0x4e); // x RAM counter
+                u8[0] = (uint8_t)(pBBEP->native_width-1);
+                u8[1] = (uint8_t)((pBBEP->native_width-1)>>8);
+                bbepWriteData(pBBEP, u8, 2);
+                bbepWriteCmd(pBBEP, 0x45); // y RAM start/end
+                u8[0] = u8[1] = 0;
+                u8[2] = (uint8_t)(pBBEP->native_height-1);
+                u8[3] = (uint8_t)((pBBEP->native_height-1)>>8);
+                bbepWriteData(pBBEP, u8, 4);
+
+                bbepWriteCmd(pBBEP, 0x4f); // y RAM counter
+                u8[0] = u8[1] = 0;
+                bbepWriteData(pBBEP, u8, 2);
+            } else {
+                bbepCMD2(pBBEP, 0x11, 0x3);
+                bbepWriteCmd(pBBEP, 0x44); // x RAM start/end
+                u8[0] = 0; u8[1] = (pBBEP->native_width-1)/8;
+                bbepWriteData(pBBEP, u8, 2);
+                
+                bbepWriteCmd(pBBEP, 0x4e); // x RAM counter
+                u8[0] = 0;
+                bbepWriteData(pBBEP, u8, 1);
+                bbepWriteCmd(pBBEP, 0x45); // y RAM start/end
+                u8[0] = u8[1] = 0;
+                u8[2] = (uint8_t)(pBBEP->native_height-1);
+                u8[3] = (uint8_t)((pBBEP->native_height-1)>>8);
+                bbepWriteData(pBBEP, u8, 4);
+
+                bbepWriteCmd(pBBEP, 0x4f); // y RAM counter
+                u8[0] = u8[1] = 0;
+                bbepWriteData(pBBEP, u8, 2);
+            }
+        }
+    } // SSD16xx
+} /* bbepSetFlip180() */
 //
 // More efficient means of sending commands, data and busy-pauses
 //
@@ -4257,15 +4677,21 @@ void bbepSendCMDSequence(BBEPDISP *pBBEP, const uint8_t *pSeq)
             bbepMakeLUTs(pBBEP);
         } else if (iLen == BUSY_WAIT) {
             bbepWaitBusy(pBBEP);
+        } else if (iLen == EPD_DELAY) {
+            delay(*s++);
         } else if (iLen == EPD_RESET) {
             bbepWakeUp(pBBEP);
+        } else if (iLen == SET_ORIENTATION) {
+            bbepSetFlip180(pBBEP);
+        } else if (iLen == CMD_CS1 || iLen == CMD_CS2 || iLen == CMD_CS1_CS2) {
+            pBBEP->cs_mode = iLen; // set cs mode 
         } else {
-            bbepWriteCmd(pBBEP, s[0]);
-            s++;
             if (iLen > 1) {
-                bbepWriteData(pBBEP, s, iLen-1);
-                s += (iLen-1);
+               bbepWriteCmdData(pBBEP, s[0], &s[1], iLen-1);
+            } else {
+               bbepWriteCmd(pBBEP, s[0]);
             }
+            s += iLen;
         }
     } // while more commands to send
 } /* bbepSendCMDSequence() */
@@ -4417,12 +4843,6 @@ int bbepRefresh(BBEPDISP *pBBEP, int iMode)
             if (!(pBBEP->iFlags & BBEP_NEEDS_EXTRA_INIT)) { // already sent?
                 bbepSendCMDSequence(pBBEP, pBBEP->pInitFull);
             }
-            if (pBBEP->iFlags & BBEP_SPLIT_BUFFER) {
-               // Send the same sequence to the second controller
-               pBBEP->iCSPin = pBBEP->iCS2Pin;
-               bbepSendCMDSequence(pBBEP, pBBEP->pInitFull);
-               pBBEP->iCSPin = pBBEP->iCS1Pin;
-            }
             break;
         case REFRESH_FAST:
             if (!pBBEP->pInitFast) { // fall back to full
@@ -4447,13 +4867,13 @@ int bbepRefresh(BBEPDISP *pBBEP, int iMode)
     } // switch on mode
     if (pBBEP->chip_type == BBEP_CHIP_UC81xx) {
         if (pBBEP->iFlags & (BBEP_4GRAY | BBEP_4COLOR | BBEP_7COLOR)) {
-            bbepCMD2(pBBEP, UC8151_DRF, 0x00);
             if (pBBEP->iFlags & BBEP_SPLIT_BUFFER) {
-               // Send the same sequence to the second controller
-               pBBEP->iCSPin = pBBEP->iCS2Pin;
-               bbepCMD2(pBBEP, UC8151_DRF, 0);
-               pBBEP->iCSPin = pBBEP->iCS1Pin;
+                pBBEP->cs_mode = CMD_CS1_CS2;
+            } else {
+                pBBEP->cs_mode = CMD_CS1;
             }
+            uint8_t u8Temp = (pBBEP->type == EP133_SPECTRA_1200x1600) ? 0x01 : 0x0;
+            bbepWriteCmdData(pBBEP, UC8151_DRF, &u8Temp, 1);
         } else {
             bbepWriteCmd(pBBEP, UC8151_PTOU); // partial out (update the entire panel, not just the last memory window)
             bbepWriteCmd(pBBEP, UC8151_DRF);
@@ -4462,7 +4882,7 @@ int bbepRefresh(BBEPDISP *pBBEP, int iMode)
         const uint8_t u8CMD[4] = {0xf7, 0xc7, 0xff, 0xc0}; // normal, fast, partial, partial2
         const uint8_t u8CMDz[4] = {0xf4, 0xc7, 0xfc, 0}; // special set for SSD1680
         const uint8_t u8CMDz2[4] = {0xf4, 0xc7, 0xdc, 0}; // special set #2 for SSD1680
-        const uint8_t u8CMDz3[4] = {0xf7, 0xd7, 0xff, 0}; // special set #3
+        const uint8_t u8CMDz3[4] = {0xf7, 0xd7, 0xfc, 0}; // special set #3
         if (pBBEP->iFlags & (BBEP_4GRAY | BBEP_3COLOR | BBEP_4COLOR)) {
             iMode = REFRESH_FAST;
         } // 3/4-color = 0xc7
@@ -4625,60 +5045,58 @@ void bbepWriteImage4bppSpecial(BBEPDISP *pBBEP, uint8_t ucCMD)
 } /* bbepWriteImage4bppSpecial() */
 
 // special case for panels with 2 controllers
-void bbepWriteImage4bppDual(BBEPDISP *pBBEP, uint8_t ucCMD)
+void bbepWriteImage4bppDual(BBEPDISP *pBBEP)
 {
-    int tx, ty, iPitch;
+    int iPass, tx, ty, iPitch;
     uint8_t uc, *s, *d;
-        
-    if (ucCMD) {
-        pBBEP->iCSPin = pBBEP->iCS1Pin;
-        bbepWriteCmd(pBBEP, ucCMD); // start write
-        pBBEP->iCSPin = pBBEP->iCS2Pin;
-        bbepWriteCmd(pBBEP, ucCMD);
-    }
+
+    pBBEP->cs_mode = CMD_CS_NONE; // manual control
+    for (iPass = 0; iPass < 2; iPass++) {
+        if (iPass == 0) {
+            digitalWrite(pBBEP->iCSPin, LOW); // activate primary
+            digitalWrite(pBBEP->iCS2Pin, HIGH);
+        } else {
+            digitalWrite(pBBEP->iCSPin, HIGH); // activate secondary
+            digitalWrite(pBBEP->iCS2Pin, LOW);
+        }
+        bbepWriteCmd(pBBEP, 0x10); // DTM - write data to RAM
+
     if (pBBEP->iOrientation == 0) {
         iPitch = pBBEP->native_width / 2;
-        s = pBBEP->ucScreen;
+        s = pBBEP->ucScreen; // left half
+        if (iPass == 1) s += iPitch/2; // right half
         for (ty=0; ty<pBBEP->height; ty++) {
-            pBBEP->iCSPin = pBBEP->iCS1Pin;
             bbepWriteData(pBBEP, s, iPitch/2);
-            pBBEP->iCSPin = pBBEP->iCS2Pin;
-            bbepWriteData(pBBEP, &s[iPitch/2], iPitch/2);
-            s += iPitch; // 2 pixels per byte
+            s += iPitch;
         } // for ty
     } else if (pBBEP->iOrientation == 180) {
         iPitch = pBBEP->native_width / 2;
         for (ty=pBBEP->height-1; ty>=0; ty--) {
             s = &pBBEP->ucScreen[(ty * iPitch) + iPitch - 1];
+            if (iPass == 1) s -= (iPitch/2);
             // reverse the pixel direction
-            for (tx=0; tx<pBBEP->native_width; tx+=2) {
+            for (tx=0; tx<pBBEP->native_width/2; tx+=2) {
                 uc = *s--;
                 uc = (uc >> 4) | (uc << 4); // swap nibbles
                 u8Cache[tx/2] = uc;
             }
-            pBBEP->iCSPin = pBBEP->iCS1Pin;
             bbepWriteData(pBBEP, u8Cache, iPitch/2);
-            pBBEP->iCSPin = pBBEP->iCS2Pin;
-            bbepWriteData(pBBEP, &u8Cache[iPitch/2], iPitch/2);
         } // for ty
     } else if (pBBEP->iOrientation == 90) {
         iPitch = pBBEP->native_height / 2;
         for (tx=0; tx<pBBEP->width; tx++) {
             d = u8Cache;
-            for (ty=pBBEP->height-1; ty > 0; ty-=2) {
+            for (ty=(pBBEP->height/2)-1; ty > 0; ty-=2) {
                 s = &pBBEP->ucScreen[(tx>>1) + (ty * iPitch)];
+                if (iPass == 1) s += (pBBEP->height/2) * iPitch;
                 if (tx & 1) {
                     uc = (s[0] << 4) | (s[-iPitch] & 0x0f);
                 } else {
                     uc = (s[0] & 0xf0) | (s[-iPitch] >> 4);
                 }
-                s -= iPitch*2;
-                *d++ = uc; // store 4 pixels
+                *d++ = uc; // store 2 pixels
             } // for ty
-            pBBEP->iCSPin = pBBEP->iCS1Pin;
             bbepWriteData(pBBEP, u8Cache, pBBEP->height/4);
-            pBBEP->iCSPin = pBBEP->iCS2Pin;
-            bbepWriteData(pBBEP, &u8Cache[pBBEP->height/4], pBBEP->height/4);
         } // for tx
     } else if (pBBEP->iOrientation == 270) {
         iPitch = pBBEP->native_height / 2;
@@ -4686,21 +5104,21 @@ void bbepWriteImage4bppDual(BBEPDISP *pBBEP, uint8_t ucCMD)
             d = u8Cache;
             for (ty=0; ty < pBBEP->height; ty+=2) {
                 s = &pBBEP->ucScreen[(tx>>1) + (ty * iPitch)];
+                if (iPass == 1) s += (pBBEP->height/2) * iPitch;
                 if (tx & 1) {
                     uc = (s[0] << 4) | (s[iPitch] & 0x0f);
                 } else {
                     uc = (s[0] & 0xf0) | (s[iPitch] >> 4);
                 }
-                s += iPitch*2;
                 *d++ = uc; // store 4 pixels
             } // for ty
-            pBBEP->iCSPin = pBBEP->iCS1Pin;
             bbepWriteData(pBBEP, u8Cache, pBBEP->height/4);
-            pBBEP->iCSPin = pBBEP->iCS2Pin;
-            bbepWriteData(pBBEP, &u8Cache[pBBEP->height/4], pBBEP->height/4);     
         } // for tx
     }
-    pBBEP->iCSPin = pBBEP->iCS1Pin; // reset CS to #1
+    } // for each pass
+    digitalWrite(pBBEP->iCSPin, HIGH);
+    digitalWrite(pBBEP->iCS2Pin, HIGH);
+    pBBEP->cs_mode = CMD_CS1;
 } /* bbepWriteImage4bppDual() */
 
 void bbepWriteImage4bpp(BBEPDISP *pBBEP, uint8_t ucCMD)
@@ -5150,8 +5568,8 @@ int bbepWritePlane(BBEPDISP *pBBEP, int iPlane, int bInvert)
         return BBEP_SUCCESS;
     }
     if (pBBEP->iFlags & BBEP_7COLOR) {
-        if (pBBEP->iFlags & BBEP_SPLIT_BUFFER) { // dual cable EPD
-           bbepWriteImage4bppDual(pBBEP, 0x10);
+        if (pBBEP->iFlags & BBEP_SPLIT_BUFFER) { // dual controller EPD
+           bbepWriteImage4bppDual(pBBEP);
         } else {
            bbepWriteImage4bpp(pBBEP, 0x10);
         }

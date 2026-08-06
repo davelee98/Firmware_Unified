@@ -77,12 +77,14 @@ void od_bbep_wake(BBEPDISP *pBBEP)
     if (pBBEP->iFlags & (BBEP_7COLOR | BBEP_4COLOR)) {
         /* These controllers cannot accept data until the full init sequence has been sent. */
         bbepSendCMDSequence(pBBEP, pBBEP->pInitFull);
-        if (pBBEP->iFlags & BBEP_SPLIT_BUFFER) {   /* dual-cable EPD: second controller */
-            pBBEP->iCSPin = pBBEP->iCS2Pin;
-            bbepSendCMDSequence(pBBEP, pBBEP->pInitFull);
-            pBBEP->iCSPin = pBBEP->iCS1Pin;        /* restore: not tidy-up, see the header */
-        }
     }
+    /* THE SPLIT-CONTROLLER CS DANCE IS GONE, and its absence is correct rather than an
+     * omission. At bb_epaper 5dccfbb the library replaced manual iCSPin mutation with the
+     * cs_mode field: the backend asserts CS1, CS2 or both per transfer, so a second
+     * bbepSendCMDSequence() aimed at the other controller is no longer how that is expressed --
+     * and iCS1Pin, which the old restore step used, no longer exists. Upstream's own
+     * BBEPAPER::wake() dropped the same block in the same revision; this now matches it
+     * exactly. */
 }
 
 void od_bbep_send_panel_init_full(BBEPDISP *pBBEP)
@@ -92,11 +94,7 @@ void od_bbep_send_panel_init_full(BBEPDISP *pBBEP)
      * od_bbep_wake() above -- 7COLOR only, not 7COLOR|4COLOR -- and that asymmetry is
      * reproduced deliberately rather than harmonised. */
     bbepSendCMDSequence(pBBEP, pBBEP->pInitFull);
-    if (pBBEP->iFlags & BBEP_7COLOR) {
-        if (pBBEP->iFlags & BBEP_SPLIT_BUFFER) {
-            pBBEP->iCSPin = pBBEP->iCS2Pin;
-            bbepSendCMDSequence(pBBEP, pBBEP->pInitFull);
-            pBBEP->iCSPin = pBBEP->iCS1Pin;
-        }
-    }
+    /* Same as od_bbep_wake(): the CS1/CS2 swap this used to carry depended on iCS1Pin, removed
+     * at 5dccfbb in favour of cs_mode. A caller that needs both controllers programmed sets
+     * cs_mode = CMD_CS1_CS2 before calling; it is no longer this function's business. */
 }

@@ -198,13 +198,41 @@ int digitalRead(int pin)
  * it becomes a silent no-op and SPI write failures vanish entirely. Neither is acceptable in
  * a layer whose failures are otherwise indistinguishable from a dead panel. Logging is rate-
  * limited to once per session because this is called thousands of times per frame. */
-static bool od_bbep_spi_write(BBEPDISP *pBBEP, const uint8_t *pBuf, int iLen)
+
+/* ------------------------------------------------------- cs_mode (bb_epaper 5dccfbb) ---
+ *
+ * The library gained a `cs_mode` field and DROPPED `iCS1Pin`. Dual-controller panels used to
+ * be driven by mutating iCSPin between iCS1Pin and iCS2Pin around each write; now iCSPin IS
+ * CS1, and cs_mode (CMD_CS1 / CMD_CS2 / CMD_CS1_CS2) selects which line(s) a transfer asserts.
+ * That is what makes the 13.3" Spectra6 1200x1600 (reTerminal E1004) addressable at all -- it
+ * is a split-controller panel, so CMD_CS1_CS2 has to assert BOTH.
+ *
+ * arduino_io.inl repeats this test at eight sites (bbepWriteCmd, bbepWriteData and
+ * bbepWriteCmdData, entry and exit). This backend drives CS in exactly ONE place --
+ * od_bbep_spi_write(), because spics_io_num is -1 and the peripheral never touches it -- so the
+ * gating lives here once and every writer inherits it. Same semantics, one site to get wrong.
+ *
+ * cs_mode == 0 is treated as CMD_CS1. A BBEPDISP zeroed by memset (which is how both targets
+ * create theirs) would otherwise assert NOTHING and the panel would sit silent. */
+static inline void od_bbep_cs_assert(BBEPDISP *pBBEP, int level)
 {
+    const uint8_t mode = pBBEP->cs_mode ? pBBEP->cs_mode : (uint8_t)CMD_CS1;
+    if (mode == CMD_CS1 || mode == CMD_CS1_CS2) {
+        digitalWrite(pBBEP->iCSPin, level);
+    }
+    if (mode == CMD_CS2 || mode == CMD_CS1_CS2) {
+        digitalWrite(pBBEP->iCS2Pin, level);
+    }
+}
+
+/* The transfer itself, WITHOUT touching CS. Split out so bbepWriteCmdData() can hold one CS
+ * assertion across a command byte and its payload -- see its comment. */
+static bool od_bbep_spi_write_nocs(BBEPDISP *pBBEP, const uint8_t *pBuf, int iLen)
+{
+    (void)pBBEP;
     if (s_spi == NULL || pBuf == NULL || iLen <= 0) {
         return false;
     }
-
-    digitalWrite(pBBEP->iCSPin, LOW);
     bool ok = true;
     while (iLen > 0) {
         /* max_transfer_sz below is 4096; chunk under it. Upstream chunks at 4000 with a
@@ -229,7 +257,17 @@ static bool od_bbep_spi_write(BBEPDISP *pBBEP, const uint8_t *pBuf, int iLen)
         iLen -= l;
         pBuf += l;
     }
-    digitalWrite(pBBEP->iCSPin, HIGH);
+    return ok;
+}
+
+static bool od_bbep_spi_write(BBEPDISP *pBBEP, const uint8_t *pBuf, int iLen)
+{
+    if (s_spi == NULL || pBuf == NULL || iLen <= 0) {
+        return false;
+    }
+    od_bbep_cs_assert(pBBEP, LOW);
+    const bool ok = od_bbep_spi_write_nocs(pBBEP, pBuf, iLen);
+    od_bbep_cs_assert(pBBEP, HIGH);
     return ok;
 }
 
@@ -329,6 +367,28 @@ void bbepWriteData(BBEPDISP *pBBEP, uint8_t *pData, int iLen)
     }
 }
 
+/* NEW IN THE CONTRACT at bb_epaper 5dccfbb: bb_ep.inl calls this directly (two sites), so a
+ * backend without it no longer links. Modelled on arduino_io.inl's version -- command byte with
+ * DC low, then the payload with DC high, all inside ONE CS assertion. That single-assertion
+ * property is the point: splitting it into bbepWriteCmd() + bbepWriteData() would toggle CS in
+ * between, and controllers that latch on the CS edge would see two transactions where the
+ * library intends one. */
+void bbepWriteCmdData(BBEPDISP *pBBEP, uint8_t cmd, uint8_t *pData, int iLen)
+{
+    if (!pBBEP->is_awake) {
+        bbepWakeUp(pBBEP);
+        pBBEP->is_awake = 1;
+    }
+    od_bbep_cs_assert(pBBEP, LOW);
+    digitalWrite(pBBEP->iDCPin, LOW);
+    od_bbep_spi_write_nocs(pBBEP, &cmd, 1);
+    digitalWrite(pBBEP->iDCPin, HIGH);
+    if (pData != NULL && iLen > 0) {
+        od_bbep_spi_write_nocs(pBBEP, pData, iLen);
+    }
+    od_bbep_cs_assert(pBBEP, HIGH);
+}
+
 void bbepCMD2(BBEPDISP *pBBEP, uint8_t cmd1, uint8_t cmd2)
 {
     bbepWriteCmd(pBBEP, cmd1);
@@ -337,7 +397,8 @@ void bbepCMD2(BBEPDISP *pBBEP, uint8_t cmd1, uint8_t cmd2)
 
 void bbepSetCS2(BBEPDISP *pBBEP, uint8_t cs)
 {
-    pBBEP->iCS1Pin = pBBEP->iCSPin;
+    /* No iCS1Pin assignment: the field was REMOVED at bb_epaper 5dccfbb because iCSPin is
+     * CS1. Keeping a stale copy here is how the two would drift. */
     pBBEP->iCS2Pin = cs;
     od_bbep_pin_output(cs);
     digitalWrite(cs, HIGH);   /* second controller deselected until addressed */

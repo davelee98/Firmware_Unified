@@ -49,10 +49,10 @@ a per-target fork. Do not "fix" this by moving it into `shared/`.
 |---|---|
 | Author | Larry Bank (BitBank Software, Inc.) |
 | Upstream | https://github.com/bitbank2/bb_epaper |
-| Vendored from | https://github.com/davelee98-creator/bb_epaper — **a fork, not upstream** |
-| Revision | `2ef09a1afaf4b7cec88a2821f50796a5280924ae` ("Fixed 4.26 again") |
+| Vendored from | https://github.com/davelee98-creator/bb_epaper — a fork, **now fast-forwarded to upstream and carrying no unique commits** (verified: `git log upstream/main..main` is empty) |
+| Revision | `5dccfbb` ("Added support for the Seeed reTerminal E1004 and its 13.3 Spectra6 1200x1600 panel") |
 | Licence | **GPL-3.0-or-later** |
-| Vendored | 2026-07-25, at the ESP32 phase-B import |
+| Vendored | 2026-07-25 at the ESP32 phase-B import; **re-vendored 2026-08-05** (was `2ef09a1`, "Fixed 4.26 again") |
 
 **Pruned on the way in — 6.6 MB → 492 KB.** Kept `src/`, the four `esp_idf/*.inl` backends,
 `CMakeLists.txt`, `LICENSE`, `README.md`. Dropped the example projects under `esp_idf/`
@@ -60,14 +60,40 @@ a per-target fork. Do not "fix" this by moving it into `shared/`.
 `fontconvert/`, `imageconvert/`, and the `ch32v`/`macos`/`rpi`/`rpi_pico` ports. None is
 reachable from a firmware build.
 
-### Local patches (2026-07-25) — both are upstream bugs, marked `OD-PATCH`
+### Re-vendor 2026-08-05 — what the bump changed
+
+Taken for `s3-e1004`: upstream added `EPD_SEEED_E1004` / `EP133_SPECTRA_1200x1600`, the 13.3"
+Spectra6 panel that board needs and that no earlier revision had. 76 panels → 78.
+
+**IT WAS NOT A DROP-IN. The backend contract changed twice**, and both breaks were compile
+errors rather than silent behaviour changes, which is the only reason this was cheap:
+
+1. **`iCS1Pin` was REMOVED** from `BBEPDISP`. `iCSPin` *is* CS1 now, and dual-controller panels
+   are addressed through a new `cs_mode` field (`CMD_CS1` / `CMD_CS2` / `CMD_CS1_CS2`) instead
+   of mutating `iCSPin` around each write. Both target backends set `iCS1Pin` and the Zephyr
+   composite helpers restored CS through it; all of that is gone.
+2. **`bbepWriteCmdData()` joined the contract** — `bb_ep.inl` calls it directly, so a backend
+   without it no longer links. Both backends now implement it, modelled on `arduino_io.inl`:
+   command byte with DC low then payload with DC high, all inside ONE CS assertion.
+
+`cs_mode` gating went in at each backend's single CS seam rather than at the eight sites
+`arduino_io.inl` repeats it across. Both treat `cs_mode == 0` as `CMD_CS1`, because a
+memset-zeroed `BBEPDISP` — which is how both targets create theirs — would otherwise assert no
+CS line at all and the panel would sit silent.
+
+### Local patches — re-verified at the 2026-08-05 bump
+
+**One of the three retired: upstream fixed it.** `bb_ep.inl` no longer defines
+`epd42yr_init_full` twice, and the panel table references the surviving definition correctly.
+The `OD-PATCH` is deleted rather than carried, and the re-verify list shrinks to two.
+
+The other two are still unfixed upstream and are re-applied:
 
 The tree does not compile as vendored. Two defects, each fixed with a one-line change tagged
 `OD-PATCH` so a future bump can find them:
 
-1. **`src/bb_ep.inl` defined `epd42yr_init_full` twice** (lines 1109 and 1151) while line 3831
-   referenced `epd42yr2_init_full`, which existed nowhere. A copy-paste that was never renamed.
-   The second definition is now `epd42yr2_init_full`, which is what the panel table expects.
+1. ~~`src/bb_ep.inl` defined `epd42yr_init_full` twice~~ — **FIXED UPSTREAM at `5dccfbb`; patch
+   retired 2026-08-05.**
 2. **`src/bb_epaper.h` declared `void delay(int)` while `esp_idf/esp_generic.inl` defines
    `void delay(long)`.** Two different overloads of the library's own function, so any
    `delay(uint32_t)` call inside the library was ambiguous. The declaration now says `long`.

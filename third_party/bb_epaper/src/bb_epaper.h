@@ -47,7 +47,8 @@
 void delay(long); /* OD-PATCH: was delay(int), which made every delay(uint32_t) call inside
                    * the library ambiguous against the long-taking definition. The definition
                    * now lives in targets/esp32-idf/compat/arduino_compat.cpp, NOT in
-                   * esp_idf/esp_generic.inl -- that backend is no longer compiled. */
+                   * esp_idf/esp_generic.inl -- that backend is no longer compiled.
+                   * RE-APPLIED at the 5dccfbb re-vendor: still unfixed upstream. */
 void pinMode(int pin, int mode);
 void digitalWrite(int pin, int value);
 int digitalRead(int pin);
@@ -187,6 +188,12 @@ enum {
     EPD_WAVESHARE_397,
     EPD_WAVESHARE_397_4GRAY,
     EPD_LILYGO_T3S3,
+    EPD_M5_PAPER_COLOR, // 4" 600x400 Spectra6
+    EPD_SEEED_STICKY, // 3.97" 800x480 B/W
+    EPD_SEEED_STICKY_4GRAY,
+    EPD_M5_PAPER_MONO, // 3.97" 800x480 B/W
+    EPD_M5_PAPER_MONO_4GRAY,
+    EPD_SEEED_E1004,
     EPD_PRODUCT_COUNT
 };
 
@@ -253,8 +260,7 @@ enum {
     EP154YR_200x200, // GDEM0154F51H
     EP266YR2_184x360, // GDEY0266F52H
     EP42YR_400x300, // GDEM042F52
-    EP42YR2_400x300, // Solum 4.2" B/W/R/Y harvested panel
-    //    EP579YR_792x272, // GDEY0579F52
+//    EP579YR_792x272, // GDEY0579F52
     EP215YR_160x296, // Waveshare 2.15" 4 color
     EP1085_1360x480, // GDEM1085T51
     EP31_240x320, // GDEQ031T10 LilyGo T-Deck Pro
@@ -269,6 +275,9 @@ enum {
     EP40_SPECTRA_400x600, // GDEP040E01 Spectra 6 4" 400x600
     EP27_176x264, // Badger2350
     EP27_176x264_4GRAY, // Badger2350
+    EP426B_800x480, // TopWin 4.26" B/W 800x480
+    EP583_648x480_4GRAY, // DEPG0583BN
+    EP133_SPECTRA_1200x1600, // 13.3" Spectra6
     EP_PANEL_COUNT
 };
 #ifdef FUTURE
@@ -494,6 +503,14 @@ enum {
 #define BUSY_WAIT 0xff
 #define EPD_RESET 0xfe
 #define MAKE_LUTS 0xfd
+#define SET_ORIENTATION 0xfc
+// Spectra6 (or other multi-controller display) flags
+// Stays in effect until the next CS specifier command
+#define CMD_CS1 0xfb
+#define CMD_CS2 0xfa
+#define CMD_CS1_CS2 0xf9
+#define CMD_CS_NONE 0xf8
+#define EPD_DELAY 0xf7
 
 // Normal pixel drawing function pointer
 typedef int (BB_SET_PIXEL)(void *pBBEP, int x, int y, unsigned char color);
@@ -506,7 +523,8 @@ typedef void (BB_SPI_WRITE)(const uint8_t *pData, int iLen);
 
 typedef struct bbepstruct
 {
-uint8_t wrap, type, chip_type, last_error, italic;
+uint8_t wrap, type, chip_type, last_error, italic, flip180;
+uint8_t cs_mode;
 uint8_t *ucScreen;
 int iCursorX, iCursorY;
 int width, height, native_width, native_height;
@@ -517,8 +535,8 @@ void *pFont;
 int iDataTime, iOpTime; // time in milliseconds for data transmission and operation
 uint32_t iSpeed;
 uint32_t iTimeout; // for e-paper panels
-uint8_t iDCPin, iMOSIPin, iCLKPin, iCSPin, iRSTPin, iBUSYPin;
-uint8_t iCS1Pin, iCS2Pin;
+uint8_t iDCPin, iMOSIPin, iCLKPin, iRSTPin, iBUSYPin;
+uint8_t iCSPin, iCS2Pin;
 uint8_t x_offset, y_offset; // memory offsets
 uint8_t is_awake, iPlane, iDither, bLightSleep;
 const uint8_t *pColorLookup; // color translation table
@@ -546,7 +564,7 @@ class BBEPAPER
 #endif // __LINUX__
 {
   public:
-    BBEPAPER(void) { memset(&_bbep, 0, sizeof(_bbep)); }
+    BBEPAPER(void) { memset(&_bbep, 0, sizeof(_bbep)); _bbep.cs_mode = CMD_CS1; }
     BBEPAPER(int iPanel);
     BBEPDISP _bbep;
     int createVirtual(int iWidth, int iHeight, int iFlags);
@@ -556,6 +574,7 @@ class BBEPAPER
     void setCS2(uint8_t cs);
     bool hasFastRefresh();
     bool hasPartialRefresh();
+    void setFlip180(bool bFlip);
     void setWritefn(BB_SPI_WRITE *pWrite) {_bbep.pfnWrite = pWrite;}
     void setSetGPIOfn(BB_SET_GPIO *pSet) {_bbep.pfnSetGPIO = pSet;}
     void setGetGPIOfn(BB_GET_GPIO *pGet) {_bbep.pfnGetGPIO = pGet;}
