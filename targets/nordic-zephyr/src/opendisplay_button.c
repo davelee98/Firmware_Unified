@@ -1,9 +1,10 @@
 #include "opendisplay_button.h"
+#include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_structs.h"
 #include "opendisplay_touch.h"
-#include "nrf54_gpio.h"
+#include "od_gpio.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -35,7 +36,7 @@ static void button_irq_handler(void)
 
 static bool read_logical_pressed(const ButtonState *btn)
 {
-  bool level = nrf54_gpio_read(btn->pin) != 0;
+  bool level = od_gpio_read(btn->pin) != 0;
   return btn->inverted ? !level : level;
 }
 
@@ -69,7 +70,7 @@ void opendisplay_button_init(void)
         continue;
       }
       if (opendisplay_touch_gpio_is_touch_int(pin)) {
-        printf("[OD] button: skip pin 0x%02X (reserved for GT911 INT)\r\n", (unsigned)pin);
+        od_log_info("button: skip pin 0x%02X (reserved for GT911 INT)", (unsigned)pin);
         continue;
       }
 
@@ -83,16 +84,16 @@ void opendisplay_button_init(void)
       btn->inverted = (input->invert & (1u << pin_idx)) != 0u;
       bool pull_up = (input->pullups & (1u << pin_idx)) != 0u;
       bool pull_down = (input->pulldowns & (1u << pin_idx)) != 0u;
-      nrf54_gpio_configure_input(pin, pull_up, pull_down);
+      od_gpio_configure_input(pin, pull_up, pull_down);
       btn->current_state = read_logical_pressed(btn) ? 1u : 0u;
       btn->initialized = true;
       /* Attach a both-edges interrupt (reference uses CHANGE, device_control.cpp:604).
        * On failure we still have the polling path in _process(). */
-      if (nrf54_gpio_configure_interrupt(pin, button_irq_handler) != 0) {
-        printf("[OD] button pin=0x%02X interrupt setup failed; polling only\r\n",
+      if (od_gpio_configure_interrupt(pin, button_irq_handler) != 0) {
+        od_log_info("button pin=0x%02X interrupt setup failed; polling only",
                (unsigned)pin);
       }
-      printf("[OD] button id=%u pin=0x%02X byte=%u pull=%s\r\n", (unsigned)btn->button_id,
+      od_log_info("button id=%u pin=0x%02X byte=%u pull=%s", (unsigned)btn->button_id,
              (unsigned)pin, (unsigned)btn->byte_index,
              pull_up ? "up" : (pull_down ? "down" : "none"));
     }
@@ -131,7 +132,7 @@ void opendisplay_button_process(void)
     opendisplay_ble_set_dynamic_byte(btn->byte_index, button_data);
     opendisplay_ble_update_msd(true);
     opendisplay_ble_boost_advertising();
-    printf("[OD] button id=%u state=%u count=%u\r\n", (unsigned)btn->button_id,
+    od_log_info("button id=%u state=%u count=%u", (unsigned)btn->button_id,
            (unsigned)btn->current_state, (unsigned)btn->press_count);
   }
 }

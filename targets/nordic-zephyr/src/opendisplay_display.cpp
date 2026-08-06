@@ -1,4 +1,6 @@
 #include "opendisplay_display.h"
+
+#include "od_log.h"
 #include "opendisplay_display_color.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
@@ -7,10 +9,10 @@
 #include "opendisplay_protocol.h"
 #include "opendisplay_structs.h"
 #include "opendisplay_touch.h"
-#include "board_nrf54.h"
+#include "od_board.h"
 #include "boot_screen.h"
-#include "nrf54_gpio.h"
-#include "nrf54_zephyr_compat.h"
+#include "od_gpio.h"
+#include "od_zephyr_compat.h"
 #include "bb_epaper.h"
 #include "od_bbep_zephyr.h"
 #include <stdio.h>
@@ -42,6 +44,7 @@ static bool s_dw_compressed;
 static uint32_t s_dw_decompressed_total;
 static uint8_t s_decompression_chunk[OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE];
 static uint32_t s_displayed_etag;
+static bool s_epd_rail_conditioned;
 
 static const uint8_t PARTIAL_FLAG_COMPRESSED = 0x01u;
 static const uint8_t PARTIAL_ALLOWED_FLAGS = PARTIAL_FLAG_COMPRESSED;
@@ -65,14 +68,10 @@ struct PartialStreamContext {
 static PartialStreamContext s_partial;
 static bool s_partial_panel_up;
 
-#ifndef OD_FALLBACK_DISPLAY_PWR_PIN
-#define OD_FALLBACK_DISPLAY_PWR_PIN 0x00u
-#endif
-
 static void dw_init_mark(const char *tag)
 {
   uint32_t now = od_uptime_get_32();
-  printf("[OD] dw init %-26s %lu ms\r\n", tag, (unsigned long)(now - s_dw_init_t0));
+  od_log_info("dw init %-26s %lu ms", tag, (unsigned long)(now - s_dw_init_t0));
 }
 
 static const struct DisplayConfig *display_cfg(void)
@@ -86,7 +85,7 @@ static const struct DisplayConfig *display_cfg(void)
 
 static void display_park_signal_pin(uint8_t pin_cfg)
 {
-  nrf54_gpio_park(pin_cfg);
+  od_gpio_park(pin_cfg);
 }
 
 void opendisplay_display_park_pins(void)
@@ -104,22 +103,84 @@ void opendisplay_display_park_pins(void)
   display_park_signal_pin(d->busy_pin);
 }
 
-static void display_power_set(bool on)
+/*
+ * PANEL RAIL BRING-UP. Ported from the Arduino reference's pwrmgm(true)
+ * (Firmware/src/main.cpp:1341-1382), which is the behaviour the deployed configs were
+ * validated against.
+ *
+ * THE RAIL NEEDS ~900 ms BEFORE THE PANEL WILL TALK, and this function used to return the
+ * instant the enable pin went high. The whole init then ran against an unpowered controller:
+ *
+ *     dw init after cfg           0 ms
+ *     dw init after setPanelType  2 ms
+ *     dw init after initIO        8 ms     <- RST already toggling here
+ *     dw init after wake          60 ms    <- BUSY sampled here
+ *
+ * At 8 ms the reference has not yet finished the first of its two delays. bbepIsBusy() reads
+ * an unpowered BUSY line as idle, bbepWakeUp()'s wait returns immediately, pInitFull and all
+ * 48000 bytes are clocked into a dead controller, and the only symptom is the 60 s
+ * "BUSY NEVER ASSERTED" at refresh time. Nothing upstream of that reports an error.
+ *
+ * The reference's two delays are separate and both are needed: 800 ms for the rail itself,
+ * then the signal lines are pre-driven to their idle levels and 100 ms lets the panel see
+ * them settle before RST is toggled.
+ */
+#define OD_PANEL_RAIL_SETTLE_MS 800u
+#define OD_PANEL_PIN_SETTLE_MS  100u
+
+static bool display_power_set(bool on)
 {
   const struct GlobalConfig *cfg = opendisplay_get_global_config();
+  const struct DisplayConfig *d = display_cfg();
   uint8_t p;
 
   if (cfg == nullptr) {
-    return;
+    od_log_error("panel: global config unavailable");
+    return false;
   }
   if (!on) {
     opendisplay_display_park_pins();
   }
   p = cfg->system_config.pwr_pin;
   if (p == 0xFFu) {
-    p = OD_FALLBACK_DISPLAY_PWR_PIN;
+    od_log_error("panel: pwr_pin not set; refusing to drive an unsafe fallback");
+    return false;
   }
-  nrf54_gpio_configure_output(p, on);
+  if (on) {
+    od_board_prepare_epd_rail();
+  }
+  od_gpio_configure_output(p, on);
+  if (!on) {
+    return true;
+  }
+
+  /* The deployed nRF52840 board requires the donor firmware's one-time cold
+   * rail conditioning: BS low, on 50 ms, off 50 ms, BS low, on. nRF54 board
+   * implementations return false and retain their existing single power-on. */
+  if (!s_epd_rail_conditioned && od_board_epd_requires_cold_cycle()) {
+    od_msleep(50);
+    od_gpio_configure_output(p, false);
+    od_msleep(50);
+    od_board_prepare_epd_rail();
+    od_gpio_configure_output(p, true);
+  }
+  s_epd_rail_conditioned = true;
+  od_log_debug("panel: rail on (pwr_pin=%u), settling %u ms", (unsigned)p,
+               (unsigned)OD_PANEL_RAIL_SETTLE_MS);
+  od_msleep(OD_PANEL_RAIL_SETTLE_MS);
+
+  /* Pre-drive the signal lines to their idle levels, exactly as pwrmgm() does, so the panel
+   * comes out of its own power-on reset seeing a quiet bus rather than floating inputs. */
+  if (d != nullptr) {
+    od_gpio_configure_output(d->reset_pin, true);   /* RST idle HIGH */
+    od_gpio_configure_output(d->cs_pin, true);      /* CS  idle HIGH */
+    od_gpio_configure_output(d->dc_pin, false);
+    od_gpio_configure_output(d->clk_pin, false);
+    od_gpio_configure_output(d->data_pin, false);
+    od_gpio_configure_input(d->busy_pin, false, false);
+    od_msleep(OD_PANEL_PIN_SETTLE_MS);
+  }
+  return true;
 }
 
 void opendisplay_display_power_off(void)
@@ -131,15 +192,40 @@ static bool wait_for_refresh(uint32_t timeout_ms)
 {
   uint32_t elapsed = 0;
   bool saw_busy = false;
+
+  /*
+   * READ THE EXIT CONDITION CAREFULLY: this returns true only after it has seen BUSY go
+   * ASSERTED and then RELEASED. If BUSY never asserts at all -- panel not actually driven,
+   * or the BUSY line mis-decoded, or the wrong pull for the chip type -- the loop runs the
+   * FULL timeout in silence and then returns false. At the 60 s the caller passes, that is
+   * a minute of apparent hang with no output, during which the host gives up and its next
+   * attempt is refused with "Pipe write already in progress".
+   *
+   * The od_log_debug() lines exist so that case is distinguishable from a panel that is simply
+   * slow: "busy asserted" appearing at all is the difference between "the panel is talking
+   * to us" and "we are bit-banging into the void".
+   */
   while (elapsed < timeout_ms) {
     bool busy = bbepIsBusy(&s_epd);
     if (busy) {
+      if (!saw_busy) {
+        od_log_debug("refresh: busy asserted after %u ms", (unsigned)elapsed);
+      }
       saw_busy = true;
     } else if (saw_busy) {
+      od_log_debug("refresh: busy released after %u ms", (unsigned)elapsed);
       return true;
     }
     od_msleep(50);
     elapsed += 50;
+  }
+  if (!saw_busy) {
+    od_log_debug("refresh: BUSY NEVER ASSERTED in %u ms -- panel is not responding; "
+                 "check the BUSY pin decode and the panel power rail",
+                 (unsigned)timeout_ms);
+  } else {
+    od_log_debug("refresh: busy asserted but still held at %u ms timeout",
+           (unsigned)timeout_ms);
   }
   return saw_busy && !bbepIsBusy(&s_epd);
 }
@@ -333,7 +419,7 @@ static bool zlib_stream_to_partial_write(const uint8_t *data, uint32_t len, bool
 {
   od_zlib_status_t status = od_zlib_stream_push(data, len, final);
   if (status == OD_ZLIB_STATUS_ERROR) {
-    printf("[OD] partial zlib push error: %s\r\n", od_zlib_stream_error());
+    od_log_info("partial zlib push error: %s", od_zlib_stream_error());
     return false;
   }
 
@@ -352,7 +438,7 @@ static bool zlib_stream_to_partial_write(const uint8_t *data, uint32_t len, bool
     if (status == OD_ZLIB_STATUS_DONE) {
       return s_partial.bytes_written == s_partial.expected_stream_size;
     }
-    printf("[OD] partial zlib poll error: %s\r\n", od_zlib_stream_error());
+    od_log_info("partial zlib poll error: %s", od_zlib_stream_error());
     return false;
   }
 }
@@ -407,7 +493,9 @@ static bool partial_prepare_panel_ram(void)
     return false;
   }
 
-  display_power_set(true);
+  if (!display_power_set(true)) {
+    return false;
+  }
   memset(&s_epd, 0, sizeof(s_epd));
   if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
     display_power_set(false);
@@ -621,7 +709,7 @@ extern "C" int opendisplay_display_partial_write_start(const uint8_t *payload, u
     }
   }
 
-  printf("[OD] partial start etag=%08lX->%08lX rect=%u,%u %ux%u %s\r\n",
+  od_log_info("partial start etag=%08lX->%08lX rect=%u,%u %ux%u %s",
          (unsigned long)old_etag, (unsigned long)new_etag, (unsigned)rect_x, (unsigned)rect_y,
          (unsigned)rect_w, (unsigned)rect_h, s_partial.compressed ? "zlib" : "raw");
   return 0;
@@ -653,7 +741,7 @@ static void dw_log_progress(void)
   }
   uint8_t pct = (uint8_t)((100u * s_written_bytes) / s_total_bytes);
   if (pct >= s_dw_log_pct + 25u) {
-    printf("[OD] dw data #%lu %lu/%lu B (%u%%)%s\r\n", (unsigned long)s_dw_chunk_n,
+    od_log_info("dw data #%lu %lu/%lu B (%u%%)%s", (unsigned long)s_dw_chunk_n,
            (unsigned long)s_written_bytes, (unsigned long)s_total_bytes, (unsigned)pct,
            s_dw_compressed ? " zlib" : "");
     s_dw_log_pct = (pct / 25u) * 25u;
@@ -704,7 +792,7 @@ static bool zlib_stream_to_direct_write(const uint8_t *data, uint32_t len, bool 
 {
   od_zlib_status_t status = od_zlib_stream_push(data, len, final);
   if (status == OD_ZLIB_STATUS_ERROR) {
-    printf("[OD] zlib push error: %s\r\n", od_zlib_stream_error());
+    od_log_info("zlib push error: %s", od_zlib_stream_error());
     return false;
   }
 
@@ -732,48 +820,80 @@ static bool zlib_stream_to_direct_write(const uint8_t *data, uint32_t len, bool 
     if (status == OD_ZLIB_STATUS_DONE) {
       return s_written_bytes == s_dw_decompressed_total;
     }
-    printf("[OD] zlib poll error: %s\r\n", od_zlib_stream_error());
+    od_log_info("zlib poll error: %s", od_zlib_stream_error());
     return false;
   }
 }
 
-extern "C" void opendisplay_display_boot_apply(void)
+extern "C" bool opendisplay_display_boot_apply(void)
 {
   const struct DisplayConfig *d = display_cfg();
   int panel;
-  if (s_boot_applied || d == nullptr) {
-    return;
+  if (s_boot_applied) {
+    return true;
   }
-  s_boot_applied = true;
+  if (d == nullptr) {
+    od_log_error("boot display: no display config");
+    return false;
+  }
+  if ((d->transmission_modes & TRANSMISSION_MODE_CLEAR_ON_BOOT) != 0u) {
+    od_log_info("boot display intentionally skipped by CLEAR_ON_BOOT");
+    s_boot_applied = true;
+    return true;
+  }
   panel = opendisplay_map_epd(d->panel_ic_type);
   if (panel == EP_PANEL_UNDEFINED) {
-    return;
+    od_log_error("boot display: unsupported panel_ic_type=%u", (unsigned)d->panel_ic_type);
+    return false;
   }
-  memset(&s_epd, 0, sizeof(s_epd));
-  display_power_set(true);
-  if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
-    display_power_set(false);
-    return;
-  }
-  bbepSetRotation(&s_epd, (int)d->rotation * 90);
-  bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
-  od_bbep_wake(&s_epd);
-  od_bbep_send_panel_init_full(&s_epd);
-  if ((d->transmission_modes & TRANSMISSION_MODE_CLEAR_ON_BOOT) == 0u) {
+
+  for (unsigned attempt = 1; attempt <= 2; attempt++) {
+    bool refresh_ok = false;
+
+    memset(&s_epd, 0, sizeof(s_epd));
+    if (!display_power_set(true)) {
+      return false;
+    }
+    if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
+      od_log_error("boot display: setPanelType failed (attempt %u)", attempt);
+      display_power_set(false);
+      continue;
+    }
+    bbepSetRotation(&s_epd, (int)d->rotation * 90);
+    bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin,
+               d->clk_pin, 0);
+    od_bbep_wake(&s_epd);
+    od_bbep_send_panel_init_full(&s_epd);
     if (!writeBootScreenWithQr(s_epd)) {
+      od_log_warn("boot display: renderer failed; transmitting white fallback");
       bbepFill(&s_epd, BBEP_WHITE, PLANE_DUPLICATE);
     }
-    (void)bbepRefresh(&s_epd, REFRESH_FULL);
-    (void)wait_for_refresh(60000u);
+    od_log_info("boot framebuffer transmitted; starting physical refresh (attempt %u)", attempt);
+    if (bbepRefresh(&s_epd, REFRESH_FULL) == BBEP_SUCCESS) {
+      refresh_ok = wait_for_refresh(60000u);
+    } else {
+      od_log_error("boot display: refresh command failed (attempt %u)", attempt);
+    }
+    bbepSleep(&s_epd, DEEP_SLEEP);
+    display_power_set(false);
+
+    if (refresh_ok) {
+      s_boot_applied = true;
+      od_log_info("boot display refresh complete");
+      return true;
+    }
+    od_log_warn("boot display: physical refresh failed (attempt %u of 2)", attempt);
+    if (attempt < 2) {
+      od_msleep(100);
+    }
   }
-  bbepSleep(&s_epd, DEEP_SLEEP);
-  display_power_set(false);
+  return false;
 }
 
 extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, uint16_t payload_len)
 {
   s_dw_init_t0 = od_uptime_get_32();
-  printf("[OD] dw init begin\r\n");
+  od_log_info("dw init begin");
 
   if (s_partial.active) {
     partial_cleanup();
@@ -781,23 +901,26 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
 
   const struct DisplayConfig *d = display_cfg();
   if (d == nullptr) {
-    printf("[OD] dw start err no display cfg\r\n");
+    od_log_info("dw start err no display cfg");
     return -1;
   }
   dw_init_mark("after cfg");
 
   int panel = opendisplay_map_epd(d->panel_ic_type);
   if (panel == EP_PANEL_UNDEFINED) {
-    printf("[OD] dw start err bad panel_ic_type=%u\r\n", (unsigned)d->panel_ic_type);
+    od_log_info("dw start err bad panel_ic_type=%u", (unsigned)d->panel_ic_type);
     return -2;
   }
 
   opendisplay_display_abort();
   dw_init_mark("after abort");
-  display_power_set(true);
+  if (!display_power_set(true)) {
+    od_log_info("dw start err panel power unavailable");
+    return -3;
+  }
   memset(&s_epd, 0, sizeof(s_epd));
   if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
-    printf("[OD] dw start err setPanelType panel=%d\r\n", panel);
+    od_log_info("dw start err setPanelType panel=%d", panel);
     display_power_set(false);
     return -3;
   }
@@ -837,7 +960,7 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
 
   if (s_dw_compressed) {
     if ((d->transmission_modes & TRANSMISSION_MODE_STREAMING_DECOMPRESSION) == 0u) {
-      printf("[OD] dw start err streaming_decompression not enabled in transmission_modes=0x%02X\r\n",
+      od_log_info("dw start err streaming_decompression not enabled in transmission_modes=0x%02X",
              (unsigned)d->transmission_modes);
       opendisplay_display_abort();
       return -4;
@@ -848,7 +971,7 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
       | ((uint32_t)payload[2] << 16)
       | ((uint32_t)payload[3] << 24);
     if (s_dw_decompressed_total != s_total_bytes) {
-      printf("[OD] dw start err zlib size %lu != %lu\r\n",
+      od_log_info("dw start err zlib size %lu != %lu",
              (unsigned long)s_dw_decompressed_total, (unsigned long)s_total_bytes);
       opendisplay_display_abort();
       return -5;
@@ -861,10 +984,10 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
       }
     }
   } else if (payload_len != 0u) {
-    printf("[OD] dw start note non-empty payload len=%u (ignored)\r\n", (unsigned)payload_len);
+    od_log_info("dw start note non-empty payload len=%u (ignored)", (unsigned)payload_len);
   }
 
-  printf("[OD] dw start total=%lu B bpp=%d cs=%u panel=%u %ux%u bitplanes=%d%s\r\n",
+  od_log_info("dw start total=%lu B bpp=%d cs=%u panel=%u %ux%u bitplanes=%d%s",
          (unsigned long)s_total_bytes, opendisplay_color_bits_per_pixel(s_color_scheme),
          (unsigned)s_color_scheme, (unsigned)d->panel_ic_type, (unsigned)d->pixel_width,
          (unsigned)d->pixel_height, (int)opendisplay_color_is_bitplanes(s_color_scheme),
@@ -887,7 +1010,7 @@ extern "C" int opendisplay_display_direct_write_data(const uint8_t *payload, uin
   }
 
   if (!s_active || payload == nullptr || payload_len == 0u) {
-    printf("[OD] dw data bad arg active=%d len=%u\r\n", (int)s_active, (unsigned)payload_len);
+    od_log_info("dw data bad arg active=%d len=%u", (int)s_active, (unsigned)payload_len);
     return -1;
   }
 
@@ -907,7 +1030,7 @@ extern "C" int opendisplay_display_direct_write_data(const uint8_t *payload, uin
   if (remaining == 0u) {
     if (payload_len > 0u) {
       if (s_dw_trailing_ignores < 4u) {
-        printf("[OD] dw data ignore trailing chunk #%u len=%u (have %lu/%lu B)\r\n",
+        od_log_info("dw data ignore trailing chunk #%u len=%u (have %lu/%lu B)",
                (unsigned)s_dw_trailing_ignores + 1u, (unsigned)payload_len,
                (unsigned long)s_written_bytes, (unsigned long)s_total_bytes);
         s_dw_trailing_ignores++;
@@ -952,18 +1075,18 @@ extern "C" int opendisplay_display_direct_write_end_prepare(const uint8_t *paylo
   }
 
   if (!s_active) {
-    printf("[OD] dw end err inactive\r\n");
+    od_log_info("dw end err inactive");
     return -1;
   }
   if (s_dw_compressed) {
     if (!zlib_stream_to_direct_write(nullptr, 0, true)) {
-      printf("[OD] dw end err zlib finalize\r\n");
+      od_log_info("dw end err zlib finalize");
       opendisplay_display_abort();
       return -3;
     }
   }
   if (s_written_bytes < s_total_bytes) {
-    printf("[OD] dw end err incomplete wr=%lu need=%lu\r\n", (unsigned long)s_written_bytes,
+    od_log_info("dw end err incomplete wr=%lu need=%lu", (unsigned long)s_written_bytes,
          (unsigned long)s_total_bytes);
     opendisplay_display_abort();
     return -2;
@@ -1001,7 +1124,7 @@ extern "C" int opendisplay_display_direct_write_end_refresh(const uint8_t *paylo
   }
 
   if (!s_active) {
-    printf("[OD] dw end err inactive\r\n");
+    od_log_info("dw end err inactive");
     return -1;
   }
   if (refresh_ok != nullptr) {
@@ -1013,10 +1136,10 @@ extern "C" int opendisplay_display_direct_write_end_refresh(const uint8_t *paylo
     refresh_mode = REFRESH_FAST;
   }
 
-  printf("[OD] dw refresh start mode=%d\r\n", refresh_mode);
+  od_log_info("dw refresh start mode=%d", refresh_mode);
   (void)bbepRefresh(&s_epd, refresh_mode);
   bool ok = wait_for_refresh(60000u);
-  printf("[OD] dw refresh done ok=%d busy=%d\r\n", (int)ok, (int)bbepIsBusy(&s_epd));
+  od_log_info("dw refresh done ok=%d busy=%d", (int)ok, (int)bbepIsBusy(&s_epd));
   bbepSleep(&s_epd, DEEP_SLEEP);
   s_active = false;
   s_dw_compressed = false;

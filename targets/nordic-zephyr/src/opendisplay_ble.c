@@ -1,4 +1,5 @@
 #include "opendisplay_ble.h"
+#include "od_log.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_config_storage.h"
 #include "opendisplay_cs.h"
@@ -15,7 +16,7 @@
 #include "opendisplay_sensor_bq27220.h"
 #include "opendisplay_sensor_npm1300.h"
 #include "opendisplay_nfc.h"
-#include "board_nrf54.h"
+#include "od_board.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -223,18 +224,18 @@ static void request_fast_link(struct bt_conn *conn)
 #if defined(CONFIG_BT_CTLR_PHY_2M)
 	err = bt_conn_le_phy_update(conn, BT_CONN_LE_PHY_PARAM_2M);
 	if (err != 0) {
-		printf("[OD] PHY 2M request failed: %d\r\n", err);
+		od_log_info("PHY 2M request failed: %d", err);
 	}
 #endif
 
 	err = bt_conn_le_data_len_update(conn, BT_LE_DATA_LEN_PARAM_MAX);
 	if (err != 0) {
-		printf("[OD] DLE max request failed: %d\r\n", err);
+		od_log_info("DLE max request failed: %d", err);
 	}
 
 	err = bt_conn_le_param_update(conn, BT_LE_CONN_PARAM(6, 12, 0, 400));
 	if (err != 0) {
-		printf("[OD] conn param update failed: %d\r\n", err);
+		od_log_info("conn param update failed: %d", err);
 	}
 }
 
@@ -259,20 +260,20 @@ static void od_smp_sync(void)
 	if (want) {
 		err = smp_bt_register();
 		if (err != 0 && err != -EALREADY) {
-			printf("[OD] SMP register failed: %d\r\n", err);
+			od_log_info("SMP register failed: %d", err);
 			return;
 		}
 		s_smp_visible = true;
-		printf("[OD] SMP DFU service %s\r\n",
+		od_log_info("SMP DFU service %s",
 		       s_ota_unlocked ? "unlocked" : "available (encryption off)");
 	} else {
 		err = smp_bt_unregister();
 		if (err != 0 && err != -ENOENT) {
-			printf("[OD] SMP unregister failed: %d\r\n", err);
+			od_log_info("SMP unregister failed: %d", err);
 			return;
 		}
 		s_smp_visible = false;
-		printf("[OD] SMP DFU service hidden (use CMD_ENTER_DFU)\r\n");
+		od_log_info("SMP DFU service hidden (use CMD_ENTER_DFU)");
 	}
 #else
 	ARG_UNUSED(s_ota_unlocked);
@@ -294,7 +295,9 @@ static void dfu_work_handler(struct k_work *work)
 static void boot_display_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	opendisplay_display_boot_apply();
+	if (!opendisplay_display_boot_apply()) {
+		od_log_error("boot display failed after bounded retry");
+	}
 }
 
 static void schedule_boot_display_apply(void)
@@ -322,7 +325,7 @@ static void adv_work_handler(struct k_work *work)
 	}
 	int err = start_advertising();
 	if (err != 0) {
-		printf("[OD] adv restart retry (err %d)\r\n", err);
+		od_log_info("adv restart retry (err %d)", err);
 		(void)k_work_schedule(&s_adv_restart_work, K_MSEC(200));
 	}
 }
@@ -350,6 +353,27 @@ static void chip_id_hex6(char out[7])
 	for (unsigned i = 0; i < sizeof(id); i++) {
 		uid = (uid << 8) | id[i];
 	}
+	/*
+	 * WHICH FICR WORD THIS TAKES IS A COMPATIBILITY CONTRACT, NOT A DETAIL.
+	 *
+	 * Zephyr's nRF hwinfo driver returns be32(DEVICEID[1]) || be32(DEVICEID[0])
+	 * (zephyr/drivers/hwinfo/hwinfo_nrf.c) -- the two words are SWAPPED relative to the
+	 * register order. Accumulating big-endian therefore yields
+	 *     uid = (DEVICEID[1] << 32) | DEVICEID[0]
+	 * so a plain `uid & 0xFFFFFF` is the low 3 bytes of DEVICEID[0].
+	 *
+	 * The Arduino nRF52 firmware names the device from DEVICEID[**1**] & 0xFFFFFF
+	 * (Firmware/src/encryption.cpp getChipIdHex). So on the nRF52840 the migrated
+	 * firmware advertised a DIFFERENT OD<id> than the same physical board did under the
+	 * old firmware -- reported from hardware as "OD address is incorrect/different".
+	 *
+	 * Fixed only for the nRF52840, deliberately. The nRF54 boards have never had an
+	 * Arduino firmware to agree with, and their current names are already deployed;
+	 * "correcting" them here would rename every field unit for no benefit.
+	 */
+#if defined(OD_BOARD_XIAO_NRF52840)
+	uid >>= 32; /* DEVICEID[1] -- match the Arduino nRF52 firmware. */
+#endif
 	snprintf(out, 7, "%06lX", (unsigned long)(uid & 0xFFFFFFu));
 }
 
@@ -420,11 +444,24 @@ static void log_msd(const char *tag)
 #if defined(OD_LOW_POWER_QUIET)
 	ARG_UNUSED(tag);
 #else
-	printf("[OD] msd %s:", tag);
-	for (unsigned i = 0; i < MSD_PAYLOAD_LEN; i++) {
-		printf(" %02X", msd_payload[i]);
+	char line[96];
+	int pos = snprintf(line, sizeof(line), "[OD] msd %s:", tag);
+
+	if (pos < 0) {
+		return;
 	}
-	printf("\r\n");
+	for (unsigned i = 0; i < MSD_PAYLOAD_LEN; i++) {
+		if (pos >= (int)sizeof(line)) {
+			break;
+		}
+		int n = snprintf(line + pos, sizeof(line) - (size_t)pos, " %02X", msd_payload[i]);
+
+		if (n < 0) {
+			break;
+		}
+		pos += n;
+	}
+	od_log_info("%s", line);
 #endif
 }
 
@@ -521,7 +558,7 @@ void opendisplay_ble_update_msd(bool refresh_advertising)
 static void connected(struct bt_conn *conn, uint8_t err)
 {
 	if (err != 0) {
-		printf("[OD] connect failed: %u\r\n", (unsigned)err);
+		od_log_info("connect failed: %u", (unsigned)err);
 		opendisplay_ble_boost_advertising();
 		schedule_adv_restart(150);
 		return;
@@ -548,7 +585,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	ARG_UNUSED(conn);
-	printf("[OD] disconnected reason=%u\r\n", (unsigned)reason);
+	od_log_info("disconnected reason=%u", (unsigned)reason);
 	opendisplay_cs_on_disconnected(conn);
 	opendisplay_pipe_on_connection_closed();
 	if (s_conn != NULL) {
@@ -664,7 +701,7 @@ static void apply_tx_power(uint8_t handle_type, uint16_t handle)
 
 	buf = bt_hci_cmd_alloc(K_FOREVER);
 	if (buf == NULL) {
-		printf("[OD] tx_power: no HCI cmd buffer\r\n");
+		od_log_info("tx_power: no HCI cmd buffer");
 		return;
 	}
 	cp = net_buf_add(buf, sizeof(*cp));
@@ -674,18 +711,18 @@ static void apply_tx_power(uint8_t handle_type, uint16_t handle)
 
 	err = bt_hci_cmd_send_sync(BT_HCI_OP_VS_WRITE_TX_POWER_LEVEL, buf, &rsp);
 	if (err != 0) {
-		printf("[OD] tx_power set failed (type=%u req=%d dBm): %d\r\n",
+		od_log_info("tx_power set failed (type=%u req=%d dBm): %d",
 		       (unsigned)handle_type, (int)requested, err);
 		return;
 	}
 	rp = (struct bt_hci_rp_vs_write_tx_power_level *)rsp->data;
-	printf("[OD] tx_power type=%u requested=%d selected=%d dBm\r\n",
+	od_log_info("tx_power type=%u requested=%d selected=%d dBm",
 	       (unsigned)handle_type, (int)requested, (int)rp->selected_tx_power);
 	net_buf_unref(rsp);
 #else
 	ARG_UNUSED(handle_type);
 	ARG_UNUSED(handle);
-	printf("[OD] tx_power: CONFIG_BT_HCI_VS disabled; not applied\r\n");
+	od_log_info("tx_power: CONFIG_BT_HCI_VS disabled; not applied");
 #endif
 }
 
@@ -723,13 +760,13 @@ static int start_advertising(void)
 	err = bt_le_adv_start(&s_adv_param, ad, ARRAY_SIZE(ad), sd_buf, sd_count);
 	s_adv_active = (err == 0);
 	if (err != 0) {
-		printf("[OD] adv start failed: %d (will retry)\r\n", err);
+		od_log_info("adv start failed: %d (will retry)", err);
 	} else {
 		if (!s_msd_published) {
 			memcpy(s_last_published_msd, msd_payload, MSD_PAYLOAD_LEN);
 			s_msd_published = true;
 		}
-		printf("[OD] advertising as %s (interval=%u-%u ms)\r\n", s_dev_name,
+		od_log_info("advertising as %s (interval=%u-%u ms)", s_dev_name,
 		       (unsigned)BT_GAP_ADV_INTERVAL_TO_MS(s_adv_param.interval_min),
 		       (unsigned)BT_GAP_ADV_INTERVAL_TO_MS(s_adv_param.interval_max));
 	}
@@ -752,11 +789,11 @@ static void flash_powerdown_from_config(void)
 		if (fc->mosi_pin == 0xFFu || fc->sck_pin == 0xFFu || fc->cs_pin == 0xFFu) {
 			continue;
 		}
-		printf("[OD] flash powerdown MOSI=%u SCK=%u CS=%u MISO=%u WP=%u HOLD=%u\r\n",
+		od_log_info("flash powerdown MOSI=%u SCK=%u CS=%u MISO=%u WP=%u HOLD=%u",
 		       fc->mosi_pin, fc->sck_pin, fc->cs_pin,
 		       fc->miso_pin, fc->wp_pin, fc->hold_pin);
-		board_nrf54_flash_powerdown(fc->mosi_pin, fc->sck_pin, fc->cs_pin,
-					    fc->miso_pin, fc->wp_pin, fc->hold_pin);
+		od_board_flash_powerdown(fc->mosi_pin, fc->sck_pin, fc->cs_pin,
+					 fc->miso_pin, fc->wp_pin, fc->hold_pin);
 		break;
 	}
 }
@@ -822,7 +859,7 @@ void opendisplay_ble_init(void)
 	(void)initConfigStorage();
 #ifdef FACTORY_CLEAR_CONFIG_ON_BOOT
 	/* One-shot clear build (scripts/factory_config_gen.py). */
-	printf("[OD] factory clear build: erasing stored config\r\n");
+	od_log_info("factory clear build: erasing stored config");
 	(void)clearStoredConfig();
 #endif
 	bool config_loaded = loadGlobalConfig(&s_od_global_config);
@@ -831,10 +868,10 @@ void opendisplay_ble_init(void)
 		config_loaded = loadGlobalConfig(&s_od_global_config);
 	}
 	if (config_loaded) {
-		printf("[OD] config loaded: displays=%u\r\n",
+		od_log_info("config loaded: displays=%u",
 		       (unsigned)s_od_global_config.display_count);
 	} else {
-		printf("[OD] config: defaults\r\n");
+		od_log_info("config: defaults");
 	}
 	flash_powerdown_from_config();
 
@@ -845,10 +882,10 @@ void opendisplay_ble_init(void)
 	opendisplay_led_init();
 	opendisplay_buzzer_init();
 
-	printf("[OD] enabling Bluetooth\r\n");
+	od_log_info("enabling Bluetooth");
 	err = bt_enable(NULL);
 	if (err != 0) {
-		printf("[OD] bt_enable failed: %d\r\n", err);
+		od_log_info("bt_enable failed: %d", err);
 		return;
 	}
 	if (IS_ENABLED(CONFIG_SETTINGS)) {
@@ -868,12 +905,12 @@ void opendisplay_ble_init(void)
 	update_msd_payload();
 	err = start_advertising();
 	if (err != 0) {
-		printf("[OD] initial adv failed: %d (will retry)\r\n", err);
+		od_log_info("initial adv failed: %d (will retry)", err);
 		schedule_adv_restart(0);
 	} else {
 		apply_tx_power(BT_HCI_VS_LL_HANDLE_TYPE_ADV, 0);
 	}
-	printf("[OD] BLE ready as %s\r\n", s_dev_name);
+	od_log_info("BLE ready as %s", s_dev_name);
 	schedule_boot_display_apply();
 }
 
@@ -898,14 +935,14 @@ void opendisplay_ble_process(void)
 
 void opendisplay_ble_schedule_dfu(void)
 {
-	printf("[OD] ENTER_DFU: unlocking SMP OTA\r\n");
+	od_log_info("ENTER_DFU: unlocking SMP OTA");
 	(void)k_work_cancel_delayable(&s_dfu_work);
 	(void)k_work_schedule(&s_dfu_work, K_MSEC(500));
 }
 
 void opendisplay_ble_schedule_deep_sleep(void)
 {
-	printf("[OD] deep sleep: nPM1300 hibernate if available\r\n");
+	od_log_info("deep sleep: nPM1300 hibernate if available");
 	opendisplay_sensor_npm1300_enter_hibernate();
 }
 

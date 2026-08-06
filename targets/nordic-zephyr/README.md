@@ -1,39 +1,54 @@
 # Target: Nordic (Zephyr / nRF Connect SDK)
 
-One target, one build, **multiple boards** — nRF54L15 and nRF52840 share the Zephyr BT host,
-PSA Crypto, NVS/`settings`, and the bb_epaper panel stack, so they are boards of a single
-target rather than two targets. See ../../docs/TOOLCHAINS.md.
+One shared Zephyr application, with **separate platform build paths** for nRF52840 and nRF54.
+They share the BT host, protocol, storage, and display renderer; they do not share board init,
+pin encoding, bootloader policy, flashing, or EPD rail preparation. See
+[docs/PLATFORM_SEPARATION.md](docs/PLATFORM_SEPARATION.md).
 
 | Board (`-b` argument) | Chip | Source | Status |
 |---|---|---|---|
-| `xiao_nrf54l15/nrf54l15/cpuapp` | nRF54L15 | `Firmware_NRF54` (https://github.com/davelee98/Firmware_NRF54) | imported; **the only board built here** — `build.sh` default |
-| `xiao_nrf54lm20a/nrf54lm20a/cpuapp` | **nRF54LM20A** | `Firmware_NRF54`; board definition in-tree at `boards/seeed/xiao_nrf54lm20a/` | imported, **never built here** |
-| nRF52840 custom | nRF52840 | `Firmware` (https://github.com/davelee98/Firmware) | **not ported** — migration step 4 |
+| `xiao_nrf54l15/nrf54l15/cpuapp` | nRF54L15 | `Firmware_NRF54` | supported; MCUboot |
+| `xiao_nrf54lm20a/nrf54lm20a/cpuapp` | nRF54LM20A | `Firmware_NRF54` | supported; MCUboot |
+| `xiao_ble/nrf52840` | nRF52840 | `Firmware` | ported; Adafruit bootloader/UF2 |
 
 **`lm20` IS A DIFFERENT PART, not a variant of the L15.** This table used to say "nRF54L15 —
 variant of the above", which understated it: `xiao_nrf54lm20a` is an **nRF54LM20A** with its own
 DTS, pinctrl, defconfig and a second core (`cpuflpr`), and it is the only board here carrying a
 full in-tree definition (15 files). `zephyr/CMakeLists.txt` gives it its own
-`prj_lm20_extra.conf` and an `NRF54_BOARD_LM20` define. Treating it as a rebadged L15 is how a
+board-specific configuration and source file. Treating it as a rebadged L15 is how a
 board-specific defect gets debugged against the wrong datasheet.
 
-Build with `./build.sh`, flash with `./flash.sh`; both take `BOARD=` and `BUILD_DIR=` and
-**default to the same board**, so `./build.sh && ./flash.sh` works. For the LM20:
+Use the platform-specific front doors:
 
 ```bash
-BOARD=xiao_nrf54lm20a/nrf54lm20a/cpuapp BUILD_DIR=build-lm20 ./build.sh
-BOARD=xiao_nrf54lm20a/nrf54lm20a/cpuapp BUILD_DIR=build-lm20 ./flash.sh
+./build-nrf52840.sh
+./flash-nrf52840.sh /path/to/ADAFRUIT_UF2_VOLUME
+
+./build-nrf52840-debug.sh
+./flash-nrf52840-debug.sh /path/to/ADAFRUIT_UF2_VOLUME
+
+./build-nrf54.sh l15
+./flash-nrf54.sh l15
+
+./build-nrf54.sh lm20
+./flash-nrf54.sh lm20
 ```
 
-`PROFILE=uart ./build.sh` for USB-serial debug; battery builds log over SEGGER RTT (J-Link).
+`./build.sh --all` remains the release-matrix command. Raw `BOARD=` builds are supported for
+advanced Zephyr use, but release and bench instructions use the explicit front doors.
+
+The normal binary compiles OpenDisplay through INFO and Zephyr subsystems through WARN. The
+separate debug target enables OpenDisplay DEBUG plus Zephyr subsystem INFO, uses
+`build-nrf52840-debug/`, and emits `release/opendisplay-xiao_nrf52840-debug.uf2` plus
+`release/opendisplay-xiao_nrf52840-debug-merged.hex`, so it cannot overwrite the production
+artifacts. Both variants use the application-owned
+`[SSSS.mmm|Cn] L: message` format; debug changes verbosity, not the application log protocol.
 
 ## nRF52840 is a port, not an import
 
-It currently builds with PlatformIO + Arduino (Adafruit Bluefruit, `Adafruit_LittleFS`,
-`Adafruit_nRFCrypto`/CC310) in the `Firmware` repo. It arrives here as a **third board** on this
-target — devicetree/overlay + pinctrl, an nRF52-series `prj.conf`, and reuse of the nRF54L15
-drivers. It depends on this target existing first, so it is **step 4** of the migration order
-(Silabs is step 3), not part of the first import.
+The nRF52840 implementation was ported from the Arduino/Bluefruit `Firmware` tree. It now uses
+Zephyr and the shared Nordic application, but its deployed wire-level pin encoding and board
+power sequence remain explicit nRF52840 platform contracts.
 
 **Do not confuse nRF52840 with the legacy nRF52.** nRF52840 is a supported board of this
 target, shipped and migrating here from `Firmware`. The legacy nRF52 is a different, older
@@ -41,128 +56,51 @@ product built on the bare Nordic SDK in `Firmware_NRF`; it is also shipped but i
 migrated to this repo at all, which is why there is no `targets/nrf52-sdk/` (MIGRATION.md
 § "Order and rationale" item 5).
 
-Settle **before** starting: whether deployed nRF52840 units must accept OTA from the current
-UF2/Bluefruit flash layout. That constrains or blocks the move — see § Bootloader below, where
-the likely answer is that it blocks it.
+## Bootloader policy
 
-## Bootloader: MCUboot, both boards, going forward
+**nRF52840 keeps the Adafruit bootloader. nRF54L15 and nRF54LM20A use MCUboot.** The build and
+flash entry points enforce this split; the generic nRF54 flasher rejects `xiao_ble/nrf52840`.
 
-**Decided 2026-07-25.** MCUboot via NCS sysbuild is the bootloader for this target — nRF54L15
-now, nRF52840 when it lands. The step-4 note above about UF2 compatibility is answered by this:
-new units get MCUboot; deployed nRF52840 units are a separate question, below.
+The nRF54 sysbuild configuration provides MCUboot, signed application images, and BLE SMP DFU.
+The nRF52840 sysbuild configuration instead preserves the Adafruit partition layout and emits a
+UF2. It is deliberately not compiled with `CONFIG_BOOTLOADER_MCUBOOT`.
 
-**Most of this already exists.** `Firmware_NRF54` ships a complete MCUboot setup — adopt it as
-the target-wide standard rather than designing one:
+The host currently has no SMP/mcumgr client, so nRF54 BLE OTA still needs corresponding host-side
+support. Factory and primary-slot probe flashing are available through `flash-nrf54.sh`.
 
-| Piece | Where |
-|---|---|
-| `CONFIG_BOOTLOADER_MCUBOOT=y` | `Firmware_NRF54/zephyr/prj.conf:78` |
-| BLE SMP OTA DFU | `prj.conf:79` (`CONFIG_NCS_SAMPLE_MCUMGR_BT_OTA_DFU`) |
-| sysbuild wiring | `zephyr/sysbuild.cmake`, `sysbuild.conf`, `sysbuild/mcuboot.conf` |
-| Settings/bond preservation across DFU | `prj.conf:85-86` — refuses the SMP "erase application settings" command, so display config and BLE bonds survive an update |
+## Platform contracts
 
-That last one is the kind of detail worth inheriting rather than rediscovering: a naive MCUboot
-adoption erases settings on update and unprovisions the device.
+- `zephyr/Kconfig` derives `OD_PLATFORM_NRF52840` or `OD_PLATFORM_NRF54` from the selected SoC.
+- `zephyr/CMakeLists.txt` compiles one board implementation and one pin decoder for that platform.
+- nRF52840 configuration pins use absolute `port * 32 + pin` values; nRF54 uses its packed codec.
+- The nRF52840 overlay disables UART0 because upstream UART RX on P1.12 collides with deployed
+  display CS (absolute pin 44).
+- nRF52840 EPD startup restores the donor firmware's P0.13 boost selection and cold rail cycle.
+- Boot display success means the refresh command succeeded and BUSY asserted and released; merely
+  filling the controller framebuffer is not reported as a successful physical refresh.
 
-### The gap is host-side, and it is unbudgeted
+## Toolchain and verification
 
-`py-opendisplay` has **no SMP/mcumgr client** — grep for `smp`/`mcumgr`/`mcuboot` across `src/`
-and `pyproject.toml` returns nothing. Its OTA module implements only legacy Nordic DFU
-(`perform_nrf_dfu`) and Silabs `.gbl` (`perform_silabs_ota`). So the firmware side of MCUboot
-OTA is **done on nRF54L15 and unusable**, because nothing can drive it.
+The wrappers use nRF Connect SDK + west through `ncs-env.sh`. Set `OD_NCS_VERSION` when a specific
+installed NCS version is required; release manifests record the selected version.
 
-One new host backend serves both boards. Until it exists, MCUboot buys signed images and
-automatic revert but no field update — strictly less than the nRF52840 has today. Budget the
-host work as part of adopting MCUboot, not after.
+After building, validate the platform identity and expected artifacts:
 
-### Deployed nRF52840: the choice is not MCUboot-vs-UF2
+```bash
+./scripts/validate-build.sh nrf52840
+./scripts/validate-build.sh nrf52840 debug
+./scripts/validate-build.sh nrf54l15
+./scripts/validate-build.sh nrf54lm20
+```
 
-Those units run a working BLE DFU path today — the Adafruit bootloader plus in-app
-`bledfu.begin()` (`Firmware/src/ble_init.cpp:168`) and `CMD_ENTER_DFU` setting the bootloader
-magic (`device_control.cpp:850-864`), with `py-opendisplay`'s `perform_nrf_dfu` as the client.
+Run the portable pin-codec and shared host tests from the repository root:
 
-The complication is that the Adafruit bootloader ships **with the S140 SoftDevice**, and a
-Zephyr application does not use SoftDevice. **Verify early whether a Zephyr image can run under
-that bootloader at all.** If it cannot — the likely outcome — then porting a deployed nRF52840
-to Zephyr requires replacing its bootloader, which requires physical access. The real question
-becomes:
+```bash
+cmake -S tests/host -B /tmp/od-host-tests
+cmake --build /tmp/od-host-tests
+ctest --test-dir /tmp/od-host-tests --output-on-failure
+```
 
-> ~~Do deployed nRF52840 units migrate to Zephyr at all, or stay on the current Arduino/Bluefruit
-> firmware indefinitely while only new production ships Zephyr + MCUboot?~~
-
-**ANSWERED 2026-08-05: they migrate, and they KEEP THE ADAFRUIT BOOTLOADER.**
-
-> **nRF52840 -> Adafruit bootloader. nRF54L15 / nRF54LM20A -> MCUboot.**
-> One target, two bootloaders, deliberately.
-
-That combination costs far less than an earlier draft of this section assumed, and the
-correction is worth stating because the assumption was wrong in an expensive direction:
-
-- **No physical access to deployed units.** They keep the bootloader they already have.
-- **The host SMP/mcumgr client is NOT a prerequisite for nRF52840.** It keeps the Nordic DFU
-  path `py-opendisplay`'s `perform_nrf_dfu` already drives. SMP is needed only for the nRF54
-  boards, where MCUboot OTA is currently implemented and undrivable.
-
-The mistake was assuming Zephyr implies MCUboot. It does not -- NCS ships `xiao_ble/nrf52840`
-with `pm_static.yml` for the ADAFRUIT layout, and Zephyr under that bootloader is a shipped
-configuration elsewhere (ZMK on nice!nano: S140 resident but never enabled, Zephyr's own
-controller owning the radio).
-
-**Accepted cost:** nRF52840 gets no signed images and no automatic revert. It keeps exactly the
-update story it has today. A two-tier fleet is the deliberate outcome.
-
-**Still to test, now on the critical path rather than as cost avoidance:** build a Zephyr image
-at the Adafruit flash layout, push it to ONE unit over the existing BLE DFU, confirm it boots and
-stays up. The precedent says it works; the precedent is not this firmware.
-
-Leaving them is defensible — they work, they have OTA, and the fleet is finite. Decide it
-before step 4 is scheduled, because it determines whether step 4 is a port or a product split.
-
-### To verify at import
-
-- **Flash budget on nRF52840.** 1 MB total, minus MCUboot (~32 KB) and two app slots. Confirm
-  the Zephyr app fits twice; if not, `overwrite-only` (no revert) is the fallback and should be
-  a recorded trade, not a surprise.
-- **Swap mode.** Prefer swap-move so failed images revert — that is the main reason to adopt
-  MCUboot at all.
-- **Signing keys.** MCUboot signs images; decide where the private key lives and who holds it
-  before the first signed build. Do not commit it.
-
-## Toolchain
-
-nRF Connect SDK + west. **Pin an explicit NCS version** — the source repo's `ncs-env.sh` globs
-`~/ncs/v3.*` then `~/ncs/v2.*` and takes the first hit, which is not reproducible across
-machines or CI. Not currently installed on the primary dev box.
-
-## Required at import: the advertising HAL
-
-`shared/core/od_adv_control.c` is in `shared/sources.cmake`, so **the moment this target has a
-build that consumes that list, it must also supply `od_hal_adv_{program,start,stop}`** — see
-[shared/hal/od_hal_adv.h](../../shared/hal/od_hal_adv.h). They are link-time C functions; a
-target that lists the shared sources without implementing them fails at link with three
-undefined references, which is the intended failure and needs no extra guard.
-
-There is no compile-tested stub here on purpose. This directory holds one README and no build
-system, so a fake would have nothing to compile it and would rot unnoticed. The requirement is
-recorded instead, where whoever writes the first `CMakeLists.txt` will meet it.
-
-What the Zephyr adapter owes, beyond the three functions
-([docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md](../../docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md)):
-
-- **AD packing stays here.** `od_adv_control` never sees a PDU; it hands over a 16-byte MSD
-  snapshot and the target builds the advertising and scan-response records. Match the ESP32
-  layout unless a divergence is deliberate and recorded: flags + complete name + MSD in ADV,
-  the 128-bit service UUID in the scan response.
-- **`bt_le_adv_start` / `bt_le_adv_stop` are called from the application pump, not a callback.**
-  Bluetooth callbacks publish facts through a `k_msgq` or an equivalently coherent bridge and
-  return.
-- **A `k_work` item may bridge an API-context requirement, but must not own desired state or
-  restart policy.** Keeping policy in the application pump is what preserves the same ordering
-  against display refresh, transfer teardown and deep sleep that every other target has.
-- **nRF52840/Bluefruit: set `restartOnDisconnect(false)`.** The SoftDevice's automatic restart
-  is a second policy owner, and it is the reason the application still carries a
-  `restartsAdvertisingOnDisconnect()` divergence. Once this target owns the restart explicitly,
-  that divergence and its special-case branch in `serviceBleAdvertisingRestart()` are deleted.
-- **DFU entry clears start intent and reaches the stop barrier first**, then disconnects and
-  disables the SoftDevice. It must not depend on toggling the stack's auto-restart setting at
-  the right moment to avoid a race.
+Hardware acceptance is still required before calling the nRF52840 boot-screen fault closed: flash
+one board, confirm P0.13 stays low, and observe BUSY assert/release during the boot refresh. The log
+line `boot display refresh complete` is the software success criterion.

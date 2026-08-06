@@ -1,10 +1,11 @@
 #include "boot_screen.h"
+#include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_battery.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_display_color.h"
 #include "opendisplay_structs.h"
-#include "nrf54_zephyr_compat.h"
+#include "od_zephyr_compat.h"
 #include "qr/qrcode.h"
 #include <bb_epaper.h>
 #include <ctype.h>
@@ -722,7 +723,7 @@ bool writeBootScreenWithQr(BBEPDISP &epd) {
 
     char url[128];
     snprintf(url, sizeof(url), "https://opendisplay.org/l/?%s", payloadB64);
-    printf("[OD] boot QR id=OD%s url=%s\r\n", last6, url);
+    od_log_info("boot QR id=OD%s url=%s", last6, url);
 
     QRCode qr;
     const uint8_t qrVersion = 6;
@@ -1038,6 +1039,6 @@ bool writeBootScreenWithQr(BBEPDISP &epd) {
             for (uint16_t y = 0; y < h; y++) bbep_write_data(&epd, row, pitch);
         }
     }
-    printf("[OD] boot screen rendered\r\n");
+    od_log_info("boot screen framebuffer rendered");
     return true;
 }

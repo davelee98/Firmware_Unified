@@ -1,9 +1,9 @@
 #include "opendisplay_cs.h"
 #include "opendisplay_device_flags.h"
 #include "opendisplay_structs.h"
+#include "od_log.h"
 
 #include <zephyr/kernel.h>
-#include <zephyr/logging/log.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
@@ -13,8 +13,6 @@
 #include <bluetooth/services/ras.h>
 #include <zephyr/sys/byteorder.h>
 #endif
-
-LOG_MODULE_REGISTER(opendisplay_cs, LOG_LEVEL_INF);
 
 bool opendisplay_cs_config_enabled(const struct GlobalConfig *cfg)
 {
@@ -77,12 +75,12 @@ static int cs_apply_default_settings(struct bt_conn *conn)
 
 	err = bt_le_cs_set_default_settings(conn, &default_settings);
 	if (err != 0) {
-		LOG_ERR("CS default settings failed (%d)", err);
+		od_log_error("CS default settings failed (%d)", err);
 		return err;
 	}
 
 	s_cs_defaults_applied = true;
-	LOG_INF("CS reflector defaults applied");
+	od_log_info("CS reflector defaults applied");
 	return 0;
 }
 
@@ -111,12 +109,12 @@ static int cs_apply_procedure_parameters(struct bt_conn *conn, uint8_t config_id
 
 	err = bt_le_cs_set_procedure_parameters(conn, &procedure_params);
 	if (err != 0) {
-		LOG_ERR("CS procedure parameters failed (%d)", err);
+		od_log_error("CS procedure parameters failed (%d)", err);
 		return err;
 	}
 
 	s_cs_procedure_params_set = true;
-	LOG_INF("CS procedure parameters applied (config %u)", config_id);
+	od_log_info("CS procedure parameters applied (config %u)", config_id);
 	return 0;
 }
 
@@ -126,9 +124,9 @@ static void cs_remote_capabilities_cb(struct bt_conn *conn, uint8_t status,
 	ARG_UNUSED(params);
 
 	if (status == BT_HCI_ERR_SUCCESS) {
-		LOG_INF("CS capability exchange completed");
+		od_log_info("CS capability exchange completed");
 	} else {
-		LOG_WRN("CS capability exchange failed (HCI 0x%02x)", status);
+		od_log_warn("CS capability exchange failed (HCI 0x%02x)", status);
 	}
 }
 
@@ -136,10 +134,10 @@ static void cs_config_create_cb(struct bt_conn *conn, uint8_t status,
 				struct bt_conn_le_cs_config *config)
 {
 	if (status == BT_HCI_ERR_SUCCESS) {
-		LOG_INF("CS config creation complete (id %u)", config->id);
+		od_log_info("CS config creation complete (id %u)", config->id);
 		(void)cs_apply_procedure_parameters(conn, config->id);
 	} else {
-		LOG_WRN("CS config creation failed (HCI 0x%02x)", status);
+		od_log_warn("CS config creation failed (HCI 0x%02x)", status);
 	}
 }
 
@@ -148,9 +146,9 @@ static void cs_security_enable_cb(struct bt_conn *conn, uint8_t status)
 	ARG_UNUSED(conn);
 
 	if (status == BT_HCI_ERR_SUCCESS) {
-		LOG_INF("CS security enabled");
+		od_log_info("CS security enabled");
 	} else {
-		LOG_WRN("CS security enable failed (HCI 0x%02x)", status);
+		od_log_warn("CS security enable failed (HCI 0x%02x)", status);
 	}
 }
 
@@ -160,13 +158,13 @@ static void cs_procedure_enable_cb(struct bt_conn *conn, uint8_t status,
 	ARG_UNUSED(conn);
 
 	if (status != BT_HCI_ERR_SUCCESS) {
-		LOG_WRN("CS procedure enable failed (HCI 0x%02x)", status);
+		od_log_warn("CS procedure enable failed (HCI 0x%02x)", status);
 		return;
 	}
 	if (params->state == 1) {
-		LOG_INF("CS procedures enabled (config %u)", params->config_id);
+		od_log_info("CS procedures enabled (config %u)", params->config_id);
 	} else {
-		LOG_INF("CS procedures disabled");
+		od_log_info("CS procedures disabled");
 	}
 }
 

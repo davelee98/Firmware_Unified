@@ -1,8 +1,9 @@
 #include "opendisplay_touch.h"
+#include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_constants.h"
 #include "opendisplay_structs.h"
-#include "nrf54_gpio.h"
+#include "od_gpio.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -12,7 +13,7 @@
  * GT911 capacitive touch driver for the nRF54 port. Ported from
  * OpenDisplay-Firmware src/touch_input.cpp (the Arduino reference) with the
  * transport swapped from Arduino Wire to a small software (bit-banged) I2C
- * master built on the nrf54_gpio open-drain primitives, because the touch
+ * master built on the neutral od_gpio open-drain primitives, because the touch
  * bus pins arrive as runtime config bytes (compact (port<<4)|pin encoding)
  * rather than devicetree-fixed I2C controller pins.
  *
@@ -67,7 +68,7 @@ static struct TouchRuntime s_touch_rt[4];
 static uint32_t s_last_process_ms;
 static bool s_any_initialized;
 
-/* ---- open-drain bit-bang I2C primitives over nrf54_gpio ---- */
+/* ---- open-drain bit-bang I2C primitives over od_gpio ---- */
 
 static inline void i2c_delay(void)
 {
@@ -77,24 +78,24 @@ static inline void i2c_delay(void)
 static inline void line_release(uint8_t pin)
 {
   /* Let the (internal + any external) pull-up drive the line high. */
-  nrf54_gpio_configure_input(pin, true, false);
+  od_gpio_configure_input(pin, true, false);
 }
 
 static inline void line_low(uint8_t pin)
 {
-  nrf54_gpio_configure_output(pin, false);
+  od_gpio_configure_output(pin, false);
 }
 
 static bool scl_release_wait(const struct TouchBus *b)
 {
   line_release(b->scl);
   for (uint32_t i = 0; i < I2C_STRETCH_TIMEOUT_US; i++) {
-    if (nrf54_gpio_read(b->scl) != 0) {
+    if (od_gpio_read(b->scl) != 0) {
       return true;
     }
     k_busy_wait(1);
   }
-  return nrf54_gpio_read(b->scl) != 0;
+  return od_gpio_read(b->scl) != 0;
 }
 
 static void i2c_start(const struct TouchBus *b)
@@ -143,7 +144,7 @@ static uint8_t i2c_read_bit(const struct TouchBus *b)
   i2c_delay();
   (void)scl_release_wait(b);
   i2c_delay();
-  v = (nrf54_gpio_read(b->sda) != 0) ? 1u : 0u;
+  v = (od_gpio_read(b->sda) != 0) ? 1u : 0u;
   line_low(b->scl);
   i2c_delay();
   return v;
@@ -312,7 +313,7 @@ static void touch_apply_enable_pin(const struct TouchController *tc)
   if (tc->enable_pin == 0u || tc->enable_pin == 0xFFu) {
     return;
   }
-  nrf54_gpio_configure_output(tc->enable_pin, true);
+  od_gpio_configure_output(tc->enable_pin, true);
 }
 
 static void gt911_int_wake(const struct TouchController *tc)
@@ -320,9 +321,9 @@ static void gt911_int_wake(const struct TouchController *tc)
   if (tc->int_pin == 0xFFu) {
     return;
   }
-  nrf54_gpio_configure_output(tc->int_pin, true);
+  od_gpio_configure_output(tc->int_pin, true);
   k_msleep(10);
-  nrf54_gpio_configure_input(tc->int_pin, true, false);
+  od_gpio_configure_input(tc->int_pin, true, false);
 }
 
 /*
@@ -336,24 +337,24 @@ static void gt911_hw_reset(const struct TouchController *tc, bool int_low_for_ad
     return;
   }
   if (tc->int_pin == 0xFFu) {
-    nrf54_gpio_configure_output(tc->rst_pin, false);
+    od_gpio_configure_output(tc->rst_pin, false);
     k_msleep(10);
-    nrf54_gpio_write(tc->rst_pin, true);
+    od_gpio_write(tc->rst_pin, true);
     k_msleep(60);
     return;
   }
   k_msleep(1);
-  nrf54_gpio_configure_output(tc->int_pin, false);
-  nrf54_gpio_configure_output(tc->rst_pin, false);
+  od_gpio_configure_output(tc->int_pin, false);
+  od_gpio_configure_output(tc->rst_pin, false);
   k_msleep(11);
-  nrf54_gpio_write(tc->int_pin, int_low_for_addr_5d ? false : true);
+  od_gpio_write(tc->int_pin, int_low_for_addr_5d ? false : true);
   k_busy_wait(110);
-  nrf54_gpio_write(tc->rst_pin, true);
+  od_gpio_write(tc->rst_pin, true);
   k_msleep(6);
-  nrf54_gpio_write(tc->int_pin, false);
+  od_gpio_write(tc->int_pin, false);
   k_msleep(51);
-  nrf54_gpio_write(tc->rst_pin, true);
-  nrf54_gpio_configure_input(tc->int_pin, true, false);
+  od_gpio_write(tc->rst_pin, true);
+  od_gpio_configure_input(tc->int_pin, true, false);
 }
 
 static uint8_t gt911_resolve_and_init(const struct TouchController *tc, struct TouchRuntime *rt)
@@ -507,27 +508,27 @@ void opendisplay_touch_init(void)
       continue;
     }
     if (tc->touch_ic_type != TOUCH_IC_GT911) {
-      printf("[OD] touch[%u]: skipped (only GT911 implemented, got %u)\r\n", (unsigned)i,
+      od_log_info("touch[%u]: skipped (only GT911 implemented, got %u)", (unsigned)i,
              (unsigned)tc->touch_ic_type);
       continue;
     }
     if (tc->touch_data_start_byte > 6u) {
-      printf("[OD] touch[%u]: touch_data_start_byte must be 0-6\r\n", (unsigned)i);
+      od_log_info("touch[%u]: touch_data_start_byte must be 0-6", (unsigned)i);
       continue;
     }
     if (!touch_get_bus(tc, &rt->bus)) {
-      printf("[OD] touch[%u]: no valid I2C data_bus (bus_id=%u)\r\n", (unsigned)i,
+      od_log_info("touch[%u]: no valid I2C data_bus (bus_id=%u)", (unsigned)i,
              (unsigned)tc->bus_id);
       continue;
     }
     if (!touch_reinit_gt911(tc, rt)) {
-      printf("[OD] touch[%u]: GT911 init failed (SCL=0x%02X SDA=0x%02X)\r\n", (unsigned)i,
+      od_log_info("touch[%u]: GT911 init failed (SCL=0x%02X SDA=0x%02X)", (unsigned)i,
              (unsigned)rt->bus.scl, (unsigned)rt->bus.sda);
       continue;
     }
     rt->last_poll_ms = k_uptime_get_32();
     s_any_initialized = true;
-    printf("[OD] touch[%u]: GT911 @0x%02X %s SCL=0x%02X SDA=0x%02X byte=%u\r\n", (unsigned)i,
+    od_log_info("touch[%u]: GT911 @0x%02X %s SCL=0x%02X SDA=0x%02X byte=%u", (unsigned)i,
            (unsigned)rt->addr7, rt->reg_high_first ? "BE" : "LE", (unsigned)rt->bus.scl,
            (unsigned)rt->bus.sda, (unsigned)tc->touch_data_start_byte);
   }
@@ -564,12 +565,12 @@ void opendisplay_touch_resume_after_refresh(void)
       continue;
     }
     if (touch_light_resume_gt911(tc, rt)) {
-      printf("[OD] touch[%u]: light resume after EPD @0x%02X\r\n", (unsigned)i,
+      od_log_info("touch[%u]: light resume after EPD @0x%02X", (unsigned)i,
              (unsigned)rt->addr7);
     } else if (touch_reinit_gt911(tc, rt)) {
-      printf("[OD] touch[%u]: reinit after EPD @0x%02X\r\n", (unsigned)i, (unsigned)rt->addr7);
+      od_log_info("touch[%u]: reinit after EPD @0x%02X", (unsigned)i, (unsigned)rt->addr7);
     } else {
-      printf("[OD] touch[%u]: resume failed after EPD refresh\r\n", (unsigned)i);
+      od_log_info("touch[%u]: resume failed after EPD refresh", (unsigned)i);
     }
   }
 }
@@ -616,7 +617,7 @@ void opendisplay_touch_process(void)
       if (rt->i2c_fail_streak >= TOUCH_I2C_FAIL_DISABLE_THRESHOLD) {
         rt->disabled = 1;
         rt->ok = 0;
-        printf("[OD] touch[%u]: disabled (too many I2C read failures)\r\n", (unsigned)i);
+        od_log_info("touch[%u]: disabled (too many I2C read failures)", (unsigned)i);
       }
       rt->last_poll_ms = now;
       continue;
@@ -642,7 +643,7 @@ void opendisplay_touch_process(void)
         if (rt->i2c_fail_streak >= TOUCH_I2C_FAIL_DISABLE_THRESHOLD) {
           rt->disabled = 1;
           rt->ok = 0;
-          printf("[OD] touch[%u]: disabled (too many I2C read failures)\r\n", (unsigned)i);
+          od_log_info("touch[%u]: disabled (too many I2C read failures)", (unsigned)i);
         }
         continue;
       }
@@ -696,7 +697,7 @@ void opendisplay_touch_process(void)
     if (changed) {
       opendisplay_ble_update_msd(true);
       opendisplay_ble_boost_advertising();
-      printf("[OD] touch[%u]: n=%u id=%u (%u,%u)\r\n", (unsigned)i, (unsigned)n, (unsigned)tid,
+      od_log_info("touch[%u]: n=%u id=%u (%u,%u)", (unsigned)i, (unsigned)n, (unsigned)tid,
              (unsigned)x, (unsigned)y);
     }
   }

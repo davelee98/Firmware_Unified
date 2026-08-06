@@ -1,4 +1,5 @@
-#include "board_nrf54.h"
+#include "od_board.h"
+#include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_display.h"
@@ -29,9 +30,14 @@ int main(void)
 	const struct GlobalConfig *cfg;
 	uint32_t ticks = 0;
 
-	printf("OpenDisplay nRF54 starting\r\n");
-	board_nrf54_early_init();
-	board_nrf54_prepare_epd_rail();
+	/* Compatibility hook before the first application record. */
+	od_log_init();
+#if defined(OD_DEBUG_BUILD)
+	od_log_info("OpenDisplay %s DEBUG starting", od_board_name());
+#else
+	od_log_info("OpenDisplay %s starting", od_board_name());
+#endif
+	od_board_early_init();
 	opendisplay_ble_init();
 #if defined(CONFIG_BOOTLOADER_MCUBOOT)
 	/* Confirm running image so MCUboot will not revert after OTA. */
@@ -45,7 +51,7 @@ int main(void)
 			opendisplay_ble_process();
 #if !defined(OD_LOW_POWER_QUIET)
 			if ((ticks++ % 100u) == 0u) {
-				printf("OpenDisplay alive uptime=%u ms\r\n", k_uptime_get_32());
+				od_log_info("OpenDisplay alive uptime=%u ms", k_uptime_get_32());
 			}
 #else
 			ticks++;
@@ -66,7 +72,7 @@ int main(void)
 
 #if !defined(OD_LOW_POWER_QUIET)
 		if ((ticks++ % 10u) == 0u) {
-			printf("OpenDisplay alive uptime=%u ms\r\n", k_uptime_get_32());
+			od_log_info("OpenDisplay alive uptime=%u ms", k_uptime_get_32());
 		}
 #else
 		ticks++;

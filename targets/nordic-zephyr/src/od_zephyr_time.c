@@ -1,4 +1,4 @@
-#include "nrf54_zephyr_compat.h"
+#include "od_zephyr_compat.h"
 
 #include <zephyr/kernel.h>
 

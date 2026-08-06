@@ -29,6 +29,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/build}"
 BOARD="${BOARD:-xiao_nrf54l15/nrf54l15/cpuapp}"
 
+if [[ "${BOARD}" == xiao_ble* ]]; then
+  echo "Refusing nRF52840 in the MCUboot/nRF54 flasher." >&2
+  echo "Use ./flash-nrf52840.sh with the Adafruit UF2 bootloader instead." >&2
+  exit 2
+fi
+
 MODE="${MODE:-}"
 if [[ $# -ge 1 ]]; then
   MODE="$1"
