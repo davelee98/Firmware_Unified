@@ -1,4 +1,5 @@
 #include "opendisplay_nfc.h"
+#include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_constants.h"
 #include "opendisplay_structs.h"
@@ -128,13 +129,13 @@ static bool nfc_apply_payload(void)
 
 	err = nfc_t2t_payload_set(s_ndef, s_ndef_len);
 	if (err != 0) {
-		printf("[OD][NFC] payload_set failed: %d\r\n", err);
+		od_log_info("[OD][NFC] payload_set failed: %d", err);
 		return false;
 	}
 
 	err = nfc_t2t_emulation_start();
 	if (err != 0) {
-		printf("[OD][NFC] emulation_start failed: %d\r\n", err);
+		od_log_info("[OD][NFC] emulation_start failed: %d", err);
 		return false;
 	}
 
@@ -404,7 +405,7 @@ void opendisplay_nfc_apply_config(const struct GlobalConfig *cfg)
 
 	if (cfg == NULL || !cfg->loaded || cfg->nfc_config_count == 0u) {
 		nfc_stop();
-		printf("[OD][NFC] no nfc_config (0x2A); SoC NFCT idle\r\n");
+		od_log_info("[OD][NFC] no nfc_config (0x2A); SoC NFCT idle");
 		return;
 	}
 
@@ -416,7 +417,7 @@ void opendisplay_nfc_apply_config(const struct GlobalConfig *cfg)
 	}
 	if (nfc_cfg == NULL) {
 		nfc_stop();
-		printf("[OD][NFC] configs present but none enabled\r\n");
+		od_log_info("[OD][NFC] configs present but none enabled");
 		return;
 	}
 	if (!nfc_ic_is_soc(nfc_cfg->nfc_ic_type)) {
@@ -434,7 +435,7 @@ void opendisplay_nfc_apply_config(const struct GlobalConfig *cfg)
 	if (!s_t2t_setup_done) {
 		err = nfc_t2t_setup(nfc_callback, NULL);
 		if (err != 0) {
-			printf("[OD][NFC] t2t_setup failed: %d\r\n", err);
+			od_log_info("[OD][NFC] t2t_setup failed: %d", err);
 			nfc_stop();
 			return;
 		}

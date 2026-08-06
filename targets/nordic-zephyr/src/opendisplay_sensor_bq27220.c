@@ -1,4 +1,5 @@
 #include "opendisplay_sensor_bq27220.h"
+#include "od_log.h"
 #include "opendisplay_sensor_common.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_structs.h"
@@ -119,10 +120,10 @@ void opendisplay_sensor_bq27220_init(void)
 	uint8_t raw[2];
 
 	if (!bq27220_read_block(s, BQ27220_CMD_VOLTAGE, raw, 2)) {
-		printf("[OD] BQ27220: not found @0x%02X\r\n", bq27220_addr_7bit(s));
+		od_log_info("BQ27220: not found @0x%02X", bq27220_addr_7bit(s));
 		return;
 	}
-	printf("[OD] BQ27220: fuel gauge @0x%02X\r\n", bq27220_addr_7bit(s));
+	od_log_info("BQ27220: fuel gauge @0x%02X", bq27220_addr_7bit(s));
 }
 
 void opendisplay_sensor_bq27220_poll(void)

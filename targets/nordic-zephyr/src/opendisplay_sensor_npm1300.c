@@ -1,4 +1,5 @@
 #include "opendisplay_sensor_npm1300.h"
+#include "od_log.h"
 #include "opendisplay_sensor_common.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_structs.h"
@@ -118,7 +119,7 @@ static bool npm1300_sample(const struct SensorData *s)
 	struct od_i2c_bus bus;
 
 	if (!od_sensor_bus_for(s->bus_id, &bus)) {
-		printf("[OD] nPM1300: bad data_bus (id=%u)\r\n", (unsigned)s->bus_id);
+		od_log_info("nPM1300: bad data_bus (id=%u)", (unsigned)s->bus_id);
 		return false;
 	}
 
@@ -133,7 +134,7 @@ static bool npm1300_sample(const struct SensorData *s)
 	k_busy_wait(NPM1300_ADC_CONV_TIME_US * 4u);
 
 	if (!npm1300_reg_read(s, NPM1300_ADC_BASE, NPM1300_ADC_RESULTS, results, sizeof(results))) {
-		printf("[OD] nPM1300: ADC results read failed\r\n");
+		od_log_info("nPM1300: ADC results read failed");
 		return false;
 	}
 
@@ -148,7 +149,7 @@ static bool npm1300_sample(const struct SensorData *s)
 	s_charging = ((chg_stat & 0x0Fu) == 0x0Cu || (chg_stat & 0x0Fu) == 0x0Du ||
 		      (chg_stat & 0x0Fu) == 0x0Fu);
 	if (!s_gauge_ok) {
-		printf("[OD] nPM1300: VBAT code=%u -> %d mV\r\n", (unsigned)code, (int)mv);
+		od_log_info("nPM1300: VBAT code=%u -> %d mV", (unsigned)code, (int)mv);
 	}
 	return s_gauge_ok;
 }
@@ -213,10 +214,10 @@ void opendisplay_sensor_npm1300_init(void)
 	}
 	k_msleep(30);
 	if (!npm1300_sample_retries(s, 5u)) {
-		printf("[OD] nPM1300: I2C sample failed (bus/config)\r\n");
+		od_log_info("nPM1300: I2C sample failed (bus/config)");
 		return;
 	}
-	printf("[OD] nPM1300: VBAT=%d mV (config I2C)\r\n", (int)(s_batt_v * 1000.0f));
+	od_log_info("nPM1300: VBAT=%d mV (config I2C)", (int)(s_batt_v * 1000.0f));
 	npm1300_publish_msd(s);
 }
 
@@ -243,7 +244,7 @@ void opendisplay_sensor_npm1300_poll(void)
 	have_polled = true;
 
 	if (!npm1300_sample_retries(s, 3u)) {
-		printf("[OD] nPM1300: sample failed, keeping last reading\r\n");
+		od_log_info("nPM1300: sample failed, keeping last reading");
 		npm1300_publish_msd(s);
 		return;
 	}
@@ -257,10 +258,10 @@ void opendisplay_sensor_npm1300_enter_hibernate(void)
 	uint8_t timer[3] = {0u, 0u, 0u};
 
 	if (s == NULL) {
-		printf("[OD] nPM1300: hibernate skipped (no sensor config)\r\n");
+		od_log_info("nPM1300: hibernate skipped (no sensor config)");
 		return;
 	}
-	printf("[OD] nPM1300: entering hibernate\r\n");
+	od_log_info("nPM1300: entering hibernate");
 	(void)npm1300_reg_write(s, NPM1300_TIME_BASE, NPM1300_TIME_TIMER, timer, sizeof(timer));
 	(void)npm1300_reg_write_u8(s, NPM1300_TIME_BASE, NPM1300_TIME_LOAD, 1u);
 	k_msleep(1);

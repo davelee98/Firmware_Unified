@@ -1,4 +1,5 @@
 #include "opendisplay_battery.h"
+#include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_sensor_bq27220.h"
 #include "opendisplay_sensor_npm1300.h"
@@ -136,17 +137,17 @@ static float battery_read_saadc_volts(void)
 		return -1.0f;
 	}
 #if !OD_ADC_AVAILABLE
-	printf("[OD] battery: ADC not available in this build\r\n");
+	od_log_info("battery: ADC not available in this build");
 	return -1.0f;
 #else
 	const struct adc_dt_spec *spec = &s_adc_specs[ain];
 
 	if (!adc_is_ready_dt(spec)) {
-		printf("[OD] battery: ADC device not ready\r\n");
+		od_log_info("battery: ADC device not ready");
 		return -1.0f;
 	}
 	if (adc_channel_setup_dt(spec) != 0) {
-		printf("[OD] battery: adc_channel_setup failed (AIN%d)\r\n", ain);
+		od_log_info("battery: adc_channel_setup failed (AIN%d)", ain);
 		return -1.0f;
 	}
 

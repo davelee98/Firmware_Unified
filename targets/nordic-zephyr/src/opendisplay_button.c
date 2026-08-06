@@ -1,4 +1,5 @@
 #include "opendisplay_button.h"
+#include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_structs.h"
@@ -69,7 +70,7 @@ void opendisplay_button_init(void)
         continue;
       }
       if (opendisplay_touch_gpio_is_touch_int(pin)) {
-        printf("[OD] button: skip pin 0x%02X (reserved for GT911 INT)\r\n", (unsigned)pin);
+        od_log_info("button: skip pin 0x%02X (reserved for GT911 INT)", (unsigned)pin);
         continue;
       }
 

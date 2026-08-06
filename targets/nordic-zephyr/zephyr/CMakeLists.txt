@@ -111,7 +111,7 @@ elseif(BOARD MATCHES ".*xiao_ble.*")
   # OD_LOG_LEVEL is OPENDISPLAY's log level (src/od_log.h), NOT Zephyr's. It gates only our
   # own od_dbg() output, so raising it does not turn on kernel/USB debug spam the way
   # CONFIG_LOG_DEFAULT_LEVEL=4 does. 2 = debug, while this board is on the bench.
-  target_compile_definitions(app PRIVATE OD_BOARD_XIAO_NRF52840 OD_LOG_LEVEL=2)
+  target_compile_definitions(app PRIVATE OD_BOARD_XIAO_NRF52840 OD_LOG_LEVEL=OD_LOG_DEBUG)
 else()
   target_compile_definitions(app PRIVATE NRF54_BOARD_L15)
 endif()
@@ -157,6 +157,7 @@ target_sources(app PRIVATE
   ${SRC_DIR}/nrf54_gpio.c
   ${SRC_DIR}/nrf54_zephyr_time.c
   ${SRC_DIR}/newlib_stubs.c
+  ${SRC_DIR}/od_log.c
   ${SRC_DIR}/opendisplay_ble.c
   ${SRC_DIR}/opendisplay_battery.c
   ${SRC_DIR}/opendisplay_i2c.c

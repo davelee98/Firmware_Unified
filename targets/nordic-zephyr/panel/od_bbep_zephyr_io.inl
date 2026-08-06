@@ -172,13 +172,13 @@ void bbepInitIO(BBEPDISP *pBBEP, uint8_t u8DC, uint8_t u8RST, uint8_t u8BUSY, ui
 		static const char *const names[6] = { "DC", "RST", "BUSY", "CS", "MOSI", "SCK" };
 		const uint8_t cfgs[6] = { u8DC, u8RST, u8BUSY, u8CS, u8MOSI, u8SCK };
 
-		od_dbg("[OD] panel pins (speed=%u Hz):\r\n", (unsigned)u32Speed);
+		od_log_debug("panel pins (speed=%u Hz):", (unsigned)u32Speed);
 		for (unsigned i = 0; i < 6u; i++) {
 			uint8_t port = 0;
 			uint8_t pin = 0;
 			bool ok = nrf54_pin_decode(cfgs[i], &port, &pin);
 
-			od_dbg("[OD]   %-4s cfg=%3u (0x%02X) -> P%u.%02u ok=%d\r\n", names[i],
+			od_log_debug("  %-4s cfg=%3u (0x%02X) -> P%u.%02u ok=%d", names[i],
 			       (unsigned)cfgs[i], (unsigned)cfgs[i], (unsigned)port,
 			       (unsigned)pin, (int)ok);
 		}

@@ -1,4 +1,5 @@
 #include "opendisplay_pipe.h"
+#include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_display.h"
 #include "opendisplay_led.h"
@@ -566,7 +567,7 @@ static void pipe_send_raw(uint8_t connection, const uint8_t *data, uint16_t len)
     }
     k_msleep(1);
   }
-  printf("[OD] pipe notify failed len=%u\r\n", (unsigned)len);
+  od_log_info("pipe notify failed len=%u", (unsigned)len);
 }
 
 static void pipe_send(uint8_t connection, const uint8_t *data, uint16_t len)
@@ -765,7 +766,7 @@ static void handle_direct_write_start(uint8_t connection, const uint8_t *payload
 {
   uint8_t ok[] = { 0x00u, 0x70u };
   uint8_t err[] = { 0xFFu, 0x70u };
-  printf("[OD] pipe 0070 recv len=%u (epd init next)\r\n", (unsigned)payload_len);
+  od_log_info("pipe 0070 recv len=%u (epd init next)", (unsigned)payload_len);
   opendisplay_pipe_write_reset();
   if (opendisplay_display_direct_write_start(payload, payload_len) == 0) {
     pipe_send(connection, ok, sizeof(ok));
@@ -1257,7 +1258,7 @@ static void dispatch(uint8_t connection, uint16_t cmd, const uint8_t *payload, u
       handle_config_chunk(connection, payload, payload_len);
       break;
     case CMD_REBOOT:
-      printf("[OD] reboot\r\n");
+      od_log_info("reboot");
       for (volatile uint32_t i = 0; i < 800000u; i++) {
       }
       NVIC_SystemReset();
@@ -1347,7 +1348,7 @@ static void dispatch(uint8_t connection, uint16_t cmd, const uint8_t *payload, u
       opendisplay_pipe_write_end(connection, payload, payload_len, pipe_send);
       break;
     default:
-      printf("[OD] unknown cmd 0x%04X\r\n", (unsigned)cmd);
+      od_log_info("unknown cmd 0x%04X", (unsigned)cmd);
       break;
   }
 }
@@ -1420,14 +1421,14 @@ void opendisplay_pipe_on_write(const uint8_t *data, uint16_t len, bool write_cmd
   msg.write_cmd = write_cmd ? 1u : 0u;
   memcpy(msg.data, data, len);
   if (k_msgq_put(&s_pipe_msgq, &msg, K_MSEC(100)) != 0) {
-    printf("[OD] pipe queue full, dropped %u B\r\n", (unsigned)len);
+    od_log_info("pipe queue full, dropped %u B", (unsigned)len);
   }
 }
 
 void opendisplay_pipe_on_notify_changed(bool enabled)
 {
   s_notify = enabled;
-  printf("[OD] pipe notifications %s\r\n", enabled ? "on" : "off");
+  od_log_info("pipe notifications %s", enabled ? "on" : "off");
 }
 
 /* BT RX thread: mark only; cleanup (EPD abort etc.) runs on the main thread. */
