@@ -49,15 +49,26 @@ endif()
 # home in this repo and the migration plan does not mention it; where it belongs
 # is an open decision, not an oversight. The path below is unchanged from the
 # source repo so that the fix is a one-line repoint once that is settled.
-set(OPD_APP_PROPERTIES_DIR "${CMAKE_CURRENT_LIST_DIR}/../third_party/silabs_app_properties")
-if(NOT EXISTS "${OPD_APP_PROPERTIES_DIR}/app_properties.c")
+# APP PROPERTIES COMES FROM THE PINNED SDK TOO, and unlike RTT this one is NOT optional:
+# app_properties.c is what the Gecko Bootloader/AppLoader reads to validate the application, so
+# it gates the .gbl OTA path -- the only field-update mechanism any target in this repo has.
+#
+# The two files were byte-for-byte identical to the SDK's copy (verified by hash), so vendoring
+# them bought nothing. The target keeps its own config/app_properties_config.h and
+# config/sl_application_type.h: those carry the OpenDisplay signature, version, capabilities and
+# product id, which ARE ours and must not come from the SDK.
+set(OPD_APP_PROPERTIES_SRC
+    "${SDK_PATH}/bootloader_interface/platform/bootloader/app_properties/app_properties.c")
+if(NOT EXISTS "${OPD_APP_PROPERTIES_SRC}")
   message(FATAL_ERROR
-    "third_party/silabs_app_properties was not imported (see the import commit).\n"
-    "It supplies app_properties.c, which the Gecko Bootloader/AppLoader reads to\n"
-    "validate the application -- so it is required for the .gbl OTA path, not\n"
-    "optional. Source: Firmware_Silabs/third_party/silabs_app_properties/.")
+    "The pinned Simplicity SDK has no app_properties.c at\n"
+    "  ${OPD_APP_PROPERTIES_SRC}\n"
+    "This is REQUIRED, not optional: without it the .gbl OTA image is not valid and the\n"
+    "only field-update path this fleet has stops working. Check SDK_PATH.")
 endif()
-target_sources(slc PRIVATE "${OPD_APP_PROPERTIES_DIR}/app_properties.c")
+target_sources(slc PRIVATE "${OPD_APP_PROPERTIES_SRC}")
+target_include_directories(slc PUBLIC
+    "${SDK_PATH}/bootloader_interface/platform/bootloader")
 target_include_directories(slc PUBLIC
   "${OPD_APP_PROPERTIES_DIR}"
   "${CMAKE_CURRENT_LIST_DIR}/../config"
