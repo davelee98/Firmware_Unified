@@ -11,8 +11,10 @@ static const struct device *gpio_dev(uint8_t port)
 		return DEVICE_DT_GET(DT_NODELABEL(gpio0));
 	case 1:
 		return DEVICE_DT_GET(DT_NODELABEL(gpio1));
+#if DT_NODE_HAS_STATUS(DT_NODELABEL(gpio2), okay)
 	case 2:
 		return DEVICE_DT_GET(DT_NODELABEL(gpio2));
+#endif
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(gpio3), okay)
 	case 3:
 		return DEVICE_DT_GET(DT_NODELABEL(gpio3));

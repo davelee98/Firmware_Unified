@@ -1,0 +1,48 @@
+/*
+ * XIAO nRF52840 (NOT the Sense variant) — board overlay.
+ *
+ * The nRF54 boards' overlay does the same three jobs; the node labels are all that differ,
+ * which is why this is a per-board file rather than #ifdefs in one shared app.overlay.
+ * app.overlay was nRF54L15-only (spi00 / uart20 / i2c22) and was silently applied to every
+ * board — an nRF52840 build failed on `undefined node label 'spi00'` before reaching a single
+ * line of application code.
+ */
+/ {
+	/*
+	 * NO zephyr,console override. The nRF54 overlay points it at uart20, but this board's
+	 * Kconfig.defconfig installs a USB CDC ACM console and prj.conf logs over RTT; naming a
+	 * UART here only adds a third opinion. The board .conf beside this file declines the CDC
+	 * backend, which leaves RTT as prj.conf intends.
+	 */
+	/*
+	 * All 8 SAADC channels, so the battery driver can pick one at runtime by index from the
+	 * configured battery_sense_pin. Same contract as the nRF54 boards; the channels come from
+	 * the board DTS.
+	 */
+	zephyr,user {
+		io-channels = <&adc 0>, <&adc 1>, <&adc 2>, <&adc 3>,
+			      <&adc 4>, <&adc 5>, <&adc 6>, <&adc 7>;
+	};
+};
+
+/*
+ * The display is a GPIO bit-bang SPI on the OpenDisplay config pins. xiao_ble_common.dtsi
+ * enables spi2 on the XIAO connector pads, and leaving a SPIM peripheral driving pads the
+ * firmware also bit-bangs corrupts panel data — the same failure the nRF54 overlay disables
+ * spi00 for. No firmware path uses the Zephyr SPI API.
+ */
+&spi2 {
+	status = "disabled";
+};
+
+/*
+ * Same reasoning for I2C: an enabled controller holds its pins at the idle level rather than
+ * letting the panel drive them, and the display BUSY line shares a pad. On nRF54 that made
+ * every bbepWaitBusy() time out. No firmware path uses the Zephyr I2C API.
+ */
+&i2c0 {
+	status = "disabled";
+};
+
+/* No lsm6ds3tr_c node here: the IMU is on the SENSE variant only, so the nRF54 overlay's
+ * disable of it would be a dangling reference on this board. */
