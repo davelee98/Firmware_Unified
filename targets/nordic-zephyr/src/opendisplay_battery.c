@@ -4,7 +4,7 @@
 #include "opendisplay_sensor_bq27220.h"
 #include "opendisplay_sensor_npm1300.h"
 #include "opendisplay_structs.h"
-#include "nrf54_gpio.h"
+#include "od_gpio.h"
 
 #include <stdio.h>
 #include <zephyr/devicetree.h>
@@ -59,7 +59,7 @@ static int battery_pin_to_ain(uint8_t pin_cfg)
 	uint8_t port;
 	uint8_t pin;
 
-	if (!nrf54_pin_decode(pin_cfg, &port, &pin)) {
+	if (!od_pin_decode(pin_cfg, &port, &pin)) {
 		return -1;
 	}
 #if defined(OD_BOARD_XIAO_NRF52840)
@@ -153,7 +153,7 @@ static float battery_read_saadc_volts(void)
 	/* Enable the sense divider (reference drives it HIGH; battery_sense_flags
 	 * ENABLE_INVERTED is not honored, matching readBatteryVoltageUncached). */
 	if (enable_pin != 0xFFu) {
-		nrf54_gpio_configure_output(enable_pin, true);
+		od_gpio_configure_output(enable_pin, true);
 		k_msleep(10);
 	}
 
@@ -169,8 +169,8 @@ static float battery_read_saadc_volts(void)
 	}
 
 	if (enable_pin != 0xFFu) {
-		nrf54_gpio_write(enable_pin, false);
-		nrf54_gpio_park(enable_pin);
+		od_gpio_write(enable_pin, false);
+		od_gpio_park(enable_pin);
 	}
 
 	if (good == 0) {

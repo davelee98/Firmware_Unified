@@ -22,14 +22,14 @@
  * bb_ep.inl the third, so the generic implementation works as-is on this target. The two
  * implementations are the same algorithm -- same 5 s / 30 s timeouts, same UC81xx polarity
  * inversion -- differing only in whether the pin read goes through digitalRead() or
- * nrf54_gpio_read() directly, and digitalRead() here IS nrf54_gpio_read().
+ * od_gpio_read() directly, and digitalRead() here IS od_gpio_read().
  *
  * CORRECTION (validated 2026-08-05): an earlier version of this comment claimed the vendored
  * version "additionally honours bLightSleep", so the busy-wait might now enter light sleep
  * where it previously spun. THAT WAS WRONG. bbepLightSleep() is `#ifdef ARDUINO_ARCH_ESP32`
  * only; off ESP32 it is `(void)bLightSleep; delay(u32Millis)` (bb_ep.inl:3962-3975). On Zephyr
  * the two implementations poll identically -- same 10 ms + 1 ms settle, same 20 ms poll, same
- * 5 s / 30 s timeouts, same UC81xx polarity -- and digitalRead() here IS nrf54_gpio_read().
+ * 5 s / 30 s timeouts, same UC81xx polarity -- and digitalRead() here IS od_gpio_read().
  *
  * The only real difference is on TIMEOUT: the source override re-read BUSY and logged; the
  * vendored one's warning is guarded by ESP_PLATFORM, so this build is silent. Both then return

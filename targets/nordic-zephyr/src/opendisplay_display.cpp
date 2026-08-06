@@ -9,10 +9,10 @@
 #include "opendisplay_protocol.h"
 #include "opendisplay_structs.h"
 #include "opendisplay_touch.h"
-#include "board_nrf54.h"
+#include "od_board.h"
 #include "boot_screen.h"
-#include "nrf54_gpio.h"
-#include "nrf54_zephyr_compat.h"
+#include "od_gpio.h"
+#include "od_zephyr_compat.h"
 #include "bb_epaper.h"
 #include "od_bbep_zephyr.h"
 #include <stdio.h>
@@ -44,6 +44,7 @@ static bool s_dw_compressed;
 static uint32_t s_dw_decompressed_total;
 static uint8_t s_decompression_chunk[OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE];
 static uint32_t s_displayed_etag;
+static bool s_epd_rail_conditioned;
 
 static const uint8_t PARTIAL_FLAG_COMPRESSED = 0x01u;
 static const uint8_t PARTIAL_ALLOWED_FLAGS = PARTIAL_FLAG_COMPRESSED;
@@ -67,10 +68,6 @@ struct PartialStreamContext {
 static PartialStreamContext s_partial;
 static bool s_partial_panel_up;
 
-#ifndef OD_FALLBACK_DISPLAY_PWR_PIN
-#define OD_FALLBACK_DISPLAY_PWR_PIN 0x00u
-#endif
-
 static void dw_init_mark(const char *tag)
 {
   uint32_t now = od_uptime_get_32();
@@ -88,7 +85,7 @@ static const struct DisplayConfig *display_cfg(void)
 
 static void display_park_signal_pin(uint8_t pin_cfg)
 {
-  nrf54_gpio_park(pin_cfg);
+  od_gpio_park(pin_cfg);
 }
 
 void opendisplay_display_park_pins(void)
@@ -131,34 +128,43 @@ void opendisplay_display_park_pins(void)
 #define OD_PANEL_RAIL_SETTLE_MS 800u
 #define OD_PANEL_PIN_SETTLE_MS  100u
 
-static void display_power_set(bool on)
+static bool display_power_set(bool on)
 {
   const struct GlobalConfig *cfg = opendisplay_get_global_config();
   const struct DisplayConfig *d = display_cfg();
   uint8_t p;
 
   if (cfg == nullptr) {
-    return;
+    od_log_error("panel: global config unavailable");
+    return false;
   }
   if (!on) {
     opendisplay_display_park_pins();
   }
   p = cfg->system_config.pwr_pin;
   if (p == 0xFFu) {
-    /*
-     * The reference logs "Power pin not set" and drives NOTHING here. Do not let this pass
-     * silently: OD_FALLBACK_DISPLAY_PWR_PIN is 0x00, and on nRF52840 pin 0 is P0.00 == XL1,
-     * the 32.768 kHz crystal input. Driving it as a GPIO fights the LFXO the BLE stack runs
-     * on, and it powers no panel either way.
-     */
-    od_log_warn("panel: pwr_pin not set in config -- using fallback P0.%02u",
-                (unsigned)OD_FALLBACK_DISPLAY_PWR_PIN);
-    p = OD_FALLBACK_DISPLAY_PWR_PIN;
+    od_log_error("panel: pwr_pin not set; refusing to drive an unsafe fallback");
+    return false;
   }
-  nrf54_gpio_configure_output(p, on);
+  if (on) {
+    od_board_prepare_epd_rail();
+  }
+  od_gpio_configure_output(p, on);
   if (!on) {
-    return;
+    return true;
   }
+
+  /* The deployed nRF52840 board requires the donor firmware's one-time cold
+   * rail conditioning: BS low, on 50 ms, off 50 ms, BS low, on. nRF54 board
+   * implementations return false and retain their existing single power-on. */
+  if (!s_epd_rail_conditioned && od_board_epd_requires_cold_cycle()) {
+    od_msleep(50);
+    od_gpio_configure_output(p, false);
+    od_msleep(50);
+    od_board_prepare_epd_rail();
+    od_gpio_configure_output(p, true);
+  }
+  s_epd_rail_conditioned = true;
   od_log_debug("panel: rail on (pwr_pin=%u), settling %u ms", (unsigned)p,
                (unsigned)OD_PANEL_RAIL_SETTLE_MS);
   od_msleep(OD_PANEL_RAIL_SETTLE_MS);
@@ -166,14 +172,15 @@ static void display_power_set(bool on)
   /* Pre-drive the signal lines to their idle levels, exactly as pwrmgm() does, so the panel
    * comes out of its own power-on reset seeing a quiet bus rather than floating inputs. */
   if (d != nullptr) {
-    nrf54_gpio_configure_output(d->reset_pin, true);   /* RST idle HIGH */
-    nrf54_gpio_configure_output(d->cs_pin, true);      /* CS  idle HIGH */
-    nrf54_gpio_configure_output(d->dc_pin, false);
-    nrf54_gpio_configure_output(d->clk_pin, false);
-    nrf54_gpio_configure_output(d->data_pin, false);
-    nrf54_gpio_configure_input(d->busy_pin, false, false);
+    od_gpio_configure_output(d->reset_pin, true);   /* RST idle HIGH */
+    od_gpio_configure_output(d->cs_pin, true);      /* CS  idle HIGH */
+    od_gpio_configure_output(d->dc_pin, false);
+    od_gpio_configure_output(d->clk_pin, false);
+    od_gpio_configure_output(d->data_pin, false);
+    od_gpio_configure_input(d->busy_pin, false, false);
     od_msleep(OD_PANEL_PIN_SETTLE_MS);
   }
+  return true;
 }
 
 void opendisplay_display_power_off(void)
@@ -486,7 +493,9 @@ static bool partial_prepare_panel_ram(void)
     return false;
   }
 
-  display_power_set(true);
+  if (!display_power_set(true)) {
+    return false;
+  }
   memset(&s_epd, 0, sizeof(s_epd));
   if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
     display_power_set(false);
@@ -816,37 +825,69 @@ static bool zlib_stream_to_direct_write(const uint8_t *data, uint32_t len, bool 
   }
 }
 
-extern "C" void opendisplay_display_boot_apply(void)
+extern "C" bool opendisplay_display_boot_apply(void)
 {
   const struct DisplayConfig *d = display_cfg();
   int panel;
-  if (s_boot_applied || d == nullptr) {
-    return;
+  if (s_boot_applied) {
+    return true;
   }
-  s_boot_applied = true;
+  if (d == nullptr) {
+    od_log_error("boot display: no display config");
+    return false;
+  }
+  if ((d->transmission_modes & TRANSMISSION_MODE_CLEAR_ON_BOOT) != 0u) {
+    od_log_info("boot display intentionally skipped by CLEAR_ON_BOOT");
+    s_boot_applied = true;
+    return true;
+  }
   panel = opendisplay_map_epd(d->panel_ic_type);
   if (panel == EP_PANEL_UNDEFINED) {
-    return;
+    od_log_error("boot display: unsupported panel_ic_type=%u", (unsigned)d->panel_ic_type);
+    return false;
   }
-  memset(&s_epd, 0, sizeof(s_epd));
-  display_power_set(true);
-  if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
-    display_power_set(false);
-    return;
-  }
-  bbepSetRotation(&s_epd, (int)d->rotation * 90);
-  bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
-  od_bbep_wake(&s_epd);
-  od_bbep_send_panel_init_full(&s_epd);
-  if ((d->transmission_modes & TRANSMISSION_MODE_CLEAR_ON_BOOT) == 0u) {
+
+  for (unsigned attempt = 1; attempt <= 2; attempt++) {
+    bool refresh_ok = false;
+
+    memset(&s_epd, 0, sizeof(s_epd));
+    if (!display_power_set(true)) {
+      return false;
+    }
+    if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
+      od_log_error("boot display: setPanelType failed (attempt %u)", attempt);
+      display_power_set(false);
+      continue;
+    }
+    bbepSetRotation(&s_epd, (int)d->rotation * 90);
+    bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin,
+               d->clk_pin, 0);
+    od_bbep_wake(&s_epd);
+    od_bbep_send_panel_init_full(&s_epd);
     if (!writeBootScreenWithQr(s_epd)) {
+      od_log_warn("boot display: renderer failed; transmitting white fallback");
       bbepFill(&s_epd, BBEP_WHITE, PLANE_DUPLICATE);
     }
-    (void)bbepRefresh(&s_epd, REFRESH_FULL);
-    (void)wait_for_refresh(60000u);
+    od_log_info("boot framebuffer transmitted; starting physical refresh (attempt %u)", attempt);
+    if (bbepRefresh(&s_epd, REFRESH_FULL) == BBEP_SUCCESS) {
+      refresh_ok = wait_for_refresh(60000u);
+    } else {
+      od_log_error("boot display: refresh command failed (attempt %u)", attempt);
+    }
+    bbepSleep(&s_epd, DEEP_SLEEP);
+    display_power_set(false);
+
+    if (refresh_ok) {
+      s_boot_applied = true;
+      od_log_info("boot display refresh complete");
+      return true;
+    }
+    od_log_warn("boot display: physical refresh failed (attempt %u of 2)", attempt);
+    if (attempt < 2) {
+      od_msleep(100);
+    }
   }
-  bbepSleep(&s_epd, DEEP_SLEEP);
-  display_power_set(false);
+  return false;
 }
 
 extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, uint16_t payload_len)
@@ -873,7 +914,10 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
 
   opendisplay_display_abort();
   dw_init_mark("after abort");
-  display_power_set(true);
+  if (!display_power_set(true)) {
+    od_log_info("dw start err panel power unavailable");
+    return -3;
+  }
   memset(&s_epd, 0, sizeof(s_epd));
   if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
     od_log_info("dw start err setPanelType panel=%d", panel);

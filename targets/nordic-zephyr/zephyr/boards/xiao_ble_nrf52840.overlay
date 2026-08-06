@@ -148,11 +148,28 @@
 };
 
 /*
- * Same reasoning for I2C: an enabled controller holds its pins at the idle level rather than
- * letting the panel drive them, and the display BUSY line shares a pad. On nRF54 that made
- * every bbepWaitBusy() time out. No firmware path uses the Zephyr I2C API.
+ * OpenDisplay I2C buses are selected from runtime data_bus packets and driven through od_gpio;
+ * neither Zephyr hardware controller is used. Keep both disabled so their compile-time pinctrl
+ * routes cannot claim pins that a board configuration assigns to another function:
+ *
+ *   i2c1: P0.04/P0.05 -- P0.05 is display BUSY on the XIAO preset and battery-enable on EN04.
+ *   i2c0: P0.07/P0.27 -- not the deployed XIAO D4/D5 bus and otherwise available to runtime GPIO.
+ *
+ * This matches the donor firmware's effective behavior: Wire is only activated when a runtime
+ * I2C data bus exists; a preset without one leaves the pins unclaimed.
  */
+&i2c1 {
+	status = "disabled";
+};
+
 &i2c0 {
+	status = "disabled";
+};
+
+/* The console is USB CDC. Upstream xiao_ble also enables UARTE0 RX on P1.12,
+ * which is the deployed display CS pin (absolute pin 44). Keep that peripheral
+ * out of the image so its pinctrl cannot reclaim CS. */
+&uart0 {
 	status = "disabled";
 };
 
@@ -172,11 +189,9 @@
  *
  * (zephyr/subsys/usb/device_next/class/usbd_cdc_acm.c, cdc_acm_poll_out)
  *
- * Without it the console drops INDIVIDUAL CHARACTERS whenever output outruns the host, which
- * is why log lines were arriving without their CR and/or LF: the terminators sit at the end of
- * each record, exactly where a burst is most likely to hit the ring limit. Nothing about the
- * record assembly was wrong -- od_log.c's CRLF append was verified on the host, truncation
- * path included.
+ * Without it the console drops INDIVIDUAL CHARACTERS whenever output outruns the host,
+ * including the native log backend's record terminators. Zephyr now owns record assembly and
+ * line termination; this flag keeps the CDC transport from truncating those records afterward.
  *
  * The cost is that a stalled host now delays the logging thread instead of silently corrupting
  * the log. For a bench debug console that is the right trade.

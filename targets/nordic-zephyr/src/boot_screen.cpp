@@ -5,7 +5,7 @@
 #include "opendisplay_config_parser.h"
 #include "opendisplay_display_color.h"
 #include "opendisplay_structs.h"
-#include "nrf54_zephyr_compat.h"
+#include "od_zephyr_compat.h"
 #include "qr/qrcode.h"
 #include <bb_epaper.h>
 #include <ctype.h>
@@ -1039,6 +1039,6 @@ bool writeBootScreenWithQr(BBEPDISP &epd) {
             for (uint16_t y = 0; y < h; y++) bbep_write_data(&epd, row, pitch);
         }
     }
-    od_log_info("boot screen rendered");
+    od_log_info("boot screen framebuffer rendered");
     return true;
 }

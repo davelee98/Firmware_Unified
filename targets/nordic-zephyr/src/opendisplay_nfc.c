@@ -161,7 +161,7 @@ static bool nfc_ic_is_soc(uint8_t ic_type)
 	}
 	/* LM20: auto resolves to SoC NFCT (no external TNB132M). */
 	if (ic_type == OD_NFC_IC_AUTO) {
-#if defined(NRF54_BOARD_LM20)
+#if defined(OD_BOARD_NRF54LM20A)
 		return true;
 #else
 		return false;

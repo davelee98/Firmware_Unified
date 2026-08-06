@@ -1,72 +1,29 @@
 #include "od_log.h"
 
 #include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/logging/log_ctrl.h>
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
-/*
- * Zephyr port of Firmware/src/od_log.cpp. The record format and the level semantics are
- * identical; the delivery path is not, and the difference is deliberate -- see od_log.h.
- */
-
 static const char level_chars[] = "EWID";
 
-/*
- * Serialises whole records against each other.
- *
- * NOT a hang guard and not a correctness requirement -- each record is emitted with a SINGLE
- * printf of an already-assembled buffer, so a record can never be interleaved mid-way the way
- * a run of printf("%s") calls could be. What this buys is ordering between threads: BLE
- * callbacks, the display path and main() all log, and without it two records can reach the
- * console interleaved at the driver level.
- *
- * A failed take does NOT drop the record. Losing log lines to contention is a worse outcome
- * than a rare interleave, and unlike the Arduino target there is no TX-space reservation here
- * that a lock could protect.
- */
-static struct k_mutex s_lock;
-static bool s_lock_ready;
-
-/* Bounded so logging from an ISR-adjacent or high-priority context cannot stall on a lower
- * priority thread holding the lock. 20 ms matches the Arduino target's budget. */
-#define OD_LOG_LOCK_MS 20
-
-/* Longest record handed to the console; matches the ESP32 source's OD_LOG_MAX_TEXT budget
- * via the 256-byte assembly buffer below. The longest thing emitted is a hex line (32 bytes
- * rendered as "%02X " plus a label), which is comfortably inside it. */
+/* One complete application record is submitted as one native raw-log message. Zephyr owns the
+ * queue, serialization and backend; OpenDisplay owns the record format. */
 #define OD_LOG_BUF 256
 
 void od_log_init(void)
 {
-	k_mutex_init(&s_lock);
-
-	/*
-	 * UNBUFFERED STDOUT, and this is the second half of the "lines missing their CR/LF" fix.
-	 *
-	 * CONFIG_NEWLIB_LIBC is enabled, and newlib does not treat Zephyr's console hook as a
-	 * tty, so stdout defaults to FULLY buffered with a 1 KB buffer. Records therefore did not
-	 * leave printf() one at a time -- they piled up and were dumped as a single ~1 KB burst
-	 * whenever the buffer filled. That burst overruns the CDC ACM TX ring in one go, and the
-	 * ring's overflow behaviour is to DISCARD (see the hw-flow-control note in the board
-	 * overlay). Because the flush boundary is fixed relative to record boundaries, the same
-	 * part of a record kept getting eaten -- which is why it looked like every line was
-	 * losing its terminator rather than random bytes going missing.
-	 *
-	 * _IONBF makes each record reach the driver as it is written. The overlay's
-	 * hw-flow-control then makes the driver wait rather than drop. Either alone leaves a hole;
-	 * both together make the console lossless.
-	 */
-	setvbuf(stdout, NULL, _IONBF, 0);
-
-	s_lock_ready = true;
+	/* Zephyr initializes the logging core and configured backends during SYS_INIT. Kept as an
+	 * API-compatible hook so shared startup code does not need a platform conditional. */
 }
 
 uint32_t od_log_dropped_total(void)
 {
-	/* See od_log.h: Zephyr's console exposes no TX-room query, so there is nothing to
-	 * count. Reporting a real 0 is better than a fabricated number. */
+	/* Zephyr owns drop accounting internally and does not expose it through this compatibility
+	 * API. Reporting a real 0 is better than fabricating a transport-level count. */
 	return 0u;
 }
 
@@ -77,32 +34,9 @@ __weak uint32_t od_log_cycle_count(void)
 
 static void od_emit(const char *text)
 {
-	bool locked = false;
-
-	/*
-	 * k_is_in_isr() is load-bearing: k_mutex_lock() with a non-zero timeout is illegal in
-	 * ISR context and would fault rather than log. Anything logging from an ISR skips the
-	 * lock and prints unserialised, which is the right trade for a diagnostic.
-	 */
-	if (s_lock_ready && !k_is_in_isr()) {
-		locked = (k_mutex_lock(&s_lock, K_MSEC(OD_LOG_LOCK_MS)) == 0);
-	}
-
-	/*
-	 * printf(), NOT od_log_raw(). od_log_raw() calls od_emit(), so routing this through it
-	 * is unbounded recursion -- od_emit -> od_log_raw -> od_emit -> ... at 256 bytes of
-	 * stack per frame. It got that way because the mechanical printf->od_log_* conversion
-	 * was run across src/ INCLUDING THIS FILE, which is the one file it must never touch.
-	 *
-	 * ONE call, not a run of writes: the buffer is already the complete record, and printf
-	 * is the same path every call site in this target used before the conversion, so
-	 * delivery behaviour is unchanged.
-	 */
-	printf("%s", text);
-
-	if (locked) {
-		k_mutex_unlock(&s_lock);
-	}
+	/* LOG_RAW bypasses Zephyr's system-log envelope but still uses its deferred queue and sole
+	 * configured backend. It appends nothing, so the application record remains byte-exact. */
+	LOG_RAW("%s", text);
 }
 
 void _od_log(int level, const char *fmt, ...)
@@ -127,12 +61,8 @@ void _od_log(int level, const char *fmt, ...)
 	(void)vsnprintf(buf + pos, sizeof(buf) - (size_t)pos, fmt, args);
 	va_end(args);
 
-	/*
-	 * The line ending is appended here rather than being carried in every format string,
-	 * which is what lets call sites drop their trailing "\r\n". CRLF, not LF: these logs are
-	 * read on terminals that do not translate, and the previous bare printf() calls in this
-	 * target already used CRLF.
-	 */
+	/* LOG_RAW does not append any characters. Terminate the application record here so UART,
+	 * RTT and future Zephyr backends all carry the same wire format. */
 	{
 		size_t len = strlen(buf);
 
@@ -159,8 +89,7 @@ void od_log_raw(const char *fmt, ...)
 	(void)vsnprintf(buf, sizeof(buf), fmt, args);
 	va_end(args);
 
-	/* No header and no newline by contract -- this is how a caller builds one line out of
-	 * several calls (progress dots). Adding either would corrupt that. */
+	/* No application header or newline by contract. */
 	od_emit(buf);
 }
 
@@ -189,14 +118,9 @@ void od_log_hex_line(char *buf, size_t bufSize, const char *label,
 
 void od_log_flush(void)
 {
-	fflush(stdout);
+	log_flush();
 
-	/*
-	 * Settling pause, matching the ESP32 source's rationale: fflush() returns once the
-	 * driver has the bytes, which is not the same as the host having seen them -- on a CDC
-	 * console the transfer still has to be polled off the device. od_log_flush() is for
-	 * boot/wake checkpoints and pre-power-cut, where losing the last line costs the most and
-	 * 5 ms costs nothing.
-	 */
+	/* The backend has accepted every queued record, but CDC still needs a USB poll to move its
+	 * final packet to the host. Preserve the existing checkpoint settling budget. */
 	k_msleep(5);
 }

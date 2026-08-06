@@ -1,0 +1,22 @@
+mainmenu "OpenDisplay Nordic firmware"
+
+source "Kconfig.zephyr"
+
+menu "OpenDisplay platform"
+
+config OD_PLATFORM_NRF52840
+	bool
+	default y if SOC_NRF52840
+	help
+	  Selects the deployed XIAO nRF52840 platform contract: absolute
+	  Nordic pin numbers, Adafruit bootloader, and board-specific EPD power
+	  sequencing.
+
+config OD_PLATFORM_NRF54
+	bool
+	default y if SOC_SERIES_NRF54L
+	help
+	  Selects the nRF54L platform contract and packed OpenDisplay pin
+	  encoding used by the L15 and LM20 boards.
+
+endmenu

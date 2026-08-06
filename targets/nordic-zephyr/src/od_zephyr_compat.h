@@ -1,5 +1,5 @@
-#ifndef NRF54_ZEPHYR_COMPAT_H
-#define NRF54_ZEPHYR_COMPAT_H
+#ifndef OD_ZEPHYR_COMPAT_H
+#define OD_ZEPHYR_COMPAT_H
 
 #include <stddef.h>
 #include <stdint.h>

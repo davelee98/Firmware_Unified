@@ -45,10 +45,18 @@ elseif(OD_LOW_POWER_QUIET OR (DEFINED PROFILE AND PROFILE STREQUAL "quiet"))
   set(OD_LOW_POWER_QUIET ON)
 endif()
 
+if(DEFINED ENV{PROFILE} AND "$ENV{PROFILE}" STREQUAL "debug")
+  list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_LIST_DIR}/prj_debug.conf)
+  set(OD_DEBUG_BUILD ON)
+elseif(OD_DEBUG_BUILD OR (DEFINED PROFILE AND PROFILE STREQUAL "debug"))
+  list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_LIST_DIR}/prj_debug.conf)
+  set(OD_DEBUG_BUILD ON)
+endif()
+
 list(APPEND BOARD_ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
-project(opendisplay_nrf54)
+project(opendisplay_nordic)
 
 set(FACTORY_GEN_SCRIPT ${PROJECT_ROOT}/scripts/factory_config_gen.py)
 set(FACTORY_GEN_STAMP ${GEN_DIR}/.factory_gen_stamp)
@@ -90,30 +98,47 @@ target_include_directories(app PRIVATE
 )
 
 target_compile_definitions(app PRIVATE
-  TARGET_NRF54
   OD_APP_VERSION=0x0100
-  OPENDISPLAY_BUILD_ID=\"nrf54\"
   OPENDISPLAY_ZLIB_USE_HEAP_WINDOW=0
 )
 
-# BOARD *is* set here -- find_package(Zephyr) ran on line 50. Only the EXTRA_CONF_FILE block
-# above it sees an empty BOARD; do not move these down-stream checks up there.
+# BOARD *is* set here -- find_package(Zephyr) has run. Only the EXTRA_CONF_FILE block above it
+# sees an empty BOARD; do not move these down-stream checks up there.
 #
 # The nRF52840 needed its own arm. This was a two-way if, so xiao_ble fell into the else and
-# compiled as NRF54_BOARD_L15 -- meaning board_nrf54_early_init() drove P2.3/P2.5/P2.10, which
+# compiled as the L15 board -- meaning early init drove P2.3/P2.5/P2.10, which
 # are nRF54L15 RF-switch and boost-select pins that DO NOT EXIST on the nRF52840 (P0/P1 only).
-# It was silent rather than fatal because nrf54_pin_decode() rejects a port whose gpio node is
+# It was silent rather than fatal because the pin decoder rejects a port whose gpio node is
 # not okay and returns false, so every one of those writes was a no-op. Silent-and-wrong is
 # still wrong: the board got no init of its own.
-if(BOARD MATCHES ".*lm20.*")
-  target_compile_definitions(app PRIVATE NRF54_BOARD_LM20)
-elseif(BOARD MATCHES ".*xiao_ble.*")
-  # OD_LOG_LEVEL is OPENDISPLAY's log level (src/od_log.h), NOT Zephyr's. It gates only our
-  # own od_dbg() output, so raising it does not turn on kernel/USB debug spam the way
-  # CONFIG_LOG_DEFAULT_LEVEL=4 does. 2 = debug, while this board is on the bench.
-  target_compile_definitions(app PRIVATE OD_BOARD_XIAO_NRF52840 OD_LOG_LEVEL=OD_LOG_DEBUG)
+if(CONFIG_OD_PLATFORM_NRF52840)
+  target_compile_definitions(app PRIVATE
+    OD_PLATFORM_NRF52840
+    OD_BOARD_XIAO_NRF52840
+    OD_PLATFORM_NAME=\"nRF52840\"
+    OPENDISPLAY_BUILD_ID=\"nrf52840\")
+elseif(CONFIG_OD_PLATFORM_NRF54)
+  target_compile_definitions(app PRIVATE
+    OD_PLATFORM_NRF54
+    OD_PLATFORM_NAME=\"nRF54\"
+    OPENDISPLAY_BUILD_ID=\"nrf54\")
+  if(CONFIG_SOC_NRF54LM20A)
+    target_compile_definitions(app PRIVATE OD_BOARD_NRF54LM20A)
+  elseif(CONFIG_SOC_NRF54L15)
+    target_compile_definitions(app PRIVATE OD_BOARD_NRF54L15)
+  else()
+    message(FATAL_ERROR "Unsupported nRF54 SoC")
+  endif()
 else()
-  target_compile_definitions(app PRIVATE NRF54_BOARD_L15)
+  message(FATAL_ERROR "Unsupported Nordic platform: expected nRF52840 or nRF54L")
+endif()
+
+# Application verbosity is a build-profile property, independent of Zephyr subsystem levels.
+# Both profiles use the same OpenDisplay record format and native raw-log transport.
+if(OD_DEBUG_BUILD)
+  target_compile_definitions(app PRIVATE OD_DEBUG_BUILD=1 OD_LOG_LEVEL=OD_LOG_DEBUG)
+else()
+  target_compile_definitions(app PRIVATE OD_LOG_LEVEL=OD_LOG_INFO)
 endif()
 
 # OpenDisplay app version string (boot screen + CMD_FIRMWARE_VERSION major.minor.patch).
@@ -153,9 +178,10 @@ endif()
 
 target_sources(app PRIVATE
   ${SRC_DIR}/main.c
-  ${SRC_DIR}/board_nrf54.c
-  ${SRC_DIR}/nrf54_gpio.c
-  ${SRC_DIR}/nrf54_zephyr_time.c
+  ${SRC_DIR}/od_board_common.c
+  ${SRC_DIR}/od_gpio.c
+  ${SRC_DIR}/od_pin_codec.c
+  ${SRC_DIR}/od_zephyr_time.c
   ${SRC_DIR}/newlib_stubs.c
   ${SRC_DIR}/od_log.c
   ${SRC_DIR}/opendisplay_ble.c
@@ -186,5 +212,19 @@ target_sources(app PRIVATE
   ${THIRD_PARTY_DIR}/bb_epaper/src/Group5.cpp
   ${THIRD_PARTY_DIR}/uzlib/src/od_zlib_stream.c
 )
+
+if(CONFIG_OD_PLATFORM_NRF52840)
+  target_sources(app PRIVATE
+    ${SRC_DIR}/platform/nrf52840/od_board_nrf52840.c
+    ${SRC_DIR}/platform/nrf52840/od_pin_codec_nrf52840.c)
+elseif(CONFIG_SOC_NRF54LM20A)
+  target_sources(app PRIVATE
+    ${SRC_DIR}/platform/nrf54/od_board_nrf54lm20a.c
+    ${SRC_DIR}/platform/nrf54/od_pin_codec_nrf54.c)
+elseif(CONFIG_SOC_NRF54L15)
+  target_sources(app PRIVATE
+    ${SRC_DIR}/platform/nrf54/od_board_nrf54l15.c
+    ${SRC_DIR}/platform/nrf54/od_pin_codec_nrf54.c)
+endif()
 
 add_dependencies(app factory_config_gen)

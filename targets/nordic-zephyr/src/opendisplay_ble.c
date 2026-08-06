@@ -16,7 +16,7 @@
 #include "opendisplay_sensor_bq27220.h"
 #include "opendisplay_sensor_npm1300.h"
 #include "opendisplay_nfc.h"
-#include "board_nrf54.h"
+#include "od_board.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -295,7 +295,9 @@ static void dfu_work_handler(struct k_work *work)
 static void boot_display_work_handler(struct k_work *work)
 {
 	ARG_UNUSED(work);
-	opendisplay_display_boot_apply();
+	if (!opendisplay_display_boot_apply()) {
+		od_log_error("boot display failed after bounded retry");
+	}
 }
 
 static void schedule_boot_display_apply(void)
@@ -442,17 +444,24 @@ static void log_msd(const char *tag)
 #if defined(OD_LOW_POWER_QUIET)
 	ARG_UNUSED(tag);
 #else
-	od_log_raw("[OD] msd %s:", tag);
-	for (unsigned i = 0; i < MSD_PAYLOAD_LEN; i++) {
-		od_log_raw(" %02X", msd_payload[i]);
+	char line[96];
+	int pos = snprintf(line, sizeof(line), "[OD] msd %s:", tag);
+
+	if (pos < 0) {
+		return;
 	}
-	/*
-	 * od_log_raw(), NOT od_log_info(""). This terminates the hex line built by the
-	 * od_log_raw() calls above; od_log_info("") would emit a whole HEADERED record --
-	 * appending "[SSSS.mmm|C0] I: " to the end of the MSD dump instead of ending the line.
-	 * It was printf("\r\n") before the conversion, and only od_log_raw() preserves that.
-	 */
-	od_log_raw("\r\n");
+	for (unsigned i = 0; i < MSD_PAYLOAD_LEN; i++) {
+		if (pos >= (int)sizeof(line)) {
+			break;
+		}
+		int n = snprintf(line + pos, sizeof(line) - (size_t)pos, " %02X", msd_payload[i]);
+
+		if (n < 0) {
+			break;
+		}
+		pos += n;
+	}
+	od_log_info("%s", line);
 #endif
 }
 
@@ -783,8 +792,8 @@ static void flash_powerdown_from_config(void)
 		od_log_info("flash powerdown MOSI=%u SCK=%u CS=%u MISO=%u WP=%u HOLD=%u",
 		       fc->mosi_pin, fc->sck_pin, fc->cs_pin,
 		       fc->miso_pin, fc->wp_pin, fc->hold_pin);
-		board_nrf54_flash_powerdown(fc->mosi_pin, fc->sck_pin, fc->cs_pin,
-					    fc->miso_pin, fc->wp_pin, fc->hold_pin);
+		od_board_flash_powerdown(fc->mosi_pin, fc->sck_pin, fc->cs_pin,
+					 fc->miso_pin, fc->wp_pin, fc->hold_pin);
 		break;
 	}
 }

@@ -4,7 +4,7 @@
 #include "opendisplay_config_parser.h"
 #include "opendisplay_structs.h"
 #include "opendisplay_touch.h"
-#include "nrf54_gpio.h"
+#include "od_gpio.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -36,7 +36,7 @@ static void button_irq_handler(void)
 
 static bool read_logical_pressed(const ButtonState *btn)
 {
-  bool level = nrf54_gpio_read(btn->pin) != 0;
+  bool level = od_gpio_read(btn->pin) != 0;
   return btn->inverted ? !level : level;
 }
 
@@ -84,12 +84,12 @@ void opendisplay_button_init(void)
       btn->inverted = (input->invert & (1u << pin_idx)) != 0u;
       bool pull_up = (input->pullups & (1u << pin_idx)) != 0u;
       bool pull_down = (input->pulldowns & (1u << pin_idx)) != 0u;
-      nrf54_gpio_configure_input(pin, pull_up, pull_down);
+      od_gpio_configure_input(pin, pull_up, pull_down);
       btn->current_state = read_logical_pressed(btn) ? 1u : 0u;
       btn->initialized = true;
       /* Attach a both-edges interrupt (reference uses CHANGE, device_control.cpp:604).
        * On failure we still have the polling path in _process(). */
-      if (nrf54_gpio_configure_interrupt(pin, button_irq_handler) != 0) {
+      if (od_gpio_configure_interrupt(pin, button_irq_handler) != 0) {
         od_log_info("button pin=0x%02X interrupt setup failed; polling only",
                (unsigned)pin);
       }

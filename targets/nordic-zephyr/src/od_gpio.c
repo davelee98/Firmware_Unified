@@ -1,4 +1,4 @@
-#include "nrf54_gpio.h"
+#include "od_gpio.h"
 
 #include "od_log.h"
 
@@ -26,69 +26,20 @@ static const struct device *gpio_dev(uint8_t port)
 	}
 }
 
-bool nrf54_pin_decode(uint8_t cfg, uint8_t *port_out, uint8_t *pin_out)
+bool od_gpio_port_ready(uint8_t port)
 {
-	uint8_t port;
-	uint8_t pin;
-
-	if (cfg == NRF54_GPIO_PIN_UNUSED) {
-		return false;
-	}
-	/*
-	 * Compact pin byte:
-	 *   bit7=0: (port << 4) | pin   — pin 0..15 (legacy, L15-safe)
-	 *   bit7=1: 0x80 | (port << 5) | pin — pin 0..31 (LM20 D1/D2/D3 etc.)
-	 */
-#if defined(OD_BOARD_XIAO_NRF52840)
-	/*
-	 * nRF52840 USES ABSOLUTE NORDIC PIN NUMBERS (port * 32 + pin), NOT the packed nibble
-	 * form above. This is a wire contract with the host, not a preference: the Arduino
-	 * nRF52 firmware this board is migrating from consumed the config's pin bytes as raw
-	 * Nordic pin numbers, so every config already written for this hardware is in that
-	 * encoding, and a real config off the bench decodes correctly only this way:
-	 *
-	 *   RST=15 -> P0.15      CS=44   -> P1.12 (D7,  XIAO CS)
-	 *   BUSY=29 -> P0.29 (D3) DATA=47 -> P1.15 (D10, XIAO MOSI)
-	 *   DC=31  -> P0.31      CLK=45  -> P1.13 (D8,  XIAO SCK)
-	 *
-	 * Under the nibble form those same bytes decode to port 2 (44 = 0x2C -> P2.12), a port
-	 * the nRF52840 does not have. nrf54_pin_decode() then returned false for CS, MOSI and
-	 * SCK, every bit-bang write became a no-op, and the panel stayed blank while BLE and
-	 * PIPE upload worked perfectly -- which is exactly the reported symptom.
-	 *
-	 * The nRF54 boards keep the nibble form. They have a real P2, their deployed configs
-	 * are written in that encoding, and changing them would break working hardware.
-	 */
-	port = (uint8_t)((cfg >> 5) & 0x07u);
-	pin = (uint8_t)(cfg & 0x1Fu);
-#else
-	if ((cfg & 0x80u) != 0u) {
-		port = (uint8_t)((cfg >> 5) & 0x03u);
-		pin = (uint8_t)(cfg & 0x1Fu);
-	} else {
-		port = (uint8_t)((cfg >> 4) & 0x0Fu);
-		pin = (uint8_t)(cfg & 0x0Fu);
-	}
-#endif
-	if (port > 3u || pin > 31u) {
-		return false;
-	}
-	if (gpio_dev(port) == NULL || !device_is_ready(gpio_dev(port))) {
-		return false;
-	}
-	*port_out = port;
-	*pin_out = pin;
-	return true;
+	const struct device *dev = gpio_dev(port);
+	return dev != NULL && device_is_ready(dev);
 }
 
-void nrf54_gpio_configure_output(uint8_t cfg, bool initial_high)
+void od_gpio_configure_output(uint8_t cfg, bool initial_high)
 {
 	uint8_t port;
 	uint8_t pin;
 	gpio_flags_t flags = GPIO_OUTPUT | (initial_high ? GPIO_OUTPUT_INIT_HIGH
 							 : GPIO_OUTPUT_INIT_LOW);
 
-	if (!nrf54_pin_decode(cfg, &port, &pin)) {
+	if (!od_pin_decode(cfg, &port, &pin)) {
 		od_log_debug("gpio: cfg=0x%02X does not decode; output IGNORED", cfg);
 		return;
 	}
@@ -108,7 +59,7 @@ void nrf54_gpio_configure_output(uint8_t cfg, bool initial_high)
 	}
 }
 
-void nrf54_gpio_configure_input(uint8_t cfg, bool pull_up, bool pull_down)
+void od_gpio_configure_input(uint8_t cfg, bool pull_up, bool pull_down)
 {
 	uint8_t port;
 	uint8_t pin;
@@ -119,7 +70,7 @@ void nrf54_gpio_configure_input(uint8_t cfg, bool pull_up, bool pull_down)
 	} else if (pull_down) {
 		flags |= GPIO_PULL_DOWN;
 	}
-	if (!nrf54_pin_decode(cfg, &port, &pin)) {
+	if (!od_pin_decode(cfg, &port, &pin)) {
 		od_log_debug("gpio: cfg=0x%02X does not decode; input IGNORED", cfg);
 		return;
 	}
@@ -133,42 +84,41 @@ void nrf54_gpio_configure_input(uint8_t cfg, bool pull_up, bool pull_down)
 
 /* One slot per interrupt-enabled pin. Each slot owns its gpio_callback so the
  * Zephyr trampoline can recover the registered handler via CONTAINER_OF. */
-#define NRF54_GPIO_IRQ_MAX 8
+#define OD_GPIO_IRQ_MAX 8
 
-struct nrf54_gpio_irq_slot {
+struct od_gpio_irq_slot {
 	struct gpio_callback cb;
-	nrf54_gpio_irq_handler_t handler;
+	od_gpio_irq_handler_t handler;
 	bool used;
 };
 
-static struct nrf54_gpio_irq_slot s_irq_slots[NRF54_GPIO_IRQ_MAX];
+static struct od_gpio_irq_slot s_irq_slots[OD_GPIO_IRQ_MAX];
 
-static void nrf54_gpio_irq_trampoline(const struct device *dev, struct gpio_callback *cb,
-				      uint32_t pins)
+static void od_gpio_irq_trampoline(const struct device *dev, struct gpio_callback *cb,
+				   uint32_t pins)
 {
 	ARG_UNUSED(dev);
 	ARG_UNUSED(pins);
-	struct nrf54_gpio_irq_slot *slot =
-		CONTAINER_OF(cb, struct nrf54_gpio_irq_slot, cb);
+	struct od_gpio_irq_slot *slot = CONTAINER_OF(cb, struct od_gpio_irq_slot, cb);
 
 	if (slot->handler != NULL) {
 		slot->handler();
 	}
 }
 
-int nrf54_gpio_configure_interrupt(uint8_t cfg, nrf54_gpio_irq_handler_t handler)
+int od_gpio_configure_interrupt(uint8_t cfg, od_gpio_irq_handler_t handler)
 {
 	uint8_t port;
 	uint8_t pin;
 	const struct device *dev;
-	struct nrf54_gpio_irq_slot *slot = NULL;
+	struct od_gpio_irq_slot *slot = NULL;
 	int err;
 
-	if (handler == NULL || !nrf54_pin_decode(cfg, &port, &pin)) {
+	if (handler == NULL || !od_pin_decode(cfg, &port, &pin)) {
 		return -1;
 	}
 	dev = gpio_dev(port);
-	for (unsigned i = 0; i < NRF54_GPIO_IRQ_MAX; i++) {
+	for (unsigned i = 0; i < OD_GPIO_IRQ_MAX; i++) {
 		if (!s_irq_slots[i].used) {
 			slot = &s_irq_slots[i];
 			break;
@@ -179,7 +129,7 @@ int nrf54_gpio_configure_interrupt(uint8_t cfg, nrf54_gpio_irq_handler_t handler
 	}
 	slot->handler = handler;
 	slot->used = true;
-	gpio_init_callback(&slot->cb, nrf54_gpio_irq_trampoline, BIT(pin));
+	gpio_init_callback(&slot->cb, od_gpio_irq_trampoline, BIT(pin));
 	err = gpio_add_callback(dev, &slot->cb);
 	if (err != 0) {
 		slot->used = false;
@@ -193,12 +143,12 @@ int nrf54_gpio_configure_interrupt(uint8_t cfg, nrf54_gpio_irq_handler_t handler
 	return err;
 }
 
-void nrf54_gpio_write(uint8_t cfg, bool level_high)
+void od_gpio_write(uint8_t cfg, bool level_high)
 {
 	uint8_t port;
 	uint8_t pin;
 
-	if (!nrf54_pin_decode(cfg, &port, &pin)) {
+	if (!od_pin_decode(cfg, &port, &pin)) {
 		return;
 	}
 	int err = gpio_pin_set(gpio_dev(port), pin, level_high ? 1 : 0);
@@ -209,11 +159,11 @@ void nrf54_gpio_write(uint8_t cfg, bool level_high)
 	 * worse than the bug it reports. One line per failing pin is enough to identify it.
 	 */
 	if (err != 0) {
-		static uint64_t reported;
-		uint64_t bit = 1ULL << ((port * 32u) + pin);
+		static uint32_t reported[4];
+		uint32_t bit = 1UL << pin;
 
-		if ((reported & bit) == 0u) {
-			reported |= bit;
+		if ((reported[port] & bit) == 0u) {
+			reported[port] |= bit;
 			od_log_error("gpio: SET P%u.%02u (cfg=0x%02X) FAILED: %d "
 				     "(further failures on this pin are suppressed)",
 				     port, pin, cfg, err);
@@ -221,12 +171,12 @@ void nrf54_gpio_write(uint8_t cfg, bool level_high)
 	}
 }
 
-int nrf54_gpio_read(uint8_t cfg)
+int od_gpio_read(uint8_t cfg)
 {
 	uint8_t port;
 	uint8_t pin;
 
-	if (!nrf54_pin_decode(cfg, &port, &pin)) {
+	if (!od_pin_decode(cfg, &port, &pin)) {
 		return 0;
 	}
 	int val = gpio_pin_get(gpio_dev(port), pin);
@@ -238,11 +188,11 @@ int nrf54_gpio_read(uint8_t cfg)
 	 * return 0 so a failure cannot masquerade as a level.
 	 */
 	if (val < 0) {
-		static uint64_t reported;
-		uint64_t bit = 1ULL << ((port * 32u) + pin);
+		static uint32_t reported[4];
+		uint32_t bit = 1UL << pin;
 
-		if ((reported & bit) == 0u) {
-			reported |= bit;
+		if ((reported[port] & bit) == 0u) {
+			reported[port] |= bit;
 			od_log_error("gpio: GET P%u.%02u (cfg=0x%02X) FAILED: %d", port, pin, cfg,
 				     val);
 		}
@@ -251,12 +201,12 @@ int nrf54_gpio_read(uint8_t cfg)
 	return val;
 }
 
-void nrf54_gpio_park(uint8_t cfg)
+void od_gpio_park(uint8_t cfg)
 {
 	uint8_t port;
 	uint8_t pin;
 
-	if (!nrf54_pin_decode(cfg, &port, &pin)) {
+	if (!od_pin_decode(cfg, &port, &pin)) {
 		return;
 	}
 	(void)gpio_pin_configure(gpio_dev(port), pin, GPIO_DISCONNECTED);

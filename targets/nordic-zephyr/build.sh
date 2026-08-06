@@ -37,8 +37,21 @@ od_write_manifest_header() {
 }
 RELEASE_DIR="${REPO_ROOT}/release"
 MANIFEST="${RELEASE_DIR}/MANIFEST-nordic-zephyr.txt"
-PROFILE="${PROFILE:-battery}"   # battery | uart | quiet
+PROFILE="${PROFILE:-battery}"   # battery | uart | debug | quiet
 PURGE="${PURGE:-always}"        # always | never | auto
+
+case "${PROFILE}" in
+  battery|uart|debug|quiet) ;;
+  *)
+    echo "Unknown PROFILE '${PROFILE}'. Use battery, uart, debug, or quiet." >&2
+    exit 2
+    ;;
+esac
+
+PROFILE_SUFFIX=""
+if [[ "${PROFILE}" == debug ]]; then
+  PROFILE_SUFFIX="-debug"
+fi
 
 export PROFILE
 
@@ -55,7 +68,7 @@ if [[ "${1:-}" == "--all" ]]; then
     echo "=============================================================="
     # Separate BUILD_DIR per board: sharing one would make each build a full rebuild and would
     # leave whichever ran last as the only thing flash.sh could find.
-    if BOARD="${b}" BUILD_DIR="${SCRIPT_DIR}/build-${tag}" OD_MANIFEST_APPEND="${MANIFEST}.tmp" \
+    if BOARD="${b}" BUILD_DIR="${SCRIPT_DIR}/build-${tag}${PROFILE_SUFFIX}" OD_MANIFEST_APPEND="${MANIFEST}.tmp" \
          "${BASH_SOURCE[0]}" "$@"; then :; else rc=1; echo "!! ${b} FAILED" >&2; fi
   done
   od_write_manifest_header > "${MANIFEST}" 2>/dev/null || true
@@ -106,7 +119,7 @@ if [[ ! -f "${HEX}" ]]; then
   HEX="${BUILD_DIR}/zephyr/zephyr/zephyr.hex"
 fi
 if [[ ! -f "${HEX}" ]]; then
-  HEX="${BUILD_DIR}/opendisplay_nrf54/zephyr/zephyr.hex"
+  HEX="${BUILD_DIR}/opendisplay_nordic/zephyr/zephyr.hex"
 fi
 
 UPDATE_BIN=""
@@ -154,15 +167,15 @@ esac
 mkdir -p "${RELEASE_DIR}"
 REL_LINE=""
 if [[ -f "${HEX}" ]]; then
-  cp "${HEX}" "${RELEASE_DIR}/opendisplay-${BOARD_TAG}-merged.hex"
-  REL_LINE="$(printf '%-22s %10s  opendisplay-%s-merged.hex' \
-      "${BOARD_TAG}" "$(stat -c %s "${HEX}")" "${BOARD_TAG}")"
+  cp "${HEX}" "${RELEASE_DIR}/opendisplay-${BOARD_TAG}${PROFILE_SUFFIX}-merged.hex"
+  REL_LINE="$(printf '%-22s %10s  opendisplay-%s%s-merged.hex' \
+      "${BOARD_TAG}${PROFILE_SUFFIX}" "$(stat -c %s "${HEX}")" "${BOARD_TAG}" "${PROFILE_SUFFIX}")"
 fi
 if [[ -n "${UPDATE_BIN}" ]]; then
-  cp "${UPDATE_BIN}" "${RELEASE_DIR}/opendisplay-${BOARD_TAG}-ota.bin"
+  cp "${UPDATE_BIN}" "${RELEASE_DIR}/opendisplay-${BOARD_TAG}${PROFILE_SUFFIX}-ota.bin"
 fi
 if [[ -n "${DFU_ZIP}" ]]; then
-  cp "${DFU_ZIP}" "${RELEASE_DIR}/opendisplay-${BOARD_TAG}-dfu.zip"
+  cp "${DFU_ZIP}" "${RELEASE_DIR}/opendisplay-${BOARD_TAG}${PROFILE_SUFFIX}-dfu.zip"
 fi
 # UF2 is the ADAFRUIT BOOTLOADER's flashing format and is the artefact that actually matters on
 # nRF52840: that board has no MCUboot, so there is no signed OTA image or dfu_application.zip
@@ -175,7 +188,7 @@ for candidate in \
   if [[ -f "${candidate}" ]]; then UF2="${candidate}"; break; fi
 done
 if [[ -n "${UF2}" ]]; then
-  cp "${UF2}" "${RELEASE_DIR}/opendisplay-${BOARD_TAG}.uf2"
+  cp "${UF2}" "${RELEASE_DIR}/opendisplay-${BOARD_TAG}${PROFILE_SUFFIX}.uf2"
 fi
 if [[ -n "${REL_LINE}" ]]; then
   if [[ -n "${OD_MANIFEST_APPEND:-}" ]]; then
@@ -186,14 +199,26 @@ if [[ -n "${REL_LINE}" ]]; then
   fi
 fi
 
-echo "Release: ${RELEASE_DIR}/opendisplay-${BOARD_TAG}-merged.hex"
-echo "Flash: ./flash.sh"
+echo "Release: ${RELEASE_DIR}/opendisplay-${BOARD_TAG}${PROFILE_SUFFIX}-merged.hex"
+if [[ "${BOARD}" == xiao_ble* ]]; then
+  if [[ "${PROFILE}" == debug ]]; then
+    echo "Flash: ./flash-nrf52840-debug.sh"
+  else
+    echo "Flash: ./flash-nrf52840.sh"
+  fi
+else
+  echo "Flash: ./flash-nrf54.sh"
+fi
 if [[ -f "${CONF}" ]]; then
   echo "Profile: ${PROFILE}  serial=$(grep -E '^CONFIG_SERIAL=|^# CONFIG_SERIAL is not set' "${CONF}" | head -1)"
-  if [[ "${PROFILE}" == "uart" ]]; then
+  if [[ "${PROFILE}" == "debug" ]]; then
+    echo "Debug build: application DEBUG plus Zephyr subsystem INFO"
+  elif [[ "${PROFILE}" == "uart" ]]; then
     echo "Serial monitor: 115200 baud on the board USB port"
   elif [[ "${PROFILE}" == "quiet" ]]; then
     echo "Quiet build: LOG off, no heartbeat prints (for advertising-current tests)"
+  elif [[ "${BOARD}" == xiao_ble* ]]; then
+    echo "Logs: USB CDC ACM"
   else
     echo "Logs: SEGGER RTT (battery build has no USB UART)"
   fi
