@@ -1,7 +1,117 @@
 # Target: EFR32BG22 (Simplicity SDK + CMake)
 
 Source repo: `Firmware_Silabs` (https://github.com/davelee98/Firmware_Silabs)
-Surveyed at commit `d1a866d` (2026-07-25). **Not yet imported.**
+Surveyed at commit `d1a866d` (2026-07-25). **Imported 2026-08-05 at `17a8222`** — a
+descendant of the surveyed commit, and one commit behind `OpenDisplay/Firmware_Silabs`.
+
+## Status (2026-08-05) — imported, does NOT build
+
+Read this before anything below it; several statements further down were written
+before the import and are corrected here.
+
+| | |
+|---|---|
+| Source repo builds on this box | **yes**, clean: `text 236316  data 492  bss 31792` |
+| This target builds | **no** |
+| Furthest reached | **179 of 181 objects compiled**, measured — the whole SDK, every application C source, uzlib, QR |
+| Blocked by | `bb_epaper` has no EFR32 IO backend here, and `BBEPAPER::sendPanelInitFull()` does not exist in the shared vendored copy |
+| Also missing | `third_party/segger_rtt` and `third_party/silabs_app_properties` — not imported, no home decided |
+
+The 179/181 figure comes from a scratch probe that temporarily staged the two
+un-imported vendored trees; it is evidence about the SDK repoint, **not** a build. The
+two failures were:
+
+```
+third_party/bb_epaper/src/../esp_idf/esp_generic.inl:9:10:
+      fatal error: esp_timer.h: No such file or directory
+opendisplay_display.cpp:705:9:
+      error: 'class BBEPAPER' has no member named 'sendPanelInitFull'
+```
+
+Both are the bb_epaper reconciliation the nRF54 import already recorded, arriving here
+for the second time. The first says the shared vendored copy falls through its `#ifdef`
+chain to the ESP-IDF backend because no EFR32 arm exists — `silabs_efr32_io.inl` and
+`silabs_bbep_busy.inl` live only in `Firmware_NRF54/third_party/bb_epaper/src/`. The
+second is the same `sendPanelInitFull()` that commit `5068c29` established was the
+nRF54's *local* addition to the vendored class: this target depends on it too, and the
+shared copy does not have it. The shape of the fix is already set by the other two
+targets — a target-owned `panel/` backend, not an edit to `third_party/`.
+
+## What is imported, and what is deliberately not
+
+| | |
+|---|---|
+| Imported | 27 flat application sources, `qr/`, `config/`, `cmake_gcc/`, the `.slcp`/`.pintool`, `build-and-flash.sh`, `AGENTS.md` |
+| Not imported: the SDK | `simplicity_sdk_2025.12.2/`, 57 MB / 658 files — the documented deviation. Replaced by the pinned install |
+| Not imported: `third_party/` | all four trees. `bb_epaper` and `uzlib` are vendored once at repo level; `segger_rtt` and `silabs_app_properties` **have no home yet** |
+| Not imported: `include/` | the local protocol-header copies; `shared/protocol/` is the single reference |
+| Not imported: the bootloader blob | 753 KB `.s37`; its README is imported so the provenance survives |
+
+### The two homeless vendored trees
+
+`third_party/segger_rtt/` (5 files, the RTT log transport) and
+`third_party/silabs_app_properties/` (2 files, `app_properties.c` — which the Gecko
+Bootloader reads to validate the application, so it is required for `.gbl` OTA, not
+optional) exist in the source repo and have **no top-level home in this repo**. The
+migration plan does not mention either.
+
+Both placements are defensible — promote to repo-level `third_party/`, or keep them as
+a target-owned vendor directory in the shape of `targets/esp32-idf/vendor/fastepd/` —
+which is exactly why this is recorded as an open decision rather than settled by
+whichever directory was convenient. The build fails on each with an explicit
+`FATAL_ERROR` naming this paragraph, not with "cannot find source file".
+
+## autogen/ is not entirely generated — and regenerating it is dangerous
+
+Found 2026-08-05 by regenerating against the installed SDK and diffing. This is not in
+any plan document, and it contradicts the expectation (MIGRATION.md § "The Silabs SDK is
+not imported as-is", reason 3) that installing a real SDK simply "fixes the regen
+hazard". It restores `slc generate` — but three files under `autogen/` carry the
+"Automatically-generated file. Do not edit!" banner and **have been hand-edited anyway**,
+and the generator silently reverts both edits:
+
+1. **`autogen/linkerfile.ld`.** Checked in: `FLASH ORIGIN = 0x12000, LENGTH = 0x44000`,
+   `RAM ORIGIN = 0x20000004`, plus a `BOOTLOADER_RESET_REGION` and a
+   `.bootloader_reset_section`. Regenerated: `FLASH ORIGIN = 0x0, LENGTH = 0x56000`, no
+   reset region. **A regenerated build links over the Gecko Bootloader and AppLoader** —
+   destroying the `.gbl` OTA path, which is the only field-update path any OpenDisplay
+   target actually has (MIGRATION.md § "Deployed fleet status", consequence 4).
+2. **`autogen/gatt_db.c` and `autogen/gatt_db.h`.** Checked in: "Minimal static GATT: GAP
+   (0x1800) + Device Name only", 53 lines. Regenerated from the checked-in
+   `config/btconf/gatt_configuration.btconf`: 110 lines with the stock Silabs Device
+   Information Service restored, and **`gattdb_device_name` moves from handle 3 to
+   handle 11** — wire-visible on shipped hardware.
+
+Two consequences:
+
+- This repo's `.gitignore` already ignored `autogen/` for this target, written before the
+  import. That rule is right about 18 of the 21 files and **wrong about these three**,
+  which exist nowhere else and would have been lost. They are now committed through
+  targeted negations; the other 18 stay ignored.
+- `tools/slc_regenerate.sh` runs `slc generate` into a temporary directory, copies back
+  only `autogen/`, and then **restores the three protected files from git**, leaving the
+  generator's versions in the temp directory for inspection. Do not replace it with a
+  plain `slc generate` in place: that also deletes the hand-added display/panel/QR/
+  compression sources from `cmake_gcc/opendisplay-bg22.cmake`.
+
+The proper fix is to move both edits somewhere a generator does not shadow them — a
+project-owned linker script, and a `.btconf` (or dynamic GATT) that actually describes
+the shipped database. Until then the banner is a lie and the protections are what stand
+between a regen and a bricked OTA path.
+
+## The protocol header hazard, restated — the source repo is at 2.1
+
+The section near the end of this file describes **two** disagreeing in-tree copies, a
+current one at the repo root and a stale 2.1 one in `include/`. At `17a8222` **the root
+copy no longer exists** — `refactor/vendored-headers-phase0` deleted it — so `include/`
+is the only copy and the source repo compiles against **protocol 2.1**. This target now
+compiles against `shared/protocol/`, which is **2.2 plus unreleased additions**.
+
+Measured, the delta is purely additive: `OD_PROTOCOL_VERSION_MINOR` 1u → 2u,
+`OD_PROTOCOL_VERSION_STR` "2.1" → "2.2", and six new constants (`OD_BLE_MAX_FRAME`, the
+five `OD_LAN_*`). No existing constant changes value, and `opendisplay_structs.h` is
+byte-identical. The version string is the one behaviour change, and it is a change: this
+firmware will report 2.2 where it used to report 2.1.
 
 The smallest target by a wide margin and the one that constrains `shared/` the most. Read
 this before designing anything in `shared/core` or `shared/compress` — several of the
@@ -79,9 +189,29 @@ Project options exposed by the wrapper: `OD_ENABLE_RTT`, `OD_GENERATE_GBL_OTA`,
 has zero `.slcc` files, so a bare `slc generate` fails there with "no valid sdk could be
 loaded", and `cmake_gcc/opendisplay-bg22.cmake` is hand-maintained in that repo as a result.
 The SDK it needs *is* installed on this box (below) — the failure is unregistered tooling, not
-a missing download. **This target does not inherit that hazard** — see the pinned install below, which
-restores `slc generate` and makes the CMake file genuinely generated again. Note the CMake build
-itself needs neither `slc` nor the SDK metadata, so it keeps working either way.
+a missing download. Note the CMake build itself needs neither `slc` nor the SDK metadata, so it
+keeps working either way.
+
+> **CORRECTED 2026-08-05, by doing it.** This paragraph used to claim "this target does not
+> inherit that hazard", because the pinned install "restores `slc generate` and makes the CMake
+> file genuinely generated again". Half of that is now verified and half is now known to be
+> wrong.
+>
+> **Verified:** `slc generate -p opendisplay-bg22.slcp -s <installed SDK> -nocp` succeeds
+> against the pinned 2025.12.2 install with no `.slconf` and no registration — it needs only
+> `-s`. It emits the full `autogen/` including `gatt_db.c` and `linkerfile.ld`, and its
+> `cmake_gcc/opendisplay-bg22.cmake` uses `${SDK_PATH}/...` with SDK_PATH pointing at the
+> install, which is what made the repoint in this target a mechanical rewrite rather than a
+> guess. All 241 SDK source paths were checked to exist in the install at byte-identical
+> relative paths. `tools/slc_regenerate.sh` wraps this.
+>
+> **Wrong:** the CMake file is *not* safely regenerable, and regenerating is now known to be
+> actively dangerous. `slc generate` emits only what the `.slcp` lists, so it drops the
+> hand-added display/panel/QR/colour/compression sources and rewrites application paths as
+> absolute machine paths — and it reverts three hand-edits inside `autogen/`, one of which
+> relocates the image over the bootloader. See § "autogen/ is not entirely generated" above.
+> The hand-maintained hazard is deeper than the migration docs record, not resolved by the
+> install.
 
 Toolchain locations on this machine are recorded in ../../docs/TOOLCHAINS.md.
 
