@@ -1,5 +1,6 @@
 #include "board_nrf54.h"
 #include "od_log.h"
+#include "opendisplay_button.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_display.h"
@@ -20,7 +21,12 @@ static void idle_delay_ms(uint32_t delay_ms)
 		uint32_t step = (remaining > chunk_ms) ? chunk_ms : remaining;
 
 		opendisplay_ble_process();
-		k_msleep(step);
+		/*
+		 * NOT k_msleep(): this sleeps in 1000 ms chunks, so a bare sleep meant a button
+		 * press was not published until the chunk expired -- and a press shorter than the
+		 * chunk was never seen at all. This returns as soon as the button ISR signals.
+		 */
+		opendisplay_button_wait(step);
 		remaining -= step;
 	}
 }
