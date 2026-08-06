@@ -37,6 +37,31 @@ void board_nrf54_prepare_epd_rail(void)
 	k_msleep(50);
 }
 
+#elif defined(OD_BOARD_XIAO_NRF52840)
+
+/*
+ * XIAO nRF52840 has NO board-level init to do here, and that is a finding rather than a
+ * shrug. Before this arm existed the board compiled as NRF54_BOARD_L15 and ran the L15
+ * init, driving P2.3 / P2.5 / P2.10 -- nRF54L15 RF-switch and boost-select pins on ports
+ * this chip does not have (nRF52840 is P0/P1 only). Nothing faulted, because
+ * nrf54_pin_decode() rejects a port whose gpio node is not okay, so all three writes were
+ * no-ops. The board was getting the wrong init and no complaint about it.
+ *
+ * The real board needs nothing: its antenna is hard-wired (no RF switch to steer) and it
+ * has no EPD boost rail to sequence. VBAT sense enable (P0.14) belongs to the battery
+ * driver, not to early init.
+ */
+void board_nrf54_early_init(void)
+{
+}
+
+void board_nrf54_prepare_epd_rail(void)
+{
+	/* No board rail to bring up; the delay matches the other boards so panel timing
+	 * does not silently differ by 50 ms across boards. */
+	k_msleep(50);
+}
+
 #else
 
 #define NRF54L15_RFSW_PWR  0x23u /* P2.3 — RF switch power (keep high) */

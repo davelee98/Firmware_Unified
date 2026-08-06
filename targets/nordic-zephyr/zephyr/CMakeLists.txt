@@ -96,8 +96,19 @@ target_compile_definitions(app PRIVATE
   OPENDISPLAY_ZLIB_USE_HEAP_WINDOW=0
 )
 
+# BOARD *is* set here -- find_package(Zephyr) ran on line 50. Only the EXTRA_CONF_FILE block
+# above it sees an empty BOARD; do not move these down-stream checks up there.
+#
+# The nRF52840 needed its own arm. This was a two-way if, so xiao_ble fell into the else and
+# compiled as NRF54_BOARD_L15 -- meaning board_nrf54_early_init() drove P2.3/P2.5/P2.10, which
+# are nRF54L15 RF-switch and boost-select pins that DO NOT EXIST on the nRF52840 (P0/P1 only).
+# It was silent rather than fatal because nrf54_pin_decode() rejects a port whose gpio node is
+# not okay and returns false, so every one of those writes was a no-op. Silent-and-wrong is
+# still wrong: the board got no init of its own.
 if(BOARD MATCHES ".*lm20.*")
   target_compile_definitions(app PRIVATE NRF54_BOARD_LM20)
+elseif(BOARD MATCHES ".*xiao_ble.*")
+  target_compile_definitions(app PRIVATE OD_BOARD_XIAO_NRF52840)
 else()
   target_compile_definitions(app PRIVATE NRF54_BOARD_L15)
 endif()

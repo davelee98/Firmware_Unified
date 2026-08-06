@@ -350,6 +350,27 @@ static void chip_id_hex6(char out[7])
 	for (unsigned i = 0; i < sizeof(id); i++) {
 		uid = (uid << 8) | id[i];
 	}
+	/*
+	 * WHICH FICR WORD THIS TAKES IS A COMPATIBILITY CONTRACT, NOT A DETAIL.
+	 *
+	 * Zephyr's nRF hwinfo driver returns be32(DEVICEID[1]) || be32(DEVICEID[0])
+	 * (zephyr/drivers/hwinfo/hwinfo_nrf.c) -- the two words are SWAPPED relative to the
+	 * register order. Accumulating big-endian therefore yields
+	 *     uid = (DEVICEID[1] << 32) | DEVICEID[0]
+	 * so a plain `uid & 0xFFFFFF` is the low 3 bytes of DEVICEID[0].
+	 *
+	 * The Arduino nRF52 firmware names the device from DEVICEID[**1**] & 0xFFFFFF
+	 * (Firmware/src/encryption.cpp getChipIdHex). So on the nRF52840 the migrated
+	 * firmware advertised a DIFFERENT OD<id> than the same physical board did under the
+	 * old firmware -- reported from hardware as "OD address is incorrect/different".
+	 *
+	 * Fixed only for the nRF52840, deliberately. The nRF54 boards have never had an
+	 * Arduino firmware to agree with, and their current names are already deployed;
+	 * "correcting" them here would rename every field unit for no benefit.
+	 */
+#if defined(OD_BOARD_XIAO_NRF52840)
+	uid >>= 32; /* DEVICEID[1] -- match the Arduino nRF52 firmware. */
+#endif
 	snprintf(out, 7, "%06lX", (unsigned long)(uid & 0xFFFFFFu));
 }
 
