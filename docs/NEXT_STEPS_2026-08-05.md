@@ -565,38 +565,65 @@ fails this milestone by design and must be corrected rather than hidden behind a
 7 opened -- migrate the fleet, or leave deployed units on Arduino/Bluefruit indefinitely while
 only new production ships Zephyr -- is answered: it migrates.
 
-### What follows mechanically from that
+### Bootloader: TWO TIERS, decided 2026-08-05
 
-Recorded because Milestone 7 attached these to the decision, not to the implementation:
+**nRF52840 keeps the Adafruit bootloader. nRF54L15 / nRF54LM20A use MCUboot.** One target, two
+bootloaders, deliberately -- not an inconsistency to tidy up later.
 
-- **Deployed units need their bootloader replaced, which needs PHYSICAL ACCESS** -- unless the
-  experiment below says otherwise. Those units run the Adafruit bootloader, which ships with the
-  S140 SoftDevice; a Zephyr application does not use SoftDevice, it uses NCS's SoftDevice
-  Controller compiled into its own image. The two arrangements are not obviously compatible.
-- **The host SMP/mcumgr client is now a PREREQUISITE, not parallel work.** `py-opendisplay` has
-  none -- its OTA module implements only legacy Nordic DFU and Silabs `.gbl`. Migrating a
-  deployed unit to MCUboot before that client exists would trade a WORKING field-update path for
-  a signed one nothing can drive: strictly worse than what those units have today. Build the
-  client first.
+This REVERSES two consequences recorded earlier the same day, and the reversal is the point:
+
+| Earlier note | Now |
+|---|---|
+| "Deployed units need their bootloader replaced, which needs PHYSICAL ACCESS" | **No physical access.** They keep the bootloader they have. |
+| "The host SMP/mcumgr client is a PREREQUISITE" | **Not for nRF52840.** It keeps its existing Nordic DFU path, which `py-opendisplay`'s `perform_nrf_dfu` already drives. The SMP client is needed only for the nRF54 boards. |
+
+What made the earlier framing wrong was assuming Zephyr implies MCUboot. It does not. Evidence
+gathered before deciding:
+
+- **NCS ships `xiao_ble/nrf52840` upstream** with `pm_static.yml` for the ADAFRUIT layout, not
+  MCUboot partitions. The configuration that needs no physical access is the one upstream
+  already supports; MCUboot on this board means writing partitions by hand.
+- **Zephyr under the Adafruit bootloader is a shipped configuration elsewhere** (ZMK on
+  nice!nano: nRF52840, Adafruit bootloader, S140 resident but never enabled, Zephyr's own
+  controller owning the radio). Not speculative.
+- Attempting the build confirmed the first failure is `slot0_partition` missing -- an MCUboot
+  requirement, not an SoC problem.
+
+**What nRF52840 gives up, accepted:** no signed images and no automatic revert. Those units keep
+exactly the update story they have today, which is a working one. New production on nRF54 gets
+the stronger story. A two-tier fleet is the deliberate outcome, not drift.
+
+**What still needs testing** -- unchanged, and now on the critical path rather than a
+cost-avoidance check: build a Zephyr image at the Adafruit flash layout, push it to ONE unit over
+the existing BLE DFU, confirm it boots and stays up. The precedent says it works; the precedent
+is not this firmware.
+
+### What else follows
+
 - **The Arduino shim can finally die.** `targets/esp32-idf/compat/` sits at its floor of 5, and
   those files are counted only for `TARGET_NRF` arms. They leave with this port; only then does
-  the ratchet reach zero and `compat/` get dismantled per `SHIM_BUDGET`. Not before, and not by
-  finishing them early.
+  the ratchet reach zero and `compat/` get dismantled per `SHIM_BUDGET`.
 - **The advertising divergence closes.** Set `restartOnDisconnect(false)` and adopt
   `od_adv_control`; that deletes `restartsAdvertisingOnDisconnect()` and its special-case branch
   in `serviceBleAdvertisingRestart()`, because Bluefruit's automatic restart is a second policy
-  owner. Requirement already recorded in `targets/nordic-zephyr/README.md`.
+  owner.
+- **`zephyr/sysbuild.conf` must become board-conditional.** It currently hard-sets
+  `SB_CONFIG_BOOTLOADER_MCUBOOT=y` for every board, which is what makes an nRF52840 configure
+  fail today.
 
-### The one experiment that could remove the physical-access cost
+### Scope of the port, measured rather than estimated
 
-Milestone 7's wording was "budget a physical bootloader replacement **unless testing proves** a
-Zephyr image can safely run under the current Adafruit/SoftDevice arrangement." That unless is
-still live and the test is cheap: build a Zephyr image at the Adafruit flash layout, push it to
-ONE unit over the existing BLE DFU, see whether it boots and stays up.
-
-Worth running before committing budget, because the answer changes the cost of this decision by
-the size of the deployed fleet. The likely outcome is that it does not work -- but "likely" is
-not a measurement, and this one is answerable in an afternoon with a single board.
+- **No custom board definition needed** -- `xiao_ble/nrf52840` is upstream. (The plain variant:
+  the physical board is NOT the Sense, despite `Firmware/boards/nrf52840custom.json` saying
+  `usb_product: "XIAO nRF52840 Sense"`. That field is wrong.)
+- **The GPIO layer is already portable.** `nrf54_gpio.c` uses Zephyr's generic API
+  (`gpio_pin_configure`, `DEVICE_DT_GET`), not nRF54 registers, so the 14 of 26 source files
+  that include it come across unchanged. Only the name is SoC-specific.
+- **The real work is a board-specific devicetree overlay.** `zephyr/app.overlay` is written
+  against nRF54L15 node labels (`spi00`, `uart20`, `i2c22`); nRF52840 has `spi0..spi3`. Normal
+  per-board Zephyr work, not a port.
+- **One small fix:** `gpio_dev()` guards `gpio3` behind `DT_NODE_HAS_STATUS` but not `gpio2`.
+  nRF52840 has neither.
 
 ### Order
 

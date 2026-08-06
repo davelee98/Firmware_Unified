@@ -90,20 +90,30 @@ becomes:
 > ~~Do deployed nRF52840 units migrate to Zephyr at all, or stay on the current Arduino/Bluefruit
 > firmware indefinitely while only new production ships Zephyr + MCUboot?~~
 
-**ANSWERED 2026-08-05: they migrate.** nRF52840 becomes a board of this target
-(docs/NEXT_STEPS_2026-08-05.md § Milestone 7). Two things that decision carries with it:
+**ANSWERED 2026-08-05: they migrate, and they KEEP THE ADAFRUIT BOOTLOADER.**
 
-- **Budget physical access to deployed units** for the bootloader replacement, unless the test
-  below says otherwise. That is the cost the decision accepts.
-- **The host SMP/mcumgr client is a PREREQUISITE.** Migrating a fielded unit to MCUboot before
-  `py-opendisplay` can drive SMP would replace a working BLE DFU path with a signed one nothing
-  can use -- strictly worse than those units have today. Build the client first.
+> **nRF52840 -> Adafruit bootloader. nRF54L15 / nRF54LM20A -> MCUboot.**
+> One target, two bootloaders, deliberately.
 
-**Run the cheap test before spending the budget.** Build a Zephyr image at the Adafruit flash
-layout, push it to ONE unit over the existing BLE DFU, and see whether it boots and stays up. If
-it works, the physical-access cost disappears; if it does not, it is confirmed rather than
-assumed. The likely answer is that it does not work -- but that is a guess, and this is
-answerable in an afternoon with one board.
+That combination costs far less than an earlier draft of this section assumed, and the
+correction is worth stating because the assumption was wrong in an expensive direction:
+
+- **No physical access to deployed units.** They keep the bootloader they already have.
+- **The host SMP/mcumgr client is NOT a prerequisite for nRF52840.** It keeps the Nordic DFU
+  path `py-opendisplay`'s `perform_nrf_dfu` already drives. SMP is needed only for the nRF54
+  boards, where MCUboot OTA is currently implemented and undrivable.
+
+The mistake was assuming Zephyr implies MCUboot. It does not -- NCS ships `xiao_ble/nrf52840`
+with `pm_static.yml` for the ADAFRUIT layout, and Zephyr under that bootloader is a shipped
+configuration elsewhere (ZMK on nice!nano: S140 resident but never enabled, Zephyr's own
+controller owning the radio).
+
+**Accepted cost:** nRF52840 gets no signed images and no automatic revert. It keeps exactly the
+update story it has today. A two-tier fleet is the deliberate outcome.
+
+**Still to test, now on the critical path rather than as cost avoidance:** build a Zephyr image
+at the Adafruit flash layout, push it to ONE unit over the existing BLE DFU, confirm it boots and
+stays up. The precedent says it works; the precedent is not this firmware.
 
 Leaving them is defensible — they work, they have OTA, and the fleet is finite. Decide it
 before step 4 is scheduled, because it determines whether step 4 is a port or a product split.
