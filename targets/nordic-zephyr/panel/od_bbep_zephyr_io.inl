@@ -119,9 +119,31 @@ long millis(void)
 	return (long)od_uptime_get_32();
 }
 
+/* ------------------------------------------------------- cs_mode (bb_epaper 5dccfbb) ---
+ *
+ * bb_epaper gained a `cs_mode` field and DROPPED `iCS1Pin`. Dual-controller panels used to be
+ * driven by mutating iCSPin between iCS1Pin and iCS2Pin; now iCSPin IS CS1 and cs_mode
+ * (CMD_CS1 / CMD_CS2 / CMD_CS1_CS2) selects which line(s) a transfer asserts. Split-controller
+ * panels need CMD_CS1_CS2 to assert BOTH.
+ *
+ * arduino_io.inl repeats this test at every CS site; this backend routes them through one
+ * pair of helpers so there is a single place to get it wrong. cs_mode == 0 is treated as
+ * CMD_CS1: a memset-zeroed BBEPDISP (which is how this target creates its) would otherwise
+ * assert nothing and the panel would sit silent. */
+static inline void od_bbep_cs(BBEPDISP *pBBEP, int level)
+{
+	const uint8_t mode = pBBEP->cs_mode ? pBBEP->cs_mode : (uint8_t)CMD_CS1;
+	if (mode == CMD_CS1 || mode == CMD_CS1_CS2) {
+		digitalWrite(pBBEP->iCSPin, level);
+	}
+	if (mode == CMD_CS2 || mode == CMD_CS1_CS2) {
+		digitalWrite(pBBEP->iCS2Pin, level);
+	}
+}
+
 void bbepSetCS2(BBEPDISP *pBBEP, uint8_t cs)
 {
-	pBBEP->iCS1Pin = pBBEP->iCSPin;
+	/* No iCS1Pin: the field was REMOVED at 5dccfbb because iCSPin is CS1. */
 	pBBEP->iCS2Pin = cs;
 	pinMode(cs, OUTPUT);
 	digitalWrite(cs, HIGH);
@@ -188,9 +210,9 @@ void bbepWriteCmd(BBEPDISP *pBBEP, uint8_t cmd)
 	}
 	digitalWrite(pBBEP->iDCPin, LOW);
 	delay(1);
-	digitalWrite(pBBEP->iCSPin, LOW);
+	od_bbep_cs(pBBEP, LOW);
 	bb_spi_write(pBBEP, &cmd, 1);
-	digitalWrite(pBBEP->iCSPin, HIGH);
+	od_bbep_cs(pBBEP, HIGH);
 	digitalWrite(pBBEP->iDCPin, HIGH);
 }
 
@@ -198,15 +220,38 @@ void bbepWriteData(BBEPDISP *pBBEP, uint8_t *pData, int iLen)
 {
 	if (pBBEP->iFlags & BBEP_CS_EVERY_BYTE) {
 		for (int i = 0; i < iLen; i++) {
-			digitalWrite(pBBEP->iCSPin, LOW);
+			od_bbep_cs(pBBEP, LOW);
 			bb_spi_write(pBBEP, &pData[i], 1);
-			digitalWrite(pBBEP->iCSPin, HIGH);
+			od_bbep_cs(pBBEP, HIGH);
 		}
 	} else {
-		digitalWrite(pBBEP->iCSPin, LOW);
+		od_bbep_cs(pBBEP, LOW);
 		bb_spi_write(pBBEP, pData, iLen);
-		digitalWrite(pBBEP->iCSPin, HIGH);
+		od_bbep_cs(pBBEP, HIGH);
 	}
+}
+
+/* NEW IN THE CONTRACT at 5dccfbb: bb_ep.inl calls this directly, so a backend without it no
+ * longer links. Modelled on arduino_io.inl -- command byte with DC low, payload with DC high,
+ * all inside ONE CS assertion. Splitting it into bbepWriteCmd() + bbepWriteData() would toggle
+ * CS in between, and controllers that latch on the CS edge would see two transactions where the
+ * library intends one. */
+void bbepWriteCmdData(BBEPDISP *pBBEP, uint8_t cmd, uint8_t *pData, int iLen)
+{
+	if (!pBBEP->is_awake) {
+		bbepWakeUp(pBBEP);
+		pBBEP->is_awake = 1;
+	}
+	digitalWrite(pBBEP->iDCPin, LOW);
+	delay(1);
+	od_bbep_cs(pBBEP, LOW);
+	bb_spi_write(pBBEP, &cmd, 1);
+	digitalWrite(pBBEP->iDCPin, HIGH);
+	delay(1);
+	if (pData != NULL && iLen > 0) {
+		bb_spi_write(pBBEP, pData, iLen);
+	}
+	od_bbep_cs(pBBEP, HIGH);
 }
 
 void bbepCMD2(BBEPDISP *pBBEP, uint8_t cmd1, uint8_t cmd2)

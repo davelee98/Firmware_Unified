@@ -588,7 +588,7 @@ becomes expensive.
 | Three-toolchain CI | Design reproducible IDF/NCS/Simplicity builds, not merely a local matrix | Before the second target is called imported |
 | ~~BG22 security~~ | **CLOSED 2026-08-05** (D3) — resolved by the shared session/dispatch promotion; DIVERGENCE_MATRIX §1.5a and §2.4 are Gate 1 test cases, so the promotion cannot pass carrying them | — |
 | OTA | Scope ESP32 `esp_ota` and host SMP/mcumgr support | Before promising field updates for S3 or Nordic |
-| `s3-e1004` | Re-vendor the correct panel fork and fix SPI initialization | Before claiming all source ESP32 variants are supported |
+| ~~`s3-e1004`~~ | **RETIRED 2026-08-05** — the board variant is retired, so no fragment is wanted. The blocker also dissolved: upstream merged E1004 support at `5dccfbb` and the `BBEP_T133A01` stream it needed fixing no longer exists | — |
 
 ## Immediate work queue
 

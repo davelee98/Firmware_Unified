@@ -28,7 +28,8 @@
 #include <string.h>
 #include <fcntl.h>
 #else // Arduino
-
+#include <Arduino.h>
+#include <Wire.h>
 #endif // __LINUX__
 
 #include "bb_epaper.h"
@@ -63,6 +64,7 @@ BBEPAPER::BBEPAPER(int iPanel)
 {
     memset(&_bbep, 0, sizeof(_bbep));
     _bbep.iFG = BBEP_BLACK;
+    _bbep.cs_mode = CMD_CS1;
     bbepSetPanelType(&_bbep, iPanel);
 }
 
@@ -81,11 +83,175 @@ void BBEPAPER::setAddrWindow(int x, int y, int w, int h)
     bbepSetAddrWindow(&_bbep, x, y, w, h);
 }
 
+void BBEPAPER::setFlip180(bool bFlip)
+{
+    _bbep.flip180 = bFlip;
+} /* setFlip180() */
+
+#ifdef ARDUINO_ARCH_ESP32
+//
+// Read-modify-write an I2C register value, setting a single bit
+//
+static void setI2CBit(uint8_t u8Addr, uint8_t u8Reg, uint8_t u8Bit, uint8_t u8Value)
+{
+    Wire.beginTransmission(u8Addr);
+    Wire.write(u8Reg);
+    Wire.endTransmission();
+    Wire.requestFrom(u8Addr, 1);
+    uint8_t u8 = Wire.read(); // read the current value
+    if (u8Value) {
+        u8 |= (1 << u8Bit); // set the requested bit
+    } else {
+        u8 &= ~(1 << u8Bit); // clear the requested bit
+    }
+    Wire.beginTransmission(u8Addr);
+    Wire.write(u8Reg);
+    Wire.write(u8); // write the modified value
+    Wire.endTransmission();
+} /* setI2CBit() */
+
+uint16_t M5ReadReg16(uint8_t u8Addr, uint8_t u8Reg)
+{
+uint8_t u8Temp[4];
+uint16_t *p16 = (uint16_t *)&u8Temp[0];
+    Wire.beginTransmission(u8Addr);
+    Wire.write(u8Reg);
+    Wire.endTransmission();
+    Wire.requestFrom(u8Addr, 2); // read current state of GPIO drive setting
+    u8Temp[0] = Wire.read();
+    u8Temp[1] = Wire.read();
+    return *p16;
+} /* M5ReadReg16() */
+
+void M5WriteReg16(uint8_t u8Addr, uint8_t u8Reg, uint16_t u16Val)
+{
+    Wire.beginTransmission(u8Addr);
+    Wire.write(u8Reg);
+    Wire.write((uint8_t)u16Val);
+    Wire.write((uint8_t)(u16Val >> 8));
+    Wire.endTransmission();
+} /* M5WriteReg16() */
+
+//
+// Set the state of a GPIO output on
+// The M5Stack IO Expander chip (M5IOE1)
+//
+void M5IOE1_SetGPIO(uint8_t u8Addr, int iGPIO, int iState)
+{
+uint16_t u16;
+
+    iGPIO--; // pin numbers are 0-based
+// Set the pin to output push-pull mode
+    u16 = M5ReadReg16(u8Addr, 0x13); // M5IOE1_REG_GPIO_DRV_L
+    u16 &= ~(1<<iGPIO); // set push-pull mode
+//Serial.printf("gpio drive setting = 0x%04x\n", u16);
+    M5WriteReg16(u8Addr, 0x13, u16);
+// Disable pull up and pull down
+    u16 = M5ReadReg16(u8Addr, 0x9); // M5IOE1_REG_GPIO_PU_L
+    u16 &= ~(1<<iGPIO); // disable
+    M5WriteReg16(u8Addr, 0x9, u16);
+    u16 = M5ReadReg16(u8Addr, 0xb); // M5IOE1_REG_GPIO_PD_L
+    u16 &= ~(1<<iGPIO); // disable
+    M5WriteReg16(u8Addr, 0xb, u16);
+// Set the pin to OUTPUT (not input)
+    u16 = M5ReadReg16(u8Addr, 0x03); // M5IOE1_REG_GPIO_MODE_L
+    u16 |= (1 << iGPIO); // output = 1
+//Serial.printf("gpio mode setting = 0x%04x\n", u16);
+    M5WriteReg16(u8Addr, 0x03, u16);
+// Set the pin state
+    u16 = M5ReadReg16(u8Addr, 0x05); // M5IOE1_REG_GPIO_OUT_L
+    if (iState) {
+       u16 |= (1 << iGPIO);
+    } else {
+       u16 &= ~(1 << iGPIO);
+    }
+    M5WriteReg16(u8Addr, 0x05, u16);
+//Serial.printf("gpio state setting = 0x%04x\n", u16);
+} /* M5IOE1_SetGPIO() */
+
+#endif // ARDUINO_ARCH_ESP32
+
 int BBEPAPER::begin(int iProduct, bool bSharedSPI)
 {
 int rc = BBEP_ERROR_BAD_PARAMETER;
 
     switch (iProduct) {
+#ifdef ARDUINO_ARCH_ESP32
+        case EPD_M5_PAPER_MONO: // DC:17 RST:-1 BUSY:18 CS:16 MOSI:14 SCK:15
+        case EPD_M5_PAPER_MONO_4GRAY:
+            Wire.end();
+            Wire.begin(47, 48); // SDA=47, SCL=48
+            M5IOE1_SetGPIO(0x4f, 3, 1); // turn on EPD 3.3V LDO
+          //  M5IOE1_SetGPIO(0x4f, 13, 1); // touch controller enable
+          //  M5IOE1_SetGPIO(0x4f, 14, 1); // uSD card enable
+            delay(50);
+            M5IOE1_SetGPIO(0x4f, 5, 0); // Toggle the EPD reset (M5Stack IO Expander chip)
+            //M5IOE1_SetGPIO(0x4f, 6, 0); // toggle touch reset
+            delay(20);
+            M5IOE1_SetGPIO(0x4f, 5, 1);
+           // M5IOE1_SetGPIO(0x4f, 6, 1);
+            delay(20);
+            if (setPanelType((iProduct == EPD_M5_PAPER_MONO) ? EP426_800x480:EP426_800x480_4GRAY) == BBEP_SUCCESS) {
+                initIO(17, -1, 18, 16, 14, 15, 1000000);
+                return BBEP_SUCCESS;
+            }
+            break;
+
+        case EPD_SEEED_E1004: // 13.3" Spectra6 1200x1600
+// DC:11 RST:38 BUSY:13 CS:10 MOSI:9 SCK:7 PWR:12, CS2:2
+           pinMode(12, OUTPUT);
+           digitalWrite(12, 1); // enable power
+           setCS2(2);
+           if (setPanelType(EP133_SPECTRA_1200x1600) == BBEP_SUCCESS) {
+               initIO(11, 38, 13, 10, 9, 7, 10000000);
+               return BBEP_SUCCESS;
+           }
+           break;
+
+        case EPD_SEEED_STICKY: // DC:16 RST:17 BUSY:18 CS:15 MOSI:14 SCK:13 PWR:47
+        case EPD_SEEED_STICKY_4GRAY:
+            pinMode(47, OUTPUT);
+            digitalWrite(47, 1); // enable EPD power
+            pinMode(10, OUTPUT); // SD card enable
+            digitalWrite(10, 1);
+            pinMode(8, OUTPUT); // SD card CS (shared SPI with EPD)
+            digitalWrite(8, 1); // disable SD card
+            pinMode(11, INPUT_PULLUP); // SD card detect
+            if (setPanelType((iProduct == EPD_SEEED_STICKY) ? EP397_800x480:EP397_800x480_4GRAY) == BBEP_SUCCESS) {
+                initIO(16, 17, 18, 15, 14, 13, 10000000);
+                return BBEP_SUCCESS;
+            }
+           break;
+
+        case EPD_M5_PAPER_COLOR: // DC:43 RST:12 BUSY:11 CS:44 MOSI:13 SCK:15
+           if (setPanelType(EP40_SPECTRA_400x600) == BBEP_SUCCESS) {
+              // We need to enable the power management chip (PY32) to power the EPD
+               Wire.end();
+               Wire.begin(3,2);
+               //Wire.beginTransmission(0x6e);
+               //Wire.write(0x00); // read ID
+               //Wire.endTransmission();
+               //Wire.requestFrom(0x6e, 1);
+               //if (Wire.read() == 0x50) { // it's the Paper Color
+               //   Serial.println("Paper color found!");
+               //}
+               Wire.beginTransmission(0x6e);
+               Wire.write(0x0a); // disable watchdog
+               Wire.write(0);
+               Wire.endTransmission();
+               setI2CBit(0x6e, 0x16, 0, 0); // set gpio0 as gpio (off)
+               setI2CBit(0x6e, 0x10, 0, 1); // set gpio0 as output (on)
+               setI2CBit(0x6e, 0x13, 0, 0); // set gpio0 as push-pull mode (off)
+               setI2CBit(0x6e, 0x11, 0, 1); // set gpio0 output high (on)
+               Wire.beginTransmission(0x6e);
+               Wire.write(0x09); // disable i2c idle sleep mode
+               Wire.write(0x00);
+               Wire.endTransmission();
+               initIO(43, 12, 11, 44, 13, 15, 10000000);
+               return BBEP_SUCCESS;
+           }
+           break;
+#endif // ARDUINO_ARCH_ESP32S3
         case EPD_LILYGO_T3S3: // DC:16 RST:47 BUSY:48 CS:15 MOSI:11 SCK:4
            if (setPanelType(EP213ZZ_122x250) == BBEP_SUCCESS) {
                initIO(16, 47, 48, 15, 11, 14, 10000000);
@@ -307,6 +473,11 @@ int BBEPAPER::refresh(int iMode, bool bWait)
     rc = bbepRefresh(&_bbep, iMode);
     if (rc == BBEP_SUCCESS && bWait) {
         bbepWaitBusy(&_bbep);
+        if (_bbep.chip_type == BBEP_CHIP_UC81xx) {
+            // Send a POFF (power off) command after each update
+            // This is needed by Spectra6 and some other panels
+            bbepWriteCmd(&_bbep, UC8151_POFF); 
+        }
     }
     _bbep.iOpTime = (int)(millis() - l);
     return rc;
@@ -740,13 +911,7 @@ void BBEPAPER::wake(void)
     bbepWakeUp(&_bbep);
     if (_bbep.iFlags & (BBEP_7COLOR | BBEP_4COLOR)) { // need to send before you can send it data
         bbepSendCMDSequence(&_bbep, _bbep.pInitFull);
-        if (_bbep.iFlags & BBEP_SPLIT_BUFFER) { // dual cable EPD
-            _bbep.iCSPin = _bbep.iCS2Pin;
-            bbepSendCMDSequence(&_bbep, _bbep.pInitFull); // second controller 
-            _bbep.iCSPin = _bbep.iCS1Pin;
-        }
     }
-
 }
 
 void BBEPAPER::sleep(int bDeep)

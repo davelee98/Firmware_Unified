@@ -1335,7 +1335,7 @@ int bbepWriteStringCustom(BBEPDISP *pBBEP, void *pFont, int x, int y, char *szMs
             xOffset = (int8_t)pgm_read_byte(&pSmallGlyph->xOffset);
             yOffset = (int8_t)pgm_read_byte(&pSmallGlyph->yOffset);
         }
-        if (w > 1) { // skip this if drawing a space
+        if (w > 0) { // skip this if drawing a space
             s = pBits + u32Offset; // start of compressed bitmap data
             if (u32Rot == 0 || u32Rot == 180) {
                 dx = x + xOffset; // offset from character UL to start drawing
@@ -1756,7 +1756,7 @@ int bbepWriteString(BBEPDISP *pBBEP, int x, int y, char *szMsg, int iSize, int i
                     {
                         if (ty < 3) // top half
                         {
-                            if (iColor == BBEP_WHITE) {
+                            if (iColor == BBEP_WHITE && !pBBEP->ucScreen) {
                                 pDest[1] &= ~(1 << ((ty * 2)+1));
                                 pDest[2] &= ~(1 << ((ty * 2)+1));
                                 pDest[1] &= ~(1 << ((ty+1) * 2));
@@ -1770,7 +1770,7 @@ int bbepWriteString(BBEPDISP *pBBEP, int x, int y, char *szMsg, int iSize, int i
                         }
                         else if (ty == 3) // on the border
                         {
-                            if (iColor == BBEP_WHITE) {
+                            if (iColor == BBEP_WHITE && !pBBEP->ucScreen) {
                                 pDest[1] &= ~0x80; pDest[2] &= ~0x80;
                                 pDest[13] &= ~1; pDest[14] &= ~1;
                             } else {
@@ -1780,7 +1780,7 @@ int bbepWriteString(BBEPDISP *pBBEP, int x, int y, char *szMsg, int iSize, int i
                         }
                         else // bottom half
                         {
-                            if (iColor == BBEP_WHITE) {
+                            if (iColor == BBEP_WHITE && !pBBEP->ucScreen) {
                                 pDest[13] &= ~(1 << (2*(ty-4)+1));
                                 pDest[14] &= ~(1 << (2*(ty-4)+1));
                                 pDest[13] &= ~(1 << ((ty-3) * 2));
@@ -1797,7 +1797,7 @@ int bbepWriteString(BBEPDISP *pBBEP, int x, int y, char *szMsg, int iSize, int i
                     {
                         if (ty < 4) // top half
                         {
-                            if (iColor == BBEP_WHITE) {
+                            if (iColor == BBEP_WHITE && !pBBEP->ucScreen) {
                                 pDest[1] &= ~(1 << ((ty * 2)+1));
                                 pDest[2] &= ~(1 << ((ty+1) * 2));
                             } else {
@@ -1807,7 +1807,7 @@ int bbepWriteString(BBEPDISP *pBBEP, int x, int y, char *szMsg, int iSize, int i
                         }
                         else
                         {
-                            if (iColor == BBEP_WHITE) {
+                            if (iColor == BBEP_WHITE && !pBBEP->ucScreen) {
                                 pDest[13] &= ~(1 << (2*(ty-4)+1));
                                 pDest[14] &= ~(1 << ((ty-3) * 2));
                             } else {

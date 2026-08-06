@@ -255,7 +255,7 @@ what licenses retiring the source repo:
 3. **Every transfer pays a full cold bring-up** (1.4 s) because this unit has
    `Screen Timeout: 0 s`, i.e. keep-alive disabled. 800 ms of that is an unconditional
    `delay(800)` rail settle in `pwrmgm()`.
-4. **`s3-e1004` still has no board fragment** — see § `s3-e1004` is blocked, not forgotten.
+4. ~~**`s3-e1004` still has no board fragment**~~ — **RETIRED 2026-08-05**: the board variant is retired, so no fragment is wanted. See third_party/NOTICE.md.
 
 ### Phase C — the ESP32 app-code work is DONE (2026-08-05)
 
@@ -392,7 +392,7 @@ targets — see the ESP32 section of ../../docs/MIGRATION.md.
 
 Eleven variants in the source repo's `platformio.ini`. **Ten have fragments and all ten
 build** (measured 2026-07-26, ESP-IDF v5.5.4, clean tree each time). The eleventh,
-`s3-e1004`, is deliberately absent — see below.
+`s3-e1004`, is absent because **the board variant is retired** (2026-08-05) — see below.
 
 | Board | Chip | Flash / PSRAM | FastEPD | Image | Slot free | Notes |
 |---|---|---|---|---|---|---|
@@ -406,7 +406,7 @@ build** (measured 2026-07-26, ESP-IDF v5.5.4, clean tree each time). The elevent
 | `c3-n16` | ESP32-C3 | 16 MB, no PSRAM | no | 1,327,536 | 80% | DIO flash to free GPIO12/13 |
 | `c6-n4` | ESP32-C6 | 4 MB, no PSRAM | no | 1,518,032 | 23% | IDF ≥ 5.1. **Shipped.** `min_spiffs_4MB.csv` — see below |
 | `esp32-n4` | classic ESP32 | 4 MB, no PSRAM | no | **695,104** | 65% | no WiFi; reduced PIPE reorder window |
-| `s3-e1004` | ESP32-S3 | 32 MB + 8 MB | no | — | — | **NO FRAGMENT.** Blocked: wrong bb_epaper fork vendored — see below |
+| ~~`s3-e1004`~~ | ESP32-S3 | 32 MB + 8 MB | — | — | — | **RETIRED 2026-08-05.** Board variant retired; no fragment wanted. The old blocker (wrong bb_epaper fork) also dissolved — upstream merged E1004 support at `5dccfbb` |
 
 Two things the table makes obvious that were not obvious before:
 
@@ -417,45 +417,24 @@ Two things the table makes obvious that were not obvious before:
 * **The C6 is the tightest fit by a wide margin** — 23% slot headroom against 62-81% for
   everything else, and it is a *shipped* board. It is the one to watch as `shared/core` lands.
 
-### `s3-e1004` is blocked, not forgotten
+### ~~`s3-e1004` is blocked, not forgotten~~ — RETIRED 2026-08-05
 
-`env:esp32-s3-E1004` pins `limengdu/bb_epaper` (PR bitbank2#32, T133A01); this repo vendors
-`davelee98-creator/bb_epaper`, which defines neither `BBEP_T133A01` nor the
-`EP133A_SPECTRA_1200x1600` enum that `display_service.cpp:700` maps onto. Writing the fragment
-would produce a board that builds and cannot drive its own panel. It needs a re-vendor *and* a
-fix to `e1004_write_stream_bytes()`, which calls `SPI.writeBytes()` with nothing calling
-`SPI.begin()`. Full detail in [third_party/NOTICE.md](../../third_party/NOTICE.md).
+**The E1004 board variant is retired.** No fragment exists and none is wanted; the entry stays
+in the table above so the absence reads as a decision rather than an oversight.
 
-## Partitions — ESP32-C6 moves to `min_spiffs.csv` (gate measured 2026-07-26)
+The blocker this section described also dissolved, independently and on the same day, so neither
+half is outstanding:
 
-**The gate below fired: the C6 image does NOT fit 1.25 MB.** Measured with ESP-IDF v5.5.4,
-`idf.py -DOD_BOARD=c6-n4 build`:
+- `bitbank2/bb_epaper` merged E1004 support upstream (`5dccfbb`), retiring the `limengdu` fork
+  requirement. The re-vendor brought `EPD_SEEED_E1004` / `EP133_SPECTRA_1200x1600` in, and the
+  core drives the dual-CS refresh itself via `cs_mode = CMD_CS1_CS2`.
+- `BBEP_T133A01` and `e1004_write_stream_bytes()` no longer exist upstream, so the
+  `SPI.writeBytes()`-without-`SPI.begin()` defect has no code left to fix.
 
-| | bytes |
-|---|---|
-| C6 app image (`opendisplay.bin`) | **1 498 256** |
-| `default_4MB.csv` slot (0x140000) | 1 310 720 → **overflows by 187 536** (14.3% over) |
-| `min_spiffs_4MB.csv` slot (0x1E0000) | 1 966 080 → **fits, 467 824 spare** (24% free) |
-
-So the C6 keeps dual-slot A/B on 4 MB, but pays for it with the filesystem: `partitions/
-min_spiffs_4MB.csv`, 1.875 MB per slot and 128 KB of SPIFFS instead of 1.4 MB. Affordable
-because config moved to NVS in phase B and nothing else on this target needs bulk storage.
-`boards/c6-n4.cmake` points at it. The `default.csv` decision below is superseded.
-
-The expectation recorded below — "the IDF image is expected to be *smaller* than today's
-Arduino build" — was **not** borne out relative to the S3. The same tree builds to 1 241 056
-bytes on `s3-n16r8` and 1 498 256 on `c6-n4`, i.e. the C6 is **257 KB larger while compiling
-strictly less code** (no FastEPD, no PSRAM). Per-archive, the C6 pays:
-
-- `libble_app.a` 235 592 vs the S3's `libbtdm_app.a` 89 867 — **+146 KB** for the C6's
-  precompiled BLE controller. Single biggest item, and not something the app can shrink.
-- WiFi/lwip stack +110 KB across `libpp` (+46 KB), `libnet80211` (+44 KB), `liblwip` (+19 KB).
-- RISC-V code density: `libmain.a` is 129 756 on C6 vs 129 293 on S3 — *the same size despite
-  the C6 not compiling FastEPD at all.*
-
-(Ignore `libesp_app_format.a`'s ~105 KB in `esp-idf-size --archives`. It is the merged
-`.rodata` string pool attributed to whichever object lands first in `.flash.rodata`; the map
-shows `0xee (size before relaxing)` for it. Both chips show it. It is not that component.)
+Recorded for anyone who revives the variant: it differed from `s3-n32r8-extuart` by exactly one
+build flag, `OPENDISPLAY_ZLIB_WINDOW_BITS=15`. Panel pins, controller type and the second
+chip-select all come from the runtime config blob (`DisplayConfig.cs_pin_2` exists for
+"panels split over 2 drivers"), so reviving it is a three-line fragment, not a driver port.
 
 ### Original decision (2026-07-25), superseded above
 
