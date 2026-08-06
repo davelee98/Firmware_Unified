@@ -253,7 +253,9 @@ add_library(slc OBJECT
     "../autogen/sl_event_handler.c"
     "../autogen/sl_power_manager_handler.c"
     "../main.c"
-    "${OD_REPO_ROOT}/third_party/bb_epaper/src/bb_epaper.cpp"
+    # OUR glue TU, not the vendored bb_epaper.cpp -- see ../panel/od_bbep_efr32.cpp for why.
+    # Third target on this pattern; third_party/bb_epaper takes zero edits.
+    "${CMAKE_CURRENT_LIST_DIR}/../panel/od_bbep_efr32.cpp"
     "${OD_REPO_ROOT}/third_party/bb_epaper/src/Group5.cpp"
     "${OD_REPO_ROOT}/third_party/uzlib/src/od_zlib_stream.c"
 )
@@ -269,6 +271,7 @@ target_include_directories(slc PUBLIC
    "${OD_REPO_ROOT}/shared/protocol"
    "${SDK_PATH}/segger/systemview/SEGGER"
    "${OD_REPO_ROOT}/third_party/bb_epaper/src"
+   "${CMAKE_CURRENT_LIST_DIR}/../panel"
    "${OD_REPO_ROOT}/third_party/uzlib/src"
     "${SDK_PATH}/devices/platform/Device/SiliconLabs/EFR32BG22/Include"
     "${SDK_PATH}/platform_common_apps/app/common/util/app_assert"
