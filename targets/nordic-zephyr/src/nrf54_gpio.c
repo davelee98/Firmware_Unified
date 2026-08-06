@@ -37,6 +37,29 @@ bool nrf54_pin_decode(uint8_t cfg, uint8_t *port_out, uint8_t *pin_out)
 	 *   bit7=0: (port << 4) | pin   — pin 0..15 (legacy, L15-safe)
 	 *   bit7=1: 0x80 | (port << 5) | pin — pin 0..31 (LM20 D1/D2/D3 etc.)
 	 */
+#if defined(OD_BOARD_XIAO_NRF52840)
+	/*
+	 * nRF52840 USES ABSOLUTE NORDIC PIN NUMBERS (port * 32 + pin), NOT the packed nibble
+	 * form above. This is a wire contract with the host, not a preference: the Arduino
+	 * nRF52 firmware this board is migrating from consumed the config's pin bytes as raw
+	 * Nordic pin numbers, so every config already written for this hardware is in that
+	 * encoding, and a real config off the bench decodes correctly only this way:
+	 *
+	 *   RST=15 -> P0.15      CS=44   -> P1.12 (D7,  XIAO CS)
+	 *   BUSY=29 -> P0.29 (D3) DATA=47 -> P1.15 (D10, XIAO MOSI)
+	 *   DC=31  -> P0.31      CLK=45  -> P1.13 (D8,  XIAO SCK)
+	 *
+	 * Under the nibble form those same bytes decode to port 2 (44 = 0x2C -> P2.12), a port
+	 * the nRF52840 does not have. nrf54_pin_decode() then returned false for CS, MOSI and
+	 * SCK, every bit-bang write became a no-op, and the panel stayed blank while BLE and
+	 * PIPE upload worked perfectly -- which is exactly the reported symptom.
+	 *
+	 * The nRF54 boards keep the nibble form. They have a real P2, their deployed configs
+	 * are written in that encoding, and changing them would break working hardware.
+	 */
+	port = (uint8_t)((cfg >> 5) & 0x07u);
+	pin = (uint8_t)(cfg & 0x1Fu);
+#else
 	if ((cfg & 0x80u) != 0u) {
 		port = (uint8_t)((cfg >> 5) & 0x03u);
 		pin = (uint8_t)(cfg & 0x1Fu);
@@ -44,6 +67,7 @@ bool nrf54_pin_decode(uint8_t cfg, uint8_t *port_out, uint8_t *pin_out)
 		port = (uint8_t)((cfg >> 4) & 0x0Fu);
 		pin = (uint8_t)(cfg & 0x0Fu);
 	}
+#endif
 	if (port > 3u || pin > 31u) {
 		return false;
 	}

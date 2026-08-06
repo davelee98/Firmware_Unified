@@ -61,10 +61,29 @@ static int battery_pin_to_ain(uint8_t pin_cfg)
 	if (!nrf54_pin_decode(pin_cfg, &port, &pin)) {
 		return -1;
 	}
+#if defined(OD_BOARD_XIAO_NRF52840)
+	/*
+	 * nRF52840's SAADC inputs are AIN0..AIN7 on P0.02-P0.05 and P0.28-P0.31 -- a different
+	 * set of pins AND a different port from the nRF54L's P1.00-P1.07. The nRF54 rule
+	 * rejected P0.02 (XIAO D0 / AIN0, a perfectly good analog pin) with
+	 * "sense pin 0x02 is not SAADC-capable", which is the nRF54 answer to an nRF52 question.
+	 */
+	if (port != 0u) {
+		return -1;
+	}
+	if (pin >= 2u && pin <= 5u) {
+		return (int)(pin - 2u);          /* P0.02..P0.05 -> AIN0..AIN3 */
+	}
+	if (pin >= 28u && pin <= 31u) {
+		return (int)(pin - 28u + 4u);    /* P0.28..P0.31 -> AIN4..AIN7 */
+	}
+	return -1;
+#else
 	if (port != 1u || pin > 7u) {
 		return -1;
 	}
 	return (int)pin;
+#endif
 }
 
 #if OD_ADC_AVAILABLE
