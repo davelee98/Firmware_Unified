@@ -73,8 +73,23 @@ that bootloader at all.** If it cannot — the likely outcome — then porting a
 to Zephyr requires replacing its bootloader, which requires physical access. The real question
 becomes:
 
-> Do deployed nRF52840 units migrate to Zephyr at all, or stay on the current Arduino/Bluefruit
-> firmware indefinitely while only new production ships Zephyr + MCUboot?
+> ~~Do deployed nRF52840 units migrate to Zephyr at all, or stay on the current Arduino/Bluefruit
+> firmware indefinitely while only new production ships Zephyr + MCUboot?~~
+
+**ANSWERED 2026-08-05: they migrate.** nRF52840 becomes a board of this target
+(docs/NEXT_STEPS_2026-08-05.md § Milestone 7). Two things that decision carries with it:
+
+- **Budget physical access to deployed units** for the bootloader replacement, unless the test
+  below says otherwise. That is the cost the decision accepts.
+- **The host SMP/mcumgr client is a PREREQUISITE.** Migrating a fielded unit to MCUboot before
+  `py-opendisplay` can drive SMP would replace a working BLE DFU path with a signed one nothing
+  can use -- strictly worse than those units have today. Build the client first.
+
+**Run the cheap test before spending the budget.** Build a Zephyr image at the Adafruit flash
+layout, push it to ONE unit over the existing BLE DFU, and see whether it boots and stays up. If
+it works, the physical-access cost disappears; if it does not, it is confirmed rather than
+assumed. The likely answer is that it does not work -- but that is a guess, and this is
+answerable in an afternoon with one board.
 
 Leaving them is defensible — they work, they have OTA, and the fleet is finite. Decide it
 before step 4 is scheduled, because it determines whether step 4 is a port or a product split.

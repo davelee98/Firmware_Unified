@@ -27,8 +27,8 @@ target order and migration rules remain in [MIGRATION.md](MIGRATION.md), known d
 5. Run the release acceptance matrix and explicitly record any hardware debt still accepted.
 6. Import nRF54L15 into `targets/nordic-zephyr/`, one subsystem at a time.
 7. Import EFR32BG22, using its no-kernel and 32 KB RAM limits as hard shared-core gates.
-8. Decide the deployed nRF52840 product split, then port only the population that is actually
-   meant to move to Zephyr.
+8. ~~Decide the deployed nRF52840 product split~~ — **DECIDED 2026-08-05: it migrates.** Port
+   nRF52840 as a board of `targets/nordic-zephyr/`. Prerequisite: the host SMP/mcumgr client.
 
 The wire-capture corpus, host issues, protocol-header synchronization, CI matrix, and BG22
 security decision run in parallel, with deadlines stated below.
@@ -559,19 +559,50 @@ Import Silabs third, before the architecture can accidentally assume Zephyr-size
 Any shared API requiring a scheduler, heap allocation, blocking wait, or large automatic buffer
 fails this milestone by design and must be corrected rather than hidden behind a Silabs fork.
 
-## Milestone 7 — nRF52840 product decision and port
+## Milestone 7 — nRF52840 port — **DECIDED 2026-08-05: it migrates**
 
-Before writing port code, decide which deployed units move:
+**The nRF52840 migrates to `targets/nordic-zephyr/` as a board.** The product question Milestone
+7 opened -- migrate the fleet, or leave deployed units on Arduino/Bluefruit indefinitely while
+only new production ships Zephyr -- is answered: it migrates.
 
-- **Existing fleet stays on Bluefruit:** maintain it in the source repo and preserve host
-  compatibility; only new production uses Zephyr/MCUboot.
-- **Existing fleet migrates:** budget a physical bootloader replacement unless testing proves a
-  Zephyr image can safely run under the current Adafruit/SoftDevice arrangement.
+### What follows mechanically from that
 
-For units that move, make nRF52840 a board on `targets/nordic-zephyr/`, not a separate target.
-Disable Bluefruit-style automatic advertising restart in the donor behavior and use the common
-loop-owned controller. Only after this port removes the guarded nRF arms may the shim ratchet
-reach zero and `targets/esp32-idf/compat/` be dismantled according to `SHIM_BUDGET`.
+Recorded because Milestone 7 attached these to the decision, not to the implementation:
+
+- **Deployed units need their bootloader replaced, which needs PHYSICAL ACCESS** -- unless the
+  experiment below says otherwise. Those units run the Adafruit bootloader, which ships with the
+  S140 SoftDevice; a Zephyr application does not use SoftDevice, it uses NCS's SoftDevice
+  Controller compiled into its own image. The two arrangements are not obviously compatible.
+- **The host SMP/mcumgr client is now a PREREQUISITE, not parallel work.** `py-opendisplay` has
+  none -- its OTA module implements only legacy Nordic DFU and Silabs `.gbl`. Migrating a
+  deployed unit to MCUboot before that client exists would trade a WORKING field-update path for
+  a signed one nothing can drive: strictly worse than what those units have today. Build the
+  client first.
+- **The Arduino shim can finally die.** `targets/esp32-idf/compat/` sits at its floor of 5, and
+  those files are counted only for `TARGET_NRF` arms. They leave with this port; only then does
+  the ratchet reach zero and `compat/` get dismantled per `SHIM_BUDGET`. Not before, and not by
+  finishing them early.
+- **The advertising divergence closes.** Set `restartOnDisconnect(false)` and adopt
+  `od_adv_control`; that deletes `restartsAdvertisingOnDisconnect()` and its special-case branch
+  in `serviceBleAdvertisingRestart()`, because Bluefruit's automatic restart is a second policy
+  owner. Requirement already recorded in `targets/nordic-zephyr/README.md`.
+
+### The one experiment that could remove the physical-access cost
+
+Milestone 7's wording was "budget a physical bootloader replacement **unless testing proves** a
+Zephyr image can safely run under the current Adafruit/SoftDevice arrangement." That unless is
+still live and the test is cheap: build a Zephyr image at the Adafruit flash layout, push it to
+ONE unit over the existing BLE DFU, see whether it boots and stays up.
+
+Worth running before committing budget, because the answer changes the cost of this decision by
+the size of the deployed fleet. The likely outcome is that it does not work -- but "likely" is
+not a measurement, and this one is answerable in an afternoon with a single board.
+
+### Order
+
+Still last. It depends on `targets/nordic-zephyr/` existing AND being verified on hardware
+(Milestone 5 step 3), which has not happened. Nothing is blocked *by* this decision; it unblocks
+planning, not code.
 
 ## Parallel work with deadlines
 
