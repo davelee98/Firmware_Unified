@@ -6,6 +6,10 @@ platformio.local.ini
 
 # Zephyr / nRF Connect SDK (targets/nrf54l15-zephyr)
 build/
+# `./build.sh --all` in targets/nordic-zephyr/ gives each board its own build dir
+# (build-xiao_nrf54l15/, build-xiao_ble/, ...): sharing one would make every board a full
+# rebuild and leave only the last as something flash.sh could find.
+build-*/
 twister-out*/
 .west/
 

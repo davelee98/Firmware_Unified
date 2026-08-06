@@ -1,4 +1,5 @@
 #include "opendisplay_touch.h"
+#include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_constants.h"
 #include "opendisplay_structs.h"
@@ -507,27 +508,27 @@ void opendisplay_touch_init(void)
       continue;
     }
     if (tc->touch_ic_type != TOUCH_IC_GT911) {
-      printf("[OD] touch[%u]: skipped (only GT911 implemented, got %u)\r\n", (unsigned)i,
+      od_log_info("touch[%u]: skipped (only GT911 implemented, got %u)", (unsigned)i,
              (unsigned)tc->touch_ic_type);
       continue;
     }
     if (tc->touch_data_start_byte > 6u) {
-      printf("[OD] touch[%u]: touch_data_start_byte must be 0-6\r\n", (unsigned)i);
+      od_log_info("touch[%u]: touch_data_start_byte must be 0-6", (unsigned)i);
       continue;
     }
     if (!touch_get_bus(tc, &rt->bus)) {
-      printf("[OD] touch[%u]: no valid I2C data_bus (bus_id=%u)\r\n", (unsigned)i,
+      od_log_info("touch[%u]: no valid I2C data_bus (bus_id=%u)", (unsigned)i,
              (unsigned)tc->bus_id);
       continue;
     }
     if (!touch_reinit_gt911(tc, rt)) {
-      printf("[OD] touch[%u]: GT911 init failed (SCL=0x%02X SDA=0x%02X)\r\n", (unsigned)i,
+      od_log_info("touch[%u]: GT911 init failed (SCL=0x%02X SDA=0x%02X)", (unsigned)i,
              (unsigned)rt->bus.scl, (unsigned)rt->bus.sda);
       continue;
     }
     rt->last_poll_ms = k_uptime_get_32();
     s_any_initialized = true;
-    printf("[OD] touch[%u]: GT911 @0x%02X %s SCL=0x%02X SDA=0x%02X byte=%u\r\n", (unsigned)i,
+    od_log_info("touch[%u]: GT911 @0x%02X %s SCL=0x%02X SDA=0x%02X byte=%u", (unsigned)i,
            (unsigned)rt->addr7, rt->reg_high_first ? "BE" : "LE", (unsigned)rt->bus.scl,
            (unsigned)rt->bus.sda, (unsigned)tc->touch_data_start_byte);
   }
@@ -564,12 +565,12 @@ void opendisplay_touch_resume_after_refresh(void)
       continue;
     }
     if (touch_light_resume_gt911(tc, rt)) {
-      printf("[OD] touch[%u]: light resume after EPD @0x%02X\r\n", (unsigned)i,
+      od_log_info("touch[%u]: light resume after EPD @0x%02X", (unsigned)i,
              (unsigned)rt->addr7);
     } else if (touch_reinit_gt911(tc, rt)) {
-      printf("[OD] touch[%u]: reinit after EPD @0x%02X\r\n", (unsigned)i, (unsigned)rt->addr7);
+      od_log_info("touch[%u]: reinit after EPD @0x%02X", (unsigned)i, (unsigned)rt->addr7);
     } else {
-      printf("[OD] touch[%u]: resume failed after EPD refresh\r\n", (unsigned)i);
+      od_log_info("touch[%u]: resume failed after EPD refresh", (unsigned)i);
     }
   }
 }
@@ -616,7 +617,7 @@ void opendisplay_touch_process(void)
       if (rt->i2c_fail_streak >= TOUCH_I2C_FAIL_DISABLE_THRESHOLD) {
         rt->disabled = 1;
         rt->ok = 0;
-        printf("[OD] touch[%u]: disabled (too many I2C read failures)\r\n", (unsigned)i);
+        od_log_info("touch[%u]: disabled (too many I2C read failures)", (unsigned)i);
       }
       rt->last_poll_ms = now;
       continue;
@@ -642,7 +643,7 @@ void opendisplay_touch_process(void)
         if (rt->i2c_fail_streak >= TOUCH_I2C_FAIL_DISABLE_THRESHOLD) {
           rt->disabled = 1;
           rt->ok = 0;
-          printf("[OD] touch[%u]: disabled (too many I2C read failures)\r\n", (unsigned)i);
+          od_log_info("touch[%u]: disabled (too many I2C read failures)", (unsigned)i);
         }
         continue;
       }
@@ -696,7 +697,7 @@ void opendisplay_touch_process(void)
     if (changed) {
       opendisplay_ble_update_msd(true);
       opendisplay_ble_boost_advertising();
-      printf("[OD] touch[%u]: n=%u id=%u (%u,%u)\r\n", (unsigned)i, (unsigned)n, (unsigned)tid,
+      od_log_info("touch[%u]: n=%u id=%u (%u,%u)", (unsigned)i, (unsigned)n, (unsigned)tid,
              (unsigned)x, (unsigned)y);
     }
   }

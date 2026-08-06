@@ -18,7 +18,11 @@ if [[ -f "$ROOT/scripts/env.sh" ]]; then
   source "$ROOT/scripts/env.sh"
 fi
 
-ARTIFACTS_DIR="${ARTIFACTS_DIR:-$ROOT/artifacts}"
+# Build artefacts go to <repo>/release/, the same place targets/esp32-idf and
+# targets/nordic-zephyr deliver to, so a release set is one directory rather than three
+# per-target ones. It is gitignored. --artifacts-dir still overrides.
+OD_REPO_ROOT="$(cd "$ROOT/../.." && pwd)"
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-$OD_REPO_ROOT/release}"
 DO_COLLECT_ARTIFACTS=1
 
 DO_BUILD=1
@@ -379,6 +383,32 @@ od_print_memory_summary() {
   echo "    (Bootloader+Apploader 0x00000–0x11FFF and NVM3 tail are not included in app slot figures.)"
 }
 
+od_write_manifest() {
+  # Per-target manifest: three targets share release/, and one MANIFEST.txt would be whichever
+  # target built last. Records the flash figures because on a 32 KB part they are the number
+  # that decides whether a change is viable at all.
+  local m="$ARTIFACTS_DIR/MANIFEST-efr32bg22-slc.txt" commit dirty=""
+  commit="$(git -C "$OD_REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  git -C "$OD_REPO_ROOT" diff --quiet HEAD 2>/dev/null || dirty=" (working tree DIRTY)"
+  {
+    echo "OpenDisplay EFR32BG22 (Silabs) firmware"
+    echo "built    $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    echo "commit   ${commit}${dirty}"
+    echo
+    echo "IMAGE                          NOTE"
+    echo "${TARGET_NAME}.s37            application, full flash"
+    echo "${TARGET_NAME}.hex            application"
+    echo "${TARGET_NAME}.gbl            OTA image for the Gecko Bootloader/AppLoader --"
+    echo "                               the only field-update path this fleet has"
+    echo "bootloader-apploader.s37       full-flash bootloader (virgin boards only)"
+    echo
+    if [[ -f "$CMAKE_DIR/build/base/${TARGET_NAME}.out" ]]; then
+      "${OD_SIZE:-arm-none-eabi-size}" "$CMAKE_DIR/build/base/${TARGET_NAME}.out" 2>/dev/null \
+        || echo "(size unavailable)"
+    fi
+  } > "$m"
+}
+
 od_collect_artifacts() {
   local dst bl app_s37 app_hex app_out gbl n
   dst="$ARTIFACTS_DIR"
@@ -591,6 +621,7 @@ fi
 if [[ "$DO_COLLECT_ARTIFACTS" -eq 1 ]] && [[ "$DO_BUILD" -eq 1 || "$DO_FLASH" -eq 1 || "$DO_GBL_ONLY" -eq 1 ]]; then
   echo "==> Staging artifacts + memory summary"
   od_collect_artifacts
+  od_write_manifest
   od_print_memory_summary
 fi
 

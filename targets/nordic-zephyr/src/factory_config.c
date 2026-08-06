@@ -1,4 +1,5 @@
 #include "factory_config.h"
+#include "od_log.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -67,13 +68,13 @@ bool tryProvisionFactoryEmbed(void)
     return false;
   }
 
-  printf("No valid stored config; provisioning from factory embed...\r\n");
+  od_log_info("No valid stored config; provisioning from factory embed...");
   if (saveConfig((uint8_t *)(void *)g_factory_embed.data, g_factory_embed.len)) {
-    printf("Factory config saved to settings\r\n");
+    od_log_info("Factory config saved to settings");
     return true;
   }
 
-  printf("ERROR: Factory embed present but saveConfig failed\r\n");
+  od_log_info("ERROR: Factory embed present but saveConfig failed");
 #endif
   return false;
 }

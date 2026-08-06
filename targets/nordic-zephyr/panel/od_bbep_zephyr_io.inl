@@ -18,6 +18,7 @@
 
 #include "nrf54_gpio.h"
 #include "nrf54_zephyr_compat.h"
+#include "od_log.h"
 
 #include <string.h>
 
@@ -160,14 +161,79 @@ void bbepInitIO(BBEPDISP *pBBEP, uint8_t u8DC, uint8_t u8RST, uint8_t u8BUSY, ui
 	pBBEP->iBUSYPin = u8BUSY;
 	pBBEP->iSpeed = (int)u32Speed;
 
+	/*
+	 * PIN RESOLUTION IS THE FIRST THING TO CHECK when the panel is silent, because a pin
+	 * that fails to decode does not fault -- nrf54_gpio_write() simply returns and the
+	 * bit-bang writes go nowhere. That failure mode already cost one bring-up session
+	 * (config bytes decoded to a port the chip does not have), and it is invisible without
+	 * this dump. "ok=0" on any row means every transfer on that line is a no-op.
+	 */
+	{
+		static const char *const names[6] = { "DC", "RST", "BUSY", "CS", "MOSI", "SCK" };
+		const uint8_t cfgs[6] = { u8DC, u8RST, u8BUSY, u8CS, u8MOSI, u8SCK };
+
+		od_log_debug("panel pins (speed=%u Hz):", (unsigned)u32Speed);
+		for (unsigned i = 0; i < 6u; i++) {
+			uint8_t port = 0;
+			uint8_t pin = 0;
+			bool ok = nrf54_pin_decode(cfgs[i], &port, &pin);
+
+			od_log_debug("  %-4s cfg=%3u (0x%02X) -> P%u.%02u ok=%d", names[i],
+			       (unsigned)cfgs[i], (unsigned)cfgs[i], (unsigned)port,
+			       (unsigned)pin, (int)ok);
+		}
+	}
+
 	pinMode(pBBEP->iDCPin, OUTPUT);
 	if (pBBEP->iRSTPin != 0xff) {
+		/*
+		 * A REAL RESET PULSE, matching the known-good ESP-IDF backend
+		 * (targets/esp32-idf/panel/od_bbep_idf_io.inl): drive RST low, hold, release, wait.
+		 *
+		 * This backend previously only configured RST as an output and drove it high --
+		 * no low phase at all. bb_epaper's own bbepWakeUp() does a 20/20 ms pulse later,
+		 * but that runs AFTER the panel rail has just been switched on with no settle
+		 * time, so the controller may not have been ready to latch it. The ESP target,
+		 * which drives this same panel family correctly, gives the rail 800 ms and then
+		 * does its own 100/100 ms reset before anything else; this is the backend half of
+		 * closing that gap.
+		 */
 		pinMode(pBBEP->iRSTPin, OUTPUT);
+		digitalWrite(pBBEP->iRSTPin, LOW);
+		delay(100);
 		digitalWrite(pBBEP->iRSTPin, HIGH);
+		delay(100);
 	}
 	if (pBBEP->iBUSYPin != 0xff) {
-		pinMode(pBBEP->iBUSYPin,
-			(pBBEP->chip_type == BBEP_CHIP_UC81xx) ? INPUT_PULLUP : INPUT_PULLDOWN);
+		/*
+		 * NO PULL ON BUSY. This was INPUT_PULLUP/INPUT_PULLDOWN selected by chip_type --
+		 * i.e. biased toward the IDLE level -- inherited from
+		 * Firmware_NRF54/third_party/bb_epaper/src/nrf54_zephyr_io.inl:135, which in turn
+		 * copied it from the BG22 backend ("Keep BUSY stable on BG22") without that
+		 * comment. Every other backend uses a bare input: upstream arduino_io.inl:73,
+		 * rpi_io.inl:237, esphome_io.inl:72, the Arduino reference's pwrmgm()
+		 * (Firmware/src/main.cpp), and this repo's own reference target
+		 * (targets/esp32-idf/panel/od_bbep_idf_io.inl:166, which disables both pulls
+		 * explicitly).
+		 *
+		 * The pull was never load-bearing. BUSY is a push-pull CMOS output on both SSD16xx
+		 * and UC81xx, so an 11-16 kOhm internal pull cannot influence a connected, powered
+		 * panel either way. It changes exactly one thing: what gets read when the line is
+		 * NOT being driven -- panel unpowered, absent, or unplugged.
+		 *
+		 * Biasing that toward IDLE is the worst of the three options, because it makes
+		 * "no panel" read identically to "panel ready". Every guard downstream then passes:
+		 * bbepWaitBusy() returns at once, bbepWakeUp() completes, pInitFull and a whole
+		 * frame are clocked into a dead controller, and the first symptom is a 60 s
+		 * wait_for_refresh() timeout with nothing in the log naming the cause. That is
+		 * precisely how an unpowered rail stayed invisible for a full bring-up session.
+		 *
+		 * Floating-input current -- the BG22's actual concern -- is handled where it should
+		 * be, at power-down: opendisplay_display_park_pins() puts the pin in
+		 * GPIO_DISCONNECTED, which neither draws crowbar current nor oscillates. A pull is
+		 * not needed for that and does not help while the rail is up.
+		 */
+		pinMode(pBBEP->iBUSYPin, INPUT);
 	}
 	pinMode(pBBEP->iCSPin, OUTPUT);
 	digitalWrite(pBBEP->iCSPin, HIGH);
