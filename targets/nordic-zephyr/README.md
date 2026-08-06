@@ -4,13 +4,27 @@ One target, one build, **multiple boards** — nRF54L15 and nRF52840 share the Z
 PSA Crypto, NVS/`settings`, and the bb_epaper panel stack, so they are boards of a single
 target rather than two targets. See ../../docs/TOOLCHAINS.md.
 
-| Board | Chip | Source repo | Status |
+| Board (`-b` argument) | Chip | Source | Status |
 |---|---|---|---|
-| `xiao_nrf54l15` | nRF54L15 | `Firmware_NRF54` (https://github.com/davelee98/Firmware_NRF54) | imported first |
-| `lm20` | nRF54L15 | `Firmware_NRF54` | variant of the above (`NRF54_BOARD_LM20`) |
-| nRF52840 custom | nRF52840 | `Firmware` (https://github.com/davelee98/Firmware) | ported later, off PlatformIO/Arduino |
+| `xiao_nrf54l15/nrf54l15/cpuapp` | nRF54L15 | `Firmware_NRF54` (https://github.com/davelee98/Firmware_NRF54) | imported; **the only board built here** — `build.sh` default |
+| `xiao_nrf54lm20a/nrf54lm20a/cpuapp` | **nRF54LM20A** | `Firmware_NRF54`; board definition in-tree at `boards/seeed/xiao_nrf54lm20a/` | imported, **never built here** |
+| nRF52840 custom | nRF52840 | `Firmware` (https://github.com/davelee98/Firmware) | **not ported** — migration step 4 |
 
-Not yet imported. Build (once imported): `./build.sh`, flash with `./flash.sh`.
+**`lm20` IS A DIFFERENT PART, not a variant of the L15.** This table used to say "nRF54L15 —
+variant of the above", which understated it: `xiao_nrf54lm20a` is an **nRF54LM20A** with its own
+DTS, pinctrl, defconfig and a second core (`cpuflpr`), and it is the only board here carrying a
+full in-tree definition (15 files). `zephyr/CMakeLists.txt` gives it its own
+`prj_lm20_extra.conf` and an `NRF54_BOARD_LM20` define. Treating it as a rebadged L15 is how a
+board-specific defect gets debugged against the wrong datasheet.
+
+Build with `./build.sh`, flash with `./flash.sh`; both take `BOARD=` and `BUILD_DIR=` and
+**default to the same board**, so `./build.sh && ./flash.sh` works. For the LM20:
+
+```bash
+BOARD=xiao_nrf54lm20a/nrf54lm20a/cpuapp BUILD_DIR=build-lm20 ./build.sh
+BOARD=xiao_nrf54lm20a/nrf54lm20a/cpuapp BUILD_DIR=build-lm20 ./flash.sh
+```
+
 `PROFILE=uart ./build.sh` for USB-serial debug; battery builds log over SEGGER RTT (J-Link).
 
 ## nRF52840 is a port, not an import

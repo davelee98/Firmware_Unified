@@ -8,17 +8,26 @@
 #                       Preserves MCUboot, secondary slot, and settings_storage.
 #
 # Usage:
-#   ./flash.sh              # factory (LM20 / build-lm20)
+#   ./flash.sh              # factory (defaults MATCH build.sh: xiao_nrf54l15 / build)
 #   ./flash.sh factory
 #   ./flash.sh update
 #   MODE=update ./flash.sh
 #   BUILD_DIR=build BOARD=xiao_nrf54l15/nrf54l15/cpuapp ./flash.sh update
 set -euo pipefail
 
-# Default to XIAO nRF54LM20A (override with BUILD_DIR=build BOARD=... for L15).
-BUILD_DIR="${BUILD_DIR:-build-lm20}"
-BOARD="${BOARD:-xiao_nrf54lm20a/nrf54lm20a/cpuapp}"
+# SCRIPT_DIR FIRST: BUILD_DIR interpolates it. It used to be assigned two lines LATER, so the
+# default expanded to a bare "/build" -- harmless only because the default BUILD_DIR was a
+# relative "build-lm20" that never referenced it.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# DEFAULTS MATCH build.sh, deliberately. They used to differ -- flash.sh defaulted to
+# xiao_nrf54lm20a / build-lm20 while build.sh defaulted to xiao_nrf54l15 / build -- so a plain
+# `./build.sh && ./flash.sh` built one board and tried to flash a DIFFERENT one from a directory
+# that did not exist. Inherited from the source repo, and exactly the kind of thing that eats
+# the first hour of a bench session. Override both together for the LM20:
+#   BOARD=xiao_nrf54lm20a/nrf54lm20a/cpuapp BUILD_DIR=build-lm20 ./flash.sh
+BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/build}"
+BOARD="${BOARD:-xiao_nrf54l15/nrf54l15/cpuapp}"
 
 MODE="${MODE:-}"
 if [[ $# -ge 1 ]]; then
