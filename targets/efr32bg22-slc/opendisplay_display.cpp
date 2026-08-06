@@ -6,6 +6,7 @@
 #include "opendisplay_epd_map.h"
 #include "opendisplay_runtime.h"
 #include "bb_epaper.h"
+#include "od_bbep_efr32.h"
 #include "em_cmu.h"
 #include "em_gpio.h"
 #include "em_system.h"
@@ -20,7 +21,9 @@ extern "C" {
 
 #define OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE 256u
 
-static BBEPAPER s_epd;
+/* Raw BBEPDISP, not the vendored BBEPAPER C++ class -- see panel/od_bbep_efr32.h. The class is
+ * not compiled on this target, matching esp32-idf and nordic-zephyr. */
+static BBEPDISP s_epd;
 static bool s_active;
 static uint32_t s_total_bytes;
 static uint32_t s_written_bytes;
@@ -344,7 +347,7 @@ static uint16_t base64url_encode(const uint8_t *data, uint16_t len, char *out, u
   return out_len;
 }
 
-static bool render_boot_screen(BBEPAPER &epd, const struct GlobalConfig *cfg)
+static bool render_boot_screen(BBEPDISP &epd, const struct GlobalConfig *cfg)
 {
   static const char *LANDING_URL_PREFIX = "https://opendisplay.org/l/?";
   const struct SecurityConfig *sec = od_get_parsed_security();
@@ -378,8 +381,8 @@ static bool render_boot_screen(BBEPAPER &epd, const struct GlobalConfig *cfg)
     return false;
   }
   dc = &cfg->displays[0];
-  w = (uint16_t)epd.width();
-  h = (uint16_t)epd.height();
+  w = (uint16_t)epd.width;
+  h = (uint16_t)epd.height;
 
   memset(payload, 0, sizeof(payload));
   tag_type = dc->legacy_tag_type;
@@ -461,8 +464,8 @@ static bool render_boot_screen(BBEPAPER &epd, const struct GlobalConfig *cfg)
 
   {
     static uint8_t s_boot_row[256];
-    bool is4clr = (epd._bbep.iFlags & BBEP_4COLOR) != 0;
-    bool is3clr = (epd._bbep.iFlags & BBEP_3COLOR) != 0;
+    bool is4clr = (epd.iFlags & BBEP_4COLOR) != 0;
+    bool is3clr = (epd.iFlags & BBEP_3COLOR) != 0;
     int pitch = is4clr ? ((int)w + 3) / 4 : ((int)w + 7) / 8;
     uint8_t white_byte = is4clr ? 0x55u : 0xFFu;
     int domX, nameX, fwX, k1X, k2X, y;
@@ -500,8 +503,8 @@ static bool render_boot_screen(BBEPAPER &epd, const struct GlobalConfig *cfg)
       k2X = pad;
     }
 
-    epd.setAddrWindow(0, 0, (int)w, (int)h);
-    epd.startWrite(is4clr ? PLANE_1 : PLANE_0);
+    bbepSetAddrWindow(&epd, 0, 0, (int)w, (int)h);
+    bbepStartWrite(&epd, is4clr ? PLANE_1 : PLANE_0);
 
     for (y = 0; y < (int)h; y++) {
       memset(s_boot_row, white_byte, (size_t)pitch);
@@ -543,13 +546,13 @@ static bool render_boot_screen(BBEPAPER &epd, const struct GlobalConfig *cfg)
         }
       }
 
-      epd.writeData(s_boot_row, pitch);
+      bbepWriteData(&epd, s_boot_row, pitch);
     }
     if (is3clr) {
-      epd.startWrite(PLANE_1);
+      bbepStartWrite(&epd, PLANE_1);
       for (y = 0; y < (int)h; y++) {
         memset(s_boot_row, 0x00u, (size_t)pitch);
-        epd.writeData(s_boot_row, pitch);
+        bbepWriteData(&epd, s_boot_row, pitch);
       }
     }
   }
@@ -561,7 +564,7 @@ static bool wait_for_refresh(uint32_t timeout_ms)
   uint32_t elapsed = 0;
   bool saw_busy = false;
   while (elapsed < timeout_ms) {
-    bool busy = s_epd.isBusy();
+    bool busy = bbepIsBusy(&s_epd);
     if (busy) {
       saw_busy = true;
     } else if (saw_busy) {
@@ -570,13 +573,13 @@ static bool wait_for_refresh(uint32_t timeout_ms)
     sl_sleeptimer_delay_millisecond(50);
     elapsed += 50;
   }
-  return saw_busy && !s_epd.isBusy();
+  return saw_busy && !bbepIsBusy(&s_epd);
 }
 
 extern "C" void opendisplay_display_abort(void)
 {
   if (s_active) {
-    s_epd.sleep(DEEP_SLEEP);
+    bbepSleep(&s_epd, DEEP_SLEEP);
   }
   display_power_set(false);
   s_active = false;
@@ -628,13 +631,13 @@ static int dw_stream_raw_bytes(const uint8_t *payload, uint32_t payload_len)
     if (chunk == 0u) {
       break;
     }
-    s_epd.writeData((uint8_t *)(void *)p, (int)chunk);
+    bbepWriteData(&s_epd, (uint8_t *)(void *)p, (int)chunk);
     p += chunk;
     left -= chunk;
     s_written_bytes += chunk;
     remaining -= chunk;
     if (bitplanes && !s_plane2_started && s_plane_size > 0u && s_written_bytes >= s_plane_size) {
-      s_epd.startWrite(PLANE_1);
+      bbepStartWrite(&s_epd, PLANE_1);
       s_plane2_started = true;
     }
   }
@@ -694,21 +697,26 @@ extern "C" void opendisplay_display_boot_apply(void)
   if (panel == EP_PANEL_UNDEFINED) {
     return;
   }
-  s_epd = BBEPAPER();
+  memset(&s_epd, 0, sizeof(s_epd));
   display_power_set(true);
-  if (s_epd.setPanelType(panel) != BBEP_SUCCESS) {
+  if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
     display_power_set(false);
     return;
   }
-  s_epd.setRotation((int)d->rotation * 90);
-  s_epd.initIO(d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
-  s_epd.wake();
-  s_epd.sendPanelInitFull();
+  bbepSetRotation(&s_epd, (int)d->rotation * 90);
+  bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
+  od_bbep_wake(&s_epd);
+  od_bbep_send_panel_init_full(&s_epd);
   if (!render_boot_screen(s_epd, opendisplay_get_global_config())) {
-    s_epd.fillScreen(BBEP_WHITE);
+    bbepFill(&s_epd, BBEP_WHITE, PLANE_DUPLICATE);
   }
-  (void)s_epd.refresh(REFRESH_FULL, true);
-  s_epd.sleep(DEEP_SLEEP);
+  /* The class's refresh(mode, bWait=true) called bbepWaitBusy() itself after a successful
+     * refresh; the bare function does not. Written out explicitly -- dropping it would let boot
+     * proceed while the panel was still refreshing. */
+  if (bbepRefresh(&s_epd, REFRESH_FULL) == BBEP_SUCCESS) {
+    bbepWaitBusy(&s_epd);
+  }
+  bbepSleep(&s_epd, DEEP_SLEEP);
   display_power_set(false);
 }
 
@@ -733,22 +741,22 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
   opendisplay_display_abort();
   dw_init_mark("after abort");
   display_power_set(true);
-  s_epd = BBEPAPER();
-  if (s_epd.setPanelType(panel) != BBEP_SUCCESS) {
+  memset(&s_epd, 0, sizeof(s_epd));
+  if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
     printf("[OD] dw start err setPanelType panel=%d\r\n", panel);
     display_power_set(false);
     return -3;
   }
   dw_init_mark("after setPanelType");
 
-  s_epd.setRotation((int)d->rotation * 90);
-  s_epd.initIO(d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
+  bbepSetRotation(&s_epd, (int)d->rotation * 90);
+  bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
   dw_init_mark("after initIO");
-  s_epd.wake();
+  od_bbep_wake(&s_epd);
   dw_init_mark("after wake (reset + busy)");
-  s_epd.sendPanelInitFull();
+  od_bbep_send_panel_init_full(&s_epd);
   dw_init_mark("after pInitFull");
-  s_epd.setAddrWindow(0, 0, d->pixel_width, d->pixel_height);
+  bbepSetAddrWindow(&s_epd, 0, 0, d->pixel_width, d->pixel_height);
   dw_init_mark("after setAddrWindow");
 
   s_color_scheme = d->color_scheme;
@@ -761,7 +769,7 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
     opendisplay_color_direct_write_total_bytes(d->pixel_width, d->pixel_height, s_color_scheme);
   {
     int sp = opendisplay_color_start_plane(s_color_scheme);
-    s_epd.startWrite(sp == 0 ? PLANE_0 : PLANE_1);
+    bbepStartWrite(&s_epd, sp == 0 ? PLANE_0 : PLANE_1);
   }
   dw_init_mark("after startWrite");
 
@@ -879,10 +887,10 @@ extern "C" int opendisplay_display_direct_write_end(const uint8_t *payload, uint
   }
 
   printf("[OD] dw refresh start mode=%d\r\n", refresh_mode);
-  (void)s_epd.refresh(refresh_mode, false);
+  (void)bbepRefresh(&s_epd, refresh_mode);
   bool ok = wait_for_refresh(60000u);
-  printf("[OD] dw refresh done ok=%d busy=%d\r\n", (int)ok, (int)s_epd.isBusy());
-  s_epd.sleep(DEEP_SLEEP);
+  printf("[OD] dw refresh done ok=%d busy=%d\r\n", (int)ok, (int)bbepIsBusy(&s_epd));
+  bbepSleep(&s_epd, DEEP_SLEEP);
   s_active = false;
   s_dw_compressed = false;
   s_dw_decompressed_total = 0;
