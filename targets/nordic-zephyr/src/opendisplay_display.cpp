@@ -1,4 +1,6 @@
 #include "opendisplay_display.h"
+
+#include "od_log.h"
 #include "opendisplay_display_color.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
@@ -131,15 +133,40 @@ static bool wait_for_refresh(uint32_t timeout_ms)
 {
   uint32_t elapsed = 0;
   bool saw_busy = false;
+
+  /*
+   * READ THE EXIT CONDITION CAREFULLY: this returns true only after it has seen BUSY go
+   * ASSERTED and then RELEASED. If BUSY never asserts at all -- panel not actually driven,
+   * or the BUSY line mis-decoded, or the wrong pull for the chip type -- the loop runs the
+   * FULL timeout in silence and then returns false. At the 60 s the caller passes, that is
+   * a minute of apparent hang with no output, during which the host gives up and its next
+   * attempt is refused with "Pipe write already in progress".
+   *
+   * The od_dbg() lines exist so that case is distinguishable from a panel that is simply
+   * slow: "busy asserted" appearing at all is the difference between "the panel is talking
+   * to us" and "we are bit-banging into the void".
+   */
   while (elapsed < timeout_ms) {
     bool busy = bbepIsBusy(&s_epd);
     if (busy) {
+      if (!saw_busy) {
+        od_dbg("[OD] refresh: busy asserted after %u ms\r\n", (unsigned)elapsed);
+      }
       saw_busy = true;
     } else if (saw_busy) {
+      od_dbg("[OD] refresh: busy released after %u ms\r\n", (unsigned)elapsed);
       return true;
     }
     od_msleep(50);
     elapsed += 50;
+  }
+  if (!saw_busy) {
+    od_dbg("[OD] refresh: BUSY NEVER ASSERTED in %u ms -- panel is not responding; "
+           "check the BUSY pin decode and the panel power rail\r\n",
+           (unsigned)timeout_ms);
+  } else {
+    od_dbg("[OD] refresh: busy asserted but still held at %u ms timeout\r\n",
+           (unsigned)timeout_ms);
   }
   return saw_busy && !bbepIsBusy(&s_epd);
 }

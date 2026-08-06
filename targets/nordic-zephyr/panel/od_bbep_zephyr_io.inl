@@ -18,6 +18,7 @@
 
 #include "nrf54_gpio.h"
 #include "nrf54_zephyr_compat.h"
+#include "od_log.h"
 
 #include <string.h>
 
@@ -159,6 +160,29 @@ void bbepInitIO(BBEPDISP *pBBEP, uint8_t u8DC, uint8_t u8RST, uint8_t u8BUSY, ui
 	pBBEP->iRSTPin = u8RST;
 	pBBEP->iBUSYPin = u8BUSY;
 	pBBEP->iSpeed = (int)u32Speed;
+
+	/*
+	 * PIN RESOLUTION IS THE FIRST THING TO CHECK when the panel is silent, because a pin
+	 * that fails to decode does not fault -- nrf54_gpio_write() simply returns and the
+	 * bit-bang writes go nowhere. That failure mode already cost one bring-up session
+	 * (config bytes decoded to a port the chip does not have), and it is invisible without
+	 * this dump. "ok=0" on any row means every transfer on that line is a no-op.
+	 */
+	{
+		static const char *const names[6] = { "DC", "RST", "BUSY", "CS", "MOSI", "SCK" };
+		const uint8_t cfgs[6] = { u8DC, u8RST, u8BUSY, u8CS, u8MOSI, u8SCK };
+
+		od_dbg("[OD] panel pins (speed=%u Hz):\r\n", (unsigned)u32Speed);
+		for (unsigned i = 0; i < 6u; i++) {
+			uint8_t port = 0;
+			uint8_t pin = 0;
+			bool ok = nrf54_pin_decode(cfgs[i], &port, &pin);
+
+			od_dbg("[OD]   %-4s cfg=%3u (0x%02X) -> P%u.%02u ok=%d\r\n", names[i],
+			       (unsigned)cfgs[i], (unsigned)cfgs[i], (unsigned)port,
+			       (unsigned)pin, (int)ok);
+		}
+	}
 
 	pinMode(pBBEP->iDCPin, OUTPUT);
 	if (pBBEP->iRSTPin != 0xff) {

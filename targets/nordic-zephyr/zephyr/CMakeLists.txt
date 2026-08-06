@@ -108,7 +108,10 @@ target_compile_definitions(app PRIVATE
 if(BOARD MATCHES ".*lm20.*")
   target_compile_definitions(app PRIVATE NRF54_BOARD_LM20)
 elseif(BOARD MATCHES ".*xiao_ble.*")
-  target_compile_definitions(app PRIVATE OD_BOARD_XIAO_NRF52840)
+  # OD_LOG_LEVEL is OPENDISPLAY's log level (src/od_log.h), NOT Zephyr's. It gates only our
+  # own od_dbg() output, so raising it does not turn on kernel/USB debug spam the way
+  # CONFIG_LOG_DEFAULT_LEVEL=4 does. 2 = debug, while this board is on the bench.
+  target_compile_definitions(app PRIVATE OD_BOARD_XIAO_NRF52840 OD_LOG_LEVEL=2)
 else()
   target_compile_definitions(app PRIVATE NRF54_BOARD_L15)
 endif()
