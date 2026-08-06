@@ -7,21 +7,133 @@
  * board — an nRF52840 build failed on `undefined node label 'spi00'` before reaching a single
  * line of application code.
  */
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc.h>
+
 / {
 	/*
-	 * NO zephyr,console override. The nRF54 overlay points it at uart20, but this board's
-	 * Kconfig.defconfig installs a USB CDC ACM console and prj.conf logs over RTT; naming a
-	 * UART here only adds a third opinion. The board .conf beside this file declines the CDC
-	 * backend, which leaves RTT as prj.conf intends.
+	 * NO zephyr,console override. The board's Kconfig.defconfig installs a USB CDC ACM console
+	 * on &board_cdc_acm_uart and the .conf beside this file keeps it (there is no debug probe
+	 * on this board, so RTT — which prj.conf selects for the nRF54 boards — goes nowhere).
+	 * Naming a UART here would only add a third opinion.
 	 */
 	/*
 	 * All 8 SAADC channels, so the battery driver can pick one at runtime by index from the
-	 * configured battery_sense_pin. Same contract as the nRF54 boards; the channels come from
-	 * the board DTS.
+	 * configured battery_sense_pin. Same contract as the nRF54 boards.
 	 */
 	zephyr,user {
 		io-channels = <&adc 0>, <&adc 1>, <&adc 2>, <&adc 3>,
 			      <&adc 4>, <&adc 5>, <&adc 6>, <&adc 7>;
+	};
+};
+
+/*
+ * THE CHANNEL NODES HAVE TO BE DECLARED HERE, unlike on the nRF54 boards.
+ *
+ * xiao_nrf54l15_common.dtsi ships channel@0..7 in the board DTS, so the nRF54 overlay only has
+ * to reference them. The upstream xiao_ble DTS does NOT: its &adc node is a bare
+ * `status = "okay"` with no children. `io-channels = <&adc 0>` still compiles against it,
+ * because ADC_DT_SPEC_GET_BY_IDX wraps the channel lookup in
+ * IF_ENABLED(DT_NODE_EXISTS(...)) — a missing channel node is not an error, it silently
+ * leaves adc_dt_spec::channel_cfg ZERO-FILLED.
+ *
+ * A zeroed channel_cfg means gain ADC_GAIN_1, reference ADC_REF_VDD_1 (both enum value 0) and
+ * resolution 0. adc_nrfx_saadc's channel_setup rejects ADC_REF_VDD_1 — the nRF SAADC only does
+ * ADC_REF_INTERNAL and ADC_REF_VDD_1_4 — so every battery read failed at the first call with
+ *
+ *     battery: adc_channel_setup failed (AIN0)
+ *
+ * every 40 s. The failure is in the devicetree, not in opendisplay_battery.c: battery_pin_to_ain()
+ * had already correctly decoded P0.02 -> AIN0.
+ *
+ * GAIN 1/6 + INTERNAL REF, not the nRF54 boards' 1/4. That is 0.6 V * 6 = 3.6 V full scale,
+ * which is exactly the Arduino AR_DEFAULT scale that battery_read_saadc_volts() converts back
+ * into ("raw10 = pin_mv * 1024 / 3600") and that existing device configs calibrated
+ * voltage_scaling_factor against. Copying 1/4 from the nRF54 overlay would clamp full scale to
+ * 2.4 V and silently saturate a fresh Li-ion divider.
+ */
+&adc {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN0>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
+	};
+
+	channel@1 {
+		reg = <1>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN1>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
+	};
+
+	channel@2 {
+		reg = <2>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN2>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
+	};
+
+	channel@3 {
+		reg = <3>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN3>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
+	};
+
+	channel@4 {
+		reg = <4>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN4>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
+	};
+
+	channel@5 {
+		reg = <5>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN5>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
+	};
+
+	channel@6 {
+		reg = <6>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN6>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
+	};
+
+	channel@7 {
+		reg = <7>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN7>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
 	};
 };
 

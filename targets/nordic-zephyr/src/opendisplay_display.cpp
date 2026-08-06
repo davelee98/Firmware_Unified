@@ -106,9 +106,35 @@ void opendisplay_display_park_pins(void)
   display_park_signal_pin(d->busy_pin);
 }
 
+/*
+ * PANEL RAIL BRING-UP. Ported from the Arduino reference's pwrmgm(true)
+ * (Firmware/src/main.cpp:1341-1382), which is the behaviour the deployed configs were
+ * validated against.
+ *
+ * THE RAIL NEEDS ~900 ms BEFORE THE PANEL WILL TALK, and this function used to return the
+ * instant the enable pin went high. The whole init then ran against an unpowered controller:
+ *
+ *     dw init after cfg           0 ms
+ *     dw init after setPanelType  2 ms
+ *     dw init after initIO        8 ms     <- RST already toggling here
+ *     dw init after wake          60 ms    <- BUSY sampled here
+ *
+ * At 8 ms the reference has not yet finished the first of its two delays. bbepIsBusy() reads
+ * an unpowered BUSY line as idle, bbepWakeUp()'s wait returns immediately, pInitFull and all
+ * 48000 bytes are clocked into a dead controller, and the only symptom is the 60 s
+ * "BUSY NEVER ASSERTED" at refresh time. Nothing upstream of that reports an error.
+ *
+ * The reference's two delays are separate and both are needed: 800 ms for the rail itself,
+ * then the signal lines are pre-driven to their idle levels and 100 ms lets the panel see
+ * them settle before RST is toggled.
+ */
+#define OD_PANEL_RAIL_SETTLE_MS 800u
+#define OD_PANEL_PIN_SETTLE_MS  100u
+
 static void display_power_set(bool on)
 {
   const struct GlobalConfig *cfg = opendisplay_get_global_config();
+  const struct DisplayConfig *d = display_cfg();
   uint8_t p;
 
   if (cfg == nullptr) {
@@ -119,9 +145,35 @@ static void display_power_set(bool on)
   }
   p = cfg->system_config.pwr_pin;
   if (p == 0xFFu) {
+    /*
+     * The reference logs "Power pin not set" and drives NOTHING here. Do not let this pass
+     * silently: OD_FALLBACK_DISPLAY_PWR_PIN is 0x00, and on nRF52840 pin 0 is P0.00 == XL1,
+     * the 32.768 kHz crystal input. Driving it as a GPIO fights the LFXO the BLE stack runs
+     * on, and it powers no panel either way.
+     */
+    od_log_warn("panel: pwr_pin not set in config -- using fallback P0.%02u",
+                (unsigned)OD_FALLBACK_DISPLAY_PWR_PIN);
     p = OD_FALLBACK_DISPLAY_PWR_PIN;
   }
   nrf54_gpio_configure_output(p, on);
+  if (!on) {
+    return;
+  }
+  od_log_debug("panel: rail on (pwr_pin=%u), settling %u ms", (unsigned)p,
+               (unsigned)OD_PANEL_RAIL_SETTLE_MS);
+  od_msleep(OD_PANEL_RAIL_SETTLE_MS);
+
+  /* Pre-drive the signal lines to their idle levels, exactly as pwrmgm() does, so the panel
+   * comes out of its own power-on reset seeing a quiet bus rather than floating inputs. */
+  if (d != nullptr) {
+    nrf54_gpio_configure_output(d->reset_pin, true);   /* RST idle HIGH */
+    nrf54_gpio_configure_output(d->cs_pin, true);      /* CS  idle HIGH */
+    nrf54_gpio_configure_output(d->dc_pin, false);
+    nrf54_gpio_configure_output(d->clk_pin, false);
+    nrf54_gpio_configure_output(d->data_pin, false);
+    nrf54_gpio_configure_input(d->busy_pin, false, false);
+    od_msleep(OD_PANEL_PIN_SETTLE_MS);
+  }
 }
 
 void opendisplay_display_power_off(void)
