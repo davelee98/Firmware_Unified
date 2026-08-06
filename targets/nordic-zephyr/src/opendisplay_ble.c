@@ -264,7 +264,7 @@ static void od_smp_sync(void)
 			return;
 		}
 		s_smp_visible = true;
-		printf("[OD] SMP DFU service %s\r\n",
+		od_log_info("SMP DFU service %s",
 		       s_ota_unlocked ? "unlocked" : "available (encryption off)");
 	} else {
 		err = smp_bt_unregister();
@@ -702,12 +702,12 @@ static void apply_tx_power(uint8_t handle_type, uint16_t handle)
 
 	err = bt_hci_cmd_send_sync(BT_HCI_OP_VS_WRITE_TX_POWER_LEVEL, buf, &rsp);
 	if (err != 0) {
-		printf("[OD] tx_power set failed (type=%u req=%d dBm): %d\r\n",
+		od_log_info("tx_power set failed (type=%u req=%d dBm): %d",
 		       (unsigned)handle_type, (int)requested, err);
 		return;
 	}
 	rp = (struct bt_hci_rp_vs_write_tx_power_level *)rsp->data;
-	printf("[OD] tx_power type=%u requested=%d selected=%d dBm\r\n",
+	od_log_info("tx_power type=%u requested=%d selected=%d dBm",
 	       (unsigned)handle_type, (int)requested, (int)rp->selected_tx_power);
 	net_buf_unref(rsp);
 #else
@@ -757,7 +757,7 @@ static int start_advertising(void)
 			memcpy(s_last_published_msd, msd_payload, MSD_PAYLOAD_LEN);
 			s_msd_published = true;
 		}
-		printf("[OD] advertising as %s (interval=%u-%u ms)\r\n", s_dev_name,
+		od_log_info("advertising as %s (interval=%u-%u ms)", s_dev_name,
 		       (unsigned)BT_GAP_ADV_INTERVAL_TO_MS(s_adv_param.interval_min),
 		       (unsigned)BT_GAP_ADV_INTERVAL_TO_MS(s_adv_param.interval_max));
 	}
@@ -780,7 +780,7 @@ static void flash_powerdown_from_config(void)
 		if (fc->mosi_pin == 0xFFu || fc->sck_pin == 0xFFu || fc->cs_pin == 0xFFu) {
 			continue;
 		}
-		printf("[OD] flash powerdown MOSI=%u SCK=%u CS=%u MISO=%u WP=%u HOLD=%u\r\n",
+		od_log_info("flash powerdown MOSI=%u SCK=%u CS=%u MISO=%u WP=%u HOLD=%u",
 		       fc->mosi_pin, fc->sck_pin, fc->cs_pin,
 		       fc->miso_pin, fc->wp_pin, fc->hold_pin);
 		board_nrf54_flash_powerdown(fc->mosi_pin, fc->sck_pin, fc->cs_pin,
@@ -859,7 +859,7 @@ void opendisplay_ble_init(void)
 		config_loaded = loadGlobalConfig(&s_od_global_config);
 	}
 	if (config_loaded) {
-		printf("[OD] config loaded: displays=%u\r\n",
+		od_log_info("config loaded: displays=%u",
 		       (unsigned)s_od_global_config.display_count);
 	} else {
 		od_log_info("config: defaults");

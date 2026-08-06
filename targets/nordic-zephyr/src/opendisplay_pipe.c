@@ -1372,7 +1372,7 @@ static void on_pipe_write(uint8_t connection, const uint8_t *data, uint16_t len,
 
   cmd = (uint16_t)(((uint16_t)frame[0] << 8) | frame[1]);
   if (cmd != CMD_DIRECT_WRITE_DATA && cmd != CMD_PIPE_WRITE_DATA) {
-    printf("[OD] rx cmd=0x%04X len=%u sec=%d sess=%d\r\n", (unsigned)cmd,
+    od_log_info("rx cmd=0x%04X len=%u sec=%d sess=%d", (unsigned)cmd,
            (unsigned)frame_len, (int)sec_enabled(), (int)session_alive());
   }
   if (sec_enabled() && cmd != CMD_AUTHENTICATE) {

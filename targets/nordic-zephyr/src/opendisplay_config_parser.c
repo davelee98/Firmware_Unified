@@ -58,7 +58,7 @@ static void rescan_security_packet(const uint8_t *configData, uint32_t configLen
     if (candidate->encryption_enabled != 0u ||
         security_key_bytes_set(candidate->encryption_key)) {
       memcpy(&s_od_security_parsed, candidate, sizeof(struct SecurityConfig));
-      printf("Security: recovered from scan @%u (enabled=%d)\r\n",
+      od_log_info("Security: recovered from scan @%u (enabled=%d)",
              (unsigned)i, (int)s_od_security_parsed.encryption_enabled);
       return;
     }
@@ -269,19 +269,19 @@ bool parseConfigBytes(uint8_t* configData, uint32_t configLen, struct GlobalConf
                 }
                 if (globalConfig->display_count < 4 && offset + sizeof(struct DisplayConfig) <= configLen - 2) {
                     memcpy(&globalConfig->displays[globalConfig->display_count], &configData[offset], sizeof(struct DisplayConfig));
-                    printf("Display: ic=0x%04X %dx%d\r\n", 
+                    od_log_info("Display: ic=0x%04X %dx%d", 
                                  globalConfig->displays[globalConfig->display_count].panel_ic_type,
                                  globalConfig->displays[globalConfig->display_count].pixel_width,
                                  globalConfig->displays[globalConfig->display_count].pixel_height);
-                    printf("Display: RST=%d BUSY=%d DC=%d\r\n", 
+                    od_log_info("Display: RST=%d BUSY=%d DC=%d", 
                                  globalConfig->displays[globalConfig->display_count].reset_pin,
                                  globalConfig->displays[globalConfig->display_count].busy_pin,
                                  globalConfig->displays[globalConfig->display_count].dc_pin);
-                    printf("Display: CS=%d DATA=%d CLK=%d\r\n", 
+                    od_log_info("Display: CS=%d DATA=%d CLK=%d", 
                                  globalConfig->displays[globalConfig->display_count].cs_pin,
                                  globalConfig->displays[globalConfig->display_count].data_pin,
                                  globalConfig->displays[globalConfig->display_count].clk_pin);
-                    printf("Display: color=%d modes=0x%02X\r\n", 
+                    od_log_info("Display: color=%d modes=0x%02X", 
                                  globalConfig->displays[globalConfig->display_count].color_scheme,
                                  globalConfig->displays[globalConfig->display_count].transmission_modes);
                     offset += sizeof(struct DisplayConfig);
@@ -500,7 +500,7 @@ bool parseConfigBytes(uint8_t* configData, uint32_t configLen, struct GlobalConf
                         return false;
                     }
                 } else {
-                    printf("wifi_config: need %zu, have %u\r\n",
+                    od_log_info("wifi_config: need %zu, have %u",
                            sizeof(struct WifiConfig), (unsigned)(configLen - 2 - offset));
                     offset = configLen - 2; // Skip to CRC
                 }
@@ -520,12 +520,12 @@ bool parseConfigBytes(uint8_t* configData, uint32_t configLen, struct GlobalConf
                         globalConfig->loaded = false;
                         return false;
                     }
-                    printf("Security: enabled=%d, flags=0x%02X, reset_pin=%d\r\n",
+                    od_log_info("Security: enabled=%d, flags=0x%02X, reset_pin=%d",
                                  s_od_security_parsed.encryption_enabled,
                                  s_od_security_parsed.flags,
                                  s_od_security_parsed.reset_pin);
                 } else {
-                    printf("security_config: need %zu, have %u\r\n",
+                    od_log_info("security_config: need %zu, have %u",
                                   sizeof(struct SecurityConfig), (unsigned)(configLen - 2 - offset));
                     offset = configLen - 2;
                 }
@@ -607,7 +607,7 @@ bool parseConfigBytes(uint8_t* configData, uint32_t configLen, struct GlobalConf
                         return false;
                     }
                 } else {
-                    printf("data_extended: need %zu, have %u\r\n",
+                    od_log_info("data_extended: need %zu, have %u",
                            sizeof(struct DataExtended),
                            (unsigned)(configLen - 2 - offset));
                     offset = configLen - 2;
@@ -626,17 +626,17 @@ bool parseConfigBytes(uint8_t* configData, uint32_t configLen, struct GlobalConf
                 uint16_t knownSize = config_packet_data_size(packetId);
                 if (knownSize != 0u) {
                     if (offset + knownSize <= configLen - 2) {
-                        printf("Known-unparsed pkt 0x%02X @%u, skipping %u B\r\n",
+                        od_log_info("Known-unparsed pkt 0x%02X @%u, skipping %u B",
                                packetId, (unsigned)(offset - 2), (unsigned)knownSize);
                         offset += knownSize;
                     } else {
-                        printf("Known-unparsed pkt 0x%02X @%u: need %u, have %u\r\n",
+                        od_log_info("Known-unparsed pkt 0x%02X @%u: need %u, have %u",
                                packetId, (unsigned)(offset - 2), (unsigned)knownSize,
                                (unsigned)(configLen - 2 - offset));
                         offset = configLen - 2; // Truncated packet; stop.
                     }
                 } else {
-                    printf("Unknown pkt 0x%02X @%u, skip-to-CRC (drops later pkts)\r\n",
+                    od_log_info("Unknown pkt 0x%02X @%u, skip-to-CRC (drops later pkts)",
                            packetId, (unsigned)(offset - 2));
                     offset = configLen - 2; // Skip to CRC
                 }
@@ -649,7 +649,7 @@ bool parseConfigBytes(uint8_t* configData, uint32_t configLen, struct GlobalConf
 
     rescan_security_packet(configData, configLen);
     if (od_security_key_set() || s_od_security_parsed.encryption_enabled != 0u) {
-        printf("Security: enabled=%d, flags=0x%02X, key_set=%d\r\n",
+        od_log_info("Security: enabled=%d, flags=0x%02X, key_set=%d",
                (int)s_od_security_parsed.encryption_enabled,
                (unsigned)s_od_security_parsed.flags,
                (int)od_security_key_set());
@@ -664,7 +664,7 @@ bool parseConfigBytes(uint8_t* configData, uint32_t configLen, struct GlobalConf
     }
     
     globalConfig->loaded = true;
-    printf("Config parsed successfully: version=%d, displays=%d, leds=%d, sensors=%d, data_buses=%d, binary_inputs=%d, buzzers=%d, nfc=%d, flash=%d\r\n",
+    od_log_info("Config parsed successfully: version=%d, displays=%d, leds=%d, sensors=%d, data_buses=%d, binary_inputs=%d, buzzers=%d, nfc=%d, flash=%d",
                  globalConfig->version, globalConfig->display_count, globalConfig->led_count,
                  globalConfig->sensor_count, globalConfig->data_bus_count, globalConfig->binary_input_count,
                  globalConfig->passive_buzzer_count, globalConfig->nfc_config_count, globalConfig->flash_config_count);

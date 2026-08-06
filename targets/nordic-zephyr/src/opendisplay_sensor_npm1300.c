@@ -124,7 +124,7 @@ static bool npm1300_sample(const struct SensorData *s)
 	}
 
 	if (!npm1300_reg_write(s, NPM1300_ADC_BASE, NPM1300_ADC_TASK_VBAT, tasks, sizeof(tasks))) {
-		printf("[OD] nPM1300: ADC task NACK (addr=0x%02X scl=0x%02X sda=0x%02X)\r\n",
+		od_log_info("nPM1300: ADC task NACK (addr=0x%02X scl=0x%02X sda=0x%02X)",
 		       (unsigned)npm1300_addr_7bit(s), (unsigned)bus.scl_cfg,
 		       (unsigned)bus.sda_cfg);
 		return false;

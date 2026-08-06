@@ -162,8 +162,8 @@ static bool wait_for_refresh(uint32_t timeout_ms)
   }
   if (!saw_busy) {
     od_log_debug("refresh: BUSY NEVER ASSERTED in %u ms -- panel is not responding; "
-           "check the BUSY pin decode and the panel power rail\r\n",
-           (unsigned)timeout_ms);
+                 "check the BUSY pin decode and the panel power rail",
+                 (unsigned)timeout_ms);
   } else {
     od_log_debug("refresh: busy asserted but still held at %u ms timeout",
            (unsigned)timeout_ms);
@@ -648,7 +648,7 @@ extern "C" int opendisplay_display_partial_write_start(const uint8_t *payload, u
     }
   }
 
-  printf("[OD] partial start etag=%08lX->%08lX rect=%u,%u %ux%u %s\r\n",
+  od_log_info("partial start etag=%08lX->%08lX rect=%u,%u %ux%u %s",
          (unsigned long)old_etag, (unsigned long)new_etag, (unsigned)rect_x, (unsigned)rect_y,
          (unsigned)rect_w, (unsigned)rect_h, s_partial.compressed ? "zlib" : "raw");
   return 0;
@@ -680,7 +680,7 @@ static void dw_log_progress(void)
   }
   uint8_t pct = (uint8_t)((100u * s_written_bytes) / s_total_bytes);
   if (pct >= s_dw_log_pct + 25u) {
-    printf("[OD] dw data #%lu %lu/%lu B (%u%%)%s\r\n", (unsigned long)s_dw_chunk_n,
+    od_log_info("dw data #%lu %lu/%lu B (%u%%)%s", (unsigned long)s_dw_chunk_n,
            (unsigned long)s_written_bytes, (unsigned long)s_total_bytes, (unsigned)pct,
            s_dw_compressed ? " zlib" : "");
     s_dw_log_pct = (pct / 25u) * 25u;
@@ -864,7 +864,7 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
 
   if (s_dw_compressed) {
     if ((d->transmission_modes & TRANSMISSION_MODE_STREAMING_DECOMPRESSION) == 0u) {
-      printf("[OD] dw start err streaming_decompression not enabled in transmission_modes=0x%02X\r\n",
+      od_log_info("dw start err streaming_decompression not enabled in transmission_modes=0x%02X",
              (unsigned)d->transmission_modes);
       opendisplay_display_abort();
       return -4;
@@ -875,7 +875,7 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
       | ((uint32_t)payload[2] << 16)
       | ((uint32_t)payload[3] << 24);
     if (s_dw_decompressed_total != s_total_bytes) {
-      printf("[OD] dw start err zlib size %lu != %lu\r\n",
+      od_log_info("dw start err zlib size %lu != %lu",
              (unsigned long)s_dw_decompressed_total, (unsigned long)s_total_bytes);
       opendisplay_display_abort();
       return -5;
@@ -891,7 +891,7 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
     od_log_info("dw start note non-empty payload len=%u (ignored)", (unsigned)payload_len);
   }
 
-  printf("[OD] dw start total=%lu B bpp=%d cs=%u panel=%u %ux%u bitplanes=%d%s\r\n",
+  od_log_info("dw start total=%lu B bpp=%d cs=%u panel=%u %ux%u bitplanes=%d%s",
          (unsigned long)s_total_bytes, opendisplay_color_bits_per_pixel(s_color_scheme),
          (unsigned)s_color_scheme, (unsigned)d->panel_ic_type, (unsigned)d->pixel_width,
          (unsigned)d->pixel_height, (int)opendisplay_color_is_bitplanes(s_color_scheme),
@@ -934,7 +934,7 @@ extern "C" int opendisplay_display_direct_write_data(const uint8_t *payload, uin
   if (remaining == 0u) {
     if (payload_len > 0u) {
       if (s_dw_trailing_ignores < 4u) {
-        printf("[OD] dw data ignore trailing chunk #%u len=%u (have %lu/%lu B)\r\n",
+        od_log_info("dw data ignore trailing chunk #%u len=%u (have %lu/%lu B)",
                (unsigned)s_dw_trailing_ignores + 1u, (unsigned)payload_len,
                (unsigned long)s_written_bytes, (unsigned long)s_total_bytes);
         s_dw_trailing_ignores++;
@@ -990,7 +990,7 @@ extern "C" int opendisplay_display_direct_write_end_prepare(const uint8_t *paylo
     }
   }
   if (s_written_bytes < s_total_bytes) {
-    printf("[OD] dw end err incomplete wr=%lu need=%lu\r\n", (unsigned long)s_written_bytes,
+    od_log_info("dw end err incomplete wr=%lu need=%lu", (unsigned long)s_written_bytes,
          (unsigned long)s_total_bytes);
     opendisplay_display_abort();
     return -2;

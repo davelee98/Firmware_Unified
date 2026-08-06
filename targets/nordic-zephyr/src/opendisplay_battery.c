@@ -132,8 +132,7 @@ static float battery_read_saadc_volts(void)
 	}
 	int ain = battery_pin_to_ain(sense_pin);
 	if (ain < 0) {
-		printf("[OD] battery: sense pin 0x%02X is not SAADC-capable "
-		       "(need P1.00-P1.07)\r\n", sense_pin);
+		od_log_info("battery: sense pin 0x%02X is not SAADC-capable " "(need P1.00-P1.07)", sense_pin);
 		return -1.0f;
 	}
 #if !OD_ADC_AVAILABLE

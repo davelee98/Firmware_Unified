@@ -422,7 +422,7 @@ void opendisplay_nfc_apply_config(const struct GlobalConfig *cfg)
 	}
 	if (!nfc_ic_is_soc(nfc_cfg->nfc_ic_type)) {
 		nfc_stop();
-		printf("[OD][NFC] unsupported nfc_ic_type=%u (need auto/soc_nfct)\r\n",
+		od_log_info("[OD][NFC] unsupported nfc_ic_type=%u (need auto/soc_nfct)",
 		       (unsigned)nfc_cfg->nfc_ic_type);
 		return;
 	}
@@ -448,7 +448,7 @@ void opendisplay_nfc_apply_config(const struct GlobalConfig *cfg)
 		return;
 	}
 
-	printf("[OD][NFC] SoC NFCT T2T active (adv_byte=%u)\r\n",
+	od_log_info("[OD][NFC] SoC NFCT T2T active (adv_byte=%u)",
 	       (unsigned)s_adv_byte_index);
 }
 

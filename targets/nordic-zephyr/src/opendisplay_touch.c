@@ -508,7 +508,7 @@ void opendisplay_touch_init(void)
       continue;
     }
     if (tc->touch_ic_type != TOUCH_IC_GT911) {
-      printf("[OD] touch[%u]: skipped (only GT911 implemented, got %u)\r\n", (unsigned)i,
+      od_log_info("touch[%u]: skipped (only GT911 implemented, got %u)", (unsigned)i,
              (unsigned)tc->touch_ic_type);
       continue;
     }
@@ -517,18 +517,18 @@ void opendisplay_touch_init(void)
       continue;
     }
     if (!touch_get_bus(tc, &rt->bus)) {
-      printf("[OD] touch[%u]: no valid I2C data_bus (bus_id=%u)\r\n", (unsigned)i,
+      od_log_info("touch[%u]: no valid I2C data_bus (bus_id=%u)", (unsigned)i,
              (unsigned)tc->bus_id);
       continue;
     }
     if (!touch_reinit_gt911(tc, rt)) {
-      printf("[OD] touch[%u]: GT911 init failed (SCL=0x%02X SDA=0x%02X)\r\n", (unsigned)i,
+      od_log_info("touch[%u]: GT911 init failed (SCL=0x%02X SDA=0x%02X)", (unsigned)i,
              (unsigned)rt->bus.scl, (unsigned)rt->bus.sda);
       continue;
     }
     rt->last_poll_ms = k_uptime_get_32();
     s_any_initialized = true;
-    printf("[OD] touch[%u]: GT911 @0x%02X %s SCL=0x%02X SDA=0x%02X byte=%u\r\n", (unsigned)i,
+    od_log_info("touch[%u]: GT911 @0x%02X %s SCL=0x%02X SDA=0x%02X byte=%u", (unsigned)i,
            (unsigned)rt->addr7, rt->reg_high_first ? "BE" : "LE", (unsigned)rt->bus.scl,
            (unsigned)rt->bus.sda, (unsigned)tc->touch_data_start_byte);
   }
@@ -565,7 +565,7 @@ void opendisplay_touch_resume_after_refresh(void)
       continue;
     }
     if (touch_light_resume_gt911(tc, rt)) {
-      printf("[OD] touch[%u]: light resume after EPD @0x%02X\r\n", (unsigned)i,
+      od_log_info("touch[%u]: light resume after EPD @0x%02X", (unsigned)i,
              (unsigned)rt->addr7);
     } else if (touch_reinit_gt911(tc, rt)) {
       od_log_info("touch[%u]: reinit after EPD @0x%02X", (unsigned)i, (unsigned)rt->addr7);
@@ -697,7 +697,7 @@ void opendisplay_touch_process(void)
     if (changed) {
       opendisplay_ble_update_msd(true);
       opendisplay_ble_boost_advertising();
-      printf("[OD] touch[%u]: n=%u id=%u (%u,%u)\r\n", (unsigned)i, (unsigned)n, (unsigned)tid,
+      od_log_info("touch[%u]: n=%u id=%u (%u,%u)", (unsigned)i, (unsigned)n, (unsigned)tid,
              (unsigned)x, (unsigned)y);
     }
   }

@@ -1,4 +1,5 @@
 #include "opendisplay_buzzer.h"
+#include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_constants.h"
 #include "opendisplay_structs.h"
@@ -295,7 +296,7 @@ void opendisplay_buzzer_init(void)
 			/* Initialise to the disabled level (active-low -> drive high). */
 			nrf54_gpio_configure_output(b->enable_pin, !active_high);
 		}
-		printf("[OD] buzzer %u drive=0x%02X enable=0x%02X duty=%u\r\n",
+		od_log_info("buzzer %u drive=0x%02X enable=0x%02X duty=%u",
 		       (unsigned)b->instance_number, (unsigned)b->drive_pin,
 		       (unsigned)b->enable_pin, (unsigned)b->duty_percent);
 	}

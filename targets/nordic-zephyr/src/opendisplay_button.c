@@ -90,10 +90,10 @@ void opendisplay_button_init(void)
       /* Attach a both-edges interrupt (reference uses CHANGE, device_control.cpp:604).
        * On failure we still have the polling path in _process(). */
       if (nrf54_gpio_configure_interrupt(pin, button_irq_handler) != 0) {
-        printf("[OD] button pin=0x%02X interrupt setup failed; polling only\r\n",
+        od_log_info("button pin=0x%02X interrupt setup failed; polling only",
                (unsigned)pin);
       }
-      printf("[OD] button id=%u pin=0x%02X byte=%u pull=%s\r\n", (unsigned)btn->button_id,
+      od_log_info("button id=%u pin=0x%02X byte=%u pull=%s", (unsigned)btn->button_id,
              (unsigned)pin, (unsigned)btn->byte_index,
              pull_up ? "up" : (pull_down ? "down" : "none"));
     }
@@ -132,7 +132,7 @@ void opendisplay_button_process(void)
     opendisplay_ble_set_dynamic_byte(btn->byte_index, button_data);
     opendisplay_ble_update_msd(true);
     opendisplay_ble_boost_advertising();
-    printf("[OD] button id=%u state=%u count=%u\r\n", (unsigned)btn->button_id,
+    od_log_info("button id=%u state=%u count=%u", (unsigned)btn->button_id,
            (unsigned)btn->current_state, (unsigned)btn->press_count);
   }
 }
