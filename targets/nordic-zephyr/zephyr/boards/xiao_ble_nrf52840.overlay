@@ -46,3 +46,29 @@
 
 /* No lsm6ds3tr_c node here: the IMU is on the SENSE variant only, so the nRF54 overlay's
  * disable of it would be a dangling reference on this board. */
+
+/*
+ * hw-flow-control ON THE CDC CONSOLE. This is not about RTS/CTS wires -- there are none on a
+ * USB CDC link. It is the flag cdc_acm_poll_out() checks to decide what to do when its TX ring
+ * is full:
+ *
+ *     if (k_is_in_isr() || !data->flow_ctrl) {
+ *             LOG_WRN_ONCE("Ring buffer full, discard data");
+ *             break;                       <-- THE CHARACTER IS THROWN AWAY
+ *     }
+ *     k_msleep(1);                         <-- with flow_ctrl: wait for room instead
+ *
+ * (zephyr/subsys/usb/device_next/class/usbd_cdc_acm.c, cdc_acm_poll_out)
+ *
+ * Without it the console drops INDIVIDUAL CHARACTERS whenever output outruns the host, which
+ * is why log lines were arriving without their CR and/or LF: the terminators sit at the end of
+ * each record, exactly where a burst is most likely to hit the ring limit. Nothing about the
+ * record assembly was wrong -- od_log.c's CRLF append was verified on the host, truncation
+ * path included.
+ *
+ * The cost is that a stalled host now delays the logging thread instead of silently corrupting
+ * the log. For a bench debug console that is the right trade.
+ */
+&board_cdc_acm_uart {
+	hw-flow-control;
+};

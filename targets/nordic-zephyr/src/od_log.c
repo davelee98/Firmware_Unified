@@ -41,6 +41,25 @@ static bool s_lock_ready;
 void od_log_init(void)
 {
 	k_mutex_init(&s_lock);
+
+	/*
+	 * UNBUFFERED STDOUT, and this is the second half of the "lines missing their CR/LF" fix.
+	 *
+	 * CONFIG_NEWLIB_LIBC is enabled, and newlib does not treat Zephyr's console hook as a
+	 * tty, so stdout defaults to FULLY buffered with a 1 KB buffer. Records therefore did not
+	 * leave printf() one at a time -- they piled up and were dumped as a single ~1 KB burst
+	 * whenever the buffer filled. That burst overruns the CDC ACM TX ring in one go, and the
+	 * ring's overflow behaviour is to DISCARD (see the hw-flow-control note in the board
+	 * overlay). Because the flush boundary is fixed relative to record boundaries, the same
+	 * part of a record kept getting eaten -- which is why it looked like every line was
+	 * losing its terminator rather than random bytes going missing.
+	 *
+	 * _IONBF makes each record reach the driver as it is written. The overlay's
+	 * hw-flow-control then makes the driver wait rather than drop. Either alone leaves a hole;
+	 * both together make the console lossless.
+	 */
+	setvbuf(stdout, NULL, _IONBF, 0);
+
 	s_lock_ready = true;
 }
 
