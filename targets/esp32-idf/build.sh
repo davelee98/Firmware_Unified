@@ -183,7 +183,10 @@ COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown
 DIRTY=""
 git -C "$REPO_ROOT" diff --quiet HEAD 2>/dev/null || DIRTY=" (working tree DIRTY)"
 
-MANIFEST="$RELEASE_DIR/MANIFEST.txt"
+# Per-target manifest name. Three targets now deliver into one release/ directory, so a bare
+# MANIFEST.txt would be whichever target happened to build last -- and the ESP32 one would look
+# authoritative for images it says nothing about.
+MANIFEST="$RELEASE_DIR/MANIFEST-esp32-idf.txt"
 {
     echo "OpenDisplay ESP32 firmware -- merged images, flash at offset 0x0"
     echo "built    $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
