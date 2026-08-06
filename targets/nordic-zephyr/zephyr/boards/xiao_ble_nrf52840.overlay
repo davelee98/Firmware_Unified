@@ -184,3 +184,33 @@
 &board_cdc_acm_uart {
 	hw-flow-control;
 };
+
+/*
+ * uart0 DISABLED -- IT OWNS THE PANEL'S CS PIN.
+ *
+ * xiao_ble_common.dtsi enables uart0 with status="okay" and pinctrl uart0_default, whose
+ * psels are:
+ *     UART_TX -> P1.11
+ *     UART_RX -> P1.12   with bias-pull-up
+ *
+ * P1.12 is the panel CS line on this build (config byte 44 -> P1.12, confirmed in the boot
+ * pin dump). So the UARTE peripheral was initialised at boot, its PSEL pointed at P1.12, and
+ * pinctrl put a pull-up on it -- while the panel code separately tried to drive the same pin
+ * as a GPIO output. Two owners, one pad.
+ *
+ * This fits every symptom exactly: CS is what frames EVERY command and every RAM byte, so if
+ * it is not being driven cleanly the controller sees no valid transaction. That is why init
+ * "succeeded", 48000 bytes streamed without error, and BUSY then never asserted for the
+ * refresh -- nothing the panel could act on ever arrived.
+ *
+ * Nothing needs uart0 here: the console is USB CDC ACM (see the .conf), and this board has no
+ * on-board debug UART. spi2 was already disabled for the same class of reason (its SPIM_SCK
+ * psel is P1.13, the panel SCK); its pinctrl is inert because the node is disabled, and the
+ * same is now true of uart0's.
+ *
+ * IF A UART CONSOLE IS EVER WANTED ON THIS BOARD, it cannot use the default pins -- they are
+ * the panel bus. Remap uart0's pinctrl to free pads first.
+ */
+&uart0 {
+	status = "disabled";
+};
