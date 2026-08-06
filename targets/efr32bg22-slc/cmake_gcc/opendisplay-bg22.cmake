@@ -53,17 +53,27 @@ set(COPIED_SDK_PATH "")
 # directory. cmake_gcc/ -> targets/efr32bg22-slc/ -> targets/ -> repo root.
 cmake_path(SET OD_REPO_ROOT NORMALIZE "${CMAKE_CURRENT_LIST_DIR}/../../..")
 
-# segger_rtt has NO top-level home in this repo and was not imported -- it is one
-# of the two vendored trees (with silabs_app_properties) that the migration plan
-# did not anticipate. Fail loudly and specifically rather than as "Cannot find
-# source file", which reads like a typo.
-if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/../third_party/segger_rtt/SEGGER_RTT.c")
+# SEGGER RTT COMES FROM THE PINNED SDK, NOT FROM A VENDORED COPY.
+#
+# The import left a FATAL_ERROR here because segger_rtt had no home in this repo and the
+# migration plan did not mention it. The answer turned out to be that it needs no home: the
+# pinned Simplicity SDK ships SEGGER RTT as a component, and MIGRATION.md already requires SDK
+# components come from the install rather than be vendored. Nordic sets the same precedent --
+# it vendors no SEGGER either, just Kconfig into NCS's copy.
+#
+# RTT is DEBUG-ONLY here: od_rtt.c redirects libc stdout to RTT channel 0 and nothing else
+# touches SEGGER. A shipping build can omit it entirely (--no-rtt), which is why the guard below
+# is conditional -- the old one ran unconditionally, so even an RTT-disabled build failed.
+#
+# The target keeps its OWN config/SEGGER_RTT_Conf.h and that is deliberate: it declares 2 up /
+# 2 down buffers at 1024/16 bytes where the SDK default is 10/10 at 1024/1024. Taking the SDK
+# default would cost RAM this 32 KB part does not have.
+if(OD_ENABLE_RTT AND NOT EXISTS "${SDK_PATH}/segger/systemview/SEGGER/SEGGER_RTT.c")
   message(FATAL_ERROR
-    "third_party/segger_rtt was not imported and has no top-level home in this repo.\n"
-    "It is vendored in Firmware_Silabs/third_party/segger_rtt/ (5 files, SEGGER BSD).\n"
-    "Deciding where it lives -- repo-level third_party/ or a target-owned vendor/\n"
-    "directory like targets/esp32-idf/vendor/fastepd/ -- is an open item, not a\n"
-    "missing file. See the import commit and targets/efr32bg22-slc/README.md.")
+    "OD_ENABLE_RTT is ON but the pinned Simplicity SDK has no SEGGER RTT at\n"
+    "  ${SDK_PATH}/segger/systemview/SEGGER/\n"
+    "Either the SDK path is wrong or this SDK build omits the component.\n"
+    "Build with -DOD_ENABLE_RTT=OFF for a shipping image that needs no RTT.")
 endif()
 
 add_library(slc OBJECT
@@ -87,7 +97,7 @@ add_library(slc OBJECT
     "${SDK_PATH}/platform_common/platform/common/src/sl_assert.c"
     "${SDK_PATH}/platform_common/platform/common/src/sl_slist.c"
     "${SDK_PATH}/platform_common/platform/common/src/sl_syscalls.c"
-    "../third_party/segger_rtt/SEGGER_RTT.c"
+    "${SDK_PATH}/segger/systemview/SEGGER/SEGGER_RTT.c"
     "../od_rtt.c"
     "${SDK_PATH}/platform_core/platform/common/src/sl_core_cortexm.c"
     "${SDK_PATH}/platform_core/platform/driver/gpio/src/sl_gpio.c"
@@ -243,7 +253,9 @@ add_library(slc OBJECT
     "../autogen/sl_event_handler.c"
     "../autogen/sl_power_manager_handler.c"
     "../main.c"
-    "${OD_REPO_ROOT}/third_party/bb_epaper/src/bb_epaper.cpp"
+    # OUR glue TU, not the vendored bb_epaper.cpp -- see ../panel/od_bbep_efr32.cpp for why.
+    # Third target on this pattern; third_party/bb_epaper takes zero edits.
+    "${CMAKE_CURRENT_LIST_DIR}/../panel/od_bbep_efr32.cpp"
     "${OD_REPO_ROOT}/third_party/bb_epaper/src/Group5.cpp"
     "${OD_REPO_ROOT}/third_party/uzlib/src/od_zlib_stream.c"
 )
@@ -257,8 +269,9 @@ target_include_directories(slc PUBLIC
    # This repo keeps exactly one copy, in shared/protocol/, so the local pair was
    # not imported. See the note on the protocol version above.
    "${OD_REPO_ROOT}/shared/protocol"
-   "../third_party/segger_rtt"
+   "${SDK_PATH}/segger/systemview/SEGGER"
    "${OD_REPO_ROOT}/third_party/bb_epaper/src"
+   "${CMAKE_CURRENT_LIST_DIR}/../panel"
    "${OD_REPO_ROOT}/third_party/uzlib/src"
     "${SDK_PATH}/devices/platform/Device/SiliconLabs/EFR32BG22/Include"
     "${SDK_PATH}/platform_common_apps/app/common/util/app_assert"
