@@ -36,6 +36,13 @@
 #                         is cheap to get wrong in a way only a field boot-loop reveals.
 #                         Like od_adv_control.c this has no wire surface, so it is not a
 #                         reordering of the protocol subsystem sequence below.)
+#   core/od_advert.c      16-byte MSD build                   (LANDED — moved AHEAD of the
+#                         protocol subsystems below, deliberately. It was the only remaining
+#                         item needing no HAL and no state machine, so every target can take it
+#                         the day it lands, and it changes wire ENCODING only — the same bytes
+#                         three targets already broadcast, now pinned by a differential host
+#                         test instead of by a comment citing another target's line numbers.
+#                         Not a reordering of anything that parses or alters wire BEHAVIOUR.)
 #   core/od_dispatch.c    opcode dispatch, encryption gate
 #   core/od_xfer_direct.c 0x70/0x71/0x72
 #   core/od_xfer_partial.c 0x76
@@ -72,6 +79,7 @@ get_filename_component(OD_SHARED_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
 set(OD_SHARED_SOURCES_PURE
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config_asm.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config_tlv.c"
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_advert.c"
 )
 
 set(OD_SHARED_SOURCES_HAL_ADV

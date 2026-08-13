@@ -88,6 +88,17 @@ add_executable(od_config_tlv_test config_tlv_test.c)
 target_link_libraries(od_config_tlv_test od_shared)
 add_test(NAME config_tlv COMMAND od_config_tlv_test)
 
+# advert: the 16-byte MSD encoder. DIFFERENTIAL -- the test carries an independent
+# transcription of the shipped Zephyr/Silabs byte assembly and sweeps both encoders over the
+# input space, because this is a promotion of bytes three targets already broadcast. A vector
+# table derived from the new code would prove only self-consistency.
+#
+# What a green run does NOT prove: that any target calls it yet. All three still build their
+# own copy; this pins the bytes so those swaps are mechanical.
+add_executable(od_advert_test advert_test.c)
+target_link_libraries(od_advert_test od_shared)
+add_test(NAME advert COMMAND od_advert_test)
+
 # watchdog: strike counting, safe mode, the retained-byte layout and breadcrumb caching, driven
 # against a fake retained store and a fake WDT. SCAFFOLD -- no target implements od_hal_wdt.h
 # yet, so a green run here says the policy is right, NOT that any device is protected.

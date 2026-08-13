@@ -15,13 +15,13 @@ archive. One doc per task, at most; past that, write the code and flag the uncer
 ## Status
 
 - **`targets/esp32-idf/` is the only HARDWARE-VERIFIED target** — 10 boards, run on an ESP32-S3.
-  It is no longer the only one that builds: `efr32bg22-slc` builds clean headless
-  (`./build-and-flash.sh --no-flash`, 2026-08-13), nothing flashed. Neither it nor
-  `nordic-zephyr` is README-only any more — both carry imported source and a build.
+  It is no longer the only one that builds: `nordic-zephyr` (`./build.sh`, nRF54L15) and
+  `efr32bg22-slc` (`./build-and-flash.sh --no-flash`) both build clean headless, verified
+  2026-08-13. Neither is README-only any more. Nothing but ESP32 has been flashed.
 - `./build.sh` there builds everything (it sources ESP-IDF itself; never on `PATH`).
   `tools/run_host_tests.sh` runs host tests. `compat/ratchet.sh` and
   `tools/sdkconfig_baseline.sh` are gates a change must not break.
-- **`shared/` is no longer empty** — `core/od_{adv_control,config_asm,config_tlv,watchdog}.c`, all
+- **`shared/` is no longer empty** — `core/od_{adv_control,advert,config_asm,config_tlv,watchdog}.c`, all
   listed in `shared/sources.cmake` (never globbed) in per-HAL tiers. Consumers: host tests and
   `esp32-idf` take the aggregate; `nordic-zephyr` and `efr32bg22-slc` take the PURE tier,
   compiled but not yet called. Most of the protocol logic still lives in the ESP32 target.
@@ -116,6 +116,12 @@ Rationale in [docs/MIGRATION.md](docs/MIGRATION.md) / [docs/ARCHITECTURE.md](doc
   revertable.
 - **Delete nothing from the original repos** until the unified target is hardware-verified.
 - **Resolve divergence deliberately and write it down** — not by whichever repo was copied first.
+  **`Firmware` is the authority over `Firmware_NRF54`** when their algorithms disagree: it is the
+  field-proven original and what the host tooling was validated against, and the NRF54 port
+  re-derived several of them. So port the `esp32-idf` behaviour and make the Zephyr difference
+  justify itself — in a differential test, the Firmware form is the reference. `esp32-idf` is
+  C++ and `shared/` is plain C, so this usually means a C port, not a file move. A default, not
+  a licence to skip the write-up.
 
 ## Memory sensitivity
 
