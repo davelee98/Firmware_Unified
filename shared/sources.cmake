@@ -44,11 +44,48 @@
 
 get_filename_component(OD_SHARED_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
 
-set(OD_SHARED_SOURCES
-    "${CMAKE_CURRENT_LIST_DIR}/core/od_adv_control.c"
+# ----------------------------------------------------------------------------- source tiers ---
+#
+# The tiers answer ONE question: what must a consumer already have in order to link this source?
+# They are NOT a second dimension of policy and NOT a way to opt out of shared code.
+#
+#   PURE     needs the C standard library and shared/protocol only. Any consumer can take it.
+#   HAL_ADV  needs shared/hal/od_hal_adv.h implemented (three link-time C functions).
+#   HAL_WDT  needs shared/hal/od_hal_wdt.h implemented (reset reason, retained byte, arm, feed).
+#
+# WHY THE SPLIT EXISTS. A target part-way through migration can consume the sources whose HAL it
+# has and add the rest as each HAL lands, instead of waiting to take all of shared/ at once. That
+# is a real state — targets/nordic-zephyr implements NEITHER HAL today — and the alternative was
+# a target that consumes nothing from shared/ for as long as one unimplemented HAL exists.
+#
+# THIS DOES NOT WEAKEN THE ONE-LIST RULE. OD_SHARED_SOURCES is COMPOSED from the tiers below, not
+# hand-maintained beside them, so a file added to any tier still reaches the host tests and the
+# ESP32 build automatically. Adding a source to a tier and forgetting the aggregate is not a
+# possible mistake. Do not turn these into GLOBs and do not add a source to OD_SHARED_SOURCES
+# directly — every source belongs to exactly one tier.
+#
+# A tier is a statement about LINKAGE, not about quality or readiness: od_config_tlv.c is PURE and
+# also the most wire-sensitive file here.
+
+set(OD_SHARED_SOURCES_PURE
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config_asm.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config_tlv.c"
+)
+
+set(OD_SHARED_SOURCES_HAL_ADV
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_adv_control.c"
+)
+
+set(OD_SHARED_SOURCES_HAL_WDT
     "${CMAKE_CURRENT_LIST_DIR}/core/od_watchdog.c"
+)
+
+# The aggregate: every tier, for consumers that have every HAL (today: the host tests, which fake
+# them, and targets/esp32-idf).
+set(OD_SHARED_SOURCES
+    ${OD_SHARED_SOURCES_PURE}
+    ${OD_SHARED_SOURCES_HAL_ADV}
+    ${OD_SHARED_SOURCES_HAL_WDT}
 )
 
 # Public headers live alongside their sources; shared/protocol is the wire contract and is
@@ -63,3 +100,16 @@ set(OD_SHARED_INCLUDE_DIRS
 # source list nothing ever included a shared header, so the gap could not present. Left as a
 # note rather than silently fixed, because it is the first evidence that this file's "green
 # against an empty list" property also means "unexercised against an empty list".
+#
+# ORDER IS LOAD-BEARING WHEN A TARGET CARRIES ITS OWN PROTOCOL HEADERS. Two shared headers pull
+# in the wire contract by its bare name — od_config_asm.h includes "opendisplay_protocol.h",
+# od_config_tlv.h includes "opendisplay_structs.h" — and both names also exist, as hand-written
+# SUBSETS, in targets/nordic-zephyr/src/ (77 and 319 lines, against 991 and 1242 here). Neither
+# quoted include resolves relative to shared/core, so whichever -I comes first wins.
+#
+# Getting that backwards is not a build error in the general case: od_config_tlv.c derives packet
+# body sizes with sizeof on the canonical structs, so a subset that merely differs in layout
+# yields a silently WRONG size table — a wire divergence introduced by an include path. A
+# consumer whose own include dirs contain either name MUST put OD_SHARED_INCLUDE_DIRS ahead of
+# them for the shared sources, per-source if the target's own translation units still need their
+# copies. targets/nordic-zephyr/zephyr/CMakeLists.txt does exactly that and says so.

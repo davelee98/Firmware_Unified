@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.13.1)
 
 set(PROJECT_ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
+# shared/ -- ONE source list, four consumers (shared/sources.cmake). Sets OD_SHARED_SOURCES,
+# the per-tier lists, and OD_SHARED_INCLUDE_DIRS. Do not glob shared/ from this file.
+include(${PROJECT_ROOT}/../../shared/sources.cmake)
 # third_party is the REPO-LEVEL vendored tree, shared by every target -- not a per-target copy.
 # The source repo had its own third_party/ beside src/; importing that would have made this
 # repo's "one vendored copy for all targets" rule a fiction. ../../.. is the repo root.
@@ -212,6 +215,43 @@ target_sources(app PRIVATE
   ${THIRD_PARTY_DIR}/bb_epaper/src/Group5.cpp
   ${THIRD_PARTY_DIR}/uzlib/src/od_zlib_stream.c
 )
+
+# ------------------------------------------------------------------------------ shared/ ---
+# The PURE tier only: these need the C standard library and shared/protocol, nothing else.
+# od_adv_control.c and od_watchdog.c are deliberately NOT here -- this target implements
+# neither od_hal_adv.h nor od_hal_wdt.h, and taking a source whose HAL is missing buys an
+# unreferenced object that links only because nothing calls it. Add each tier when its HAL
+# lands, not before.
+#
+# COMPILED, NOT YET CALLED. src/opendisplay_config_parser.c still owns config parsing here;
+# these two are wired in so shared/ is proved to compile under the Zephyr toolchain -- a
+# different compiler, different warning set and a freestanding libc from the host tests --
+# ahead of the swap that makes them load-bearing. That is the point of doing it now.
+target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE})
+
+# INCLUDE ORDER IS THE WHOLE RISK HERE, and it is why this is a source-file property rather
+# than an append to target_include_directories above.
+#
+# od_config_asm.h includes "opendisplay_protocol.h" and od_config_tlv.h includes
+# "opendisplay_structs.h". BOTH names also exist in ${SRC_DIR} as hand-written subsets (77 and
+# 319 lines, against 991 and 1242 in shared/protocol), and ${SRC_DIR} is already first on this
+# target's include path. Neither quoted include resolves relative to shared/core, so without
+# this the shared sources would compile against the subsets.
+#
+# od_config_asm.c would at least fail loudly -- the subset defines neither CONFIG_CHUNK_SIZE
+# nor MAX_CONFIG_CHUNKS. od_config_tlv.c is the dangerous one: it derives packet body sizes
+# with sizeof on the canonical structs, so a subset differing in layout would produce a
+# silently wrong size table, i.e. a wire divergence created by an -I ordering.
+#
+# CMake places source-level include directories BEFORE the target's, so this pins the two
+# shared TUs to the canonical headers while every src/ translation unit keeps resolving those
+# names to its own copies exactly as before. Nothing else in this build changes.
+#
+# The subsets themselves are a real defect, just not this change's to fix: they are unsynced
+# hand-written copies of a header CLAUDE.md declares byte-for-byte canonical. Deleting them in
+# favour of shared/protocol is a separate, verifiable step.
+set_source_files_properties(${OD_SHARED_SOURCES_PURE}
+  PROPERTIES INCLUDE_DIRECTORIES "${OD_SHARED_INCLUDE_DIRS}")
 
 if(CONFIG_OD_PLATFORM_NRF52840)
   target_sources(app PRIVATE
