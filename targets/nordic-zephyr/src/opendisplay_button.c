@@ -2,7 +2,7 @@
 #include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
-#include "opendisplay_structs.h"
+#include "od_runtime_types.h"
 #include "opendisplay_touch.h"
 #include "od_gpio.h"
 
@@ -53,8 +53,8 @@ void opendisplay_button_init(void)
   for (uint8_t instance_idx = 0; instance_idx < cfg->binary_input_count; instance_idx++) {
     const struct BinaryInputs *input = &cfg->binary_inputs[instance_idx];
     uint8_t *instance_pins[8] = {
-      &input->reserved_pin_1, &input->reserved_pin_2, &input->reserved_pin_3, &input->reserved_pin_4,
-      &input->reserved_pin_5, &input->reserved_pin_6, &input->reserved_pin_7, &input->reserved_pin_8,
+      &input->input_pin_1, &input->input_pin_2, &input->input_pin_3, &input->input_pin_4,
+      &input->input_pin_5, &input->input_pin_6, &input->input_pin_7, &input->input_pin_8,
     };
 
     if (input->input_type != 1u || input->button_data_byte_index > 10u) {
@@ -62,7 +62,7 @@ void opendisplay_button_init(void)
     }
 
     for (uint8_t pin_idx = 0; pin_idx < 8u; pin_idx++) {
-      if (input->input_flags != 0u && (input->input_flags & (1u << pin_idx)) == 0u) {
+      if (input->pins_used != 0u && (input->pins_used & (1u << pin_idx)) == 0u) {
         continue;
       }
       uint8_t pin = *instance_pins[pin_idx];

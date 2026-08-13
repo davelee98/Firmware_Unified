@@ -92,7 +92,13 @@ add_custom_command(
 
 add_custom_target(factory_config_gen DEPENDS ${FACTORY_GEN_STAMP})
 
+# OD_SHARED_INCLUDE_DIRS FIRST, and that is a rule rather than a formatting choice: it carries
+# the canonical opendisplay_protocol.h / opendisplay_structs.h. ${SRC_DIR} used to carry
+# hand-written subsets of both, which shadowed them; those are gone (src/od_runtime_types.h now
+# holds the RAM-only types they also carried), and keeping shared/ ahead of src/ is what stops
+# another copy from quietly taking over if one reappears.
 target_include_directories(app PRIVATE
+  ${OD_SHARED_INCLUDE_DIRS}
   ${SRC_DIR}
   ${THIRD_PARTY_DIR}/bb_epaper/src
   ${PANEL_DIR}
@@ -229,29 +235,12 @@ target_sources(app PRIVATE
 # ahead of the swap that makes them load-bearing. That is the point of doing it now.
 target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE})
 
-# INCLUDE ORDER IS THE WHOLE RISK HERE, and it is why this is a source-file property rather
-# than an append to target_include_directories above.
-#
-# od_config_asm.h includes "opendisplay_protocol.h" and od_config_tlv.h includes
-# "opendisplay_structs.h". BOTH names also exist in ${SRC_DIR} as hand-written subsets (77 and
-# 319 lines, against 991 and 1242 in shared/protocol), and ${SRC_DIR} is already first on this
-# target's include path. Neither quoted include resolves relative to shared/core, so without
-# this the shared sources would compile against the subsets.
-#
-# od_config_asm.c would at least fail loudly -- the subset defines neither CONFIG_CHUNK_SIZE
-# nor MAX_CONFIG_CHUNKS. od_config_tlv.c is the dangerous one: it derives packet body sizes
-# with sizeof on the canonical structs, so a subset differing in layout would produce a
-# silently wrong size table, i.e. a wire divergence created by an -I ordering.
-#
-# CMake places source-level include directories BEFORE the target's, so this pins the two
-# shared TUs to the canonical headers while every src/ translation unit keeps resolving those
-# names to its own copies exactly as before. Nothing else in this build changes.
-#
-# The subsets themselves are a real defect, just not this change's to fix: they are unsynced
-# hand-written copies of a header CLAUDE.md declares byte-for-byte canonical. Deleting them in
-# favour of shared/protocol is a separate, verifiable step.
-set_source_files_properties(${OD_SHARED_SOURCES_PURE}
-  PROPERTIES INCLUDE_DIRECTORIES "${OD_SHARED_INCLUDE_DIRS}")
+# The per-source INCLUDE_DIRECTORIES property that used to sit here is GONE, and its removal is
+# the point of the header adoption: it existed only to pin these two shared TUs to the canonical
+# opendisplay_protocol.h / opendisplay_structs.h while ${SRC_DIR} still carried subsets of the
+# same names. With the subsets deleted there is one definition of each on the include path, so
+# the whole target -- shared and local alike -- compiles against the same wire contract, which is
+# what the ordering above now enforces for everyone rather than for two files.
 
 if(CONFIG_OD_PLATFORM_NRF52840)
   target_sources(app PRIVATE

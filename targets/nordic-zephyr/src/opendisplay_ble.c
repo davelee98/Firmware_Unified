@@ -777,17 +777,25 @@ static void flash_powerdown_from_config(void)
 	for (uint8_t i = 0; i < s_od_global_config.flash_config_count; i++) {
 		const struct FlashConfig *fc = &s_od_global_config.flash_configs[i];
 
-		if ((fc->flags & FLASH_CONFIG_FLAG_ENABLED) == 0u) {
+		if ((fc->flags & OD_FLASH_FLAG_ENABLED) == 0u) {
 			continue;
 		}
 		if (fc->mosi_pin == 0xFFu || fc->sck_pin == 0xFFu || fc->cs_pin == 0xFFu) {
 			continue;
 		}
+		/* MISO / WP / HOLD are reserved[0..2] in the canonical contract, NOT named fields.
+		 * The subset header this target used to carry named them miso_pin / wp_pin /
+		 * hold_pin; canonical has never carved them out of FlashConfig.reserved, so the
+		 * host does not know to set them and they arrive as the must-be-zero the contract
+		 * promises unless a config was hand-built against the old nRF header. Reading them
+		 * by index keeps the behaviour byte-identical while stating what they actually are.
+		 * Promoting them is an upstream change (see protocol_pending.h for the sequence),
+		 * not a local rename. */
 		od_log_info("flash powerdown MOSI=%u SCK=%u CS=%u MISO=%u WP=%u HOLD=%u",
 		       fc->mosi_pin, fc->sck_pin, fc->cs_pin,
-		       fc->miso_pin, fc->wp_pin, fc->hold_pin);
+		       fc->reserved[0], fc->reserved[1], fc->reserved[2]);
 		od_board_flash_powerdown(fc->mosi_pin, fc->sck_pin, fc->cs_pin,
-					 fc->miso_pin, fc->wp_pin, fc->hold_pin);
+					 fc->reserved[0], fc->reserved[1], fc->reserved[2]);
 		break;
 	}
 }

@@ -2,7 +2,7 @@
 #include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_constants.h"
-#include "opendisplay_structs.h"
+#include "od_runtime_types.h"
 #include "od_gpio.h"
 
 #include <stdbool.h>
@@ -27,8 +27,8 @@
  * k_timer so an in-flight tone keeps toggling the GPIO without any busy-wait.
  */
 
-_Static_assert(sizeof(struct PassiveBuzzerConfig) == 32,
-	       "PassiveBuzzerConfig must be 32 bytes");
+_Static_assert(sizeof(struct BuzzerConfig) == 32,
+	       "BuzzerConfig must be 32 bytes");
 
 #define BUZZER_FREQ_MIN_HZ          400u
 #define BUZZER_FREQ_MAX_HZ          12000u
@@ -48,7 +48,7 @@ static struct {
 	bool active;
 	bool waiting;
 	uint8_t instance;
-	const struct PassiveBuzzerConfig *cfg;
+	const struct BuzzerConfig *cfg;
 	uint8_t payload[BUZZER_MAX_PAYLOAD];
 	uint16_t payload_len;
 	uint8_t outer;         /* total repeats of the whole pattern list */
@@ -82,14 +82,14 @@ static uint32_t buzzer_index_to_hz(uint8_t idx)
 	return BUZZER_FREQ_MIN_HZ + (span * (uint32_t)(idx - 1u)) / 254u;
 }
 
-static void buzzer_set_enable(const struct PassiveBuzzerConfig *b, bool on)
+static void buzzer_set_enable(const struct BuzzerConfig *b, bool on)
 {
 	if (b->enable_pin == GPIO_PIN_UNUSED) {
 		return;
 	}
 	bool high = on;
 
-	if ((b->flags & BUZZER_FLAG_ENABLE_ACTIVE_HIGH) == 0u) {
+	if ((b->flags & OD_BUZZER_FLAG_ENABLE_ACTIVE_HIGH) == 0u) {
 		high = !high;
 	}
 	od_gpio_write(b->enable_pin, high);
@@ -284,14 +284,14 @@ void opendisplay_buzzer_init(void)
 		return;
 	}
 	for (uint8_t i = 0; i < gc->passive_buzzer_count; i++) {
-		const struct PassiveBuzzerConfig *b = &gc->passive_buzzers[i];
+		const struct BuzzerConfig *b = &gc->passive_buzzers[i];
 
 		if (b->drive_pin == GPIO_PIN_UNUSED) {
 			continue;
 		}
 		od_gpio_configure_output(b->drive_pin, false);
 		if (b->enable_pin != GPIO_PIN_UNUSED) {
-			bool active_high = (b->flags & BUZZER_FLAG_ENABLE_ACTIVE_HIGH) != 0u;
+			bool active_high = (b->flags & OD_BUZZER_FLAG_ENABLE_ACTIVE_HIGH) != 0u;
 
 			/* Initialise to the disabled level (active-low -> drive high). */
 			od_gpio_configure_output(b->enable_pin, !active_high);
@@ -313,7 +313,7 @@ int opendisplay_buzzer_activate(const uint8_t *data, uint16_t len)
 	if (gc == NULL || !gc->loaded || inst >= gc->passive_buzzer_count) {
 		return 2;
 	}
-	const struct PassiveBuzzerConfig *b = &gc->passive_buzzers[inst];
+	const struct BuzzerConfig *b = &gc->passive_buzzers[inst];
 
 	if (b->drive_pin == GPIO_PIN_UNUSED) {
 		return 3;

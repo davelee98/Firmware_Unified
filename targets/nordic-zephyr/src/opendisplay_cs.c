@@ -1,6 +1,6 @@
 #include "opendisplay_cs.h"
 #include "opendisplay_device_flags.h"
-#include "opendisplay_structs.h"
+#include "od_runtime_types.h"
 #include "od_log.h"
 
 #include <zephyr/kernel.h>

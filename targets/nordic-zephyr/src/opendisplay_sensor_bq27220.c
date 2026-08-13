@@ -2,7 +2,7 @@
 #include "od_log.h"
 #include "opendisplay_sensor_common.h"
 #include "opendisplay_ble.h"
-#include "opendisplay_structs.h"
+#include "od_runtime_types.h"
 #include "od_gpio.h"
 
 #include <stdio.h>
@@ -29,7 +29,7 @@ static const struct SensorData *bq27220_config(void)
 		return NULL;
 	}
 	for (uint8_t i = 0; i < cfg->sensor_count; i++) {
-		if (cfg->sensors[i].sensor_type == SENSOR_TYPE_BQ27220) {
+		if (cfg->sensors[i].sensor_type == OD_SENSOR_TYPE_BQ27220) {
 			return &cfg->sensors[i];
 		}
 	}
@@ -75,7 +75,7 @@ static bool charger_gpio_charging(void)
 	if (!valid_pin(st)) {
 		return false;
 	}
-	bool active_low = (cfg->power_option.charger_flags & CHARGER_FLAG_STATE_ACTIVE_LOW) != 0u;
+	bool active_low = (cfg->power_option.charger_flags & OD_CHARGER_FLAG_STATE_ACTIVE_LOW) != 0u;
 	int level = od_gpio_read(st);
 
 	/* Matches reference charger_gpio_charging(). */
@@ -103,7 +103,7 @@ void opendisplay_sensor_bq27220_init(void)
 
 	if (valid_pin(en)) {
 		bool active_low = (cfg->power_option.charger_flags &
-				   CHARGER_FLAG_ENABLE_ACTIVE_LOW) != 0u;
+				   OD_CHARGER_FLAG_ENABLE_ACTIVE_LOW) != 0u;
 		od_gpio_configure_output(en, !active_low);
 	}
 	uint8_t st = cfg->power_option.charge_state_pin;

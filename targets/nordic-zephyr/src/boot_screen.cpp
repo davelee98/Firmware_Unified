@@ -4,7 +4,7 @@
 #include "opendisplay_battery.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_display_color.h"
-#include "opendisplay_structs.h"
+#include "od_runtime_types.h"
 #include "od_zephyr_compat.h"
 #include "qr/qrcode.h"
 #include <bb_epaper.h>
@@ -222,7 +222,7 @@ static void formatBootKeyDisplay(char* out, uint16_t outSize) {
     if (boot_sec() == NULL || bootKeyIsAllZero()) {
         for (uint16_t i = 0; i < hexLen; i++) out[i] = '-';
         out[hexLen] = '\0';
-    } else if (!(boot_sec()->flags & SECURITY_FLAG_SHOW_KEY_ON_SCREEN)) {
+    } else if (!(boot_sec()->flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN)) {
         for (uint16_t i = 0; i < hexLen; i++) out[i] = 'X';
         out[hexLen] = '\0';
     } else {
@@ -234,7 +234,7 @@ static void bootFormatKeyLine(char* out, size_t outSize, const char* label,
                               const uint8_t* keyBytes, uint8_t numBytes) {
     if (boot_sec() == NULL || bootKeyIsAllZero()) {
         snprintf(out, outSize, "%s not set", label);
-    } else if (!(boot_sec()->flags & SECURITY_FLAG_SHOW_KEY_ON_SCREEN)) {
+    } else if (!(boot_sec()->flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN)) {
         snprintf(out, outSize, "%s hidden", label);
     } else {
         char hex[17];
@@ -703,13 +703,13 @@ bool writeBootScreenWithQr(BBEPDISP &epd) {
     snprintf(last6, sizeof(last6), "%06lX", (unsigned long)last3);
 
     uint8_t payload[23] = {0};
-    uint16_t res = boot_cfg()->displays[0].tag_type;
+    uint16_t res = boot_cfg()->displays[0].legacy_tag_type;
     payload[0] = (uint8_t)((res >> 8) & 0xFF);
     payload[1] = (uint8_t)(res & 0xFF);
     payload[2] = (uint8_t)((last3 >> 16) & 0xFF);
     payload[3] = (uint8_t)((last3 >> 8) & 0xFF);
     payload[4] = (uint8_t)(last3 & 0xFF);
-    if (boot_sec() != NULL && (boot_sec()->flags & SECURITY_FLAG_SHOW_KEY_ON_SCREEN) != 0u) {
+    if (boot_sec() != NULL && (boot_sec()->flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN) != 0u) {
         memcpy(&payload[5], boot_sec()->encryption_key, 16);
     } else {
         memset(&payload[5], 0, 16);

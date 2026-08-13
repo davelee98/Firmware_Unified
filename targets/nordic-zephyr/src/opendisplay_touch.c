@@ -2,7 +2,7 @@
 #include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_constants.h"
-#include "opendisplay_structs.h"
+#include "od_runtime_types.h"
 #include "od_gpio.h"
 
 #include <stdio.h>
@@ -405,7 +405,7 @@ static bool touch_reinit_gt911(const struct TouchController *tc, struct TouchRun
 {
   uint8_t addr;
 
-  if (tc->touch_ic_type != TOUCH_IC_GT911) {
+  if (tc->touch_ic_type != OD_TOUCH_IC_GT911) {
     return false;
   }
   if (!touch_get_bus(tc, &rt->bus)) {
@@ -438,7 +438,7 @@ static bool touch_light_resume_gt911(const struct TouchController *tc, struct To
 {
   uint8_t id[4];
 
-  if (tc->touch_ic_type != TOUCH_IC_GT911 || !rt->ok || rt->addr7 == 0u) {
+  if (tc->touch_ic_type != OD_TOUCH_IC_GT911 || !rt->ok || rt->addr7 == 0u) {
     return false;
   }
   if (!touch_get_bus(tc, &rt->bus)) {
@@ -463,7 +463,7 @@ static void apply_touch_map(const struct TouchController *tc, uint16_t *x, uint1
   uint16_t w = 0;
   uint16_t h = 0;
 
-  if (tc->flags & TOUCH_FLAG_SWAP_XY) {
+  if (tc->flags & OD_TOUCH_FLAG_SWAP_XY) {
     uint16_t tmp = *x;
     *x = *y;
     *y = tmp;
@@ -472,10 +472,10 @@ static void apply_touch_map(const struct TouchController *tc, uint16_t *x, uint1
     w = cfg->displays[tc->display_instance].pixel_width;
     h = cfg->displays[tc->display_instance].pixel_height;
   }
-  if ((tc->flags & TOUCH_FLAG_INVERT_X) && w > 0u) {
+  if ((tc->flags & OD_TOUCH_FLAG_INVERT_X) && w > 0u) {
     *x = (w > *x) ? (uint16_t)(w - 1u - *x) : 0u;
   }
-  if ((tc->flags & TOUCH_FLAG_INVERT_Y) && h > 0u) {
+  if ((tc->flags & OD_TOUCH_FLAG_INVERT_Y) && h > 0u) {
     *y = (h > *y) ? (uint16_t)(h - 1u - *y) : 0u;
   }
   if (w > 0u && *x >= w) {
@@ -504,10 +504,10 @@ void opendisplay_touch_init(void)
     const struct TouchController *tc = &cfg->touch_controllers[i];
     struct TouchRuntime *rt = &s_touch_rt[i];
 
-    if (tc->touch_ic_type == TOUCH_IC_NONE) {
+    if (tc->touch_ic_type == OD_TOUCH_IC_NONE) {
       continue;
     }
-    if (tc->touch_ic_type != TOUCH_IC_GT911) {
+    if (tc->touch_ic_type != OD_TOUCH_IC_GT911) {
       od_log_info("touch[%u]: skipped (only GT911 implemented, got %u)", (unsigned)i,
              (unsigned)tc->touch_ic_type);
       continue;
@@ -543,7 +543,7 @@ bool opendisplay_touch_gpio_is_touch_int(uint8_t pin)
   }
   for (uint8_t i = 0; i < cfg->touch_controller_count && i < 4u; i++) {
     const struct TouchController *tc = &cfg->touch_controllers[i];
-    if (tc->touch_ic_type == TOUCH_IC_GT911 && tc->int_pin == pin) {
+    if (tc->touch_ic_type == OD_TOUCH_IC_GT911 && tc->int_pin == pin) {
       return true;
     }
   }
@@ -561,7 +561,7 @@ void opendisplay_touch_resume_after_refresh(void)
     const struct TouchController *tc = &cfg->touch_controllers[i];
     struct TouchRuntime *rt = &s_touch_rt[i];
 
-    if (tc->touch_ic_type != TOUCH_IC_GT911 || rt->disabled) {
+    if (tc->touch_ic_type != OD_TOUCH_IC_GT911 || rt->disabled) {
       continue;
     }
     if (touch_light_resume_gt911(tc, rt)) {
@@ -602,7 +602,7 @@ void opendisplay_touch_process(void)
     bool changed;
     uint8_t s;
 
-    if (tc->touch_ic_type != TOUCH_IC_GT911 || !rt->ok || rt->disabled) {
+    if (tc->touch_ic_type != OD_TOUCH_IC_GT911 || !rt->ok || rt->disabled) {
       continue;
     }
     interval = tc->poll_interval_ms ? tc->poll_interval_ms : (uint8_t)TOUCH_PROCESS_MIN_INTERVAL_MS;
