@@ -14,15 +14,27 @@ archive. One doc per task, at most; past that, write the code and flag the uncer
 
 ## Status
 
-- **`targets/esp32-idf/` is the only target that builds** — 10 boards, run on an ESP32-S3.
-  `nordic-zephyr` and `efr32bg22-slc` are README-only.
-- `./build.sh` there builds everything (it sources ESP-IDF itself; never on `PATH`).
-  `tools/run_host_tests.sh` runs host tests. `compat/ratchet.sh` and
-  `tools/sdkconfig_baseline.sh` are gates a change must not break.
-- **`shared/` is empty by design**; the ESP32 target holds the logic destined for it. Placeholder
-  READMEs under `shared/` and `tools/` are intentional — a missing file is not a bug.
+- **All three targets build.** `esp32-idf` (10 boards, run on an ESP32-S3) is the reference and
+  holds nearly all the hardware time. `nordic-zephyr` builds three boards (nRF54L15, nRF54LM20A,
+  nRF52840). `efr32bg22-slc` builds and has never been on hardware.
+- Build entry points are per target, and no toolchain is on `PATH` (see Toolchains):
+  `targets/esp32-idf/build.sh` (sources ESP-IDF itself), `targets/nordic-zephyr/build-nrf54.sh
+  {l15,lm20}` and `build-nrf52840.sh`, `targets/efr32bg22-slc/build-and-flash.sh`. All deliver to
+  `<repo>/release/` with a per-target manifest.
+- Host tests for `shared/` are repo-level: `cmake -S tests/host -B build -G Ninja && ctest
+  --test-dir build`. `targets/esp32-idf/tools/run_host_tests.sh` is that target's own set;
+  `compat/ratchet.sh` and `tools/sdkconfig_baseline.sh` are gates a change must not break.
+- **`shared/` holds three subsystems plus one interface** — `od_adv_control` (advertising/
+  lifecycle), `od_config_tlv` (config-blob walk + CRC), `od_config_asm` (chunked `CONFIG_WRITE`
+  reassembly), `hal/od_hal_adv.h`. `shared/compress/` is still a placeholder README.
 - `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel}`.
-- **Never hardware-verified:** the WiFi/LAN transport, and the F4/F7 correctness fixes.
+- **nRF52840 runs on hardware** — boots, USB CDC console, BLE advertising, PIPE upload — but
+  **the panel does not render** (`BUSY NEVER ASSERTED`). It keeps the Adafruit bootloader (UF2
+  drag-and-drop); the nRF54 boards use MCUboot. Two bootloaders on one target, deliberately.
+- **Never hardware-verified:** `efr32bg22-slc` and the nRF54 boards entirely; on ESP32, the
+  WiFi/LAN transport and the F4/F7 correctness fixes.
+- **No watchdog on `nordic-zephyr`** — the shipped Arduino nRF52840 has one
+  (`Firmware/src/watchdog_nrf.cpp`). Nothing deploys to a real tag until that gap closes.
 - **`compat/` (Arduino shim) is at its floor of 5 files** — `TARGET_NRF` arms that leave with
   migration step 4. Do not "finish" them (`targets/esp32-idf/compat/SHIM_BUDGET`).
 - **`targets/esp32-idf/vendor/fastepd/` is not a shim** and outlives `compat/`: the permanent
@@ -64,7 +76,9 @@ that grep before proposing anything under `shared/`; extend it as targets are im
    lacks.
 10. **Import working drivers as-is**; only shared logic is refactored.
 11. **First `shared/` source: `shared/core/od_adv_control.c`** (portable BLE advertising/
-    lifecycle). `od_config.c` is the first *protocol* subsystem promoted.
+    lifecycle). Configuration is the first *protocol* subsystem promoted, and landed as two
+    files, not one: `od_config_tlv.c` (blob walk + CRC) and `od_config_asm.c` (chunked
+    `CONFIG_WRITE` reassembly).
 12. **`MAX_CONFIG_SIZE` is 4096 everywhere** — a global cap, not a per-target macro; a uniform
     value removes a wire divergence a host could not discover. BG22 pays for it.
 13. **`third_party/` is exempt from the one rule** — `bb_epaper` picks its IO backend by `#ifdef`.
@@ -77,7 +91,9 @@ that grep before proposing anything under `shared/`; extend it as targets are im
 `shared/{protocol,core,compress,hal}` — wire contract / dispatch + config + transfer + auth /
 inflate engines / interfaces targets implement.
 `targets/{esp32-idf,nordic-zephyr,efr32bg22-slc}` — chip drivers + build system + HAL impl.
+`tests/host` host-runnable tests for `shared/`, with vectors in `tests/vectors`.
 `third_party/` vendored cross-target libs (bb_epaper); `tools/`; `docs/`.
+`release/` build output (gitignored), one manifest per target.
 
 ## Toolchains
 
@@ -90,8 +106,14 @@ Installed, but **none on `PATH`** — `which idf.py west` returning nothing ≠ 
 | Simplicity SDK | 2025.12.2 | `slt`; `slc` also needs the bundled Java on `PATH` |
 
 Pin one ESP-IDF release; floors ≥ 5.1 (C6), ≥ 5.2 (`driver/i2c_master.h` — not the deprecated
-`driver/i2c.h`). Only ESP-IDF has built anything here. **Do not claim a build passes without
-running it.** docs/TOOLCHAINS.md has the version pins and the Arduino-API replacement census.
+`driver/i2c.h`). All three toolchains have now built their target. **Do not claim a build passes
+without running it.** docs/TOOLCHAINS.md has the version pins and the Arduino-API replacement
+census.
+
+Flashing is per target and not symmetric: ESP32 uses `esptool` over serial; nRF52840 is UF2
+drag-and-drop onto the Adafruit bootloader (`flash-nrf52840.sh`, no probe needed); the nRF54
+boards need an SWD probe (`flash-nrf54.sh {l15,lm20}`, `pyocd`/`openocd` for the on-board
+CMSIS-DAP — `nrfutil`/`nrfjprog` are J-Link-only and will not drive it).
 
 ## Protocol header — do not hand-edit
 
