@@ -33,7 +33,7 @@ int opendisplay_display_pipe_partial_arm(uint8_t flags, uint32_t old_etag, uint1
                                          uint8_t *err_code_out);
 int opendisplay_display_pipe_partial_prepare(void);
 void opendisplay_display_abort(void);
-void opendisplay_display_boot_apply(void);
+bool opendisplay_display_boot_apply(void);
 void opendisplay_display_park_pins(void);
 void opendisplay_display_power_off(void);
 

@@ -1,5 +1,5 @@
 #include "opendisplay_i2c.h"
-#include "nrf54_gpio.h"
+#include "od_gpio.h"
 
 #include <zephyr/kernel.h>
 
@@ -13,22 +13,22 @@ static inline void od_delay(const struct od_i2c_bus *bus)
 
 static inline void scl_low(const struct od_i2c_bus *bus)
 {
-	nrf54_gpio_configure_output(bus->scl_cfg, false);
+	od_gpio_configure_output(bus->scl_cfg, false);
 }
 
 static inline void sda_low(const struct od_i2c_bus *bus)
 {
-	nrf54_gpio_configure_output(bus->sda_cfg, false);
+	od_gpio_configure_output(bus->sda_cfg, false);
 }
 
 static inline void sda_release(const struct od_i2c_bus *bus)
 {
-	nrf54_gpio_configure_input(bus->sda_cfg, bus->sda_pullup, false);
+	od_gpio_configure_input(bus->sda_cfg, bus->sda_pullup, false);
 }
 
 static inline int sda_read(const struct od_i2c_bus *bus)
 {
-	return nrf54_gpio_read(bus->sda_cfg);
+	return od_gpio_read(bus->sda_cfg);
 }
 
 /* Release SCL and wait (bounded) for it to actually go high (clock stretch). */
@@ -36,8 +36,8 @@ static bool scl_release(const struct od_i2c_bus *bus)
 {
 	uint32_t waited = 0;
 
-	nrf54_gpio_configure_input(bus->scl_cfg, bus->scl_pullup, false);
-	while (nrf54_gpio_read(bus->scl_cfg) == 0) {
+	od_gpio_configure_input(bus->scl_cfg, bus->scl_pullup, false);
+	while (od_gpio_read(bus->scl_cfg) == 0) {
 		if (waited >= OD_I2C_STRETCH_TIMEOUT_US) {
 			return false;
 		}
@@ -150,8 +150,8 @@ bool od_i2c_init(struct od_i2c_bus *bus, uint8_t scl_cfg, uint8_t sda_cfg,
 	uint8_t pin;
 
 	bus->ready = false;
-	if (!nrf54_pin_decode(scl_cfg, &port, &pin) ||
-	    !nrf54_pin_decode(sda_cfg, &port, &pin)) {
+	if (!od_pin_decode(scl_cfg, &port, &pin) ||
+	    !od_pin_decode(sda_cfg, &port, &pin)) {
 		return false;
 	}
 	if (speed_hz == 0u) {

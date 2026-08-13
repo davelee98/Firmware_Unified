@@ -88,6 +88,16 @@ add_executable(od_config_tlv_test config_tlv_test.c)
 target_link_libraries(od_config_tlv_test od_shared)
 add_test(NAME config_tlv COMMAND od_config_tlv_test)
 
+# Nordic config pin bytes are a wire contract and deliberately differ by
+# platform: nRF52840 uses absolute port*32+pin values, while nRF54 uses the
+# compact packed form. Keep the pure decoder checked without a Zephyr build.
+add_executable(od_nordic_pin_codec_test
+    nordic_pin_codec_test.c
+    ../../targets/nordic-zephyr/src/od_pin_codec.c)
+target_include_directories(od_nordic_pin_codec_test PRIVATE
+    ../../targets/nordic-zephyr/src)
+add_test(NAME nordic_pin_codec COMMAND od_nordic_pin_codec_test)
+
 # replay_vectors: the corpus replayed through py-opendisplay's public API. This is the
 # dual-stack half of the contract test — the same vectors will later run against the C
 # core, and a vector the two sides disagree on is exactly the host/firmware divergence

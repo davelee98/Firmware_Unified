@@ -7,21 +7,133 @@
  * board — an nRF52840 build failed on `undefined node label 'spi00'` before reaching a single
  * line of application code.
  */
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/adc/nrf-saadc.h>
+
 / {
 	/*
-	 * NO zephyr,console override. The nRF54 overlay points it at uart20, but this board's
-	 * Kconfig.defconfig installs a USB CDC ACM console and prj.conf logs over RTT; naming a
-	 * UART here only adds a third opinion. The board .conf beside this file declines the CDC
-	 * backend, which leaves RTT as prj.conf intends.
+	 * NO zephyr,console override. The board's Kconfig.defconfig installs a USB CDC ACM console
+	 * on &board_cdc_acm_uart and the .conf beside this file keeps it (there is no debug probe
+	 * on this board, so RTT — which prj.conf selects for the nRF54 boards — goes nowhere).
+	 * Naming a UART here would only add a third opinion.
 	 */
 	/*
 	 * All 8 SAADC channels, so the battery driver can pick one at runtime by index from the
-	 * configured battery_sense_pin. Same contract as the nRF54 boards; the channels come from
-	 * the board DTS.
+	 * configured battery_sense_pin. Same contract as the nRF54 boards.
 	 */
 	zephyr,user {
 		io-channels = <&adc 0>, <&adc 1>, <&adc 2>, <&adc 3>,
 			      <&adc 4>, <&adc 5>, <&adc 6>, <&adc 7>;
+	};
+};
+
+/*
+ * THE CHANNEL NODES HAVE TO BE DECLARED HERE, unlike on the nRF54 boards.
+ *
+ * xiao_nrf54l15_common.dtsi ships channel@0..7 in the board DTS, so the nRF54 overlay only has
+ * to reference them. The upstream xiao_ble DTS does NOT: its &adc node is a bare
+ * `status = "okay"` with no children. `io-channels = <&adc 0>` still compiles against it,
+ * because ADC_DT_SPEC_GET_BY_IDX wraps the channel lookup in
+ * IF_ENABLED(DT_NODE_EXISTS(...)) — a missing channel node is not an error, it silently
+ * leaves adc_dt_spec::channel_cfg ZERO-FILLED.
+ *
+ * A zeroed channel_cfg means gain ADC_GAIN_1, reference ADC_REF_VDD_1 (both enum value 0) and
+ * resolution 0. adc_nrfx_saadc's channel_setup rejects ADC_REF_VDD_1 — the nRF SAADC only does
+ * ADC_REF_INTERNAL and ADC_REF_VDD_1_4 — so every battery read failed at the first call with
+ *
+ *     battery: adc_channel_setup failed (AIN0)
+ *
+ * every 40 s. The failure is in the devicetree, not in opendisplay_battery.c: battery_pin_to_ain()
+ * had already correctly decoded P0.02 -> AIN0.
+ *
+ * GAIN 1/6 + INTERNAL REF, not the nRF54 boards' 1/4. That is 0.6 V * 6 = 3.6 V full scale,
+ * which is exactly the Arduino AR_DEFAULT scale that battery_read_saadc_volts() converts back
+ * into ("raw10 = pin_mv * 1024 / 3600") and that existing device configs calibrated
+ * voltage_scaling_factor against. Copying 1/4 from the nRF54 overlay would clamp full scale to
+ * 2.4 V and silently saturate a fresh Li-ion divider.
+ */
+&adc {
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN0>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
+	};
+
+	channel@1 {
+		reg = <1>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN1>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
+	};
+
+	channel@2 {
+		reg = <2>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN2>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
+	};
+
+	channel@3 {
+		reg = <3>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN3>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
+	};
+
+	channel@4 {
+		reg = <4>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN4>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
+	};
+
+	channel@5 {
+		reg = <5>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN5>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
+	};
+
+	channel@6 {
+		reg = <6>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN6>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
+	};
+
+	channel@7 {
+		reg = <7>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN7>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <8>;
 	};
 };
 
@@ -36,13 +148,84 @@
 };
 
 /*
- * Same reasoning for I2C: an enabled controller holds its pins at the idle level rather than
- * letting the panel drive them, and the display BUSY line shares a pad. On nRF54 that made
- * every bbepWaitBusy() time out. No firmware path uses the Zephyr I2C API.
+ * OpenDisplay I2C buses are selected from runtime data_bus packets and driven through od_gpio;
+ * neither Zephyr hardware controller is used. Keep both disabled so their compile-time pinctrl
+ * routes cannot claim pins that a board configuration assigns to another function:
+ *
+ *   i2c1: P0.04/P0.05 -- P0.05 is display BUSY on the XIAO preset and battery-enable on EN04.
+ *   i2c0: P0.07/P0.27 -- not the deployed XIAO D4/D5 bus and otherwise available to runtime GPIO.
+ *
+ * This matches the donor firmware's effective behavior: Wire is only activated when a runtime
+ * I2C data bus exists; a preset without one leaves the pins unclaimed.
  */
+&i2c1 {
+	status = "disabled";
+};
+
 &i2c0 {
+	status = "disabled";
+};
+
+/* The console is USB CDC. Upstream xiao_ble also enables UARTE0 RX on P1.12,
+ * which is the deployed display CS pin (absolute pin 44). Keep that peripheral
+ * out of the image so its pinctrl cannot reclaim CS. */
+&uart0 {
 	status = "disabled";
 };
 
 /* No lsm6ds3tr_c node here: the IMU is on the SENSE variant only, so the nRF54 overlay's
  * disable of it would be a dangling reference on this board. */
+
+/*
+ * hw-flow-control ON THE CDC CONSOLE. This is not about RTS/CTS wires -- there are none on a
+ * USB CDC link. It is the flag cdc_acm_poll_out() checks to decide what to do when its TX ring
+ * is full:
+ *
+ *     if (k_is_in_isr() || !data->flow_ctrl) {
+ *             LOG_WRN_ONCE("Ring buffer full, discard data");
+ *             break;                       <-- THE CHARACTER IS THROWN AWAY
+ *     }
+ *     k_msleep(1);                         <-- with flow_ctrl: wait for room instead
+ *
+ * (zephyr/subsys/usb/device_next/class/usbd_cdc_acm.c, cdc_acm_poll_out)
+ *
+ * Without it the console drops INDIVIDUAL CHARACTERS whenever output outruns the host,
+ * including the native log backend's record terminators. Zephyr now owns record assembly and
+ * line termination; this flag keeps the CDC transport from truncating those records afterward.
+ *
+ * The cost is that a stalled host now delays the logging thread instead of silently corrupting
+ * the log. For a bench debug console that is the right trade.
+ */
+&board_cdc_acm_uart {
+	hw-flow-control;
+};
+
+/*
+ * uart0 DISABLED -- IT OWNS THE PANEL'S CS PIN.
+ *
+ * xiao_ble_common.dtsi enables uart0 with status="okay" and pinctrl uart0_default, whose
+ * psels are:
+ *     UART_TX -> P1.11
+ *     UART_RX -> P1.12   with bias-pull-up
+ *
+ * P1.12 is the panel CS line on this build (config byte 44 -> P1.12, confirmed in the boot
+ * pin dump). So the UARTE peripheral was initialised at boot, its PSEL pointed at P1.12, and
+ * pinctrl put a pull-up on it -- while the panel code separately tried to drive the same pin
+ * as a GPIO output. Two owners, one pad.
+ *
+ * This fits every symptom exactly: CS is what frames EVERY command and every RAM byte, so if
+ * it is not being driven cleanly the controller sees no valid transaction. That is why init
+ * "succeeded", 48000 bytes streamed without error, and BUSY then never asserted for the
+ * refresh -- nothing the panel could act on ever arrived.
+ *
+ * Nothing needs uart0 here: the console is USB CDC ACM (see the .conf), and this board has no
+ * on-board debug UART. spi2 was already disabled for the same class of reason (its SPIM_SCK
+ * psel is P1.13, the panel SCK); its pinctrl is inert because the node is disabled, and the
+ * same is now true of uart0's.
+ *
+ * IF A UART CONSOLE IS EVER WANTED ON THIS BOARD, it cannot use the default pins -- they are
+ * the panel bus. Remap uart0's pinctrl to free pads first.
+ */
+&uart0 {
+	status = "disabled";
+};

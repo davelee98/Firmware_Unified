@@ -1,9 +1,10 @@
 #include "opendisplay_battery.h"
+#include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_sensor_bq27220.h"
 #include "opendisplay_sensor_npm1300.h"
 #include "opendisplay_structs.h"
-#include "nrf54_gpio.h"
+#include "od_gpio.h"
 
 #include <stdio.h>
 #include <zephyr/devicetree.h>
@@ -58,13 +59,32 @@ static int battery_pin_to_ain(uint8_t pin_cfg)
 	uint8_t port;
 	uint8_t pin;
 
-	if (!nrf54_pin_decode(pin_cfg, &port, &pin)) {
+	if (!od_pin_decode(pin_cfg, &port, &pin)) {
 		return -1;
 	}
+#if defined(OD_BOARD_XIAO_NRF52840)
+	/*
+	 * nRF52840's SAADC inputs are AIN0..AIN7 on P0.02-P0.05 and P0.28-P0.31 -- a different
+	 * set of pins AND a different port from the nRF54L's P1.00-P1.07. The nRF54 rule
+	 * rejected P0.02 (XIAO D0 / AIN0, a perfectly good analog pin) with
+	 * "sense pin 0x02 is not SAADC-capable", which is the nRF54 answer to an nRF52 question.
+	 */
+	if (port != 0u) {
+		return -1;
+	}
+	if (pin >= 2u && pin <= 5u) {
+		return (int)(pin - 2u);          /* P0.02..P0.05 -> AIN0..AIN3 */
+	}
+	if (pin >= 28u && pin <= 31u) {
+		return (int)(pin - 28u + 4u);    /* P0.28..P0.31 -> AIN4..AIN7 */
+	}
+	return -1;
+#else
 	if (port != 1u || pin > 7u) {
 		return -1;
 	}
 	return (int)pin;
+#endif
 }
 
 #if OD_ADC_AVAILABLE
@@ -112,29 +132,28 @@ static float battery_read_saadc_volts(void)
 	}
 	int ain = battery_pin_to_ain(sense_pin);
 	if (ain < 0) {
-		printf("[OD] battery: sense pin 0x%02X is not SAADC-capable "
-		       "(need P1.00-P1.07)\r\n", sense_pin);
+		od_log_info("battery: sense pin 0x%02X is not SAADC-capable " "(need P1.00-P1.07)", sense_pin);
 		return -1.0f;
 	}
 #if !OD_ADC_AVAILABLE
-	printf("[OD] battery: ADC not available in this build\r\n");
+	od_log_info("battery: ADC not available in this build");
 	return -1.0f;
 #else
 	const struct adc_dt_spec *spec = &s_adc_specs[ain];
 
 	if (!adc_is_ready_dt(spec)) {
-		printf("[OD] battery: ADC device not ready\r\n");
+		od_log_info("battery: ADC device not ready");
 		return -1.0f;
 	}
 	if (adc_channel_setup_dt(spec) != 0) {
-		printf("[OD] battery: adc_channel_setup failed (AIN%d)\r\n", ain);
+		od_log_info("battery: adc_channel_setup failed (AIN%d)", ain);
 		return -1.0f;
 	}
 
 	/* Enable the sense divider (reference drives it HIGH; battery_sense_flags
 	 * ENABLE_INVERTED is not honored, matching readBatteryVoltageUncached). */
 	if (enable_pin != 0xFFu) {
-		nrf54_gpio_configure_output(enable_pin, true);
+		od_gpio_configure_output(enable_pin, true);
 		k_msleep(10);
 	}
 
@@ -150,8 +169,8 @@ static float battery_read_saadc_volts(void)
 	}
 
 	if (enable_pin != 0xFFu) {
-		nrf54_gpio_write(enable_pin, false);
-		nrf54_gpio_park(enable_pin);
+		od_gpio_write(enable_pin, false);
+		od_gpio_park(enable_pin);
 	}
 
 	if (good == 0) {

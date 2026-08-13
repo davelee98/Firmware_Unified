@@ -1,4 +1,5 @@
 #include "opendisplay_sensor_sht40.h"
+#include "od_log.h"
 #include "opendisplay_sensor_common.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_structs.h"
@@ -220,7 +221,7 @@ void opendisplay_sensor_sht40_poll(void)
 
 		if (!read_sht40_sample(s, &tc, &rhc)) {
 			if (!logged_fail) {
-				printf("[OD] SHT40: read failed (bus %u)\r\n",
+				od_log_info("SHT40: read failed (bus %u)",
 				       (unsigned)s->bus_id);
 				logged_fail = true;
 			}

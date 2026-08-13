@@ -6,12 +6,77 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${APP_DIR:-${SCRIPT_DIR}/zephyr}"
 BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/build}"
 BOARD="${BOARD:-xiao_nrf54l15/nrf54l15/cpuapp}"
-PROFILE="${PROFILE:-battery}"   # battery | uart | quiet
+
+# Every board this target supports. `./build.sh --all` builds each and delivers all of their
+# artefacts to <repo>/release/, which is what the ESP32 target's build.sh does by default. This
+# one keeps single-board as the DEFAULT because flash.sh pairs with one BUILD_DIR and the
+# edit/flash loop is per board; --all is for producing a release set.
+OD_ALL_BOARDS=(
+  "xiao_nrf54l15/nrf54l15/cpuapp"
+  "xiao_nrf54lm20a/nrf54lm20a/cpuapp"
+  "xiao_ble/nrf52840"
+)
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+od_write_manifest_header() {
+  local commit dirty=""
+  commit="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  git -C "${REPO_ROOT}" diff --quiet HEAD 2>/dev/null || dirty=" (working tree DIRTY)"
+  echo "OpenDisplay Nordic/Zephyr firmware"
+  echo "built    $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+  echo "commit   ${commit}${dirty}"
+  echo "ncs      ${OD_NCS_VERSION:-v3.3.1}"
+  echo
+  echo "BOOTLOADER: nRF54 boards use MCUboot; xiao_nrf52840 keeps the Adafruit"
+  echo "bootloader, so its image is flashed/DFU'd through that path, NOT via MCUboot."
+  echo
+  echo "nRF54 boards additionally emit -ota.bin / -dfu.zip (MCUboot SMP)."
+  echo "xiao_nrf52840 (Zephyr board xiao_ble) emits .uf2 -- drag onto the Adafruit bootloader"
+  echo "volume; that is its field path. It has no MCUboot, so no -ota.bin / -dfu.zip."
+  echo
+  printf '%-22s %10s  %s\n' BOARD BYTES MERGED-IMAGE
+}
+RELEASE_DIR="${REPO_ROOT}/release"
+MANIFEST="${RELEASE_DIR}/MANIFEST-nordic-zephyr.txt"
+PROFILE="${PROFILE:-battery}"   # battery | uart | debug | quiet
 PURGE="${PURGE:-always}"        # always | never | auto
+
+case "${PROFILE}" in
+  battery|uart|debug|quiet) ;;
+  *)
+    echo "Unknown PROFILE '${PROFILE}'. Use battery, uart, debug, or quiet." >&2
+    exit 2
+    ;;
+esac
+
+PROFILE_SUFFIX=""
+if [[ "${PROFILE}" == debug ]]; then
+  PROFILE_SUFFIX="-debug"
+fi
 
 export PROFILE
 
 # shellcheck source=ncs-env.sh
+if [[ "${1:-}" == "--all" ]]; then
+  shift
+  mkdir -p "${RELEASE_DIR}"
+  : > "${MANIFEST}.tmp"          # fresh per --all run; single-board builds append instead
+  rc=0
+  for b in "${OD_ALL_BOARDS[@]}"; do
+    tag="${b%%/*}"
+    echo "=============================================================="
+    echo "  ${b}"
+    echo "=============================================================="
+    # Separate BUILD_DIR per board: sharing one would make each build a full rebuild and would
+    # leave whichever ran last as the only thing flash.sh could find.
+    if BOARD="${b}" BUILD_DIR="${SCRIPT_DIR}/build-${tag}${PROFILE_SUFFIX}" OD_MANIFEST_APPEND="${MANIFEST}.tmp" \
+         "${BASH_SOURCE[0]}" "$@"; then :; else rc=1; echo "!! ${b} FAILED" >&2; fi
+  done
+  od_write_manifest_header > "${MANIFEST}" 2>/dev/null || true
+  cat "${MANIFEST}.tmp" >> "${MANIFEST}"; rm -f "${MANIFEST}.tmp"
+  echo; echo "release -> ${RELEASE_DIR}"; cat "${MANIFEST}"
+  exit "${rc}"
+fi
+
 source "${SCRIPT_DIR}/ncs-env.sh"
 
 CMAKE_ARGS=(-DBOARD_ROOT="${SCRIPT_DIR}")
@@ -54,7 +119,7 @@ if [[ ! -f "${HEX}" ]]; then
   HEX="${BUILD_DIR}/zephyr/zephyr/zephyr.hex"
 fi
 if [[ ! -f "${HEX}" ]]; then
-  HEX="${BUILD_DIR}/opendisplay_nrf54/zephyr/zephyr.hex"
+  HEX="${BUILD_DIR}/opendisplay_nordic/zephyr/zephyr.hex"
 fi
 
 UPDATE_BIN=""
@@ -86,13 +151,74 @@ fi
 if [[ -n "${DFU_ZIP}" ]]; then
   echo "DFU:   ${DFU_ZIP}"
 fi
-echo "Flash: ./flash.sh"
+# ---------------------------------------------------------------- release delivery ---
+# Same contract as the ESP32 target: build artefacts land in <repo>/release/, which is
+# gitignored. Names carry the board tag because three boards share one directory and
+# "merged.hex" alone says nothing about which part it is for -- flashing an nRF54 image to an
+# nRF52840 is a soft brick that reads as a bad cable.
+# Artefact tag, NOT the Zephyr board name. Upstream calls the nRF52840 board "xiao_ble", which
+# says nothing about which part is inside -- and the whole point of a release filename here is
+# that flashing an nRF54 image to an nRF52840 is a soft brick that reads as a bad cable. The
+# board name stays xiao_ble everywhere Zephyr needs it; only the artefact is renamed.
+BOARD_TAG="${BOARD%%/*}"
+case "${BOARD_TAG}" in
+  xiao_ble) BOARD_TAG="xiao_nrf52840" ;;
+esac
+mkdir -p "${RELEASE_DIR}"
+REL_LINE=""
+if [[ -f "${HEX}" ]]; then
+  cp "${HEX}" "${RELEASE_DIR}/opendisplay-${BOARD_TAG}${PROFILE_SUFFIX}-merged.hex"
+  REL_LINE="$(printf '%-22s %10s  opendisplay-%s%s-merged.hex' \
+      "${BOARD_TAG}${PROFILE_SUFFIX}" "$(stat -c %s "${HEX}")" "${BOARD_TAG}" "${PROFILE_SUFFIX}")"
+fi
+if [[ -n "${UPDATE_BIN}" ]]; then
+  cp "${UPDATE_BIN}" "${RELEASE_DIR}/opendisplay-${BOARD_TAG}${PROFILE_SUFFIX}-ota.bin"
+fi
+if [[ -n "${DFU_ZIP}" ]]; then
+  cp "${DFU_ZIP}" "${RELEASE_DIR}/opendisplay-${BOARD_TAG}${PROFILE_SUFFIX}-dfu.zip"
+fi
+# UF2 is the ADAFRUIT BOOTLOADER's flashing format and is the artefact that actually matters on
+# nRF52840: that board has no MCUboot, so there is no signed OTA image or dfu_application.zip
+# for it, and merged.hex needs a debug probe. Drag-and-drop of this file onto the bootloader's
+# mass-storage volume is the whole field path. The nRF54 boards produce no UF2.
+UF2=""
+for candidate in \
+  "${BUILD_DIR}/zephyr/zephyr/zephyr.uf2" \
+  "${BUILD_DIR}/zephyr/zephyr.uf2"; do
+  if [[ -f "${candidate}" ]]; then UF2="${candidate}"; break; fi
+done
+if [[ -n "${UF2}" ]]; then
+  cp "${UF2}" "${RELEASE_DIR}/opendisplay-${BOARD_TAG}${PROFILE_SUFFIX}.uf2"
+fi
+if [[ -n "${REL_LINE}" ]]; then
+  if [[ -n "${OD_MANIFEST_APPEND:-}" ]]; then
+    echo "${REL_LINE}" >> "${OD_MANIFEST_APPEND}"      # --all collects, writes header once
+  else
+    od_write_manifest_header > "${MANIFEST}"
+    echo "${REL_LINE}" >> "${MANIFEST}"
+  fi
+fi
+
+echo "Release: ${RELEASE_DIR}/opendisplay-${BOARD_TAG}${PROFILE_SUFFIX}-merged.hex"
+if [[ "${BOARD}" == xiao_ble* ]]; then
+  if [[ "${PROFILE}" == debug ]]; then
+    echo "Flash: ./flash-nrf52840-debug.sh"
+  else
+    echo "Flash: ./flash-nrf52840.sh"
+  fi
+else
+  echo "Flash: ./flash-nrf54.sh"
+fi
 if [[ -f "${CONF}" ]]; then
   echo "Profile: ${PROFILE}  serial=$(grep -E '^CONFIG_SERIAL=|^# CONFIG_SERIAL is not set' "${CONF}" | head -1)"
-  if [[ "${PROFILE}" == "uart" ]]; then
+  if [[ "${PROFILE}" == "debug" ]]; then
+    echo "Debug build: application DEBUG plus Zephyr subsystem INFO"
+  elif [[ "${PROFILE}" == "uart" ]]; then
     echo "Serial monitor: 115200 baud on the board USB port"
   elif [[ "${PROFILE}" == "quiet" ]]; then
     echo "Quiet build: LOG off, no heartbeat prints (for advertising-current tests)"
+  elif [[ "${BOARD}" == xiao_ble* ]]; then
+    echo "Logs: USB CDC ACM"
   else
     echo "Logs: SEGGER RTT (battery build has no USB UART)"
   fi
