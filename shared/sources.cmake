@@ -28,6 +28,12 @@
 #   core/od_adv_control.c advertising/lifecycle policy          (LANDED — no wire surface)
 #   core/od_config_asm.c  chunked CONFIG_WRITE reassembly        (LANDED — closes F3)
 #   core/od_config_tlv.c  config blob walk + CRC                 (LANDED — pre-auth surface)
+#   core/od_watchdog.c    strike/safe-mode/breadcrumb policy     (LANDED — SCAFFOLD: no target
+#                         implements hal/od_hal_wdt.h yet, so nothing arms a watchdog by linking
+#                         it. Policy first because it must behave identically on four chips and
+#                         is cheap to get wrong in a way only a field boot-loop reveals.
+#                         Like od_adv_control.c this has no wire surface, so it is not a
+#                         reordering of the protocol subsystem sequence below.)
 #   core/od_dispatch.c    opcode dispatch, encryption gate
 #   core/od_xfer_direct.c 0x70/0x71/0x72
 #   core/od_xfer_partial.c 0x76
@@ -42,6 +48,7 @@ set(OD_SHARED_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/core/od_adv_control.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config_asm.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config_tlv.c"
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_watchdog.c"
 )
 
 # Public headers live alongside their sources; shared/protocol is the wire contract and is

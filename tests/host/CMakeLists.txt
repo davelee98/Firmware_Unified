@@ -88,6 +88,17 @@ add_executable(od_config_tlv_test config_tlv_test.c)
 target_link_libraries(od_config_tlv_test od_shared)
 add_test(NAME config_tlv COMMAND od_config_tlv_test)
 
+# watchdog: strike counting, safe mode, the retained-byte layout and breadcrumb caching, driven
+# against a fake retained store and a fake WDT. SCAFFOLD -- no target implements od_hal_wdt.h
+# yet, so a green run here says the policy is right, NOT that any device is protected.
+#
+# The boot-loop cases carry the weight. A watchdog that cannot escape a boot loop is worse than
+# no watchdog: the device never advertises, is unreachable over BLE/DFU, and flattens its
+# battery faster than if it had simply hung.
+add_executable(od_watchdog_test watchdog_test.c)
+target_link_libraries(od_watchdog_test od_shared)
+add_test(NAME watchdog COMMAND od_watchdog_test)
+
 # Nordic config pin bytes are a wire contract and deliberately differ by
 # platform: nRF52840 uses absolute port*32+pin values, while nRF54 uses the
 # compact packed form. Keep the pure decoder checked without a Zephyr build.
