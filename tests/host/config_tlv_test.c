@@ -256,23 +256,22 @@ static void test_body_size_table(void)
     CHECK(od_config_tlv_body_size(0x01) == sizeof(struct SystemConfig));
     CHECK(od_config_tlv_body_size(0x26) == sizeof(struct WifiConfig));
     CHECK(od_config_tlv_body_size(0x27) == sizeof(struct SecurityConfig));
+    CHECK(od_config_tlv_body_size(0x2A) == sizeof(struct NfcConfig));
     CHECK(od_config_tlv_body_size(0x2C) == sizeof(struct DataExtended));
     CASE("unknown ids report zero");
     CHECK(od_config_tlv_body_size(0x00) == 0);
     CHECK(od_config_tlv_body_size(0x7E) == 0);
     CHECK(od_config_tlv_body_size(0xFF) == 0);
-    /* 0x22 is genuinely unassigned. 0x2A IS NOT -- it is OD_PKT_NFC, canonical, 32 bytes
-     * (opendisplay_structs.h). An earlier version of this test called it "a gap in the assigned
-     * range", which was simply false.
+    /* 0x22 is genuinely unassigned -- no struct, no id in the canonical contract. That is the
+     * only reason a size lookup may report 0.
      *
-     * It reports 0 because NO target here implements NFC, so it behaves as unknown and ends the
-     * walk -- exactly what every shipped build does. Adding it to the table would be a
-     * BEHAVIOUR CHANGE, not a fix: the walk would continue and later packets (0x2B, 0x2C) that
-     * are discarded today would start being applied. That is the size-table skip model,
-     * deferred as an incompatible wire change (D4). This assertion therefore pins current
-     * behaviour deliberately, and the comment says which of the two it is. */
+     * This assertion used to include 0x2A and claimed it reported 0 because "no target here
+     * implements NFC". Two of the three did, and the rule settled 2026-08-13 is that a target
+     * parses and stores every canonical packet whether or not it can act on it -- so 0x2A is in
+     * the table and is asserted with the known ids above. Kept as a note because the mistake is
+     * instructive: a size table transcribed from ONE target's parser encodes that target's
+     * hardware as if it were the protocol. */
     CHECK(od_config_tlv_body_size(0x22) == 0);
-    CHECK(od_config_tlv_body_size(0x2A) == 0);   /* canonical, unimplemented -- NOT unassigned */
 }
 
 /* -------------------------------------------------------------------------------- the CRC --- */

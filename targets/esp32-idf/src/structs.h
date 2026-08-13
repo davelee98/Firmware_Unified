@@ -147,6 +147,16 @@ struct GlobalConfig {
     struct BuzzerConfig passive_buzzers[4];
     uint8_t passive_buzzer_count;
 
+    // Stored although this target has no NFC hardware and nothing reads these.
+    // Decided 2026-08-13: a target parses and stores every canonical packet whether or not it
+    // can act on it. Using a subsystem is a hardware capability; understanding the config that
+    // describes it is a protocol obligation. Before this, 0x2A was an unknown id here, which
+    // ended the config walk -- so a config carrying NFC silently lost its flash_config and
+    // data_extended packets, and the host had no way to see it. Same field name, cap and order
+    // as targets/nordic-zephyr and targets/efr32bg22-slc, which have always stored it.
+    struct NfcConfig nfc_configs[2];
+    uint8_t nfc_config_count;
+
     struct FlashConfig flash_configs[2];
     uint8_t flash_config_count;
 

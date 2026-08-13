@@ -347,9 +347,7 @@ static void test_apply_directly(void)
     CHECK(!cfg.loaded);
     CHECK(!cfg.security_loaded);
 
-    /* 0x2A is stored here even though od_config_tlv's table does not yet know it, so settling
-     * that wire question moves one line in the table and nothing in this module. */
-    CASE("nfc_config is storable ahead of the walk knowing the id");
+    CASE("nfc_config stores like any other repeatable packet");
     od_config_reset(&cfg);
     fill_body(body, (uint16_t)sizeof(struct NfcConfig), 0x60);
 #if OD_CONFIG_WITH_NFC
@@ -359,6 +357,67 @@ static void test_apply_directly(void)
 #else
     CHECK(od_config_apply_packet(&cfg, 0x2A, body, (uint16_t)sizeof(struct NfcConfig))
           == OD_CONFIG_APPLY_NOT_BUILT);
+#endif
+}
+
+/* A target parses and stores every canonical packet whether or not it can act on it (settled
+ * 2026-08-13). The assertion that matters is not that NFC is stored -- it is that the packets
+ * BEHIND it survive, because the failure this replaced was a config silently losing its
+ * flash_config and data_extended to a device with no NFC hardware. */
+static void test_nfc_does_not_end_the_walk(void)
+{
+    struct od_config cfg;
+    struct od_config_report rep;
+    struct blob b;
+    uint8_t body[512];
+
+    CASE("an nfc_config packet does not abandon the rest of the blob");
+    blob_start(&b, 1u);
+    fill_body(body, (uint16_t)sizeof(struct NfcConfig), 0x60);
+    blob_add(&b, 0x2A, body, (uint16_t)sizeof(struct NfcConfig));
+    fill_body(body, (uint16_t)sizeof(struct FlashConfig), 0x70);
+    blob_add(&b, 0x2B, body, (uint16_t)sizeof(struct FlashConfig));
+    fill_body(body, (uint16_t)sizeof(struct SystemConfig), 0x80);
+    blob_add(&b, 0x01, body, (uint16_t)sizeof(struct SystemConfig));
+    blob_finish(&b, true);
+
+    CHECK(od_config_parse(&cfg, b.bytes, b.len, &rep) == OD_CFG_TLV_OK);
+    CHECK(cfg.loaded);
+    CHECK(rep.unknown_id == 0u);            /* 0x2A is known; nothing ended the walk */
+    CHECK(cfg.flash_config_count == 1u);    /* the packet behind NFC was applied */
+    fill_body(body, (uint16_t)sizeof(struct SystemConfig), 0x80);
+    CHECK(memcmp(&cfg.system_config, body, sizeof(struct SystemConfig)) == 0);
+
+#if OD_CONFIG_WITH_NFC
+    CHECK(rep.stored == 3u);
+    CHECK(cfg.nfc_config_count == 1u);
+    fill_body(body, (uint16_t)sizeof(struct NfcConfig), 0x60);
+    CHECK(memcmp(&cfg.nfc_configs[0], body, sizeof(struct NfcConfig)) == 0);
+#else
+    /* A build without NFC storage still walks past the packet -- it is counted, not stored, and
+     * the packets behind it are unaffected. That is the whole point of the distinction. */
+    CHECK(rep.stored == 2u);
+    CHECK(rep.dropped_not_built == 1u);
+#endif
+
+    CASE("the nfc cap skips like every other, without ending the walk");
+    blob_start(&b, 1u);
+    fill_body(body, (uint16_t)sizeof(struct NfcConfig), 0x60);
+    blob_add(&b, 0x2A, body, (uint16_t)sizeof(struct NfcConfig));
+    blob_add(&b, 0x2A, body, (uint16_t)sizeof(struct NfcConfig));
+    blob_add(&b, 0x2A, body, (uint16_t)sizeof(struct NfcConfig));
+    fill_body(body, (uint16_t)sizeof(struct PowerOption), 0x90);
+    blob_add(&b, 0x04, body, (uint16_t)sizeof(struct PowerOption));
+    blob_finish(&b, true);
+
+    CHECK(od_config_parse(&cfg, b.bytes, b.len, &rep) == OD_CFG_TLV_OK);
+    fill_body(body, (uint16_t)sizeof(struct PowerOption), 0x90);
+    CHECK(memcmp(&cfg.power_option, body, sizeof(struct PowerOption)) == 0);
+#if OD_CONFIG_WITH_NFC
+    CHECK(cfg.nfc_config_count == OD_CONFIG_MAX_NFC);
+    CHECK(rep.dropped_full == 1u);
+#else
+    CHECK(rep.dropped_not_built == 3u);
 #endif
 }
 
@@ -372,6 +431,7 @@ int main(void)
 #endif
     test_hostile_blobs();
     test_apply_directly();
+    test_nfc_does_not_end_the_walk();
 
     printf("config: %u checks, %u failures\n", g_checks, g_failures);
     return (g_failures == 0u) ? 0 : 1;

@@ -19,6 +19,23 @@ uint16_t od_config_tlv_body_size(uint8_t packet_id)
     case 0x27: return (uint16_t)sizeof(struct SecurityConfig);
     case 0x28: return (uint16_t)sizeof(struct TouchController);
     case 0x29: return (uint16_t)sizeof(struct BuzzerConfig);
+    /* 0x2A nfc_config. ADDED 2026-08-13 BY DECISION, not as a table fix -- it changes the wire
+     * on the ESP32, which previously treated the id as unknown and abandoned the remainder of
+     * the blob. The decision: a target parses and stores every canonical packet whether or not
+     * it can act on it. Using a subsystem is a hardware capability; understanding the config
+     * that describes it is a protocol obligation, and a target that stops reading at a packet it
+     * cannot use makes the REST of the config depend on hardware the host cannot see.
+     *
+     * What changes on the ESP32: 0x2B and 0x2C packets that follow an nfc_config are now applied
+     * instead of discarded -- i.e. flash_config and data_extended start taking effect on devices
+     * whose config carries NFC. That is a fix in substance, since the host wrote those packets
+     * and had no way to know they were being dropped. What changes on Nordic and Silabs: nothing
+     * -- both already parse 0x2A and continue, which is why leaving it out would have regressed
+     * them the moment either adopted this walk.
+     *
+     * This is NOT the deferred size-table skip model (D4). That is about ids unknown to the
+     * CANONICAL contract; this id has always been in it. */
+    case 0x2A: return (uint16_t)sizeof(struct NfcConfig);
     case 0x2B: return (uint16_t)sizeof(struct FlashConfig);
     case 0x2C: return (uint16_t)sizeof(struct DataExtended);
     default:   return 0u;
@@ -69,24 +86,14 @@ enum od_config_tlv_result od_config_tlv_walk(const uint8_t *blob, uint32_t len,
              * incompatible wire change and is deferred (D4). Not an error: a config carrying a
              * packet this build does not know is newer, not corrupt.
              *
-             * NOTE 0x2A (OD_PKT_NFC) IS CANONICAL AND DELIBERATELY ABSENT from the table above,
-             * but the reason recorded here on 2026-08-05 was WRONG ON ITS FACTS and is corrected
-             * rather than deleted. It said "a known packet no target here implements, so this is
-             * exactly what every shipped build does today". Two of the three do implement it:
-             * targets/nordic-zephyr/src/opendisplay_config_parser.c handles CONFIG_PKT_NFC into
-             * nfc_configs[2] and continues the walk, and targets/efr32bg22-slc does the same.
-             * Only the ESP32 -- the one target with no NFC hardware -- stops here, and the table
-             * was transcribed from that parser.
-             *
-             * So this is not one behaviour preserved, it is TWO behaviours in conflict, and the
-             * resolution changes the wire either way: adding 0x2A makes the ESP32 start applying
-             * 0x2B/0x2C packets that follow an NFC packet and are discarded today, while leaving
-             * it out silently regresses Nordic and Silabs the moment either adopts this walk.
-             * Left as-is here because changing it is a wire decision, not a table edit -- it is
-             * NOT the deferred size-table skip model (D4), which is about ids that are unknown
-             * to the CANONICAL contract, and it must not be settled as a side effect of a
-             * promotion. od_config.c already stores 0x2A, so only this one line moves when it is
-             * settled. */
+             * HISTORY, kept because it is the one case that showed what this branch costs. This
+             * comment used to say 0x2A (nfc_config) was deliberately absent from the table as "a
+             * known packet no target here implements". That was wrong on its facts -- Nordic and
+             * Silabs both parsed it and continued -- so the table encoded the ESP32's behaviour
+             * as if it were the fleet's, and this branch silently made the rest of a config
+             * depend on whether the device had NFC hardware. Settled 2026-08-13: every canonical
+             * packet is parsed and stored whether or not the target can act on it, so 0x2A is in
+             * the table above and only genuinely-unknown ids reach here. */
             if (unknown_id_out) {
                 *unknown_id_out = packet_id;
             }

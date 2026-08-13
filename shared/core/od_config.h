@@ -33,12 +33,13 @@
  * incomplete size table, and the fix belongs in the table. Porting the scan would carry a
  * workaround into shared/ and leave the next missing id silently survivable.
  *
- * OPEN, AND IT BLOCKS THE NORDIC AND SILABS SWAPS: packet 0x2A (nfc_config) is canonical but is
- * NOT in od_config_tlv's size table, so the walk treats it as unknown and abandons the rest of
- * the blob. Nordic and Silabs both parse 0x2A today and keep going; only the ESP32, which has no
- * NFC hardware, stops. Resolving it changes the wire in one direction or the other -- see the
- * long note at the unknown-id branch in od_config_tlv.c. This module already stores 0x2A, so
- * whichever way it is settled, only the table moves.
+ * PARSE AND STORE EVERY CANONICAL PACKET, whether or not this target can act on it. Settled
+ * 2026-08-13 over packet 0x2A (nfc_config), which the walk's size table had omitted: using a
+ * subsystem is a hardware capability, but understanding the config that describes it is a
+ * protocol obligation, and a target that stops reading at a packet it cannot use makes the REST
+ * of the config depend on hardware the host cannot see. So the OD_CONFIG_WITH_* gates below
+ * exist to save RAM on a part that has none to spare -- not to opt a target out of a packet
+ * because its hardware is absent. The ESP32 has no NFC and stores nfc_configs anyway.
  *
  * NO HAL, no allocation, no logging: the PURE tier. Reports what happened and lets the caller
  * say it.

@@ -446,6 +446,14 @@ static bool onConfigPacket(void *ctx, uint8_t packetId, const uint8_t *body, uin
                     globalConfig.data_extended_loaded = true;
                 }
                 return true;
+            case 0x2A: // nfc_config -- stored, never acted on (no NFC hardware on this target)
+                if (globalConfig.nfc_config_count < 2) {
+                    memcpy(&globalConfig.nfc_configs[globalConfig.nfc_config_count], body, sizeof(struct NfcConfig));
+                    globalConfig.nfc_config_count++;
+                } else {
+                    od_log_warn("WARNING: Maximum nfc_config count reached, skipping");
+                }
+                return true;
             case 0x2B: // flash_config
                 if (globalConfig.flash_config_count < 2) {
                     memcpy(&globalConfig.flash_configs[globalConfig.flash_config_count], body, sizeof(struct FlashConfig));
