@@ -15,6 +15,13 @@
 #
 # Paths are relative to this file's directory. Consumers prefix with ${OD_SHARED_DIR}.
 #
+# HEADER-ONLY FILES HAVE NO ENTRY HERE and that is not the omission this file exists to prevent.
+# core/od_span.h is the only one today: it is all static inline, so there is nothing to compile
+# separately and nothing to link. It still reaches every consumer, because every one of them
+# takes OD_SHARED_INCLUDE_DIRS and the sources below include it. Do not "fix" its absence by
+# inventing an od_span.c -- what the one-list rule guards against is a source no target builds,
+# and a header with no source cannot be that.
+#
 # The list is no longer empty. core/od_adv_control.c is the first entry, landed with its host
 # tests (tests/host/adv_control_test.c), which were written against the header before the
 # implementation existed.

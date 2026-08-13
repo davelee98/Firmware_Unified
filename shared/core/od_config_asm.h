@@ -31,6 +31,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "od_span.h"
+
 /* CONFIG_CHUNK_SIZE, CONFIG_CHUNK_SIZE_WITH_PREFIX, MAX_CONFIG_CHUNKS. */
 #include "opendisplay_protocol.h"
 
@@ -91,22 +93,25 @@ void od_config_asm_reset(struct od_config_asm *s);
 
 /* Feed a CMD_CONFIG_WRITE (0x0041) payload -- the bytes AFTER the two opcode bytes.
  *
- * Shape rules, straight from the canonical header:
- *   len == 0                      -> REJECTED
- *   len <= CONFIG_CHUNK_SIZE      -> SINGLE   (an ordinary one-frame config)
- *   len == 201                    -> SINGLE   (the header's documented short-first-chunk
+ * Shape rules, straight from the canonical header, on payload.n:
+ *   0                             -> REJECTED
+ *   <= CONFIG_CHUNK_SIZE          -> SINGLE   (an ordinary one-frame config)
+ *   201                           -> SINGLE   (the header's documented short-first-chunk
  *                                              fallback: too long to be a chunk payload, too
  *                                              short to be a chunked start)
- *   len == CONFIG_CHUNK_SIZE_WITH_PREFIX (202) -> chunked start
- *   len >  202                    -> REJECTED (neither legal shape; the old code silently
+ *   CONFIG_CHUNK_SIZE_WITH_PREFIX (202) -> chunked start
+ *   > 202                         -> REJECTED (neither legal shape; the old code silently
  *                                              truncated these)
  *
  * A chunked start additionally requires CONFIG_CHUNK_SIZE < total <= the transferable ceiling,
  * so a nonsensical or oversized declaration is refused HERE rather than failing later for an
  * indirect reason.
+ *
+ * The length arrived as a uint16_t before the span. Anything above 65535 used to wrap at the
+ * call boundary into a value that could look like a legal shape; now it is simply > 202 and
+ * REJECTED. No legal frame changes meaning -- every shape above is well under the old limit.
  */
-enum od_config_asm_result od_config_asm_start(struct od_config_asm *s,
-                                              const uint8_t *payload, uint16_t len);
+enum od_config_asm_result od_config_asm_start(struct od_config_asm *s, od_span_t payload);
 
 /* Feed a CMD_CONFIG_CHUNK (0x0042) payload -- again, after the opcode bytes.
  *
@@ -115,8 +120,7 @@ enum od_config_asm_result od_config_asm_start(struct od_config_asm *s,
  *
  * COMMITS ON received == total_size, never on a chunk count. That is the F3 fix in one line.
  */
-enum od_config_asm_result od_config_asm_chunk(struct od_config_asm *s,
-                                              const uint8_t *payload, uint16_t len);
+enum od_config_asm_result od_config_asm_chunk(struct od_config_asm *s, od_span_t payload);
 
 #ifdef __cplusplus
 }

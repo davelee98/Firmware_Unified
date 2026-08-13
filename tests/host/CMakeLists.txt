@@ -58,6 +58,15 @@ add_executable(od_canary canary.c)
 target_link_libraries(od_canary od_shared)
 add_test(NAME canary COMMAND od_canary)
 
+# span: od_span_t itself. Header-only, so nothing else in this file would compile it on its own
+# terms -- and it is now the single place the config walk's "does this packet fit" arithmetic is
+# written, after fifteen copies of it on the pre-auth surface were collapsed into one. A defect
+# in od_span_split() is a defect in every caller simultaneously, which is precisely the shape of
+# bug that a suite testing only the callers can miss.
+add_executable(od_span_test span_test.c)
+target_link_libraries(od_span_test od_shared)
+add_test(NAME span COMMAND od_span_test)
+
 # adv_control: the loop-owned advertising policy machine (correctness review F4) driven against
 # a scripted fake HAL. The fake supplies od_hal_adv_{program,start,stop} at LINK time, exactly
 # as a target does — shared/ binds its HAL at link time, so there is no injection seam to fake

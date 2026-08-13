@@ -51,6 +51,7 @@
 #include <stdint.h>
 
 #include "od_config_tlv.h"
+#include "od_span.h"
 #include "opendisplay_structs.h"
 
 #ifdef __cplusplus
@@ -189,9 +190,11 @@ void od_config_reset(struct od_config *cfg);
 bool od_config_security_key_set(const struct SecurityConfig *sec);
 
 /* Store one packet whose bounds the walk has already guaranteed. Safe to call directly for a
- * target that keeps its own walk during migration. */
+ * target that keeps its own walk during migration -- and the span is what makes that safe: a
+ * target passing its own cursor cannot hand this a length belonging to a different pointer.
+ * A malformed span (non-null-with-zero aside) is OD_CONFIG_APPLY_SHORT_BODY, never a read. */
 enum od_config_apply od_config_apply_packet(struct od_config *cfg, uint8_t packet_id,
-                                            const uint8_t *body, uint16_t body_len);
+                                            od_span_t body);
 
 /* Reset, walk, store, then compute the advisory CRC.
  *
@@ -199,8 +202,8 @@ enum od_config_apply od_config_apply_packet(struct od_config *cfg, uint8_t packe
  * is too short or truncated leaves a zeroed config marked not-loaded, so a caller that ignores
  * the result still cannot read a half-parsed config as a real one. report may be NULL.
  */
-enum od_config_tlv_result od_config_parse(struct od_config *cfg, const uint8_t *blob,
-                                          uint32_t len, struct od_config_report *report);
+enum od_config_tlv_result od_config_parse(struct od_config *cfg, od_span_t blob,
+                                          struct od_config_report *report);
 
 #ifdef __cplusplus
 }

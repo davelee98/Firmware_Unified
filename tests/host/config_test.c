@@ -60,7 +60,7 @@ static void blob_add(struct blob *b, uint8_t id, const uint8_t *body, uint16_t b
  * everywhere would hide a report field that is meant to be usable. */
 static void blob_finish(struct blob *b, bool valid_crc)
 {
-    uint16_t crc = od_config_tlv_crc16(b->bytes, b->len);
+    uint16_t crc = od_config_tlv_crc16(od_span_make(b->bytes, b->len));
 
     if (!valid_crc) {
         crc = (uint16_t)(crc ^ 0xFFFFu);
@@ -99,7 +99,7 @@ static void test_single_instance_packets(void)
     blob_add(&b, 0x04, body, (uint16_t)sizeof(struct PowerOption));
     blob_finish(&b, true);
 
-    r = od_config_parse(&cfg, b.bytes, b.len, &rep);
+    r = od_config_parse(&cfg, od_span_make(b.bytes, b.len), &rep);
     CHECK(r == OD_CFG_TLV_OK);
     CHECK(cfg.loaded);
     CHECK(cfg.version == 2u);
@@ -120,7 +120,7 @@ static void test_single_instance_packets(void)
     fill_body(body, (uint16_t)sizeof(struct SystemConfig), 0x10);
     blob_add(&b, 0x01, body, (uint16_t)sizeof(struct SystemConfig));
     blob_finish(&b, false);
-    r = od_config_parse(&cfg, b.bytes, b.len, &rep);
+    r = od_config_parse(&cfg, od_span_make(b.bytes, b.len), &rep);
     CHECK(r == OD_CFG_TLV_OK);      /* a bad CRC must still parse */
     CHECK(cfg.loaded);
     CHECK(rep.crc_stored != rep.crc_computed);
@@ -145,7 +145,7 @@ static void test_instance_caps(void)
     }
     blob_finish(&b, true);
 
-    CHECK(od_config_parse(&cfg, b.bytes, b.len, &rep) == OD_CFG_TLV_OK);
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), &rep) == OD_CFG_TLV_OK);
     CHECK(cfg.display_count == OD_CONFIG_MAX_DISPLAYS);
     CHECK(rep.stored == OD_CONFIG_MAX_DISPLAYS);
     CHECK(rep.dropped_full == 2u);
@@ -166,7 +166,7 @@ static void test_instance_caps(void)
     blob_add(&b, 0x04, body, (uint16_t)sizeof(struct PowerOption));
     blob_finish(&b, true);
 
-    CHECK(od_config_parse(&cfg, b.bytes, b.len, &rep) == OD_CFG_TLV_OK);
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), &rep) == OD_CFG_TLV_OK);
     fill_body(body, (uint16_t)sizeof(struct PowerOption), 0x77);
     CHECK(memcmp(&cfg.power_option, body, sizeof(struct PowerOption)) == 0);
 }
@@ -188,7 +188,7 @@ static void test_security_zero_key(void)
     blob_add(&b, 0x27, (const uint8_t *)&sec, (uint16_t)sizeof sec);
     blob_finish(&b, true);
 
-    CHECK(od_config_parse(&cfg, b.bytes, b.len, NULL) == OD_CFG_TLV_OK);
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), NULL) == OD_CFG_TLV_OK);
     CHECK(cfg.security_loaded);
     CHECK(cfg.security.encryption_enabled == 0u);
     CHECK(!od_config_security_key_set(&cfg.security));
@@ -203,7 +203,7 @@ static void test_security_zero_key(void)
     blob_add(&b, 0x27, (const uint8_t *)&sec, (uint16_t)sizeof sec);
     blob_finish(&b, true);
 
-    CHECK(od_config_parse(&cfg, b.bytes, b.len, NULL) == OD_CFG_TLV_OK);
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), NULL) == OD_CFG_TLV_OK);
     CHECK(cfg.security.encryption_enabled == 1u);
     CHECK(od_config_security_key_set(&cfg.security));
 
@@ -215,7 +215,7 @@ static void test_security_zero_key(void)
     blob_add(&b, 0x27, (const uint8_t *)&sec, (uint16_t)sizeof sec);
     blob_finish(&b, true);
 
-    CHECK(od_config_parse(&cfg, b.bytes, b.len, NULL) == OD_CFG_TLV_OK);
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), NULL) == OD_CFG_TLV_OK);
     CHECK(cfg.security.encryption_enabled == 0u);
     CHECK(od_config_security_key_set(&cfg.security));
 }
@@ -235,7 +235,7 @@ static void test_data_extended_termination(void)
     blob_add(&b, 0x2C, (const uint8_t *)&de, (uint16_t)sizeof de);
     blob_finish(&b, true);
 
-    CHECK(od_config_parse(&cfg, b.bytes, b.len, NULL) == OD_CFG_TLV_OK);
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), NULL) == OD_CFG_TLV_OK);
     CHECK(cfg.data_extended_loaded);
     CHECK(cfg.data_extended.manufacturer_name[31] == '\0');
     CHECK(cfg.data_extended.model_name[31] == '\0');
@@ -268,7 +268,7 @@ static void test_hostile_blobs(void)
     blob_add(&b, 0x20, NULL, 4u);
     blob_finish(&b, true);
 
-    CHECK(od_config_parse(&cfg, b.bytes, b.len, &rep) == OD_CFG_TLV_TRUNCATED);
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), &rep) == OD_CFG_TLV_TRUNCATED);
     CHECK(!cfg.loaded);
     CHECK(cfg.display_count == 0u);
     /* STATED PLAINLY because it is the contract, not an accident: packets that parsed BEFORE the
@@ -282,7 +282,7 @@ static void test_hostile_blobs(void)
     CASE("a blob too short to hold a version and a CRC is refused");
     memset(&b, 0, sizeof b);
     b.len = 4u;
-    CHECK(od_config_parse(&cfg, b.bytes, b.len, &rep) == OD_CFG_TLV_TOO_SHORT);
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), &rep) == OD_CFG_TLV_TOO_SHORT);
     CHECK(!cfg.loaded);
 
     CASE("an unknown id ends the walk and is reported, without failing the parse");
@@ -294,7 +294,7 @@ static void test_hostile_blobs(void)
     blob_add(&b, 0x01, body, (uint16_t)sizeof(struct SystemConfig));
     blob_finish(&b, true);
 
-    CHECK(od_config_parse(&cfg, b.bytes, b.len, &rep) == OD_CFG_TLV_OK);
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), &rep) == OD_CFG_TLV_OK);
     CHECK(cfg.loaded);
     CHECK(rep.unknown_id == 0x7Eu);
     CHECK(rep.stored == 1u);
@@ -302,9 +302,9 @@ static void test_hostile_blobs(void)
     CHECK(cfg.system_config.device_flags == 0u);
 
     CASE("a NULL blob and a NULL config are refused, not dereferenced");
-    CHECK(od_config_parse(&cfg, NULL, 100u, &rep) == OD_CFG_TLV_TOO_SHORT);
-    CHECK(od_config_parse(NULL, b.bytes, b.len, &rep) == OD_CFG_TLV_TOO_SHORT);
-    CHECK(od_config_parse(&cfg, b.bytes, b.len, NULL) == OD_CFG_TLV_OK);   /* NULL report is fine */
+    CHECK(od_config_parse(&cfg, od_span_make(NULL, 100u), &rep) == OD_CFG_TLV_TOO_SHORT);
+    CHECK(od_config_parse(NULL, od_span_make(b.bytes, b.len), &rep) == OD_CFG_TLV_TOO_SHORT);
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), NULL) == OD_CFG_TLV_OK);   /* NULL report is fine */
 }
 
 static void test_apply_directly(void)
@@ -318,28 +318,28 @@ static void test_apply_directly(void)
     CASE("apply is usable without the walk");
     od_config_reset(&cfg);
     fill_body(body, (uint16_t)sizeof(struct LedConfig), 0x55);
-    CHECK(od_config_apply_packet(&cfg, 0x21, body, (uint16_t)sizeof(struct LedConfig))
+    CHECK(od_config_apply_packet(&cfg, 0x21, od_span_make(body, (uint16_t)sizeof(struct LedConfig)))
           == OD_CONFIG_APPLY_STORED);
     CHECK(cfg.led_count == 1u);
 
     CASE("a body shorter than the struct is refused rather than over-read");
     od_config_reset(&cfg);
-    CHECK(od_config_apply_packet(&cfg, 0x21, body, 2u) == OD_CONFIG_APPLY_SHORT_BODY);
+    CHECK(od_config_apply_packet(&cfg, 0x21, od_span_make(body, 2u)) == OD_CONFIG_APPLY_SHORT_BODY);
     CHECK(cfg.led_count == 0u);
-    CHECK(od_config_apply_packet(&cfg, 0x01, body, 2u) == OD_CONFIG_APPLY_SHORT_BODY);
+    CHECK(od_config_apply_packet(&cfg, 0x01, od_span_make(body, 2u)) == OD_CONFIG_APPLY_SHORT_BODY);
 
     CASE("an id this table does not know is reported, not stored");
-    CHECK(od_config_apply_packet(&cfg, 0x7E, body, 64u) == OD_CONFIG_APPLY_UNKNOWN_ID);
+    CHECK(od_config_apply_packet(&cfg, 0x7E, od_span_make(body, 64u)) == OD_CONFIG_APPLY_UNKNOWN_ID);
 
     CASE("NULL arguments are refused");
-    CHECK(od_config_apply_packet(NULL, 0x21, body, 64u) == OD_CONFIG_APPLY_SHORT_BODY);
-    CHECK(od_config_apply_packet(&cfg, 0x21, NULL, 64u) == OD_CONFIG_APPLY_SHORT_BODY);
+    CHECK(od_config_apply_packet(NULL, 0x21, od_span_make(body, 64u)) == OD_CONFIG_APPLY_SHORT_BODY);
+    CHECK(od_config_apply_packet(&cfg, 0x21, od_span_make(NULL, 64u)) == OD_CONFIG_APPLY_SHORT_BODY);
 
     CASE("reset clears every count");
     od_config_reset(&cfg);
     for (i = 0; i < 3u; ++i) {
         fill_body(body, (uint16_t)sizeof(struct SensorData), (uint8_t)i);
-        (void)od_config_apply_packet(&cfg, 0x23, body, (uint16_t)sizeof(struct SensorData));
+        (void)od_config_apply_packet(&cfg, 0x23, od_span_make(body, (uint16_t)sizeof(struct SensorData)));
     }
     CHECK(cfg.sensor_count == 3u);
     od_config_reset(&cfg);
@@ -351,11 +351,11 @@ static void test_apply_directly(void)
     od_config_reset(&cfg);
     fill_body(body, (uint16_t)sizeof(struct NfcConfig), 0x60);
 #if OD_CONFIG_WITH_NFC
-    CHECK(od_config_apply_packet(&cfg, 0x2A, body, (uint16_t)sizeof(struct NfcConfig))
+    CHECK(od_config_apply_packet(&cfg, 0x2A, od_span_make(body, (uint16_t)sizeof(struct NfcConfig)))
           == OD_CONFIG_APPLY_STORED);
     CHECK(cfg.nfc_config_count == 1u);
 #else
-    CHECK(od_config_apply_packet(&cfg, 0x2A, body, (uint16_t)sizeof(struct NfcConfig))
+    CHECK(od_config_apply_packet(&cfg, 0x2A, od_span_make(body, (uint16_t)sizeof(struct NfcConfig)))
           == OD_CONFIG_APPLY_NOT_BUILT);
 #endif
 }
@@ -381,7 +381,7 @@ static void test_nfc_does_not_end_the_walk(void)
     blob_add(&b, 0x01, body, (uint16_t)sizeof(struct SystemConfig));
     blob_finish(&b, true);
 
-    CHECK(od_config_parse(&cfg, b.bytes, b.len, &rep) == OD_CFG_TLV_OK);
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), &rep) == OD_CFG_TLV_OK);
     CHECK(cfg.loaded);
     CHECK(rep.unknown_id == 0u);            /* 0x2A is known; nothing ended the walk */
     CHECK(cfg.flash_config_count == 1u);    /* the packet behind NFC was applied */
@@ -410,7 +410,7 @@ static void test_nfc_does_not_end_the_walk(void)
     blob_add(&b, 0x04, body, (uint16_t)sizeof(struct PowerOption));
     blob_finish(&b, true);
 
-    CHECK(od_config_parse(&cfg, b.bytes, b.len, &rep) == OD_CFG_TLV_OK);
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), &rep) == OD_CFG_TLV_OK);
     fill_body(body, (uint16_t)sizeof(struct PowerOption), 0x90);
     CHECK(memcmp(&cfg.power_option, body, sizeof(struct PowerOption)) == 0);
 #if OD_CONFIG_WITH_NFC

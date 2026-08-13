@@ -46,8 +46,27 @@ that grep before proposing anything under `shared/`; extend it as targets are im
 
 ## Architectural decisions
 
-1. **`shared/` is plain C.** Two targets are C-only: interfaces are link-time `extern` C
-   functions the target implements. No C++ classes, no Arduino `String`.
+1. **`shared/` is plain C.** Every interface across the boundary is a link-time `extern` C
+   function the target implements. No C++ classes, no Arduino `String`.
+   Re-argued 2026-08-13 and upheld — but not because C++ is unavailable (all three toolchains
+   already compile target `.cpp`). It is that the boundary must be a C API for Zephyr's C
+   drivers and the Silabs superloop regardless, and the code being ported is already C in
+   `.cpp` files (~20k lines of `targets/esp32-idf/src/` hold 32 `new`, 9 `String`, one class).
+   So C++ buys implementation ergonomics only, priced in a doubled host gate, an
+   `-fno-exceptions -fno-rtti -fno-threadsafe-statics` contract spread across three build
+   systems `shared/` does not own, and an enforcement grep that libstdc++'s transitive
+   includes defeat. Three C-side rules buy back most of what RAII and strong types offered:
+   - **`_Static_assert` every wire size.** The `sizeof`-derived size table can go silently
+     wrong via include order (`shared/sources.cmake`, closing note) — a wrong *value*, not a
+     build error. Assert the sizes so it is a build error. Zero cost, C99, unused today.
+   - **Non-owning views are `od_span_t`** (`shared/core/od_span.h`), not ptr+len arguments.
+     `od_span_split()` is the checked cut and the one place bounds arithmetic is written;
+     `take`/`drop` saturate and are only for lengths already known to fit. The whole config
+     parse path takes spans; new shared code does too.
+   - **Single-exit + `goto cleanup`** in anything holding a resource across a fallible step.
+   Revisit only at `od_session.c` / `od_xfer_partial.c` / `od_zlib_stream.c`: nested resource
+   lifetimes with several failure exits per function are the one shape where manual cleanup
+   reliably loses. That is also the last point where switching is cheap.
 2. **One vtable, deliberately** — `od_panel_ops` (`targets/esp32-idf/hal/od_hal_panel.h`), for the
    one target with 2-3 panel backends. Keep it the only one.
 3. **Three toolchains stay three** (ESP-IDF, west/Zephyr, SLC), all CMake. Unification is about

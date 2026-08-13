@@ -354,8 +354,14 @@ uint32_t calculateConfigCRC(uint8_t* data, uint32_t len){
  * instance-count caps, and the logging. Returning false aborts the walk; a packet this build
  * does not implement is NOT a reason to do that.
  */
-static bool onConfigPacket(void *ctx, uint8_t packetId, const uint8_t *body, uint16_t bodyLen) {
-    (void)ctx; (void)bodyLen;
+static bool onConfigPacket(void *ctx, uint8_t packetId, od_span_t bodySpan) {
+    (void)ctx;
+    /* The span is unpacked ONCE, here, and the per-packet arms below stay as they were imported.
+     * They are already sizeof-bounded against the same declared size the walk checked, so
+     * rewriting thirty memcpy sites would be churn in the one hardware-verified target for no
+     * change in what is guaranteed. The bound that matters is upstream: bodySpan.n cannot
+     * disagree with bodySpan.p, which is the pairing od_span_t removes. */
+    const uint8_t *body = bodySpan.p;
     switch (packetId) {
 
             case 0x01: // system_config
@@ -635,7 +641,7 @@ bool loadGlobalConfig(){
     uint8_t parsedVersion = 0;
     uint8_t stoppedOnId = 0;
     const enum od_config_tlv_result walk =
-        od_config_tlv_walk(configData, configLen, onConfigPacket, NULL,
+        od_config_tlv_walk(od_span_make(configData, configLen), onConfigPacket, NULL,
                            &parsedVersion, &stoppedOnId);
     if (stoppedOnId != 0) {
         /* Restores the per-packet parser's "Unknown packet ID 0x%02X, skipping" warning. The
@@ -671,7 +677,7 @@ bool loadGlobalConfig(){
     // the shipped fleet) -- see docs/FOLLOWUPS.md for the upstream propagation.
     if (configLen >= 2) {
         uint16_t crcGiven = configData[configLen - 2] | (configData[configLen - 1] << 8);
-        uint16_t crcCalculated = od_config_tlv_crc16(configData, configLen - 2);
+        uint16_t crcCalculated = od_config_tlv_crc16(od_span_make(configData, configLen - 2));
         if (crcGiven != crcCalculated) {
             od_log_warn("WARNING: Config CRC mismatch (given: 0x%04X, calculated: 0x%04X)", crcGiven, crcCalculated);
         }
