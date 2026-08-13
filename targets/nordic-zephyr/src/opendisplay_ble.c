@@ -444,24 +444,18 @@ static void log_msd(const char *tag)
 #if defined(OD_LOW_POWER_QUIET)
 	ARG_UNUSED(tag);
 #else
-	char line[96];
-	int pos = snprintf(line, sizeof(line), "[OD] msd %s:", tag);
+	/* Gate BEFORE formatting, using the constant-fold `if` idiom od_log.h documents rather
+	 * than `#if`: the body still compiles at every level, but a build below INFO does no
+	 * snprintf work. od_log_info()'s own gate is inside the macro, so it cannot elide the
+	 * argument formatting this helper does -- and this runs on every MSD publish. */
+	if (OD_LOG_LEVEL >= OD_LOG_INFO) {
+		char label[32];
+		char line[96];
 
-	if (pos < 0) {
-		return;
+		snprintf(label, sizeof(label), "[OD] msd %s: ", tag);
+		od_log_hex_line(line, sizeof(line), label, msd_payload, MSD_PAYLOAD_LEN);
+		od_log_info("%s", line);
 	}
-	for (unsigned i = 0; i < MSD_PAYLOAD_LEN; i++) {
-		if (pos >= (int)sizeof(line)) {
-			break;
-		}
-		int n = snprintf(line + pos, sizeof(line) - (size_t)pos, " %02X", msd_payload[i]);
-
-		if (n < 0) {
-			break;
-		}
-		pos += n;
-	}
-	od_log_info("%s", line);
 #endif
 }
 
