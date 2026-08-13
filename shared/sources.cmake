@@ -4,7 +4,9 @@
 #
 #   targets/esp32-idf/       idf_component_register(SRCS ${OD_SHARED_SOURCES} ...)
 #   targets/nordic-zephyr/   target_sources(app PRIVATE ${OD_SHARED_SOURCES})
-#   targets/efr32bg22-slc/   the SLC-declared source set
+#   targets/efr32bg22-slc/   cmake_gcc/opendisplay-bg22.cmake's source set (NOT the .slcp: shared/
+#                            sits outside the SLC project dir, same as third_party/, so it is
+#                            hand-maintained there like every other out-of-tree source)
 #   tests/host/              the host unit-test build
 #
 # One list, four consumers, so a file added to shared/ that is not tested is a build

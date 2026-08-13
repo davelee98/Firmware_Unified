@@ -4,7 +4,7 @@ Source repo: `Firmware_Silabs` (https://github.com/davelee98/Firmware_Silabs)
 Surveyed at commit `d1a866d` (2026-07-25). **Imported 2026-08-05 at `17a8222`** — a
 descendant of the surveyed commit, and one commit behind `OpenDisplay/Firmware_Silabs`.
 
-## Status (2026-08-05) — imported, does NOT build
+## Status (updated 2026-08-13) — builds; not hardware-verified
 
 Read this before anything below it; several statements further down were written
 before the import and are corrected here.
@@ -12,10 +12,14 @@ before the import and are corrected here.
 | | |
 |---|---|
 | Source repo builds on this box | **yes**, clean: `text 236316  data 492  bss 31792` |
-| This target builds | **no** |
-| Furthest reached | **179 of 181 objects compiled**, measured — the whole SDK, every application C source, uzlib, QR |
-| Blocked by | `bb_epaper` has no EFR32 IO backend here, and `BBEPAPER::sendPanelInitFull()` does not exist in the shared vendored copy |
-| Also missing | `third_party/segger_rtt` and `third_party/silabs_app_properties` — not imported, no home decided |
+| This target builds | **yes**, clean: `text 240680  data 488  bss 31796` (`./build-and-flash.sh --no-flash`) |
+| Hardware-verified | **no** — nothing here has been flashed to a board |
+| Takes from `shared/` | the PURE tier, compiled but not yet called — see [below](#what-this-target-takes-from-shared-today) |
+| Blocked by | *(resolved)* `bb_epaper` had no EFR32 IO backend and no `sendPanelInitFull()`; fixed by the target-owned `panel/od_bbep_efr32.cpp` adapter, `third_party/` unedited |
+| Also missing | *(resolved)* SEGGER RTT and `app_properties` come from the pinned SDK; neither is vendored |
+
+The rest of this section is the record of how it got there, kept because the failures it
+describes are the ones the *next* target import will hit.
 
 The 179/181 figure comes from a scratch probe that temporarily staged the two
 un-imported vendored trees; it is evidence about the SDK repoint, **not** a build. The
@@ -331,15 +335,40 @@ What is **not** yet done is wiring `slc` to it: there is no `.slconf` in the pro
 `--sdk-package-path <the path above>` (or a project `.slconf`) to find it. That is a
 configuration step, not an install — do not record it as a missing prerequisite.
 
-## Required at import: the advertising HAL
+## What this target takes from `shared/` today
 
-`shared/core/od_adv_control.c` is in `shared/sources.cmake`, so **the moment this target
-consumes that list it must supply `od_hal_adv_{program,start,stop}`** — see
-[shared/hal/od_hal_adv.h](../../shared/hal/od_hal_adv.h). Link-time C functions; omitting them
-fails at link with three undefined references, which is the intended failure.
+The **PURE tier only** — `core/od_config_asm.c` and `core/od_config_tlv.c` — taken as
+`${OD_SHARED_SOURCES_PURE}` from `shared/sources.cmake`, which
+[cmake_gcc/opendisplay-bg22.cmake](cmake_gcc/opendisplay-bg22.cmake) includes. Same shape as
+`targets/nordic-zephyr`: **compiled, not yet called**. `opendisplay_config_parser.c` still owns
+config parsing here; the point of wiring the sources in ahead of that swap is that `shared/` is
+now proved to compile under ARM GCC on the smallest target, a third toolchain and warning set.
 
-No compile-tested stub is committed here: this directory is one README with no build system, so
-a stub would have nothing to compile it and would rot unnoticed.
+It cost nothing measurable: identical `text`/`data`/`bss` before and after (240680 / 488 /
+31796), because `-ffunction-sections -fdata-sections` + `--gc-sections` drop what nothing calls
+and neither TU defines a static instance. **Adopting `od_config_asm` for real is the expensive
+step, not this one** — `struct od_config_asm` carries a 4096-byte buffer (decision 12,
+`MAX_CONFIG_SIZE` is global) on a 32 KB part, so whoever declares the instance owns that budget;
+see [Hardware and budgets](#hardware-and-budgets) before siting it.
+
+The include path takes the whole `OD_SHARED_INCLUDE_DIRS`, not `shared/protocol` alone. The
+include-order hazard `shared/sources.cmake` warns about — a target's own subset headers shadowing
+the canonical wire contract, silently changing `sizeof`-derived size tables — cannot arise here
+because the local `include/` pair was never imported. Re-importing it would reintroduce the
+hazard; don't.
+
+## Required before the next tier: the advertising HAL
+
+`shared/core/od_adv_control.c` is in the HAL_ADV tier, deliberately **not** taken above, and
+`od_watchdog.c` (HAL_WDT) likewise: this target implements neither
+[od_hal_adv.h](../../shared/hal/od_hal_adv.h) nor [od_hal_wdt.h](../../shared/hal/od_hal_wdt.h).
+Taking HAL_ADV without supplying `od_hal_adv_{program,start,stop}` fails at link with three
+undefined references, which is the intended failure. Add each tier when its HAL lands, not
+before.
+
+No stub adapter is committed as a placeholder: a stub that satisfies the linker while doing
+nothing would make advertising *look* wired on a target where it isn't. The adapter lands with
+the tier.
 
 **This target is the proof that the controller needs no kernel**, which is why it matters more
 here than anywhere else. `od_adv_control` is run-to-completion, statically allocated, allocates
