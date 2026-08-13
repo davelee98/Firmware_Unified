@@ -3,7 +3,7 @@
 #include "opendisplay_ble.h"
 #include "opendisplay_sensor_bq27220.h"
 #include "opendisplay_sensor_npm1300.h"
-#include "opendisplay_structs.h"
+#include "od_runtime_types.h"
 #include "od_gpio.h"
 
 #include <stdio.h>

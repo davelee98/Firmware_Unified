@@ -53,7 +53,7 @@ static uint16_t make_start(uint8_t *out, uint32_t total, uint8_t seed)
 static enum od_config_asm_result run_transfer(uint32_t total)
 {
     uint16_t len = make_start(g_scratch, total, 0x11);
-    enum od_config_asm_result r = od_config_asm_start(&g_asm, g_scratch, len);
+    enum od_config_asm_result r = od_config_asm_start(&g_asm, od_span_make(g_scratch, len));
     if (r != OD_CONFIG_ASM_ACCEPTED && r != OD_CONFIG_ASM_COMPLETE) {
         return r;
     }
@@ -61,7 +61,7 @@ static enum od_config_asm_result run_transfer(uint32_t total)
         const uint32_t remaining = total - g_asm.received;
         const uint32_t n = (remaining > CONFIG_CHUNK_SIZE) ? CONFIG_CHUNK_SIZE : remaining;
         fill(g_scratch, n, 0x22);
-        r = od_config_asm_chunk(&g_asm, g_scratch, (uint16_t)n);
+        r = od_config_asm_chunk(&g_asm, od_span_make(g_scratch, (uint16_t)n));
     }
     return r;
 }
@@ -72,13 +72,13 @@ static void test_start_shapes(void)
 {
     CASE("empty start is rejected");
     od_config_asm_reset(&g_asm);
-    CHECK(od_config_asm_start(&g_asm, g_scratch, 0) == OD_CONFIG_ASM_REJECTED);
+    CHECK(od_config_asm_start(&g_asm, od_span_make(g_scratch, 0)) == OD_CONFIG_ASM_REJECTED);
 
     CASE("single-frame payloads are not chunked");
     for (uint16_t len = 1; len <= CONFIG_CHUNK_SIZE; len += 43) {
         od_config_asm_reset(&g_asm);
         fill(g_scratch, len, 0x33);
-        CHECK(od_config_asm_start(&g_asm, g_scratch, len) == OD_CONFIG_ASM_SINGLE);
+        CHECK(od_config_asm_start(&g_asm, od_span_make(g_scratch, len)) == OD_CONFIG_ASM_SINGLE);
         CHECK(!g_asm.active);   /* a single frame must leave NO transfer in progress */
     }
 
@@ -88,7 +88,7 @@ static void test_start_shapes(void)
     CASE("201-byte start is a single frame, not an orphaned transfer");
     od_config_asm_reset(&g_asm);
     fill(g_scratch, 201, 0x44);
-    CHECK(od_config_asm_start(&g_asm, g_scratch, 201) == OD_CONFIG_ASM_SINGLE);
+    CHECK(od_config_asm_start(&g_asm, od_span_make(g_scratch, 201)) == OD_CONFIG_ASM_SINGLE);
     CHECK(!g_asm.active);
 
     /* The old code copied only the first 200 data bytes and silently dropped the rest.
@@ -103,7 +103,7 @@ static void test_start_shapes(void)
         od_config_asm_reset(&g_asm);
         (void)make_start(g_scratch, 400u, 0x4A);      /* valid total, valid first 200 bytes */
         fill(g_scratch + 202, (uint32_t)len - 202u, 0x4B);   /* ...and some excess after it */
-        CHECK(od_config_asm_start(&g_asm, g_scratch, len) == OD_CONFIG_ASM_REJECTED);
+        CHECK(od_config_asm_start(&g_asm, od_span_make(g_scratch, len)) == OD_CONFIG_ASM_REJECTED);
         CHECK(!g_asm.active);
     }
 }
@@ -119,7 +119,7 @@ static void test_declared_total_bounds(void)
     for (unsigned i = 0; i < sizeof bad_low / sizeof bad_low[0]; ++i) {
         od_config_asm_reset(&g_asm);
         uint16_t len = make_start(g_scratch, bad_low[i], 0x55);
-        CHECK(od_config_asm_start(&g_asm, g_scratch, len) == OD_CONFIG_ASM_REJECTED);
+        CHECK(od_config_asm_start(&g_asm, od_span_make(g_scratch, len)) == OD_CONFIG_ASM_REJECTED);
         CHECK(!g_asm.active);
     }
 
@@ -129,7 +129,7 @@ static void test_declared_total_bounds(void)
     for (unsigned i = 0; i < sizeof bad_high / sizeof bad_high[0]; ++i) {
         od_config_asm_reset(&g_asm);
         uint16_t len = make_start(g_scratch, bad_high[i], 0x66);
-        CHECK(od_config_asm_start(&g_asm, g_scratch, len) == OD_CONFIG_ASM_REJECTED);
+        CHECK(od_config_asm_start(&g_asm, od_span_make(g_scratch, len)) == OD_CONFIG_ASM_REJECTED);
         CHECK(!g_asm.active);
     }
 }
@@ -182,19 +182,19 @@ static void test_excess_bytes_rejected(void)
     CASE("excess beyond the declared total is rejected (the 201+200 case)");
     od_config_asm_reset(&g_asm);
     uint16_t len = make_start(g_scratch, 201u, 0x77);
-    CHECK(od_config_asm_start(&g_asm, g_scratch, len) == OD_CONFIG_ASM_ACCEPTED);
+    CHECK(od_config_asm_start(&g_asm, od_span_make(g_scratch, len)) == OD_CONFIG_ASM_ACCEPTED);
     CHECK(g_asm.received == CONFIG_CHUNK_SIZE);
 
     fill(g_scratch, CONFIG_CHUNK_SIZE, 0x88);
-    CHECK(od_config_asm_chunk(&g_asm, g_scratch, CONFIG_CHUNK_SIZE) == OD_CONFIG_ASM_REJECTED);
+    CHECK(od_config_asm_chunk(&g_asm, od_span_make(g_scratch, CONFIG_CHUNK_SIZE)) == OD_CONFIG_ASM_REJECTED);
     CHECK(!g_asm.active);
 
     CASE("the same transfer completes with the correct 1-byte tail");
     od_config_asm_reset(&g_asm);
     len = make_start(g_scratch, 201u, 0x77);
-    CHECK(od_config_asm_start(&g_asm, g_scratch, len) == OD_CONFIG_ASM_ACCEPTED);
+    CHECK(od_config_asm_start(&g_asm, od_span_make(g_scratch, len)) == OD_CONFIG_ASM_ACCEPTED);
     fill(g_scratch, 1u, 0x99);
-    CHECK(od_config_asm_chunk(&g_asm, g_scratch, 1u) == OD_CONFIG_ASM_COMPLETE);
+    CHECK(od_config_asm_chunk(&g_asm, od_span_make(g_scratch, 1u)) == OD_CONFIG_ASM_COMPLETE);
     CHECK(g_asm.received == 201u);
 }
 
@@ -205,9 +205,9 @@ static void test_short_middle_chunk_rejected(void)
     CASE("a short middle chunk is rejected");
     od_config_asm_reset(&g_asm);
     uint16_t len = make_start(g_scratch, 600u, 0xA1);
-    CHECK(od_config_asm_start(&g_asm, g_scratch, len) == OD_CONFIG_ASM_ACCEPTED);
+    CHECK(od_config_asm_start(&g_asm, od_span_make(g_scratch, len)) == OD_CONFIG_ASM_ACCEPTED);
     fill(g_scratch, 50u, 0xA2);
-    CHECK(od_config_asm_chunk(&g_asm, g_scratch, 50u) == OD_CONFIG_ASM_REJECTED);
+    CHECK(od_config_asm_chunk(&g_asm, od_span_make(g_scratch, 50u)) == OD_CONFIG_ASM_REJECTED);
     CHECK(!g_asm.active);
 }
 
@@ -216,13 +216,13 @@ static void test_continuation_without_start(void)
     CASE("a continuation with no active transfer is rejected");
     od_config_asm_reset(&g_asm);
     fill(g_scratch, CONFIG_CHUNK_SIZE, 0xB1);
-    CHECK(od_config_asm_chunk(&g_asm, g_scratch, CONFIG_CHUNK_SIZE) == OD_CONFIG_ASM_REJECTED);
+    CHECK(od_config_asm_chunk(&g_asm, od_span_make(g_scratch, CONFIG_CHUNK_SIZE)) == OD_CONFIG_ASM_REJECTED);
 
     CASE("and again immediately after a completed transfer");
     od_config_asm_reset(&g_asm);
     CHECK(run_transfer(400u) == OD_CONFIG_ASM_COMPLETE);
     fill(g_scratch, CONFIG_CHUNK_SIZE, 0xB2);
-    CHECK(od_config_asm_chunk(&g_asm, g_scratch, CONFIG_CHUNK_SIZE) == OD_CONFIG_ASM_REJECTED);
+    CHECK(od_config_asm_chunk(&g_asm, od_span_make(g_scratch, CONFIG_CHUNK_SIZE)) == OD_CONFIG_ASM_REJECTED);
 }
 
 static void test_duplicate_final_chunk(void)
@@ -230,11 +230,11 @@ static void test_duplicate_final_chunk(void)
     CASE("a duplicate final chunk is rejected, not re-committed");
     od_config_asm_reset(&g_asm);
     uint16_t len = make_start(g_scratch, 400u, 0xC1);
-    CHECK(od_config_asm_start(&g_asm, g_scratch, len) == OD_CONFIG_ASM_ACCEPTED);
+    CHECK(od_config_asm_start(&g_asm, od_span_make(g_scratch, len)) == OD_CONFIG_ASM_ACCEPTED);
     fill(g_scratch, CONFIG_CHUNK_SIZE, 0xC2);
-    CHECK(od_config_asm_chunk(&g_asm, g_scratch, CONFIG_CHUNK_SIZE) == OD_CONFIG_ASM_COMPLETE);
+    CHECK(od_config_asm_chunk(&g_asm, od_span_make(g_scratch, CONFIG_CHUNK_SIZE)) == OD_CONFIG_ASM_COMPLETE);
     /* The transfer is over; a repeat of the final frame must not start a second commit. */
-    CHECK(od_config_asm_chunk(&g_asm, g_scratch, CONFIG_CHUNK_SIZE) == OD_CONFIG_ASM_REJECTED);
+    CHECK(od_config_asm_chunk(&g_asm, od_span_make(g_scratch, CONFIG_CHUNK_SIZE)) == OD_CONFIG_ASM_REJECTED);
 }
 
 static void test_bad_chunk_sizes(void)
@@ -242,13 +242,13 @@ static void test_bad_chunk_sizes(void)
     CASE("empty and over-long chunks are rejected");
     od_config_asm_reset(&g_asm);
     uint16_t len = make_start(g_scratch, 600u, 0xD1);
-    CHECK(od_config_asm_start(&g_asm, g_scratch, len) == OD_CONFIG_ASM_ACCEPTED);
-    CHECK(od_config_asm_chunk(&g_asm, g_scratch, 0u) == OD_CONFIG_ASM_REJECTED);
+    CHECK(od_config_asm_start(&g_asm, od_span_make(g_scratch, len)) == OD_CONFIG_ASM_ACCEPTED);
+    CHECK(od_config_asm_chunk(&g_asm, od_span_make(g_scratch, 0u)) == OD_CONFIG_ASM_REJECTED);
 
     od_config_asm_reset(&g_asm);
     len = make_start(g_scratch, 600u, 0xD2);
-    CHECK(od_config_asm_start(&g_asm, g_scratch, len) == OD_CONFIG_ASM_ACCEPTED);
-    CHECK(od_config_asm_chunk(&g_asm, g_scratch, CONFIG_CHUNK_SIZE + 1u)
+    CHECK(od_config_asm_start(&g_asm, od_span_make(g_scratch, len)) == OD_CONFIG_ASM_ACCEPTED);
+    CHECK(od_config_asm_chunk(&g_asm, od_span_make(g_scratch, CONFIG_CHUNK_SIZE + 1u))
           == OD_CONFIG_ASM_REJECTED);
 }
 
@@ -257,12 +257,12 @@ static void test_abandon_midway(void)
     CASE("a reset mid-transfer leaves nothing to commit");
     od_config_asm_reset(&g_asm);
     uint16_t len = make_start(g_scratch, 600u, 0xE1);
-    CHECK(od_config_asm_start(&g_asm, g_scratch, len) == OD_CONFIG_ASM_ACCEPTED);
+    CHECK(od_config_asm_start(&g_asm, od_span_make(g_scratch, len)) == OD_CONFIG_ASM_ACCEPTED);
     od_config_asm_reset(&g_asm);
     CHECK(!g_asm.active);
     CHECK(g_asm.received == 0u);
     fill(g_scratch, CONFIG_CHUNK_SIZE, 0xE2);
-    CHECK(od_config_asm_chunk(&g_asm, g_scratch, CONFIG_CHUNK_SIZE) == OD_CONFIG_ASM_REJECTED);
+    CHECK(od_config_asm_chunk(&g_asm, od_span_make(g_scratch, CONFIG_CHUNK_SIZE)) == OD_CONFIG_ASM_REJECTED);
 
     CASE("a new start after abandonment works normally");
     CHECK(run_transfer(400u) == OD_CONFIG_ASM_COMPLETE);
@@ -282,11 +282,11 @@ static void test_payload_bytes_are_exact(void)
     fill(expect + 2u * CONFIG_CHUNK_SIZE, total - 2u * CONFIG_CHUNK_SIZE, 0x33);
 
     uint16_t len = make_start(g_scratch, total, 0x11);
-    CHECK(od_config_asm_start(&g_asm, g_scratch, len) == OD_CONFIG_ASM_ACCEPTED);
+    CHECK(od_config_asm_start(&g_asm, od_span_make(g_scratch, len)) == OD_CONFIG_ASM_ACCEPTED);
     fill(g_scratch, CONFIG_CHUNK_SIZE, 0x22);
-    CHECK(od_config_asm_chunk(&g_asm, g_scratch, CONFIG_CHUNK_SIZE) == OD_CONFIG_ASM_ACCEPTED);
+    CHECK(od_config_asm_chunk(&g_asm, od_span_make(g_scratch, CONFIG_CHUNK_SIZE)) == OD_CONFIG_ASM_ACCEPTED);
     fill(g_scratch, total - 2u * CONFIG_CHUNK_SIZE, 0x33);
-    CHECK(od_config_asm_chunk(&g_asm, g_scratch, (uint16_t)(total - 2u * CONFIG_CHUNK_SIZE))
+    CHECK(od_config_asm_chunk(&g_asm, od_span_make(g_scratch, (uint16_t)(total - 2u * CONFIG_CHUNK_SIZE)))
           == OD_CONFIG_ASM_COMPLETE);
     CHECK(memcmp(g_asm.buffer, expect, total) == 0);
 }
@@ -295,11 +295,11 @@ static void test_null_safety(void)
 {
     CASE("null arguments are refused, not dereferenced");
     od_config_asm_reset(NULL);
-    CHECK(od_config_asm_start(NULL, g_scratch, 10) == OD_CONFIG_ASM_REJECTED);
-    CHECK(od_config_asm_chunk(NULL, g_scratch, 10) == OD_CONFIG_ASM_REJECTED);
+    CHECK(od_config_asm_start(NULL, od_span_make(g_scratch, 10)) == OD_CONFIG_ASM_REJECTED);
+    CHECK(od_config_asm_chunk(NULL, od_span_make(g_scratch, 10)) == OD_CONFIG_ASM_REJECTED);
     od_config_asm_reset(&g_asm);
-    CHECK(od_config_asm_start(&g_asm, NULL, 10) == OD_CONFIG_ASM_REJECTED);
-    CHECK(od_config_asm_chunk(&g_asm, NULL, 10) == OD_CONFIG_ASM_REJECTED);
+    CHECK(od_config_asm_start(&g_asm, od_span_make(NULL, 10)) == OD_CONFIG_ASM_REJECTED);
+    CHECK(od_config_asm_chunk(&g_asm, od_span_make(NULL, 10)) == OD_CONFIG_ASM_REJECTED);
 }
 
 int main(void)

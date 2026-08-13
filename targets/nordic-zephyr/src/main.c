@@ -3,7 +3,7 @@
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_display.h"
-#include "opendisplay_structs.h"
+#include "od_runtime_types.h"
 
 #include <stdio.h>
 #include <zephyr/kernel.h>

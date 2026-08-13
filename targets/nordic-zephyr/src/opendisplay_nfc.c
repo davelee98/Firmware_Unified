@@ -2,7 +2,9 @@
 #include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_constants.h"
-#include "opendisplay_structs.h"
+/* OD_NFC_IC_SOC_NFCT (2) is not in the canonical contract yet -- see the header. */
+#include "protocol_pending.h"
+#include "od_runtime_types.h"
 
 #include <stdio.h>
 #include <string.h>

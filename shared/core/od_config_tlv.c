@@ -19,23 +19,40 @@ uint16_t od_config_tlv_body_size(uint8_t packet_id)
     case 0x27: return (uint16_t)sizeof(struct SecurityConfig);
     case 0x28: return (uint16_t)sizeof(struct TouchController);
     case 0x29: return (uint16_t)sizeof(struct BuzzerConfig);
+    /* 0x2A nfc_config. ADDED 2026-08-13 BY DECISION, not as a table fix -- it changes the wire
+     * on the ESP32, which previously treated the id as unknown and abandoned the remainder of
+     * the blob. The decision: a target parses and stores every canonical packet whether or not
+     * it can act on it. Using a subsystem is a hardware capability; understanding the config
+     * that describes it is a protocol obligation, and a target that stops reading at a packet it
+     * cannot use makes the REST of the config depend on hardware the host cannot see.
+     *
+     * What changes on the ESP32: 0x2B and 0x2C packets that follow an nfc_config are now applied
+     * instead of discarded -- i.e. flash_config and data_extended start taking effect on devices
+     * whose config carries NFC. That is a fix in substance, since the host wrote those packets
+     * and had no way to know they were being dropped. What changes on Nordic and Silabs: nothing
+     * -- both already parse 0x2A and continue, which is why leaving it out would have regressed
+     * them the moment either adopted this walk.
+     *
+     * This is NOT the deferred size-table skip model (D4). That is about ids unknown to the
+     * CANONICAL contract; this id has always been in it. */
+    case 0x2A: return (uint16_t)sizeof(struct NfcConfig);
     case 0x2B: return (uint16_t)sizeof(struct FlashConfig);
     case 0x2C: return (uint16_t)sizeof(struct DataExtended);
     default:   return 0u;
     }
 }
 
-enum od_config_tlv_result od_config_tlv_walk(const uint8_t *blob, uint32_t len,
+enum od_config_tlv_result od_config_tlv_walk(od_span_t blob,
                                              od_config_tlv_packet_fn fn, void *ctx,
                                              uint8_t *version_out, uint8_t *unknown_id_out)
 {
     if (unknown_id_out) {
         *unknown_id_out = 0u;
     }
-    if (!blob || !fn) {
+    if (!od_span_valid(blob) || !fn) {
         return OD_CFG_TLV_TOO_SHORT;
     }
-    if (len < OD_CFG_TLV_HEADER_LEN + OD_CFG_TLV_CRC_LEN) {
+    if (blob.n < OD_CFG_TLV_HEADER_LEN + OD_CFG_TLV_CRC_LEN) {
         /* Not enough for a version byte and a CRC, so there is no blob here to disagree
          * about. The old check was `configLen < 3`, which admitted a 3- or 4-byte input whose
          * "body end" (len - 2) sat at or before the header -- the loop then simply did not run
@@ -44,23 +61,22 @@ enum od_config_tlv_result od_config_tlv_walk(const uint8_t *blob, uint32_t len,
     }
 
     if (version_out) {
-        *version_out = blob[2];
+        *version_out = blob.p[2];
     }
 
-    /* The one bound every packet is measured against. Computed ONCE, where the old parser
-     * recomputed `configLen - 2` at fifteen separate comparison sites. */
-    const uint32_t body_end = len - OD_CFG_TLV_CRC_LEN;
+    /* THE BODY REGION, cut once. Everything below walks inside `rest`, so there is no second
+     * bound to keep in step with the pointer -- the old parser recomputed `configLen - 2` at
+     * fifteen separate comparison sites, and reading an id out of the trailing CRC was the
+     * mistake that invited. Both cuts are safe by the length check above: at least 5 bytes, so
+     * dropping 3 leaves at least the 2 CRC bytes to trim. */
+    od_span_t rest = od_span_drop(blob, OD_CFG_TLV_HEADER_LEN);
+    rest = od_span_take(rest, rest.n - OD_CFG_TLV_CRC_LEN);
 
-    uint32_t offset = OD_CFG_TLV_HEADER_LEN;
-    while (offset < body_end) {
-        /* Each packet is [reserved:1][id:1][body...]. Both header bytes must be inside the
-         * body region -- reading an id out of the trailing CRC is exactly the confusion the
-         * single body_end above exists to prevent. */
-        if (offset + 2u > body_end) {
-            break;
-        }
-        offset++;                              /* reserved */
-        const uint8_t packet_id = blob[offset++];
+    /* Each packet is [reserved:1][id:1][body...]. Splitting `rest` in place is safe: the span
+     * is passed by value, so the tail is written from a copy, not from what it overwrites. */
+    od_span_t hdr;
+    while (od_span_split(rest, 2u, &hdr, &rest)) {
+        const uint8_t packet_id = hdr.p[1];    /* hdr.p[0] is the reserved byte */
 
         const uint16_t body_size = od_config_tlv_body_size(packet_id);
         if (body_size == 0u) {
@@ -69,30 +85,32 @@ enum od_config_tlv_result od_config_tlv_walk(const uint8_t *blob, uint32_t len,
              * incompatible wire change and is deferred (D4). Not an error: a config carrying a
              * packet this build does not know is newer, not corrupt.
              *
-             * NOTE 0x2A (OD_PKT_NFC) IS CANONICAL AND DELIBERATELY ABSENT from the table above.
-             * It is a known packet no target here implements, so it lands in this branch and
-             * abandons the remainder -- which is exactly what every shipped build does today.
-             * Adding it would be a behaviour change, not a bug fix: the walk would continue and
-             * later packets (0x2B, 0x2C) that are currently discarded would start being
-             * applied. That is the size-table skip model, deferred as an incompatible wire
-             * change (D4), and it must not arrive one packet id at a time. */
+             * HISTORY, kept because it is the one case that showed what this branch costs. This
+             * comment used to say 0x2A (nfc_config) was deliberately absent from the table as "a
+             * known packet no target here implements". That was wrong on its facts -- Nordic and
+             * Silabs both parsed it and continued -- so the table encoded the ESP32's behaviour
+             * as if it were the fleet's, and this branch silently made the rest of a config
+             * depend on whether the device had NFC hardware. Settled 2026-08-13: every canonical
+             * packet is parsed and stored whether or not the target can act on it, so 0x2A is in
+             * the table above and only genuinely-unknown ids reach here. */
             if (unknown_id_out) {
                 *unknown_id_out = packet_id;
             }
             return OD_CFG_TLV_OK;
         }
 
-        /* THE CHECK THIS MODULE EXISTS FOR, written once. Subtraction rather than
-         * `offset + body_size <= body_end` so a large declared size cannot overflow the sum
-         * and turn a truncated blob into an in-bounds read. */
-        if ((uint32_t)body_size > body_end - offset) {
+        /* THE CHECK THIS MODULE EXISTS FOR, now the same one call every span split performs:
+         * a comparison, never an addition, so a large declared size cannot overflow a sum and
+         * turn a truncated blob into an in-bounds read. It also advances `rest` -- the bound
+         * and the cursor move together or not at all, which is the whole point of the type. */
+        od_span_t body;
+        if (!od_span_split(rest, body_size, &body, &rest)) {
             return OD_CFG_TLV_TRUNCATED;
         }
 
-        if (!fn(ctx, packet_id, &blob[offset], body_size)) {
+        if (!fn(ctx, packet_id, body)) {
             return OD_CFG_TLV_REJECTED;
         }
-        offset += body_size;
     }
 
     return OD_CFG_TLV_OK;
@@ -111,7 +129,7 @@ static uint16_t od_crc16_feed(uint16_t crc, uint8_t b)
     return crc;
 }
 
-uint16_t od_config_tlv_crc16(const uint8_t *data, uint32_t len)
+uint16_t od_config_tlv_crc16(od_span_t data)
 {
     /* CRC-16/CCITT-FALSE: init 0xFFFF, poly 0x1021, no reflection, no final xor.
      *
@@ -124,19 +142,19 @@ uint16_t od_config_tlv_crc16(const uint8_t *data, uint32_t len)
      *
      * Byte-at-a-time on purpose: the targets that run this have no table to spare. */
     uint16_t crc = 0xFFFFu;
-    if (!data) {
+    if (!od_span_valid(data)) {
         return crc;
     }
-    if (len < 2u) {
-        for (uint32_t i = 0; i < len; ++i) {
-            crc = od_crc16_feed(crc, data[i]);
+    if (data.n < 2u) {
+        for (size_t i = 0; i < data.n; ++i) {
+            crc = od_crc16_feed(crc, data.p[i]);
         }
         return crc;
     }
     crc = od_crc16_feed(crc, 0u);
     crc = od_crc16_feed(crc, 0u);
-    for (uint32_t i = 2u; i < len; ++i) {
-        crc = od_crc16_feed(crc, data[i]);
+    for (size_t i = 2u; i < data.n; ++i) {
+        crc = od_crc16_feed(crc, data.p[i]);
     }
     return crc;
 }

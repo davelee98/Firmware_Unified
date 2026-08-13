@@ -3,7 +3,7 @@
 
 #include "opendisplay_ble.h"
 #include "opendisplay_i2c.h"
-#include "opendisplay_structs.h"
+#include "od_runtime_types.h"
 
 /*
  * Resolve a sensor's data_bus (0x24) instance into a bit-banged I2C bus.

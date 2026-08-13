@@ -8,7 +8,7 @@
 #include "opendisplay_constants.h"
 #include "opendisplay_protocol.h"
 #include "opendisplay_config_parser.h"
-#include "opendisplay_structs.h"
+#include "od_runtime_types.h"
 #include "opendisplay_pipe_write.h"
 #include <stdio.h>
 #include <string.h>
@@ -1274,7 +1274,21 @@ static void dispatch(uint8_t connection, uint16_t cmd, const uint8_t *payload, u
       /* Match the reference nRF52840 build (device_control.cpp:691-705): the
        * command is recognized and logged but NO response is sent, so clients do
        * not treat deep sleep as supported on this target. (Composes with the
-       * separate DFU-honesty question for 0x0051, handled elsewhere.) */
+       * separate DFU-honesty question for 0x0051, handled elsewhere.)
+       *
+       * OPCODE CHANGED 0x0052 -> 0x0053 when this target adopted the canonical
+       * protocol header. The subset header it used to carry still had the value
+       * from before the split that made 0x0052 CMD_POWER_OFF -- a hard rail-cut --
+       * and left deep sleep on 0x0053, which is what Firmware and Firmware_Silabs
+       * already answer. 0x0052 now falls through to the unknown-opcode path here,
+       * which is the safe direction: a host that has not moved gets no deep sleep
+       * rather than an unintended power-off.
+       *
+       * py-opendisplay still sends 0x0052 (protocol/commands.py DEEP_SLEEP), so
+       * deep sleep from that client stops working against this target until the
+       * host library is updated. That is the known cost of the alignment, and it
+       * MUST be fixed before anything implements CMD_POWER_OFF on 0x0052 here --
+       * at that point an un-updated host asking for deep sleep would cut the rail. */
       opendisplay_ble_schedule_deep_sleep();
       break;
     case CMD_LED_ACTIVATE: {

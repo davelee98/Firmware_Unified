@@ -58,6 +58,15 @@ add_executable(od_canary canary.c)
 target_link_libraries(od_canary od_shared)
 add_test(NAME canary COMMAND od_canary)
 
+# span: od_span_t itself. Header-only, so nothing else in this file would compile it on its own
+# terms -- and it is now the single place the config walk's "does this packet fit" arithmetic is
+# written, after fifteen copies of it on the pre-auth surface were collapsed into one. A defect
+# in od_span_split() is a defect in every caller simultaneously, which is precisely the shape of
+# bug that a suite testing only the callers can miss.
+add_executable(od_span_test span_test.c)
+target_link_libraries(od_span_test od_shared)
+add_test(NAME span COMMAND od_span_test)
+
 # adv_control: the loop-owned advertising policy machine (correctness review F4) driven against
 # a scripted fake HAL. The fake supplies od_hal_adv_{program,start,stop} at LINK time, exactly
 # as a target does — shared/ binds its HAL at link time, so there is no injection seam to fake
@@ -87,6 +96,38 @@ add_test(NAME config_asm COMMAND od_config_asm_test)
 add_executable(od_config_tlv_test config_tlv_test.c)
 target_link_libraries(od_config_tlv_test od_shared)
 add_test(NAME config_tlv COMMAND od_config_tlv_test)
+
+# config: the parsed aggregate -- instance caps, the Firmware zero-key rule, string termination,
+# and what a truncated blob leaves behind. Downstream of the pre-auth surface od_config_tlv
+# guards, so the cases are the ones where a hostile blob still reaches storage.
+#
+# The zero-key case is the one to keep: Nordic and Silabs do not normalise it today, so this is
+# the assertion that says the promotion settled the divergence rather than averaging it.
+add_executable(od_config_test config_test.c)
+target_link_libraries(od_config_test od_shared)
+add_test(NAME config COMMAND od_config_test)
+
+# advert: the 16-byte MSD encoder. DIFFERENTIAL -- the test carries an independent
+# transcription of the shipped Zephyr/Silabs byte assembly and sweeps both encoders over the
+# input space, because this is a promotion of bytes three targets already broadcast. A vector
+# table derived from the new code would prove only self-consistency.
+#
+# What a green run does NOT prove: that any target calls it yet. All three still build their
+# own copy; this pins the bytes so those swaps are mechanical.
+add_executable(od_advert_test advert_test.c)
+target_link_libraries(od_advert_test od_shared)
+add_test(NAME advert COMMAND od_advert_test)
+
+# watchdog: strike counting, safe mode, the retained-byte layout and breadcrumb caching, driven
+# against a fake retained store and a fake WDT. SCAFFOLD -- no target implements od_hal_wdt.h
+# yet, so a green run here says the policy is right, NOT that any device is protected.
+#
+# The boot-loop cases carry the weight. A watchdog that cannot escape a boot loop is worse than
+# no watchdog: the device never advertises, is unreachable over BLE/DFU, and flattens its
+# battery faster than if it had simply hung.
+add_executable(od_watchdog_test watchdog_test.c)
+target_link_libraries(od_watchdog_test od_shared)
+add_test(NAME watchdog COMMAND od_watchdog_test)
 
 # Nordic config pin bytes are a wire contract and deliberately differ by
 # platform: nRF52840 uses absolute port*32+pin values, while nRF54 uses the

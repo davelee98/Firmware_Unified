@@ -1,6 +1,21 @@
 #ifndef OPENDISPLAY_CONSTANTS_H
 #define OPENDISPLAY_CONSTANTS_H
 
+/* Target-local constants ONLY.
+ *
+ * Eleven definitions left this file when the target adopted the canonical wire contract
+ * (shared/protocol/): CONFIG_CHUNK_SIZE, CONFIG_CHUNK_SIZE_WITH_PREFIX, MAX_CONFIG_CHUNKS,
+ * MAX_RESPONSE_DATA_SIZE, OD_BUS_TYPE_I2C, OD_NFC_IC_AUTO, OD_NFC_IC_TNB132M and the four
+ * OD_NFC_REC_*. Every one had the same value canonical carries, so nothing changed but the
+ * source of truth.
+ *
+ * OD_BUS_TYPE_I2C is why this is a rule and not a tidy-up. Canonical declares it as an
+ * ENUMERATOR; a macro of the same spelling textually rewrites the enumerator and the header
+ * fails to compile -- "expected identifier before numeric constant" pointing at this file, not
+ * at the enum. The canonical header warns about exactly this for OD_NFC_IC_*. So: do not add a
+ * definition here for anything shared/protocol/ names, even with a matching value.
+ */
+
 #define CONFIG_PKT_SYSTEM         0x01
 #define CONFIG_PKT_MANUFACTURER   0x02
 #define CONFIG_PKT_POWER          0x04
@@ -17,26 +32,14 @@
 #define CONFIG_PKT_FLASH          0x2B
 #define CONFIG_PKT_DATA_EXTENDED  0x2C
 
-#define CONFIG_CHUNK_SIZE               200
-#define CONFIG_CHUNK_SIZE_WITH_PREFIX   202
-#define MAX_CONFIG_CHUNKS               20
-#define MAX_RESPONSE_DATA_SIZE          100
+/* CONFIG_CHUNK_SIZE, CONFIG_CHUNK_SIZE_WITH_PREFIX, MAX_CONFIG_CHUNKS and
+ * MAX_RESPONSE_DATA_SIZE now come from shared/protocol/opendisplay_protocol.h. */
 
 #define GPIO_PIN_UNUSED 0xFF
 
-/* OpenDisplay config struct DataBus.bus_type (matches toolbox presets, e.g. 0x01 = I2C). */
-#define OD_BUS_TYPE_I2C 1u
-
-#define OD_NFC_IC_AUTO      0u
-#define OD_NFC_IC_TNB132M   1u
-#define OD_NFC_IC_SOC_NFCT  2u
-
-#define OD_NFC_REC_TEXT             0u
-#define OD_NFC_REC_URI              1u
-#define OD_NFC_REC_WELL_KNOWN_RAW   2u
-/* BLE payload: [mime_type_len][mime_type ascii][mime body UTF-8] -> NDEF MIME (SR). */
-#define OD_NFC_REC_MIME             3u
-#define OD_NFC_REC_RAW_NDEF         4u
+/* OD_BUS_TYPE_I2C (enum BusType), OD_NFC_IC_AUTO / OD_NFC_IC_TNB132M and the OD_NFC_REC_*
+ * record types now come from shared/protocol/. OD_NFC_IC_SOC_NFCT does not exist there and
+ * lives in protocol_pending.h with the sequence for landing it upstream. */
 
 /* transmission_modes bitfield, per toolbox config.yaml:
  *   bit0 streaming_decompression - streaming zlib inflate, 512-byte DEFLATE window

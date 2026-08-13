@@ -28,6 +28,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "od_span.h"
 #include "opendisplay_structs.h"
 
 #ifdef __cplusplus
@@ -47,14 +48,15 @@ enum od_config_tlv_result {
     OD_CFG_TLV_REJECTED      /* the callback refused a packet */
 };
 
-/* Receives ONE packet with its bounds already guaranteed: body_len is the declared size for
- * packet_id and body..body+body_len-1 lies inside the blob.
+/* Receives ONE packet as a span of exactly its body: body.n is the declared size for packet_id
+ * and every byte of it lies inside the blob. The callback cannot be handed a length that does
+ * not belong to the pointer, because it is not handed a length at all -- that pairing is what
+ * od_span_t exists to remove (CLAUDE.md decision 1).
  *
  * Return false to abort the walk (OD_CFG_TLV_REJECTED). Returning true for a packet the target
  * does not implement is correct and expected -- capability differences are not parse errors.
  */
-typedef bool (*od_config_tlv_packet_fn)(void *ctx, uint8_t packet_id,
-                                        const uint8_t *body, uint16_t body_len);
+typedef bool (*od_config_tlv_packet_fn)(void *ctx, uint8_t packet_id, od_span_t body);
 
 /* Declared body size for a packet id, or 0 if this build does not know the id.
  *
@@ -78,7 +80,7 @@ uint16_t od_config_tlv_body_size(uint8_t packet_id);
  * for nothing. The walk deliberately does no logging of its own -- shared/ has no log seam and
  * a kernel-free target may have nowhere to send it.
  */
-enum od_config_tlv_result od_config_tlv_walk(const uint8_t *blob, uint32_t len,
+enum od_config_tlv_result od_config_tlv_walk(od_span_t blob,
                                              od_config_tlv_packet_fn fn, void *ctx,
                                              uint8_t *version_out,
                                              uint8_t *unknown_id_out);
@@ -90,7 +92,7 @@ enum od_config_tlv_result od_config_tlv_walk(const uint8_t *blob, uint32_t len,
  * reject configs currently accepted across the whole fleet -- a deliberate decision to take
  * separately, not a side effect of moving the function.
  */
-uint16_t od_config_tlv_crc16(const uint8_t *data, uint32_t len);
+uint16_t od_config_tlv_crc16(od_span_t data);
 
 #ifdef __cplusplus
 }

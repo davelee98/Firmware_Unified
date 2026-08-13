@@ -2,7 +2,7 @@
 #include "od_log.h"
 #include "opendisplay_sensor_common.h"
 #include "opendisplay_ble.h"
-#include "opendisplay_structs.h"
+#include "od_runtime_types.h"
 
 #include <stdio.h>
 #include <zephyr/kernel.h>
@@ -168,7 +168,7 @@ void opendisplay_sensor_sht40_init(void)
 	for (uint8_t i = 0; i < cfg->sensor_count; i++) {
 		const struct SensorData *s = &cfg->sensors[i];
 
-		if (s->sensor_type != SENSOR_TYPE_SHT40) {
+		if (s->sensor_type != OD_SENSOR_TYPE_SHT40) {
 			continue;
 		}
 		struct od_i2c_bus bus;
@@ -208,7 +208,7 @@ void opendisplay_sensor_sht40_poll(void)
 	for (uint8_t i = 0; i < cfg->sensor_count; i++) {
 		const struct SensorData *s = &cfg->sensors[i];
 
-		if (s->sensor_type != SENSOR_TYPE_SHT40) {
+		if (s->sensor_type != OD_SENSOR_TYPE_SHT40) {
 			continue;
 		}
 		uint8_t start = sht40_msd_start(s);

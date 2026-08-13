@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.13.1)
 
 set(PROJECT_ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
+# shared/ -- ONE source list, four consumers (shared/sources.cmake). Sets OD_SHARED_SOURCES,
+# the per-tier lists, and OD_SHARED_INCLUDE_DIRS. Do not glob shared/ from this file.
+include(${PROJECT_ROOT}/../../shared/sources.cmake)
 # third_party is the REPO-LEVEL vendored tree, shared by every target -- not a per-target copy.
 # The source repo had its own third_party/ beside src/; importing that would have made this
 # repo's "one vendored copy for all targets" rule a fiction. ../../.. is the repo root.
@@ -89,7 +92,13 @@ add_custom_command(
 
 add_custom_target(factory_config_gen DEPENDS ${FACTORY_GEN_STAMP})
 
+# OD_SHARED_INCLUDE_DIRS FIRST, and that is a rule rather than a formatting choice: it carries
+# the canonical opendisplay_protocol.h / opendisplay_structs.h. ${SRC_DIR} used to carry
+# hand-written subsets of both, which shadowed them; those are gone (src/od_runtime_types.h now
+# holds the RAM-only types they also carried), and keeping shared/ ahead of src/ is what stops
+# another copy from quietly taking over if one reappears.
 target_include_directories(app PRIVATE
+  ${OD_SHARED_INCLUDE_DIRS}
   ${SRC_DIR}
   ${THIRD_PARTY_DIR}/bb_epaper/src
   ${PANEL_DIR}
@@ -212,6 +221,26 @@ target_sources(app PRIVATE
   ${THIRD_PARTY_DIR}/bb_epaper/src/Group5.cpp
   ${THIRD_PARTY_DIR}/uzlib/src/od_zlib_stream.c
 )
+
+# ------------------------------------------------------------------------------ shared/ ---
+# The PURE tier only: these need the C standard library and shared/protocol, nothing else.
+# od_adv_control.c and od_watchdog.c are deliberately NOT here -- this target implements
+# neither od_hal_adv.h nor od_hal_wdt.h, and taking a source whose HAL is missing buys an
+# unreferenced object that links only because nothing calls it. Add each tier when its HAL
+# lands, not before.
+#
+# COMPILED, NOT YET CALLED. src/opendisplay_config_parser.c still owns config parsing here;
+# these two are wired in so shared/ is proved to compile under the Zephyr toolchain -- a
+# different compiler, different warning set and a freestanding libc from the host tests --
+# ahead of the swap that makes them load-bearing. That is the point of doing it now.
+target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE})
+
+# The per-source INCLUDE_DIRECTORIES property that used to sit here is GONE, and its removal is
+# the point of the header adoption: it existed only to pin these two shared TUs to the canonical
+# opendisplay_protocol.h / opendisplay_structs.h while ${SRC_DIR} still carried subsets of the
+# same names. With the subsets deleted there is one definition of each on the include path, so
+# the whole target -- shared and local alike -- compiles against the same wire contract, which is
+# what the ordering above now enforces for everyone rather than for two files.
 
 if(CONFIG_OD_PLATFORM_NRF52840)
   target_sources(app PRIVATE

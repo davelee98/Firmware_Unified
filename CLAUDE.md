@@ -14,13 +14,17 @@ archive. One doc per task, at most; past that, write the code and flag the uncer
 
 ## Status
 
-- **`targets/esp32-idf/` is the only target that builds** — 10 boards, run on an ESP32-S3.
-  `nordic-zephyr` and `efr32bg22-slc` are README-only.
+- **`targets/esp32-idf/` is the only HARDWARE-VERIFIED target** — 10 boards, run on an ESP32-S3.
+  It is no longer the only one that builds: `nordic-zephyr` (`./build.sh`, nRF54L15) and
+  `efr32bg22-slc` (`./build-and-flash.sh --no-flash`) both build clean headless, verified
+  2026-08-13. Neither is README-only any more. Nothing but ESP32 has been flashed.
 - `./build.sh` there builds everything (it sources ESP-IDF itself; never on `PATH`).
   `tools/run_host_tests.sh` runs host tests. `compat/ratchet.sh` and
   `tools/sdkconfig_baseline.sh` are gates a change must not break.
-- **`shared/` is empty by design**; the ESP32 target holds the logic destined for it. Placeholder
-  READMEs under `shared/` and `tools/` are intentional — a missing file is not a bug.
+- **`shared/` is no longer empty** — `core/od_{adv_control,advert,config_asm,config_tlv,watchdog}.c`, all
+  listed in `shared/sources.cmake` (never globbed) in per-HAL tiers. Consumers: host tests and
+  `esp32-idf` take the aggregate; `nordic-zephyr` and `efr32bg22-slc` take the PURE tier,
+  compiled but not yet called. Most of the protocol logic still lives in the ESP32 target.
 - `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel}`.
 - **Never hardware-verified:** the WiFi/LAN transport, and the F4/F7 correctness fixes.
 - **`compat/` (Arduino shim) is at its floor of 5 files** — `TARGET_NRF` arms that leave with
@@ -42,8 +46,27 @@ that grep before proposing anything under `shared/`; extend it as targets are im
 
 ## Architectural decisions
 
-1. **`shared/` is plain C.** Two targets are C-only: interfaces are link-time `extern` C
-   functions the target implements. No C++ classes, no Arduino `String`.
+1. **`shared/` is plain C.** Every interface across the boundary is a link-time `extern` C
+   function the target implements. No C++ classes, no Arduino `String`.
+   Re-argued 2026-08-13 and upheld — but not because C++ is unavailable (all three toolchains
+   already compile target `.cpp`). It is that the boundary must be a C API for Zephyr's C
+   drivers and the Silabs superloop regardless, and the code being ported is already C in
+   `.cpp` files (~20k lines of `targets/esp32-idf/src/` hold 32 `new`, 9 `String`, one class).
+   So C++ buys implementation ergonomics only, priced in a doubled host gate, an
+   `-fno-exceptions -fno-rtti -fno-threadsafe-statics` contract spread across three build
+   systems `shared/` does not own, and an enforcement grep that libstdc++'s transitive
+   includes defeat. Three C-side rules buy back most of what RAII and strong types offered:
+   - **`_Static_assert` every wire size.** The `sizeof`-derived size table can go silently
+     wrong via include order (`shared/sources.cmake`, closing note) — a wrong *value*, not a
+     build error. Assert the sizes so it is a build error. Zero cost, C99, unused today.
+   - **Non-owning views are `od_span_t`** (`shared/core/od_span.h`), not ptr+len arguments.
+     `od_span_split()` is the checked cut and the one place bounds arithmetic is written;
+     `take`/`drop` saturate and are only for lengths already known to fit. The whole config
+     parse path takes spans; new shared code does too.
+   - **Single-exit + `goto cleanup`** in anything holding a resource across a fallible step.
+   Revisit only at `od_session.c` / `od_xfer_partial.c` / `od_zlib_stream.c`: nested resource
+   lifetimes with several failure exits per function are the one shape where manual cleanup
+   reliably loses. That is also the last point where switching is cheap.
 2. **One vtable, deliberately** — `od_panel_ops` (`targets/esp32-idf/hal/od_hal_panel.h`), for the
    one target with 2-3 panel backends. Keep it the only one.
 3. **Three toolchains stay three** (ESP-IDF, west/Zephyr, SLC), all CMake. Unification is about
@@ -112,6 +135,12 @@ Rationale in [docs/MIGRATION.md](docs/MIGRATION.md) / [docs/ARCHITECTURE.md](doc
   revertable.
 - **Delete nothing from the original repos** until the unified target is hardware-verified.
 - **Resolve divergence deliberately and write it down** — not by whichever repo was copied first.
+  **`Firmware` is the authority over `Firmware_NRF54`** when their algorithms disagree: it is the
+  field-proven original and what the host tooling was validated against, and the NRF54 port
+  re-derived several of them. So port the `esp32-idf` behaviour and make the Zephyr difference
+  justify itself — in a differential test, the Firmware form is the reference. `esp32-idf` is
+  C++ and `shared/` is plain C, so this usually means a C port, not a file move. A default, not
+  a licence to skip the write-up.
 
 ## Memory sensitivity
 

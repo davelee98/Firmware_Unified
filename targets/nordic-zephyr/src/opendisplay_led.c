@@ -1,7 +1,7 @@
 #include "opendisplay_led.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_constants.h"
-#include "opendisplay_structs.h"
+#include "od_runtime_types.h"
 #include "od_gpio.h"
 
 #include <stdbool.h>

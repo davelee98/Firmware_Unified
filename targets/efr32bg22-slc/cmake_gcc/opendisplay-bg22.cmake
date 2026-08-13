@@ -53,6 +53,14 @@ set(COPIED_SDK_PATH "")
 # directory. cmake_gcc/ -> targets/efr32bg22-slc/ -> targets/ -> repo root.
 cmake_path(SET OD_REPO_ROOT NORMALIZE "${CMAKE_CURRENT_LIST_DIR}/../../..")
 
+# shared/ -- ONE source list, four consumers (shared/sources.cmake). Sets the per-tier lists
+# OD_SHARED_SOURCES_{PURE,HAL_ADV,HAL_WDT}, the aggregate OD_SHARED_SOURCES, and
+# OD_SHARED_INCLUDE_DIRS. Third consumer to wire in, after targets/esp32-idf (whole aggregate)
+# and targets/nordic-zephyr (PURE only). Do not glob shared/ from this file, and do not name a
+# shared source directly below -- take a tier variable so a file added to shared/ reaches this
+# build the same day it reaches the host tests.
+include(${OD_REPO_ROOT}/shared/sources.cmake)
+
 # SEGGER RTT COMES FROM THE PINNED SDK, NOT FROM A VENDORED COPY.
 #
 # The import left a FATAL_ERROR here because segger_rtt had no home in this repo and the
@@ -258,6 +266,23 @@ add_library(slc OBJECT
     "${CMAKE_CURRENT_LIST_DIR}/../panel/od_bbep_efr32.cpp"
     "${OD_REPO_ROOT}/third_party/bb_epaper/src/Group5.cpp"
     "${OD_REPO_ROOT}/third_party/uzlib/src/od_zlib_stream.c"
+
+    # shared/ -- the PURE TIER ONLY: needs the C standard library and shared/protocol, nothing
+    # else, both of which this target already has. od_adv_control.c (HAL_ADV) and od_watchdog.c
+    # (HAL_WDT) are deliberately absent: this target implements neither od_hal_adv.h nor
+    # od_hal_wdt.h, and od_adv_control.c would fail the link with three undefined references --
+    # the intended failure, per README.md "Required at import: the advertising HAL". Add each
+    # tier when its HAL lands, not before.
+    #
+    # COMPILED, NOT YET CALLED, same as nordic-zephyr took it. ../opendisplay_config_parser.c
+    # still owns config parsing here; retiring it for od_config_tlv is a subsystem swap that
+    # needs its own commit and a hardware verify, and it is what actually spends the 4 KB
+    # od_config_asm buffer on a 32 KB part. Wiring the sources in first proves shared/ compiles
+    # under ARM GCC -- a third toolchain, a third warning set, and the smallest target -- ahead
+    # of the swap that makes them load-bearing. Cost today is nil: -ffunction-sections +
+    # -fdata-sections + --gc-sections (below) drop what nothing calls, and neither TU defines a
+    # static instance, so struct od_config_asm costs RAM only once something declares one.
+    ${OD_SHARED_SOURCES_PURE}
 )
 
 target_include_directories(slc PUBLIC
@@ -268,7 +293,15 @@ target_include_directories(slc PUBLIC
    # was "../include" -- the target's own vendored copy of the protocol headers.
    # This repo keeps exactly one copy, in shared/protocol/, so the local pair was
    # not imported. See the note on the protocol version above.
-   "${OD_REPO_ROOT}/shared/protocol"
+   #
+   # Now the whole OD_SHARED_INCLUDE_DIRS (shared/, shared/protocol, shared/core, shared/hal)
+   # rather than shared/protocol alone, because the PURE-tier sources above include their own
+   # headers, which in turn include the wire contract by its bare name. The include-ORDER
+   # hazard sources.cmake warns about does not exist here: nothing under this target is named
+   # opendisplay_protocol.h or opendisplay_structs.h, since the local pair was never imported,
+   # so there is exactly one definition of each on the path and no per-source pinning is
+   # needed. Re-importing those copies would reintroduce the hazard -- do not.
+   ${OD_SHARED_INCLUDE_DIRS}
    "${SDK_PATH}/segger/systemview/SEGGER"
    "${OD_REPO_ROOT}/third_party/bb_epaper/src"
    "${CMAKE_CURRENT_LIST_DIR}/../panel"

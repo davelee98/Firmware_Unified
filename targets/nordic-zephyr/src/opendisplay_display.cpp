@@ -7,7 +7,7 @@
 #include "opendisplay_constants.h"
 #include "opendisplay_epd_map.h"
 #include "opendisplay_protocol.h"
-#include "opendisplay_structs.h"
+#include "od_runtime_types.h"
 #include "opendisplay_touch.h"
 #include "od_board.h"
 #include "boot_screen.h"
@@ -637,7 +637,7 @@ extern "C" int opendisplay_display_partial_write_start(const uint8_t *payload, u
   }
   if (old_etag == 0u || old_etag != s_displayed_etag || new_etag == 0u) {
     if (err_code_out != nullptr) {
-      *err_code_out = OD_ERR_ETAG_MISMATCH;
+      *err_code_out = OD_ERR_PARTIAL_ETAG_MISMATCH;
     }
     return -1;
   }
@@ -650,13 +650,13 @@ extern "C" int opendisplay_display_partial_write_start(const uint8_t *payload, u
   if (rect_w == 0u || rect_h == 0u || (uint32_t)rect_x + rect_w > d->pixel_width
       || (uint32_t)rect_y + rect_h > d->pixel_height) {
     if (err_code_out != nullptr) {
-      *err_code_out = OD_ERR_RECT_OOB;
+      *err_code_out = OD_ERR_PARTIAL_RECT_OOB;
     }
     return -1;
   }
   if ((rect_x & 7u) != 0u || (rect_w & 7u) != 0u) {
     if (err_code_out != nullptr) {
-      *err_code_out = OD_ERR_RECT_ALIGN;
+      *err_code_out = OD_ERR_PARTIAL_RECT_ALIGN;
     }
     return -1;
   }

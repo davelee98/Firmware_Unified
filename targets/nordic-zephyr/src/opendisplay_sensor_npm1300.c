@@ -1,8 +1,10 @@
 #include "opendisplay_sensor_npm1300.h"
 #include "od_log.h"
 #include "opendisplay_sensor_common.h"
+/* OD_SENSOR_TYPE_NPM1300 (6) is not in the canonical contract yet -- see the header. */
+#include "protocol_pending.h"
 #include "opendisplay_ble.h"
-#include "opendisplay_structs.h"
+#include "od_runtime_types.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -40,7 +42,7 @@ static const struct SensorData *npm1300_config(void)
 		return NULL;
 	}
 	for (uint8_t i = 0; i < cfg->sensor_count; i++) {
-		if (cfg->sensors[i].sensor_type == SENSOR_TYPE_NPM1300) {
+		if (cfg->sensors[i].sensor_type == OD_SENSOR_TYPE_NPM1300) {
 			return &cfg->sensors[i];
 		}
 	}

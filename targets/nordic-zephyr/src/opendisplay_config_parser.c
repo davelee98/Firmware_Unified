@@ -106,8 +106,10 @@ static uint16_t config_toolbox_outer_crc16(const uint8_t *data, uint32_t body_le
  * config packet type. Returns 0 for a genuinely unknown type.
  *
  * These sizes are cross-checked three ways and all agree: the reference firmware
- * structs (Firmware/src/structs.h), this port's structs (opendisplay_structs.h),
- * and the py-opendisplay serializer docstrings (protocol/config_serializer.py).
+ * structs (Firmware/src/structs.h), the canonical wire contract
+ * (shared/protocol/opendisplay_structs.h -- this port carried a hand-written subset
+ * of it when this table was written, and now takes the real thing), and the
+ * py-opendisplay serializer docstrings (protocol/config_serializer.py).
  * The one place the old code disagreed with the wire was wifi_config (0x26):
  * this port skipped a hardcoded 162 bytes, but the serializer emits 160
  * ("Serialize WifiConfig to 160 bytes") and the reference struct is 160 — the
@@ -456,9 +458,9 @@ bool parseConfigBytes(uint8_t* configData, uint32_t configLen, struct GlobalConf
                     globalConfig->loaded = false;
                     return false;
                 }
-                if (globalConfig->passive_buzzer_count < 4 && offset + sizeof(struct PassiveBuzzerConfig) <= configLen - 2) {
-                    memcpy(&globalConfig->passive_buzzers[globalConfig->passive_buzzer_count], &configData[offset], sizeof(struct PassiveBuzzerConfig));
-                    offset += sizeof(struct PassiveBuzzerConfig);
+                if (globalConfig->passive_buzzer_count < 4 && offset + sizeof(struct BuzzerConfig) <= configLen - 2) {
+                    memcpy(&globalConfig->passive_buzzers[globalConfig->passive_buzzer_count], &configData[offset], sizeof(struct BuzzerConfig));
+                    offset += sizeof(struct BuzzerConfig);
                     if (offset > configLen) {
                         od_log_info("Offset overflow after passive_buzzer");
                         globalConfig->loaded = false;
@@ -466,14 +468,14 @@ bool parseConfigBytes(uint8_t* configData, uint32_t configLen, struct GlobalConf
                     }
                     globalConfig->passive_buzzer_count++;
                 } else if (globalConfig->passive_buzzer_count >= 4) {
-                    offset += sizeof(struct PassiveBuzzerConfig);
+                    offset += sizeof(struct BuzzerConfig);
                     if (offset > configLen) {
                         od_log_info("Offset overflow after passive_buzzer (skipped)");
                         globalConfig->loaded = false;
                         return false;
                     }
                 } else {
-                    od_log_info("passive_buzzer: need %zu, have %u", sizeof(struct PassiveBuzzerConfig), (unsigned)(configLen - 2 - offset));
+                    od_log_info("passive_buzzer: need %zu, have %u", sizeof(struct BuzzerConfig), (unsigned)(configLen - 2 - offset));
                     globalConfig->loaded = false;
                     return false;
                 }

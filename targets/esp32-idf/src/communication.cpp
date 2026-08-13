@@ -631,7 +631,7 @@ void handleWriteConfig(uint8_t* data, uint16_t len) {
      * (correctness review F3). This handler is reduced to policy + I/O, which is the point:
      * the checks that were missing are missing in ONE place for every target, and they are
      * covered by host vectors rather than by whichever malformed frame someone thought of. */
-    switch (od_config_asm_start(&g_configAsm, data, len)) {
+    switch (od_config_asm_start(&g_configAsm, od_span_make(data, len))) {
     case OD_CONFIG_ASM_SINGLE: {
         const bool ok = saveConfig(data, len);
         if (ok) {
@@ -700,7 +700,7 @@ void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
         }
     }
 
-    switch (od_config_asm_chunk(&g_configAsm, data, len)) {
+    switch (od_config_asm_chunk(&g_configAsm, od_span_make(data, len))) {
     case OD_CONFIG_ASM_ACCEPTED:
         sendResponse(ok_resp, sizeof(ok_resp));
         return;

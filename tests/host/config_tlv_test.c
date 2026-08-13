@@ -42,7 +42,7 @@ struct seen {
     int      refuse_at;     /* -1 = accept everything */
 };
 
-static bool on_packet(void *ctx, uint8_t id, const uint8_t *body, uint16_t len)
+static bool on_packet(void *ctx, uint8_t id, od_span_t body)
 {
     struct seen *s = (struct seen *)ctx;
     if (s->refuse_at >= 0 && (int)s->count == s->refuse_at) {
@@ -50,8 +50,8 @@ static bool on_packet(void *ctx, uint8_t id, const uint8_t *body, uint16_t len)
     }
     if (s->count < MAX_SEEN) {
         s->ids[s->count]    = id;
-        s->lens[s->count]   = len;
-        s->bodies[s->count] = body;
+        s->lens[s->count]   = (uint16_t)body.n;
+        s->bodies[s->count] = body.p;
     }
     s->count++;
     return true;
@@ -94,13 +94,13 @@ static void test_too_short(void)
     struct seen s; seen_init(&s);
     CASE("blobs with no room for header + CRC are refused");
     for (uint32_t n = 0; n < OD_CFG_TLV_HEADER_LEN + OD_CFG_TLV_CRC_LEN; ++n) {
-        CHECK(od_config_tlv_walk(g_blob, n, on_packet, &s, NULL, NULL) == OD_CFG_TLV_TOO_SHORT);
+        CHECK(od_config_tlv_walk(od_span_make(g_blob, n), on_packet, &s, NULL, NULL) == OD_CFG_TLV_TOO_SHORT);
     }
     CHECK(s.count == 0);
 
     CASE("null arguments are refused, not dereferenced");
-    CHECK(od_config_tlv_walk(NULL, 100, on_packet, &s, NULL, NULL) == OD_CFG_TLV_TOO_SHORT);
-    CHECK(od_config_tlv_walk(g_blob, 100, NULL, &s, NULL, NULL) == OD_CFG_TLV_TOO_SHORT);
+    CHECK(od_config_tlv_walk(od_span_make(NULL, 100), on_packet, &s, NULL, NULL) == OD_CFG_TLV_TOO_SHORT);
+    CHECK(od_config_tlv_walk(od_span_make(g_blob, 100), NULL, &s, NULL, NULL) == OD_CFG_TLV_TOO_SHORT);
 }
 
 static void test_walks_known_packets(void)
@@ -115,7 +115,7 @@ static void test_walks_known_packets(void)
     blob_add(0x27, 0xA3);
     blob_end();
 
-    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, &version, NULL) == OD_CFG_TLV_OK);
+    CHECK(od_config_tlv_walk(od_span_make(g_blob, g_len), on_packet, &s, &version, NULL) == OD_CFG_TLV_OK);
     CHECK(version == 0x07);
     CHECK(s.count == 3);
     CHECK(s.ids[0] == 0x01 && s.lens[0] == od_config_tlv_body_size(0x01));
@@ -141,7 +141,7 @@ static void test_repeatable_packets(void)
         blob_add(0x20, (uint8_t)(0xB0 + i));
     }
     blob_end();
-    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL, NULL) == OD_CFG_TLV_OK);
+    CHECK(od_config_tlv_walk(od_span_make(g_blob, g_len), on_packet, &s, NULL, NULL) == OD_CFG_TLV_OK);
     CHECK(s.count == 6);
     for (unsigned i = 0; i < 6; ++i) {
         CHECK(s.bodies[i][0] == (uint8_t)(0xB0 + i));
@@ -161,7 +161,7 @@ static void test_unknown_id_ends_the_walk(void)
     blob_add(0x04, 0xC2);
     blob_end();
 
-    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL, NULL) == OD_CFG_TLV_OK);
+    CHECK(od_config_tlv_walk(od_span_make(g_blob, g_len), on_packet, &s, NULL, NULL) == OD_CFG_TLV_OK);
     CHECK(s.count == 1);
     CHECK(s.ids[0] == 0x01);
 }
@@ -181,7 +181,7 @@ static void test_truncated_packet(void)
         seen_init(&s);
         const uint32_t shorter = g_len - cut;
         const enum od_config_tlv_result r =
-            od_config_tlv_walk(g_blob, shorter, on_packet, &s, NULL, NULL);
+            od_config_tlv_walk(od_span_make(g_blob, shorter), on_packet, &s, NULL, NULL);
         CHECK(r == OD_CFG_TLV_TRUNCATED);
         CHECK(s.count == 1);       /* the first packet still fit; the second did not */
     }
@@ -209,7 +209,7 @@ static void test_header_straddling_the_crc(void)
     g_blob[g_len++] = 0x01;        /* CRC byte 0 -- would be read as a KNOWN packet id */
     g_blob[g_len++] = 0x00;        /* CRC byte 1 */
 
-    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL, NULL) == OD_CFG_TLV_OK);
+    CHECK(od_config_tlv_walk(od_span_make(g_blob, g_len), on_packet, &s, NULL, NULL) == OD_CFG_TLV_OK);
     CHECK(s.count == 1);
 }
 
@@ -223,7 +223,7 @@ static void test_callback_refusal(void)
     blob_add(0x27, 0xF3);
     blob_end();
     s.refuse_at = 1;
-    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL, NULL) == OD_CFG_TLV_REJECTED);
+    CHECK(od_config_tlv_walk(od_span_make(g_blob, g_len), on_packet, &s, NULL, NULL) == OD_CFG_TLV_REJECTED);
     CHECK(s.count == 1);           /* the refused one is not recorded */
 }
 
@@ -237,7 +237,7 @@ static void test_unknown_id_is_reported(void)
     blob_add(0x01, 0xC1);
     g_blob[g_len++] = 0; g_blob[g_len++] = 0x7E;
     blob_end();
-    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL, &stopper) == OD_CFG_TLV_OK);
+    CHECK(od_config_tlv_walk(od_span_make(g_blob, g_len), on_packet, &s, NULL, &stopper) == OD_CFG_TLV_OK);
     CHECK(stopper == 0x7E);
 
     CASE("a walk that runs to the end reports no stopper");
@@ -246,7 +246,7 @@ static void test_unknown_id_is_reported(void)
     blob_begin(1);
     blob_add(0x01, 0xC2);
     blob_end();
-    CHECK(od_config_tlv_walk(g_blob, g_len, on_packet, &s, NULL, &stopper) == OD_CFG_TLV_OK);
+    CHECK(od_config_tlv_walk(od_span_make(g_blob, g_len), on_packet, &s, NULL, &stopper) == OD_CFG_TLV_OK);
     CHECK(stopper == 0x00);
 }
 
@@ -256,23 +256,22 @@ static void test_body_size_table(void)
     CHECK(od_config_tlv_body_size(0x01) == sizeof(struct SystemConfig));
     CHECK(od_config_tlv_body_size(0x26) == sizeof(struct WifiConfig));
     CHECK(od_config_tlv_body_size(0x27) == sizeof(struct SecurityConfig));
+    CHECK(od_config_tlv_body_size(0x2A) == sizeof(struct NfcConfig));
     CHECK(od_config_tlv_body_size(0x2C) == sizeof(struct DataExtended));
     CASE("unknown ids report zero");
     CHECK(od_config_tlv_body_size(0x00) == 0);
     CHECK(od_config_tlv_body_size(0x7E) == 0);
     CHECK(od_config_tlv_body_size(0xFF) == 0);
-    /* 0x22 is genuinely unassigned. 0x2A IS NOT -- it is OD_PKT_NFC, canonical, 32 bytes
-     * (opendisplay_structs.h). An earlier version of this test called it "a gap in the assigned
-     * range", which was simply false.
+    /* 0x22 is genuinely unassigned -- no struct, no id in the canonical contract. That is the
+     * only reason a size lookup may report 0.
      *
-     * It reports 0 because NO target here implements NFC, so it behaves as unknown and ends the
-     * walk -- exactly what every shipped build does. Adding it to the table would be a
-     * BEHAVIOUR CHANGE, not a fix: the walk would continue and later packets (0x2B, 0x2C) that
-     * are discarded today would start being applied. That is the size-table skip model,
-     * deferred as an incompatible wire change (D4). This assertion therefore pins current
-     * behaviour deliberately, and the comment says which of the two it is. */
+     * This assertion used to include 0x2A and claimed it reported 0 because "no target here
+     * implements NFC". Two of the three did, and the rule settled 2026-08-13 is that a target
+     * parses and stores every canonical packet whether or not it can act on it -- so 0x2A is in
+     * the table and is asserted with the known ids above. Kept as a note because the mistake is
+     * instructive: a size table transcribed from ONE target's parser encodes that target's
+     * hardware as if it were the protocol. */
     CHECK(od_config_tlv_body_size(0x22) == 0);
-    CHECK(od_config_tlv_body_size(0x2A) == 0);   /* canonical, unimplemented -- NOT unassigned */
 }
 
 /* -------------------------------------------------------------------------------- the CRC --- */
@@ -310,22 +309,22 @@ static void test_crc_matches_shipped(void)
         for (unsigned i = 0; i < n; ++i) {
             buf[i] = (uint8_t)((i * 31u + n) & 0xFFu);
         }
-        CHECK(od_config_tlv_crc16(buf, n) == ref_crc(buf, n));
+        CHECK(od_config_tlv_crc16(od_span_make(buf, n)) == ref_crc(buf, n));
     }
 
     /* The length-independence property is the whole reason the first two bytes are zeroed.
      * If a promotion ever drops that, this is what says so. */
     CASE("the leading length field does not affect the CRC");
     for (unsigned i = 0; i < 64u; ++i) buf[i] = (uint8_t)i;
-    const uint16_t a = od_config_tlv_crc16(buf, 64u);
+    const uint16_t a = od_config_tlv_crc16(od_span_make(buf, 64u));
     buf[0] = 0xAB; buf[1] = 0xCD;
-    CHECK(od_config_tlv_crc16(buf, 64u) == a);
+    CHECK(od_config_tlv_crc16(od_span_make(buf, 64u)) == a);
     buf[2] = 0xFF;
-    CHECK(od_config_tlv_crc16(buf, 64u) != a);   /* ...but real body bytes do */
+    CHECK(od_config_tlv_crc16(od_span_make(buf, 64u)) != a);   /* ...but real body bytes do */
 
     CASE("null and empty inputs are defined");
-    CHECK(od_config_tlv_crc16(NULL, 10) == 0xFFFFu);
-    CHECK(od_config_tlv_crc16(buf, 0) == 0xFFFFu);
+    CHECK(od_config_tlv_crc16(od_span_make(NULL, 10)) == 0xFFFFu);
+    CHECK(od_config_tlv_crc16(od_span_make(buf, 0)) == 0xFFFFu);
 }
 
 int main(void)
