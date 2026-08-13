@@ -22,6 +22,8 @@
 #include "od_hal_time.h"
 #include "od_hal_adc.h"
 #include "structs.h"
+/* shared/core: the 16-byte MSD encoding. This target no longer assembles those bytes. */
+#include "od_advert.h"
 /* OD-PORT: two panel IC values this file compares against are missing from
  * shared/protocol/ -- they were added to Firmware's VENDORED copy of the wire contract
  * and never propagated to canonical. See protocol_pending.h; it is a debt with a
@@ -1889,33 +1891,28 @@ void updatemsdata(){
     pollBq27220ForMsd();
     float batteryVoltage = readBatteryVoltage();
     float chipTemperature = readChipTemperature();
+    // The 16 bytes are encoded by shared/core/od_advert.c, not here. What stays in this file is
+    // ACQUISITION -- the sensor polls above and the two conversions below -- because that is the
+    // part that is genuinely this target's: readBatteryVoltage() returns volts from an ADC this
+    // chip owns, and the negative sentinel is this target's way of saying "no reading".
+    //
+    // The clamps, the (t + 40) * 2 step encoding, the 10-bit battery split across
+    // battery_voltage_low and status bit0, and the company id all left with the encoder. Nordic
+    // and Silabs open-coded the same arithmetic; a host that mis-reads a temperature now has one
+    // file to look at rather than three that agree only by inspection.
     uint16_t batteryVoltage10mv = 0;
     if (batteryVoltage >= 0.0f) {
-        uint16_t batteryVoltageMv = (uint16_t)(batteryVoltage * 1000.0f);
-        batteryVoltage10mv = batteryVoltageMv / 10;
-        if (batteryVoltage10mv > 511) {
-            batteryVoltage10mv = 511;
-        }
+        batteryVoltage10mv = od_advert_battery_10mv_from_mv((uint16_t)(batteryVoltage * 1000.0f));
     }
-    int16_t tempEncoded = (int16_t)((chipTemperature + 40.0f) * 2.0f);
-    if (tempEncoded < 0) tempEncoded = 0;
-    else if (tempEncoded > 255) tempEncoded = 255;
-    uint8_t temperatureByte = (uint8_t)tempEncoded;
-    uint8_t batteryVoltageLowByte = (uint8_t)(batteryVoltage10mv & 0xFF);
-    uint8_t statusByte = (((batteryVoltage10mv >> 8) & 0x01) ? OD_MSD_STATUS_BATTERY_VOLTAGE_BIT8 : 0) |
-                         (rebootFlag ? OD_MSD_STATUS_REBOOT_FLAG : 0) |
-                         (connectionRequested ? OD_MSD_STATUS_CONNECTION_REQUESTED : 0) |
-                         (((uint8_t)(mloopcounter << OD_MSD_STATUS_MAIN_LOOP_COUNTER_SHIFT)) & OD_MSD_STATUS_MAIN_LOOP_COUNTER_MASK);
-    // Build the 16-byte advertisement via the canonical wire struct (all little-endian),
-    // then copy into the global msd_payload[16] that the BLE adv APIs below consume.
-    struct MsdAdvertisement m;
-    memset(&m, 0, sizeof m);
-    m.company_id = 0x2446;
-    memcpy(m.dynamic, dynamicreturndata, sizeof m.dynamic);
-    m.chip_temperature = temperatureByte;
-    m.battery_voltage_low = batteryVoltageLowByte;
-    m.status = statusByte;
-    memcpy(msd_payload, &m, sizeof m);
+    struct od_advert_inputs adv;
+    memset(&adv, 0, sizeof adv);
+    adv.dynamic = dynamicreturndata;
+    adv.chip_temperature_c = chipTemperature;
+    adv.battery_10mv = batteryVoltage10mv;
+    adv.reboot_flag = rebootFlag;
+    adv.connection_requested = connectionRequested;
+    adv.loop_counter = mloopcounter;
+    od_advert_build(&adv, msd_payload);
     // Skip the (relatively expensive) advertisement rebuild when nothing changed;
     // the loop counter still advances so successive advertisements stay
     // distinguishable. Both targets used to keep their own copy of this check
@@ -1923,8 +1920,7 @@ void updatemsdata(){
     // here and only the push below is platform-specific.
     static uint8_t prev_msd_payload[16] = {0xFF};
     if (memcmp(prev_msd_payload, msd_payload, 16) == 0) {
-        mloopcounter++;
-        mloopcounter &= 0x0F;
+        mloopcounter = od_advert_advance_counter(mloopcounter);
         return;
     }
     memcpy(prev_msd_payload, msd_payload, 16);
@@ -1941,8 +1937,7 @@ void updatemsdata(){
     // (Implies TARGET_ESP32; the enclosing target guard is gone with the split.)
     opendisplay_mdns_update_msd_txt();
 #endif
-    mloopcounter++;
-    mloopcounter &= 0x0F;
+    mloopcounter = od_advert_advance_counter(mloopcounter);
 }
 
 // --- Quiet image-write logging ---------------------------------------------

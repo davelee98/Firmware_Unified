@@ -21,10 +21,14 @@ archive. One doc per task, at most; past that, write the code and flag the uncer
 - `./build.sh` there builds everything (it sources ESP-IDF itself; never on `PATH`).
   `tools/run_host_tests.sh` runs host tests. `compat/ratchet.sh` and
   `tools/sdkconfig_baseline.sh` are gates a change must not break.
-- **`shared/` is no longer empty** — `core/od_{adv_control,advert,config_asm,config_tlv,watchdog}.c`, all
-  listed in `shared/sources.cmake` (never globbed) in per-HAL tiers. Consumers: host tests and
-  `esp32-idf` take the aggregate; `nordic-zephyr` and `efr32bg22-slc` take the PURE tier,
-  compiled but not yet called. Most of the protocol logic still lives in the ESP32 target.
+- **`shared/` is no longer empty** — `core/od_{adv_control,advert,config,config_asm,config_tlv,watchdog}.c`
+  plus header-only `od_span.h`, all listed in `shared/sources.cmake` (never globbed) in per-HAL
+  tiers. Consumers: host tests and `esp32-idf` take the aggregate; `nordic-zephyr` and
+  `efr32bg22-slc` take the PURE tier, compiled but not yet called.
+  **CALLED AND HARDWARE-VERIFIED on `esp32-idf` (2026-08-13):** `od_adv_control`, `od_advert`,
+  `od_config_asm`, `od_config_tlv`, `od_span` — a board flashed with the `od_advert` swap wrote
+  a config carrying an NFC packet and completed an encrypted image upload. `od_config` is the
+  next swap and is still uncalled everywhere. Most protocol logic still lives in the ESP32 target.
 - `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel}`.
 - **Never hardware-verified:** the WiFi/LAN transport, and the F4/F7 correctness fixes.
 - **`compat/` (Arduino shim) is at its floor of 5 files** — `TARGET_NRF` arms that leave with
