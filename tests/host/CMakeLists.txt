@@ -88,6 +88,16 @@ add_executable(od_config_tlv_test config_tlv_test.c)
 target_link_libraries(od_config_tlv_test od_shared)
 add_test(NAME config_tlv COMMAND od_config_tlv_test)
 
+# config: the parsed aggregate -- instance caps, the Firmware zero-key rule, string termination,
+# and what a truncated blob leaves behind. Downstream of the pre-auth surface od_config_tlv
+# guards, so the cases are the ones where a hostile blob still reaches storage.
+#
+# The zero-key case is the one to keep: Nordic and Silabs do not normalise it today, so this is
+# the assertion that says the promotion settled the divergence rather than averaging it.
+add_executable(od_config_test config_test.c)
+target_link_libraries(od_config_test od_shared)
+add_test(NAME config COMMAND od_config_test)
+
 # advert: the 16-byte MSD encoder. DIFFERENTIAL -- the test carries an independent
 # transcription of the shipped Zephyr/Silabs byte assembly and sweeps both encoders over the
 # input space, because this is a promotion of bytes three targets already broadcast. A vector

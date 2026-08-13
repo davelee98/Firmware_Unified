@@ -30,6 +30,13 @@
 #   core/od_adv_control.c advertising/lifecycle policy          (LANDED — no wire surface)
 #   core/od_config_asm.c  chunked CONFIG_WRITE reassembly        (LANDED — closes F3)
 #   core/od_config_tlv.c  config blob walk + CRC                 (LANDED — pre-auth surface)
+#   core/od_config.c      the parsed aggregate: instance caps,   (LANDED — the storage half of
+#                         zero-key rule, string termination       the parser, downstream of the
+#                                                                 walk. Firmware is the authority
+#                                                                 per CLAUDE.md; its zero-key
+#                                                                 normalisation is promoted and
+#                                                                 the other two targets' lack of
+#                                                                 it is the divergence settled.)
 #   core/od_watchdog.c    strike/safe-mode/breadcrumb policy     (LANDED — SCAFFOLD: no target
 #                         implements hal/od_hal_wdt.h yet, so nothing arms a watchdog by linking
 #                         it. Policy first because it must behave identically on four chips and
@@ -80,6 +87,7 @@ set(OD_SHARED_SOURCES_PURE
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config_asm.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config_tlv.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_advert.c"
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_config.c"
 )
 
 set(OD_SHARED_SOURCES_HAL_ADV

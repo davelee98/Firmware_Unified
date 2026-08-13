@@ -69,13 +69,24 @@ enum od_config_tlv_result od_config_tlv_walk(const uint8_t *blob, uint32_t len,
              * incompatible wire change and is deferred (D4). Not an error: a config carrying a
              * packet this build does not know is newer, not corrupt.
              *
-             * NOTE 0x2A (OD_PKT_NFC) IS CANONICAL AND DELIBERATELY ABSENT from the table above.
-             * It is a known packet no target here implements, so it lands in this branch and
-             * abandons the remainder -- which is exactly what every shipped build does today.
-             * Adding it would be a behaviour change, not a bug fix: the walk would continue and
-             * later packets (0x2B, 0x2C) that are currently discarded would start being
-             * applied. That is the size-table skip model, deferred as an incompatible wire
-             * change (D4), and it must not arrive one packet id at a time. */
+             * NOTE 0x2A (OD_PKT_NFC) IS CANONICAL AND DELIBERATELY ABSENT from the table above,
+             * but the reason recorded here on 2026-08-05 was WRONG ON ITS FACTS and is corrected
+             * rather than deleted. It said "a known packet no target here implements, so this is
+             * exactly what every shipped build does today". Two of the three do implement it:
+             * targets/nordic-zephyr/src/opendisplay_config_parser.c handles CONFIG_PKT_NFC into
+             * nfc_configs[2] and continues the walk, and targets/efr32bg22-slc does the same.
+             * Only the ESP32 -- the one target with no NFC hardware -- stops here, and the table
+             * was transcribed from that parser.
+             *
+             * So this is not one behaviour preserved, it is TWO behaviours in conflict, and the
+             * resolution changes the wire either way: adding 0x2A makes the ESP32 start applying
+             * 0x2B/0x2C packets that follow an NFC packet and are discarded today, while leaving
+             * it out silently regresses Nordic and Silabs the moment either adopts this walk.
+             * Left as-is here because changing it is a wire decision, not a table edit -- it is
+             * NOT the deferred size-table skip model (D4), which is about ids that are unknown
+             * to the CANONICAL contract, and it must not be settled as a side effect of a
+             * promotion. od_config.c already stores 0x2A, so only this one line moves when it is
+             * settled. */
             if (unknown_id_out) {
                 *unknown_id_out = packet_id;
             }
