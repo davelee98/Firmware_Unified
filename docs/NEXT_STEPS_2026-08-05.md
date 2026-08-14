@@ -533,7 +533,8 @@ and `od_config` are called and HARDWARE-VERIFIED — but on `xiao_nrf52840`, not
 milestone is named for. Image upload, config write + reload across a reboot, MSD decode with live
 battery/temperature, and button presses all exercised on a flashed board. The L15 and LM20A build
 clean and remain unflashed, so the *target* is verified and this milestone's *board* is not; a
-board-specific fault (SAADC pin mapping, panel timing, RAM at 92%) would still be undiscovered.
+board-specific fault (SAADC pin mapping, panel timing, the reclaimed FLPR SRAM) would still be
+undiscovered.
 Remaining for step 5: dispatch, transfer paths, session, PIPE, compression.
 
 Once ESP32 correctness and the first two shared components are stable, resume the durable target
@@ -552,7 +553,7 @@ order in `MIGRATION.md`.
    queue's *behaviour*, not its existence: make the put non-blocking (it is `K_MSEC(100)` today,
    which parks the BT RX thread on a full queue), derive the depth from `PIPE_MAX_W + 2` instead
    of the hardcoded 40, and size slots by `OD_BLE_MAX_FRAME` rather than the ATT MTU — the ring
-   is 20,560 B on a 188 KB part against ESP32's 8,976 B. See ARCHITECTURE.md § "Target state for
+   is 20,560 B against ESP32's 8,976 B. See ARCHITECTURE.md § "Target state for
    Nordic".
 
 Do not use Zephyr `k_work` as a new owner of product policy. It may bridge an API context, while

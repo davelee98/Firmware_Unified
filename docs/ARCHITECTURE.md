@@ -526,7 +526,7 @@ behaves, and each difference is a way for stack context to stop being enqueue-on
    why 33 is the *reorder* number and not the queue number.
 3. **Slot width should be the frame bound, not the ATT MTU.** Nordic sizes each slot
    `OD_PIPE_MSG_DATA_MAX` (509, i.e. ATT MTU − 3); ESP32 uses `OD_BLE_MAX_FRAME` (256). At depth
-   40 that is **20,560 B** of `__noinit` ring on a part with 188 KB, against ESP32's 8,976 B —
+   40 that is **20,560 B** of `__noinit` ring against ESP32's 8,976 B —
    the single largest pipe buffer on the target, and larger than the 8,316 B reorder queue it
    feeds. Long writes are reassembled in the transport before dispatch, so the wire frame bound
    is the honest slot size.
