@@ -52,14 +52,15 @@ list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_nvs.c
                            ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_i2c.c
                            ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_adc.c
                            ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_panel.c
+                           ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_wdt.c
                            ${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_bbep.cpp
                            ${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_fastepd.cpp
                            ${CMAKE_CURRENT_LIST_DIR}/../ble/od_ble_nimble.cpp)
 
-# Shared sources. First entry is core/od_adv_control.c -- the portable advertising controller
-# (docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md). Compiled and linked here, but NOT yet called: the
-# NimBLE callbacks still own advertising, so this commit changes no on-air behaviour. Its
-# od_hal_adv_{program,start,stop} implementations are at the bottom of ble/od_ble_nimble.cpp.
+# Shared sources: the whole aggregate, because this target implements every HAL tier.
+# od_hal_adv_{program,start,stop} are at the bottom of ble/od_ble_nimble.cpp; od_hal_wdt is
+# hal/od_hal_wdt.c, listed above. Taking the aggregate rather than naming tiers is what makes a
+# new shared source reach this build without an edit here.
 list(APPEND OD_APP_SOURCES ${OD_SHARED_SOURCES})
 
 # ble/od_ble_rx.cpp is GONE, not forgotten. It held od_ble_on_write(): the bounds check,

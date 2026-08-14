@@ -13,6 +13,7 @@
 #include "boot_screen.h"
 #include "od_gpio.h"
 #include "od_zephyr_compat.h"
+#include "od_watchdog_app.h"
 #include "bb_epaper.h"
 #include "od_bbep_zephyr.h"
 #include <stdio.h>
@@ -134,6 +135,14 @@ static bool display_power_set(bool on)
   const struct DisplayConfig *d = display_cfg();
   uint8_t p;
 
+  /* Never bring the panel rail up in watchdog safe mode. Powering DOWN is still allowed, so a
+   * rail left on by a pre-safe-mode boot can still be shut off. This is the same gate the
+   * reference puts at the top of pwrmgm() (esp32-idf main.cpp), and display_power_set is this
+   * target's pwrmgm -- one refusal point covers boot refresh and every pushed image alike. */
+  if (on && od_watchdog_app_safe_mode()) {
+    od_log_warn("panel: power-up refused - watchdog safe mode");
+    return false;
+  }
   if (cfg == nullptr) {
     od_log_error("panel: global config unavailable");
     return false;
@@ -154,12 +163,20 @@ static bool display_power_set(bool on)
   const bool has_pwr_pin = (p != 0xFFu);
 
   if (!on) {
+    od_watchdog_app_phase(OD_WDT_PHASE_FORCE_OFF);
     if (has_pwr_pin) {
       opendisplay_display_park_pins();
       od_gpio_configure_output(p, false);
     }
+    od_watchdog_app_phase(OD_WDT_PHASE_IDLE_OFF);
     return true;
   }
+
+  /* Rail bring-up, breadcrumbed per sub-step. A 2026-08-03 freeze on the reference reset ~120 s
+   * into bring-up without ever reaching the init sequence, and a single ACQUIRE_COLD stamp could
+   * not say which step it died in. There is no PWRMGM_PMIC stamp here because no PMIC sits on
+   * this path -- the nPM1300 is read as a sensor, not brought up to power the panel. */
+  od_watchdog_app_phase(OD_WDT_PHASE_PWRMGM_RAIL);
 
   /* Boost-select conditioning is a panel-interface setting, not a rail switch: the panel
    * needs it whether or not this board can cut power. */
@@ -188,6 +205,7 @@ static bool display_power_set(bool on)
 
   /* Pre-drive the signal lines to their idle levels, exactly as pwrmgm() does, so the panel
    * comes out of its own power-on reset seeing a quiet bus rather than floating inputs. */
+  od_watchdog_app_phase(OD_WDT_PHASE_PWRMGM_PINS);
   if (d != nullptr) {
     od_gpio_configure_output(d->reset_pin, true);   /* RST idle HIGH */
     od_gpio_configure_output(d->cs_pin, true);      /* CS  idle HIGH */
@@ -209,6 +227,8 @@ static bool wait_for_refresh(uint32_t timeout_ms)
 {
   uint32_t elapsed = 0;
   bool saw_busy = false;
+
+  od_watchdog_app_phase(OD_WDT_PHASE_REFRESH_WAIT);
 
   /*
    * READ THE EXIT CONDITION CAREFULLY: this returns true only after it has seen BUSY go
@@ -403,6 +423,8 @@ static void partial_set_addr_window(BBEPDISP *pBBEP, int x, int y, int cx, int c
 
 static bool partial_write_stream_bytes(uint8_t *data, uint32_t len)
 {
+  /* Per-frame path; see dw_stream_raw_bytes(). */
+  od_watchdog_app_phase(OD_WDT_PHASE_STREAM);
   uint32_t offset = 0;
   while (offset < len) {
     if (s_partial.bytes_written >= s_partial.expected_stream_size) {
@@ -767,6 +789,9 @@ static void dw_log_progress(void)
 
 static int dw_stream_raw_bytes(const uint8_t *payload, uint32_t payload_len)
 {
+  /* Per-frame path. Repeats are filtered inside od_watchdog_breadcrumb(), so a stamp on every
+   * chunk costs one comparison once the phase is already STREAM. */
+  od_watchdog_app_phase(OD_WDT_PHASE_STREAM);
   uint32_t remaining = (s_written_bytes < s_total_bytes) ? (s_total_bytes - s_written_bytes) : 0u;
   const bool bitplanes = opendisplay_color_is_bitplanes(s_color_scheme);
   const uint8_t *p = payload;
@@ -849,6 +874,15 @@ extern "C" bool opendisplay_display_boot_apply(void)
   if (s_boot_applied) {
     return true;
   }
+  /* Three consecutive watchdog resets say the panel path is what wedges, so a fourth attempt is
+   * another reset. Reported as applied, not as a failure: the caller's failure arm retries, and
+   * retrying is exactly what safe mode exists to stop. The device stays up on BLE and DFU, which
+   * is the only way a bad config or a bad image can be replaced. */
+  if (od_watchdog_app_safe_mode()) {
+    od_log_warn("boot display skipped: watchdog safe mode");
+    s_boot_applied = true;
+    return true;
+  }
   if (d == nullptr) {
     od_log_error("boot display: no display config");
     return false;
@@ -881,9 +915,11 @@ extern "C" bool opendisplay_display_boot_apply(void)
     bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin,
                d->clk_pin, 0);
     od_bbep_wake(&s_epd);
+    od_watchdog_app_phase(OD_WDT_PHASE_INIT_SEQ);
     od_bbep_send_panel_init_full(&s_epd);
     if (!writeBootScreenWithQr(s_epd)) {
       od_log_warn("boot display: renderer failed; transmitting white fallback");
+      od_watchdog_app_phase(OD_WDT_PHASE_FILL);
       bbepFill(&s_epd, BBEP_WHITE, PLANE_DUPLICATE);
     }
     od_log_info("boot framebuffer transmitted; starting physical refresh (attempt %u)", attempt);
@@ -949,6 +985,7 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
   dw_init_mark("after initIO");
   od_bbep_wake(&s_epd);
   dw_init_mark("after wake (reset + busy)");
+  od_watchdog_app_phase(OD_WDT_PHASE_INIT_SEQ);
   od_bbep_send_panel_init_full(&s_epd);
   dw_init_mark("after pInitFull");
   bbepSetAddrWindow(&s_epd, 0, 0, d->pixel_width, d->pixel_height);

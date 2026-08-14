@@ -211,6 +211,8 @@ target_sources(app PRIVATE
   ${SRC_DIR}/od_zephyr_time.c
   ${SRC_DIR}/newlib_stubs.c
   ${SRC_DIR}/od_log.c
+  ${SRC_DIR}/od_hal_wdt.c
+  ${SRC_DIR}/od_watchdog_app.c
   ${SRC_DIR}/opendisplay_ble.c
   ${SRC_DIR}/opendisplay_battery.c
   ${SRC_DIR}/opendisplay_i2c.c
@@ -241,17 +243,14 @@ target_sources(app PRIVATE
 )
 
 # ------------------------------------------------------------------------------ shared/ ---
-# The PURE tier only: these need the C standard library and shared/protocol, nothing else.
-# od_adv_control.c and od_watchdog.c are deliberately NOT here -- this target implements
-# neither od_hal_adv.h nor od_hal_wdt.h, and taking a source whose HAL is missing buys an
-# unreferenced object that links only because nothing calls it. Add each tier when its HAL
-# lands, not before.
+# PURE needs the C standard library and shared/protocol, nothing else. HAL_WDT needs
+# shared/hal/od_hal_wdt.h, which src/od_hal_wdt.c implements over the devicetree watchdog0 and
+# gpregret2 nodes.
 #
-# COMPILED, NOT YET CALLED. src/opendisplay_config_parser.c still owns config parsing here;
-# these two are wired in so shared/ is proved to compile under the Zephyr toolchain -- a
-# different compiler, different warning set and a freestanding libc from the host tests --
-# ahead of the swap that makes them load-bearing. That is the point of doing it now.
-target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE})
+# HAL_ADV is still NOT here -- this target does not implement shared/hal/od_hal_adv.h, and taking
+# a source whose HAL is missing buys an unreferenced object that links only because nothing calls
+# it. Add each tier when its HAL lands, not before.
+target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE} ${OD_SHARED_SOURCES_HAL_WDT})
 
 # The per-source INCLUDE_DIRECTORIES property that used to sit here is GONE, and its removal is
 # the point of the header adoption: it existed only to pin these two shared TUs to the canonical

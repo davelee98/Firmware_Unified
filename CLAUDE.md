@@ -35,9 +35,16 @@ looks arbitrary and is not); delete the story.
   `tools/sdkconfig_baseline.sh` are gates a change must not break.
 - **`shared/` is no longer empty** — `core/od_{adv_control,advert,config,config_asm,config_tlv,watchdog}.c`
   plus header-only `od_span.h`, all listed in `shared/sources.cmake` (never globbed) in per-HAL
-  tiers. Consumers: host tests and `esp32-idf` take the aggregate; `nordic-zephyr` and
-  `efr32bg22-slc` take the PURE tier — called on Nordic, still compiled-only on Silabs except
-  `od_advert`.
+  tiers. Consumers: host tests and `esp32-idf` take the aggregate; `nordic-zephyr` takes PURE +
+  HAL_WDT; `efr32bg22-slc` takes PURE only — called on Nordic, still compiled-only on Silabs
+  except `od_advert`.
+  **`od_watchdog` is no longer a scaffold, and NOT YET HARDWARE-VERIFIED on either target.**
+  Both `esp32-idf` (`hal/od_hal_wdt.c`, over the IDF Task Watchdog) and `nordic-zephyr`
+  (`src/od_hal_wdt.c`, over the devicetree `watchdog0` + `gpregret2` nodes) implement
+  `od_hal_wdt.h` and call the policy through a per-target `od_watchdog_app` owner. Two things
+  to know before flashing: arming widens the ESP32 idle-task TWDT check from 60 s to
+  `OD_WDT_TIMEOUT_S` (300 s, the ~240 s panel-refresh bound), and on Nordic only `main()`
+  feeds — a wedge confined to the display work queue does not trip it.
   **CALLED AND HARDWARE-VERIFIED on `esp32-idf` (2026-08-13):** `od_adv_control`, `od_advert`,
   `od_config_asm`, `od_config_tlv`, `od_span` — a board flashed with the `od_advert` swap wrote
   a config carrying an NFC packet and completed an encrypted image upload.
