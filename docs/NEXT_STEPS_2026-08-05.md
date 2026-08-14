@@ -528,6 +528,14 @@ Every unrun item must name:
 
 ## Milestone 5 — Nordic/Zephyr nRF54L15 import
 
+**Status 2026-08-14: steps 1-3 done, and step 5 has landed its first two subsystems.** `od_advert`
+and `od_config` are called and HARDWARE-VERIFIED — but on `xiao_nrf52840`, not the L15 this
+milestone is named for. Image upload, config write + reload across a reboot, MSD decode with live
+battery/temperature, and button presses all exercised on a flashed board. The L15 and LM20A build
+clean and remain unflashed, so the *target* is verified and this milestone's *board* is not; a
+board-specific fault (SAADC pin mapping, panel timing, RAM at 92%) would still be undiscovered.
+Remaining for step 5: dispatch, transfer paths, session, PIPE, compression.
+
 Once ESP32 correctness and the first two shared components are stable, resume the durable target
 order in `MIGRATION.md`.
 
@@ -539,9 +547,19 @@ order in `MIGRATION.md`.
    and compression one subsystem at a time.
 6. Run host Gate 1 before each swap and target hardware Gate 2 after it.
 7. Keep MCUboot configuration, settings preservation, and signed-image behavior from the donor.
+8. **Finish converging the RX queue on ESP32's shape** — the callback already only enqueues
+   (`od_gatt_write()` → `k_msgq_put`, drained by `opendisplay_pipe_process()`), so this is the
+   queue's *behaviour*, not its existence: make the put non-blocking (it is `K_MSEC(100)` today,
+   which parks the BT RX thread on a full queue), derive the depth from `PIPE_MAX_W + 2` instead
+   of the hardcoded 40, and size slots by `OD_BLE_MAX_FRAME` rather than the ATT MTU — the ring
+   is 20,560 B on a 188 KB part against ESP32's 8,976 B. See ARCHITECTURE.md § "Target state for
+   Nordic".
 
 Do not use Zephyr `k_work` as a new owner of product policy. It may bridge an API context, while
-the application pump remains the owner of advertising, transfers, and teardown ordering.
+the application pump remains the owner of advertising, transfers, and teardown ordering. Item 8 is
+that rule applied to RX: the fix stays a queue drained by the pump, **not** moving the panel write
+onto the display workqueue, which would relocate the block and split state across two threads that
+`shared/core` is not thread-safe against.
 
 ## Milestone 6 — EFR32BG22 import
 

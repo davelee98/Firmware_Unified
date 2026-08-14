@@ -491,20 +491,50 @@ be resumed cannot run on a superloop at all. One direction is free; the other is
 there is exactly one design available, and writing two would reintroduce the duplication this
 repo exists to remove — two transfer state machines, two config parsers, two sets of bugs.
 
-**Both existing implementations already converged on this shape, independently.** This is
-observed, not aspirational:
+**All three implementations already converged on this shape, independently.** This is observed,
+not aspirational:
 
-| | Bare-metal (EFR32BG22) | "Threaded" (ESP32) |
-|---|---|---|
-| Arrival | `sl_bt_on_event()` → `opendisplay_ble_on_event()` | GATT write callback → `bleRxQueuePush()` (`ble_transport_esp32.cpp:305`) |
-| Drain | `app_process_action()` → `opendisplay_ble_process()` | `loop()` → `bleRxQueuePeek()` (`main.cpp:756`) |
-| Own tasks | none — no kernel component in the `.slcp` | **none** — no `xTaskCreate` anywhere in `Firmware/src/` |
-| Synchronisation | none needed | one mutex, and it is only for the log TX buffer |
+| | Bare-metal (EFR32BG22) | "Threaded" (ESP32) | Nordic/Zephyr |
+|---|---|---|---|
+| Arrival | `sl_bt_on_event()` → `opendisplay_ble_on_event()` | GATT write callback → `bleRxQueuePush()` (`ble_transport_esp32.cpp:305`) | `od_gatt_write()` → `opendisplay_pipe_on_write()` → `k_msgq_put()` |
+| Drain | `app_process_action()` → `opendisplay_ble_process()` | `loop()` → `bleRxQueuePeek()` (`main.cpp:756`) | `main()` → `opendisplay_ble_process()` → `opendisplay_pipe_process()` |
+| Own tasks | none — no kernel component in the `.slcp` | **none** — no `xTaskCreate` anywhere in `Firmware/src/` | a display workqueue thread (8 KB stack) for refresh, plus adv/DFU work items |
+| Synchronisation | none needed | one mutex, and it is only for the log TX buffer | the msgq itself; dispatch is single-flow on the main thread |
 
 The ESP32 firmware is a single-flow queue-drain loop that happens to run inside Arduino's
 `loopTask`. It is already a bare-metal architecture wearing an RTOS hat. Adopting the
 bare-metal contract costs the ESP32 target nothing it is not already doing — it only stops it
 from *acquiring* a dependence on threads during the IDF port, which is the realistic risk.
+
+### Target state for Nordic: the same BLE shape as ESP32, and the callback only writes to a queue
+
+**In the target state `targets/nordic-zephyr` has the same BLE shape as `targets/esp32-idf`: the
+GATT write callback does nothing but enqueue, and a drain run from the target's own loop
+dispatches.** Nordic already has that shape in outline — `od_gatt_write()` enqueues into
+`s_pipe_msgq` and `opendisplay_pipe_process()` drains it from the main loop, so dispatch and the
+panel SPI write do NOT run in Zephyr's BT RX context. What is not yet converged is *how* the queue
+behaves, and each difference is a way for stack context to stop being enqueue-only:
+
+1. **The put must not block.** `opendisplay_pipe_on_write()` calls `k_msgq_put(..., K_MSEC(100))`,
+   so a full queue parks the BT RX thread for up to 100 ms — the callback waiting on the loop is
+   exactly the coupling rule 3 forbids, just with a timeout on it. ESP32's `bleRxQueuePush()`
+   returns false immediately and logs the drop. Match that: non-blocking put, drop-and-log.
+2. **Depth must be derived from the pipe window, not hardcoded.** Nordic's is a literal 40;
+   ESP32 derives `PIPE_MAX_W + 2` so a full window plus the unsequenced `0x0082` END fits, with a
+   `static_assert` tying the two together. A hardcoded depth silently stops matching the window
+   the moment either moves — `command_queue.h` records that this already happened once, and also
+   why 33 is the *reorder* number and not the queue number.
+3. **Slot width should be the frame bound, not the ATT MTU.** Nordic sizes each slot
+   `OD_PIPE_MSG_DATA_MAX` (509, i.e. ATT MTU − 3); ESP32 uses `OD_BLE_MAX_FRAME` (256). At depth
+   40 that is **20,560 B** of `__noinit` ring on a part with 188 KB, against ESP32's 8,976 B —
+   the single largest pipe buffer on the target, and larger than the 8,316 B reorder queue it
+   feeds. Long writes are reassembled in the transport before dispatch, so the wire frame bound
+   is the honest slot size.
+
+What must NOT be done instead: moving the panel write onto the existing display workqueue. That
+relocates the block rather than removing it, and splits transfer state across two threads —
+which `shared/core` is explicitly not thread-safe against (rule 3). The queue drained by the
+pump is the mechanism; a second thread owning protocol state is the thing being avoided.
 
 ### The rules
 
@@ -515,8 +545,9 @@ from *acquiring* a dependence on threads during the IDF port, which is the reali
 2. **`shared/core` owns no thread, task, timer, or work queue.** The target's loop calls in;
    core never calls out to wait. There is no `od_core_task()`.
 3. **`shared/core` is not thread-safe, by contract.** The target guarantees single-flow entry:
-   ISR and stack-callback context does nothing but enqueue. Both targets already honour this.
-   Stating it as a contract is far cheaper than putting locks in `shared/` — the BG22 would pay
+   ISR and stack-callback context does nothing but enqueue. All three targets honour this;
+   Nordic's put can still *block* stack context for 100 ms, which § "Target state for Nordic"
+   below closes. Stating it as a contract is far cheaper than putting locks in `shared/` — the BG22 would pay
    RAM and code for mutual exclusion it does not need, and locks in shared code are exactly the
    kind of thing that is correct on the target it was written for.
 4. **State is caller-owned and statically sized.** No hidden singletons assuming one instance,

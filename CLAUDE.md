@@ -22,21 +22,44 @@ looks arbitrary and is not); delete the story.
 
 ## Status
 
-- **`targets/esp32-idf/` is the only HARDWARE-VERIFIED target** — 10 boards, run on an ESP32-S3.
-  It is no longer the only one that builds: `nordic-zephyr` (`./build.sh`, nRF54L15) and
-  `efr32bg22-slc` (`./build-and-flash.sh --no-flash`) both build clean headless, verified
-  2026-08-13. Neither is README-only any more. Nothing but ESP32 has been flashed.
-- `./build.sh` there builds everything (it sources ESP-IDF itself; never on `PATH`).
-  `tools/run_host_tests.sh` runs host tests. `compat/ratchet.sh` and
+- **Two HARDWARE-VERIFIED targets.** `targets/esp32-idf/` — 10 boards, run on an ESP32-S3. And
+  `targets/nordic-zephyr/` **as of 2026-08-14, on the `xiao_nrf52840` board only**: image upload,
+  config write + reload, and host-side MSD decode all exercised on a flashed device. Its other
+  two boards (`xiao_nrf54l15`, `xiao_nrf54lm20a`) still build clean but have NOT been flashed, so
+  the target is verified, the L15 is not. `efr32bg22-slc` builds headless
+  (`./build-and-flash.sh --no-flash`) and has never been flashed.
+- Paths in this bullet are relative to `targets/esp32-idf/`. `./build.sh` there builds every board
+  fragment (it sources ESP-IDF itself; never on `PATH`). `tools/run_host_tests.sh` runs host tests
+  — or drive them directly the way CI does, `cmake -S tests/host -B <dir> && ctest --test-dir
+  <dir>`, which is the repo-root path and needs no ESP-IDF. `compat/ratchet.sh` and
   `tools/sdkconfig_baseline.sh` are gates a change must not break.
 - **`shared/` is no longer empty** — `core/od_{adv_control,advert,config,config_asm,config_tlv,watchdog}.c`
   plus header-only `od_span.h`, all listed in `shared/sources.cmake` (never globbed) in per-HAL
   tiers. Consumers: host tests and `esp32-idf` take the aggregate; `nordic-zephyr` and
-  `efr32bg22-slc` take the PURE tier, compiled but not yet called.
+  `efr32bg22-slc` take the PURE tier — called on Nordic, still compiled-only on Silabs except
+  `od_advert`.
   **CALLED AND HARDWARE-VERIFIED on `esp32-idf` (2026-08-13):** `od_adv_control`, `od_advert`,
   `od_config_asm`, `od_config_tlv`, `od_span` — a board flashed with the `od_advert` swap wrote
-  a config carrying an NFC packet and completed an encrypted image upload. `od_config` is the
-  next swap and is still uncalled everywhere. Most protocol logic still lives in the ESP32 target.
+  a config carrying an NFC packet and completed an encrypted image upload.
+  **CALLED AND HARDWARE-VERIFIED on `nordic-zephyr` (2026-08-14, `xiao_nrf52840`):** `od_advert`
+  and `od_config`. `struct od_config` is the parsed-config aggregate (the `struct GlobalConfig`
+  copies are gone), `od_config_parse()` is the whole of `loadGlobalConfig()`, and Nordic's
+  530-line packet switch, its own CRC-16 and its own size table went with it. Evidence from one
+  flashed board: image upload completes; a config write is re-parsed across a reboot; the host
+  decodes the MSD correctly, with battery and temperature right (the two fields `od_advert`
+  re-encodes, including its float-domain clamp) and button presses reaching the dynamic block
+  (so the `binary_inputs` packet survives the new parse and lands where the encoder reads it).
+  That upload only passed once BLE TX power was fixed — see `zephyr/CMakeLists.txt`
+  `OD_TX_POWER_DBM`, which also records why Zephyr's `BT_CTLR_TX_PWR_*` Kconfig is inert under
+  the SoftDevice Controller.
+  **CALLED, NOT YET FLASHED:** `od_advert` on `efr32bg22-slc` — with that, no open-coded MSD copy
+  is left on any target, and `tests/host/advert_test.c` holds the two encoders they shipped as the
+  differential reference (do not "update" those to match the encoder).
+  `efr32bg22-slc` still open-codes the config parse: measured 2026-08-14 as
+  +1 byte of RAM **only with `OD_CONFIG_WITH_{TOUCH,BUZZER,WIFI,DATA_EXTENDED}=0`** (gated 909 B
+  vs its current 844 + 64; ungated 1617 B against 484 B of static slack at 98.5% RAM). Its real
+  gate is `MAX_CONFIG_SIZE` 4096 + the NVM3 object-size check, not the aggregate. Most remaining
+  protocol logic (dispatch, transfer, session) still lives in the ESP32 target.
 - `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel}`.
 - **Never hardware-verified:** the WiFi/LAN transport, and the F4/F7 correctness fixes.
 - **`compat/` (Arduino shim) is at its floor of 5 files** — `TARGET_NRF` arms that leave with
