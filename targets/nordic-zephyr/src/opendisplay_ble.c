@@ -384,7 +384,7 @@ static float s_chip_temperature = -999.0f;
  * mpsl_temperature_get() and is safe after bt_enable(). Legacy Zephyr temp
  * drivers block on DATARDY IRQ; keep this call after the stack is up.
  */
-static void read_chip_temperature_once(void)
+static void read_chip_temperature(void)
 {
 #if DT_HAS_COMPAT_STATUS_OKAY(nordic_nrf_temp)
 	const struct device *temp_dev = DEVICE_DT_GET(DT_NODELABEL(temp));
@@ -412,6 +412,9 @@ static void update_msd_payload(void)
 	opendisplay_sensor_bq27220_poll();
 	opendisplay_sensor_npm1300_poll();
 	battery_voltage_10mv = opendisplay_battery_get_10mv();
+	/* Reference updatemsdata() reads the die temperature per publish; every caller
+	 * of this function runs after bt_enable(). */
+	read_chip_temperature();
 
 	temp_encoded = (int16_t)((s_chip_temperature + 40.0f) * 2.0f);
 	if (temp_encoded < 0) {
@@ -900,7 +903,6 @@ void opendisplay_ble_init(void)
 	if (IS_ENABLED(CONFIG_SETTINGS)) {
 		(void)settings_load();
 	}
-	read_chip_temperature_once();
 
 	opendisplay_button_init();
 	opendisplay_touch_init();
