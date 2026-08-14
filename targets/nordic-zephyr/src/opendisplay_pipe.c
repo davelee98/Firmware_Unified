@@ -283,6 +283,23 @@ static bool derive_session_id(const uint8_t session_key[16],
   return true;
 }
 
+/*
+ * Constant-time equality, for comparing a MAC against an attacker-supplied value.
+ * memcmp() returns as soon as two bytes differ, so its runtime reveals how many leading
+ * bytes matched -- enough to forge a 16-byte tag one byte at a time. This always reads all
+ * len bytes and folds them into a single accumulator. Matches the reference's
+ * constantTimeCompare() (Firmware/src/encryption.cpp).
+ */
+static bool od_ct_equal(const uint8_t *a, const uint8_t *b, size_t len)
+{
+  volatile uint8_t diff = 0u;
+
+  for (size_t i = 0; i < len; i++) {
+    diff |= (uint8_t)(a[i] ^ b[i]);
+  }
+  return diff == 0u;
+}
+
 static bool od_random(uint8_t *buf, size_t len)
 {
   if (!s_crypto_ready) {
@@ -707,7 +724,7 @@ static bool authenticate_handle(const uint8_t *payload, uint16_t payload_len, ui
   if (!aes_cmac_16(sec->encryption_key, challenge_input, sizeof(challenge_input), expected)) {
     return false;
   }
-  if (memcmp(expected, &payload[16], 16u) != 0) {
+  if (!od_ct_equal(expected, &payload[16], 16u)) {
     rsp[2] = AUTH_STATUS_FAILED;
     memset(s_session.pending_server_nonce, 0, 16u);
     return false;
