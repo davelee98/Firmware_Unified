@@ -30,6 +30,7 @@
  * documented removal sequence, not a second home for wire constants. */
 #include "protocol_pending.h"
 #include "od_log.h"
+#include "od_watchdog_app.h"
 #include "buzzer_control.h"
 #include "sensor_sht40.h"
 #include "sensor_bq27220.h"
@@ -184,13 +185,6 @@ void bbepWaitBusy(BBEPDISP *pBBEP);
  * docs/BBEPAPER_IO_BACKENDS.md. */
 void bbepDeInitIO(void);
 bool bbepIsBusy(BBEPDISP *pBBEP);
-#ifdef BBEP_T133A01
-void bbepSetCS2(BBEPDISP *pBBEP, uint8_t cs);
-void bbepWriteCmdData(BBEPDISP *pBBEP, uint8_t cmd, const uint8_t *pData, int iLen);
-void bbepStartDataStream(BBEPDISP *pBBEP, uint8_t cmd);
-void bbepWriteDataStreamByte(BBEPDISP *pBBEP, uint8_t data);
-void bbepEndDataStream(BBEPDISP *pBBEP);
-#endif
 void flashLed(uint8_t color, uint8_t brightness);
 bool waitforrefresh(int timeout);
 
@@ -226,132 +220,6 @@ static void prepareEpdRailForBoot() {
     }
 #endif
 }
-
-#ifdef BBEP_T133A01
-// CS2 must be set before bbepInitIO() so dual-chip init reaches both controllers.
-static void e1004InitPanel(void) {
-    const DisplayConfig& d = globalConfig.displays[0];
-    bbepSetCS2(&bbep, e1004_cs2_pin());
-    bbepInitIO(&bbep, d.dc_pin, d.reset_pin, d.busy_pin, d.cs_pin, d.data_pin, d.clk_pin, 8000000);
-}
-
-// Half-panel DTM for bwgbry_split: CS held for left half, then right (no FB).
-static bool e1004GeometryOk = false;
-static bool e1004StreamOpen = false;
-static bool e1004OnLeftHalf = true;
-static uint32_t e1004HalfBytesWritten = 0;
-static uint32_t e1004HalfPlaneBytes = 0;
-
-void e1004_end_plane(void);
-
-static uint8_t e1004_panel_byte(uint8_t packed) {
-    auto nibble = [](uint8_t c) -> uint8_t {
-        c &= 0x0f;
-        switch (c) {
-        case 0x00: case 0x01: case 0x02: case 0x03: case 0x05: case 0x06:
-            return c;
-        default:
-            return 0x00;
-        }
-    };
-    return (uint8_t)((nibble(packed >> 4) << 4) | nibble(packed));
-}
-
-static void e1004_ccset_both(void) {
-    uint8_t data = 0x01;
-    od_hal_gpio_write(bbep.iCS2Pin, false);
-    bbep.iCSPin = bbep.iCS1Pin;
-    bbepWriteCmdData(&bbep, 0xe0, &data, 1);
-    od_hal_gpio_write(bbep.iCS2Pin, true);
-    bbep.iCSPin = bbep.iCS1Pin;
-    bbepWaitBusy(&bbep);
-    od_hal_delay_ms(10);
-}
-
-static uint32_t e1004_half_plane_bytes(void) {
-    return ((uint32_t)bbep.native_width / 4u) * (uint32_t)bbep.native_height;
-}
-
-bool e1004_begin_plane(void) {
-    if (!e1004_panel_used() || !e1004GeometryOk) return false;
-    if (e1004StreamOpen) e1004_end_plane();
-    e1004_ccset_both();
-    e1004HalfPlaneBytes = e1004_half_plane_bytes();
-    e1004HalfBytesWritten = 0;
-    e1004OnLeftHalf = true;
-    bbep.iCSPin = bbep.iCS1Pin;
-    bbepStartDataStream(&bbep, UC8151_DTM1);
-    /* Payload now goes to the bb_epaper backend's SPI device, not the Arduino SPI object in
-     * vendor/fastepd. Those were TWO devices on SPI2_HOST -- see panel/od_bbep_stream.h.
-     * Opened after bbepStartDataStream() because that issues the controller's data-write
-     * command, which needs the backend's own CS framing. */
-    od_bbep_stream_begin(bbep.iCSPin);
-    e1004StreamOpen = true;
-    return true;
-}
-
-bool e1004_advance_to_cs2(void) {
-    if (!e1004StreamOpen || !e1004OnLeftHalf) return false;
-    od_bbep_stream_end();          /* release CS1 before the command frames below */
-    bbepEndDataStream(&bbep);
-    e1004OnLeftHalf = false;
-    e1004HalfBytesWritten = 0;
-    bbep.iCSPin = bbep.iCS2Pin;
-    bbepStartDataStream(&bbep, UC8151_DTM1);
-    od_bbep_stream_begin(bbep.iCSPin);   /* ...and hold CS2 for the right half */
-    return true;
-}
-
-void e1004_end_plane(void) {
-    if (!e1004StreamOpen) return;
-    od_bbep_stream_end();
-    bbepEndDataStream(&bbep);
-    bbep.iCSPin = bbep.iCS1Pin;
-    e1004StreamOpen = false;
-    e1004OnLeftHalf = true;
-    e1004HalfBytesWritten = 0;
-}
-
-void e1004_write_stream_bytes(const uint8_t* data, uint16_t len) {
-    if (!e1004StreamOpen || !data || len == 0) return;
-    uint8_t scratch[128];
-    uint16_t off = 0;
-    while (off < len) {
-        uint16_t n = (uint16_t)(len - off);
-        if (n > sizeof(scratch)) n = sizeof(scratch);
-        for (uint16_t i = 0; i < n; i++) scratch[i] = e1004_panel_byte(data[off + i]);
-        od_bbep_stream_write(scratch, n);
-        off = (uint16_t)(off + n);
-    }
-    e1004HalfBytesWritten += len;
-}
-
-static void e1004_sink_bytes(uint8_t* data, uint32_t len) {
-    while (len > 0 && e1004StreamOpen) {
-        if (e1004HalfPlaneBytes == 0) return;
-        uint32_t space = e1004HalfPlaneBytes - e1004HalfBytesWritten;
-        if (space == 0) {
-            if (e1004OnLeftHalf) {
-                if (!e1004_advance_to_cs2()) return;
-                continue;
-            }
-            return;
-        }
-        uint16_t take = (len < space) ? (uint16_t)len : (uint16_t)((space > 0xFFFFu) ? 0xFFFFu : space);
-        e1004_write_stream_bytes(data, take);
-        data += take;
-        len -= take;
-        if (e1004OnLeftHalf && e1004HalfBytesWritten >= e1004HalfPlaneBytes) {
-            if (!e1004_advance_to_cs2()) return;
-        }
-    }
-}
-#else
-bool e1004_begin_plane(void) { return false; }
-bool e1004_advance_to_cs2(void) { return false; }
-void e1004_end_plane(void) {}
-void e1004_write_stream_bytes(const uint8_t* data, uint16_t len) { (void)data; (void)len; }
-#endif
 
 // bb_epaper 71f6e70 replaced EP397/EP426 full-init RAM windows with SET_ORIENTATION
 // (flip180=0 → 0x11=0x02 on 800-wide) while part inits and our partial helpers still
@@ -391,13 +259,6 @@ static void epdAlignCustomPartialRamMode(void) {
 
 static void initBbepPanelSession() {
     const DisplayConfig& d = globalConfig.displays[0];
-#ifdef BBEP_T133A01
-    if (e1004_panel_used()) {
-        e1004InitPanel();
-        od_hal_delay_ms(200);
-        return;
-    }
-#endif
     bbepInitIO(&bbep, d.dc_pin, d.reset_pin, d.busy_pin, d.cs_pin, d.data_pin, d.clk_pin, 8000000);
     bbepWakeUp(&bbep);
     bbepSendCMDSequence(&bbep, bbep.pInitFull);
@@ -532,40 +393,32 @@ static bool epdSessionAcquire(bool partialInit) {
                      epdRailUsesAxp2101() ? " + AXP2101 I2C" : "");
         if (!epdSessionUsesFastepd()) {
             const DisplayConfig& d = globalConfig.displays[0];
-#ifdef BBEP_T133A01
-            if (e1004_panel_used()) {
-                e1004InitPanel();
-                epdSessionInitWasPartial = false;
-            } else
-#endif
-            {
-                /* Per-step timing. A cold bring-up is three vendor calls and, when the panel
-                 * is not answering, each one silently burns a full BUSY timeout (5 s B/W,
-                 * 30 s multi-colour) inside bb_epaper and returns success. From the outside
-                 * that is one opaque 16-30 s stall between "COLD bring-up" and the next line
-                 * -- which blocks loop(), so queued BLE responses cannot be notified and the
-                 * host times out. Naming the step that costs the time is the difference
-                 * between reading a log and guessing. Cheap: four log lines per cold acquire,
-                 * not per transfer. */
-                uint32_t tStep = od_hal_uptime_ms();
-                bbepInitIO(&bbep, d.dc_pin, d.reset_pin, d.busy_pin, d.cs_pin, d.data_pin, d.clk_pin, 8000000);
-                od_log_debug("[EPD cold] bbepInitIO %u ms", (unsigned)(od_hal_uptime_ms() - tStep));
+            /* Per-step timing. A cold bring-up is three vendor calls and, when the panel
+             * is not answering, each one silently burns a full BUSY timeout (5 s B/W,
+             * 30 s multi-colour) inside bb_epaper and returns success. From the outside
+             * that is one opaque 16-30 s stall between "COLD bring-up" and the next line
+             * -- which blocks loop(), so queued BLE responses cannot be notified and the
+             * host times out. Naming the step that costs the time is the difference
+             * between reading a log and guessing. Cheap: four log lines per cold acquire,
+             * not per transfer. */
+            uint32_t tStep = od_hal_uptime_ms();
+            bbepInitIO(&bbep, d.dc_pin, d.reset_pin, d.busy_pin, d.cs_pin, d.data_pin, d.clk_pin, 8000000);
+            od_log_debug("[EPD cold] bbepInitIO %u ms", (unsigned)(od_hal_uptime_ms() - tStep));
 
-                tStep = od_hal_uptime_ms();
-                bbepWakeUp(&bbep);
-                od_log_debug("[EPD cold] bbepWakeUp %u ms", (unsigned)(od_hal_uptime_ms() - tStep));
+            tStep = od_hal_uptime_ms();
+            bbepWakeUp(&bbep);
+            od_log_debug("[EPD cold] bbepWakeUp %u ms", (unsigned)(od_hal_uptime_ms() - tStep));
 
-                const uint8_t* initSeq = partialInit ? (bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull)
-                                                     : bbep.pInitFull;
-                tStep = od_hal_uptime_ms();
-                bbepSendCMDSequence(&bbep, initSeq);
-                od_log_debug("[EPD cold] initSeq (%s) %u ms",
-                             partialInit ? "partial" : "full", (unsigned)(od_hal_uptime_ms() - tStep));
-                tStep = od_hal_uptime_ms();
-                epdAlignCustomPartialRamMode();
-                od_log_debug("[EPD cold] alignRamMode %u ms", (unsigned)(od_hal_uptime_ms() - tStep));
-                epdSessionInitWasPartial = partialInit;
-            }
+            const uint8_t* initSeq = partialInit ? (bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull)
+                                                 : bbep.pInitFull;
+            tStep = od_hal_uptime_ms();
+            bbepSendCMDSequence(&bbep, initSeq);
+            od_log_debug("[EPD cold] initSeq (%s) %u ms",
+                         partialInit ? "partial" : "full", (unsigned)(od_hal_uptime_ms() - tStep));
+            tStep = od_hal_uptime_ms();
+            epdAlignCustomPartialRamMode();
+            od_log_debug("[EPD cold] alignRamMode %u ms", (unsigned)(od_hal_uptime_ms() - tStep));
+            epdSessionInitWasPartial = partialInit;
         }
         cold = true;
     } else {
@@ -577,27 +430,20 @@ static bool epdSessionAcquire(bool partialInit) {
         // Phase 1: full re-init on warm re-acquire (HW reset => registers identical
         // to cold, safest). Phase 2a will skip bbepWakeUp + resend only on change.
         if (!epdSessionUsesFastepd()) {
-#ifdef BBEP_T133A01
-            if (e1004_panel_used()) {
-                epdSessionInitWasPartial = false;
-            } else
-#endif
-            {
-                /* Same breakdown as the cold path. A WARM re-acquire skips the rail and the
-                 * SPI bring-up, so if it ALSO stalls then the panel is not answering for a
-                 * reason unrelated to power -- which is worth being able to tell apart. */
-                uint32_t tStep = od_hal_uptime_ms();
-                bbepWakeUp(&bbep);
-                od_log_debug("[EPD warm] bbepWakeUp %u ms", (unsigned)(od_hal_uptime_ms() - tStep));
-                const uint8_t* initSeq = partialInit ? (bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull)
-                                                     : bbep.pInitFull;
-                tStep = od_hal_uptime_ms();
-                bbepSendCMDSequence(&bbep, initSeq);
-                od_log_debug("[EPD warm] initSeq (%s) %u ms",
-                             partialInit ? "partial" : "full", (unsigned)(od_hal_uptime_ms() - tStep));
-                epdAlignCustomPartialRamMode();
-                epdSessionInitWasPartial = partialInit;
-            }
+            /* Same breakdown as the cold path. A WARM re-acquire skips the rail and the
+             * SPI bring-up, so if it ALSO stalls then the panel is not answering for a
+             * reason unrelated to power -- which is worth being able to tell apart. */
+            uint32_t tStep = od_hal_uptime_ms();
+            bbepWakeUp(&bbep);
+            od_log_debug("[EPD warm] bbepWakeUp %u ms", (unsigned)(od_hal_uptime_ms() - tStep));
+            const uint8_t* initSeq = partialInit ? (bbep.pInitPart ? bbep.pInitPart : bbep.pInitFull)
+                                                 : bbep.pInitFull;
+            tStep = od_hal_uptime_ms();
+            bbepSendCMDSequence(&bbep, initSeq);
+            od_log_debug("[EPD warm] initSeq (%s) %u ms",
+                         partialInit ? "partial" : "full", (unsigned)(od_hal_uptime_ms() - tStep));
+            epdAlignCustomPartialRamMode();
+            epdSessionInitWasPartial = partialInit;
         }
         cold = false;
     }
@@ -887,11 +733,7 @@ int mapEpd(int id){
         case 0x003F: return EP31_240x320;
         case 0x0040: return EP75YR_800x480;
         case 0x0041: return EP_PANEL_UNDEFINED;
-#ifdef BBEP_T133A01
-        case OD_PANEL_IC_EP133A_SPECTRA_1200X1600: return EP133A_SPECTRA_1200x1600; // 0x0042, Seeed reTerminal E1004
-#else
         case 0x0042: return EP_PANEL_UNDEFINED;
-#endif
         case 0x0043: return EP154_200x200_4GRAY;
         case 0x0044: return EP42B_400x300_4GRAY;
         case 0x0045: return EP397_800x480;
@@ -924,31 +766,10 @@ bool fastepd_driver_used(void) {
 #endif
 }
 
-bool e1004_panel_used(void) {
-#ifdef BBEP_T133A01
-    if (globalConfig.display_count < 1) return false;
-    return globalConfig.displays[0].panel_ic_type == OD_PANEL_IC_EP133A_SPECTRA_1200X1600;
-#else
-    return false;
-#endif
-}
-
-// cs_pin_2; 0 or 0xFF defaults to GPIO2.
-uint8_t e1004_cs2_pin(void) {
-    uint8_t p = globalConfig.displays[0].cs_pin_2;
-    if (p == 0 || p == 0xFF) return 2;
-    return p;
-}
-
 bool waitforrefresh(int timeout){
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) return fastepd_wait_refresh(timeout);
 #endif
-    if (e1004_panel_used() && !bbepIsBusy(&bbep)) {
-        // bbepRefresh already waited; idle here means refresh finished.
-        od_log_info("Refresh completed inside bb_epaper");
-        return true;
-    }
     // Poll at 10 ms (was 100 ms) so a ~0.5 s refresh returns up to ~90 ms sooner.
     // BUSY asserts within µs of MASTER_ACTIVATE, so the i==0 "never went busy"
     // error check stays valid at a 10 ms first poll. Loop bound scales x10
@@ -1719,7 +1540,18 @@ static void renderChar_1BPP(uint8_t* rowBuffer, const uint8_t* fontData, int fon
 }
 
 void initDisplay(){
+    /* Three consecutive watchdog resets say the panel path is what wedges, so a fourth attempt
+     * is another reset. Returning before the rail is powered leaves the device up on BLE, which
+     * is the only way a bad config or a bad image can be replaced. */
+    if (od_watchdog_app_safe_mode()) {
+        od_log_warn("Display init skipped: watchdog safe mode");
+        return;
+    }
     od_log_info("=== Initializing Display ===");
+    /* The boot refresh is the longest uninterruptible span in the firmware and the likeliest
+     * place to wedge, so it is the one phase worth breadcrumbing even on its own: the boot after
+     * a watchdog reset can then say whether the panel or something else stopped the last run. */
+    od_watchdog_app_phase(OD_WDT_PHASE_BOOT_REFRESH);
     if(globalConfig.display_count > 0){
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) {
@@ -1757,19 +1589,6 @@ void initDisplay(){
         int panelType = mapEpd(globalConfig.displays[0].panel_ic_type);
         bbepSetPanelType(&bbep, panelType);
         int rotation = globalConfig.displays[0].rotation * 90;
-#ifdef BBEP_T133A01
-        e1004GeometryOk = false;
-        if (e1004_panel_used()) {
-            rotation = 0;  // host bakes rotation into packed image
-            if (globalConfig.displays[0].pixel_width != bbep.native_width ||
-                globalConfig.displays[0].pixel_height != bbep.native_height ||
-                globalConfig.displays[0].color_scheme != OD_COLOR_SCHEME_BWGBRY_SPLIT) {
-                od_log_error("ERROR: E1004 requires a 1200x1600 bwgbry_split (8) display config");
-            } else {
-                e1004GeometryOk = true;
-            }
-        }
-#endif
         bbepSetRotation(&bbep, rotation);
         od_log_info("Height: %u", globalConfig.displays[0].pixel_height);
         od_log_info("Width: %u", globalConfig.displays[0].pixel_width);
@@ -1802,6 +1621,7 @@ void initDisplay(){
     else{
         od_log_warn("No display found");
     }
+    od_watchdog_app_phase(OD_WDT_PHASE_IDLE);
 }
 
 
@@ -2114,14 +1934,7 @@ static void streamGray4Bytes(const uint8_t* buf, uint32_t len) {
 }
 
 static void directWriteSinkBytes(uint8_t* data, uint32_t len) {
-#ifdef BBEP_T133A01
-    if (e1004_panel_used()) {
-        if (e1004GeometryOk) e1004_sink_bytes(data, len);
-    } else
-#endif
-    {
-        bbepWriteData(&bbep, data, (int)len);
-    }
+    bbepWriteData(&bbep, data, (int)len);
     directWriteBytesWritten += len;
 }
 
@@ -2149,9 +1962,6 @@ void cleanupDirectWriteState(bool refreshDisplay) {
         if (refreshDisplay) epdSessionForceOff();
         else                epdSessionRelease(true);
     }
-#ifdef BBEP_T133A01
-    if (e1004_panel_used()) e1004_end_plane();
-#endif
     if (directWriteTouchSuspended) {
         touchResumeAfterEpdRefresh();
         directWriteTouchSuspended = false;
@@ -2205,13 +2015,6 @@ static void directWriteActivatePanel(void) {
 #if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) {
         fastepd_direct_write_reset();
-    } else
-#endif
-#ifdef BBEP_T133A01
-    if (e1004_panel_used()) {
-        if (!e1004_begin_plane()) {
-            od_log_error("ERROR: E1004 dual-CS plane open failed");
-        }
     } else
 #endif
     {
@@ -2321,7 +2124,7 @@ void handlePartialWriteStart(uint8_t* data, uint16_t len) {
 
     uint16_t dispW = globalConfig.displays[0].pixel_width;
     uint16_t dispH = globalConfig.displays[0].pixel_height;
-    if (getBitsPerPixel() != 1 || e1004_panel_used()) {
+    if (getBitsPerPixel() != 1) {
         // bb_epaper partial refresh support is effectively non-existent for
         // 2bpp+ panels, and physical panels may not support that mode either.
         // This protocol uses two 1bpp controller planes as old/new image memory.
@@ -2514,7 +2317,6 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
     imageWriteLogFinish(directWriteBytesWritten, directWriteTotalBytes);
     int refreshMode = REFRESH_FULL;
     if (data != nullptr && len >= 1 && data[0] == 1) refreshMode = REFRESH_FAST;
-    if (e1004_panel_used()) refreshMode = REFRESH_FULL;  // fast re-init would wipe RAM
     const char* modeName = (refreshMode == REFRESH_FAST) ? "FAST" : "FULL";
     if (data != nullptr && len > 0) {
         od_log_info("EPD refresh: %s (mode=%d, end payload 0x%02X)", modeName, refreshMode, data[0]);
@@ -2546,9 +2348,6 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
     } else
 #endif
     {
-#ifdef BBEP_T133A01
-        if (e1004_panel_used()) e1004_end_plane();
-#endif
         bbepRefresh(&bbep, refreshMode);
         refreshSuccess = waitforrefresh(60);
         // No bbepSleep here: cleanupDirectWriteState(false) releases the session,
@@ -2599,7 +2398,7 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
 // 0x0082 END carries the refresh selector (0->FULL,1->FAST,2/absent->PARTIAL) and
 // new_etag [refresh:1][new_etag:4 BE], driving partial_write_to_panel().
 // START NACK codes: 0x01 len/ver, 0x02 unknown flag, 0x03 size mismatch,
-// 0x05 ETAG_MISMATCH (partial), 0x06 PARTIAL_UNSUPPORTED (partial, bpp!=1/E1004),
+// 0x05 ETAG_MISMATCH (partial), 0x06 PARTIAL_UNSUPPORTED (partial, bpp!=1),
 // 0x07 RECT_INVALID (partial, zero/OOB/misaligned rect). Any partial START NACK
 // at the geometry/etag stages clears displayed_etag (parity with 0x76).
 // ===========================================================================
@@ -2831,8 +2630,8 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
         uint16_t dispW = globalConfig.displays[0].pixel_width;
         uint16_t dispH = globalConfig.displays[0].pixel_height;
         // 5: partial uses two 1bpp planes (old+new). FastEPD IT8951 accepts that stream
-        // and applies a row-band update; 2bpp+/E1004 remain unsupported.
-        if (getBitsPerPixel() != 1 || e1004_panel_used()) {
+        // and applies a row-band update; 2bpp+ remains unsupported.
+        if (getBitsPerPixel() != 1) {
             displayed_etag = 0; sendPipeStartNack(OD_ERR_PIPE_START_PARTIAL_UNSUPPORTED); return;
         }
         // 6: etag gate — nonzero and must match what is currently on the panel.
@@ -3474,9 +3273,9 @@ static void send_direct_write_nack(uint8_t opcode, uint8_t error, bool cleanupSt
 // both compiled out here -- so compat SPI's _bus_ok is always false and the SPI.end() this
 // replaces could never have freed anything on such a board.
 //
-// Since the E1004 payload moved to od_bbep_stream_write() (2026-08-04), display_service.cpp
-// has no adapter dependency at all, which is why <SPI.h> is gone from it. The bb_epaper bus is
-// released by bbepDeInitIO(), called from the panel force-off path above.
+// display_service.cpp has no FastEPD/vendor adapter dependency at all, which is why <SPI.h> is
+// gone from it. The bb_epaper bus is released by bbepDeInitIO(), called from the panel
+// force-off path above.
 #if !defined(OPENDISPLAY_FASTEPD)
 void displayReleaseSpiBus(void) { }
 #endif
