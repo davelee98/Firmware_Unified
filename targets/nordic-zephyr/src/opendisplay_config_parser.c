@@ -16,6 +16,21 @@ static bool security_key_bytes_set(const uint8_t key[16])
   return memcmp(key, key + 1, 15) != 0;
 }
 
+/*
+ * The zero-key rule: a config asking for encryption while carrying an all-zero
+ * key does not get it, or the device demands authentication against a key any
+ * client knows. Applied wherever the parsed security struct is populated, so no
+ * consumer can read an un-normalised encryption_enabled.
+ */
+static void apply_zero_key_rule(void)
+{
+  if (s_od_security_parsed.encryption_enabled != 0u &&
+      !security_key_bytes_set(s_od_security_parsed.encryption_key)) {
+    s_od_security_parsed.encryption_enabled = 0u;
+    od_log_info("Security: encryption disabled (key is all zeros)");
+  }
+}
+
 const struct SecurityConfig *od_get_parsed_security(void)
 {
   return &s_od_security_parsed;
@@ -58,6 +73,7 @@ static void rescan_security_packet(const uint8_t *configData, uint32_t configLen
     if (candidate->encryption_enabled != 0u ||
         security_key_bytes_set(candidate->encryption_key)) {
       memcpy(&s_od_security_parsed, candidate, sizeof(struct SecurityConfig));
+      apply_zero_key_rule();
       od_log_info("Security: recovered from scan @%u (enabled=%d)",
              (unsigned)i, (int)s_od_security_parsed.encryption_enabled);
       return;
@@ -516,6 +532,7 @@ bool parseConfigBytes(uint8_t* configData, uint32_t configLen, struct GlobalConf
                 }
                 if (offset + sizeof(struct SecurityConfig) <= configLen - 2) {
                     memcpy(&s_od_security_parsed, &configData[offset], sizeof(struct SecurityConfig));
+                    apply_zero_key_rule();
                     offset += sizeof(struct SecurityConfig);
                     if (offset > configLen) {
                         od_log_info("Offset overflow after security_config");
