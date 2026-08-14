@@ -150,6 +150,24 @@ else()
   target_compile_definitions(app PRIVATE OD_LOG_LEVEL=OD_LOG_INFO)
 endif()
 
+# Default BLE TX power in dBm, used when the stored config leaves PowerOption.tx_power at 0.
+#
+# THIS IS THE ONLY BUILD-TIME KNOB THAT REACHES THE RADIO ON THIS TARGET. Zephyr's
+# BT_CTLR_TX_PWR_* choice looks like the obvious one and is inert here: CONFIG_BT_LL_SOFTDEVICE
+# selects the SoftDevice Controller, and BT_CTLR_TX_PWR_DBM has no consumer outside Zephyr's own
+# software link layer (BT_LL_SW_SPLIT). Power is set at runtime instead, by the HCI VS
+# Write_Tx_Power_Level that opendisplay_ble.c's apply_tx_power() issues -- so the default has to
+# reach that call, not Kconfig.
+#
+# +8 dBm is the maximum on every board this target builds: nRF52840 sets
+# HAS_HW_NRF_RADIO_TX_PWR_HIGH (radio-tx-high-power-supported in its DTS) and nRF54L15/LM20A are
+# SOC_COMPATIBLE_NRF54LX. The controller clamps to the nearest supported step and reports what it
+# took; apply_tx_power() logs requested and selected so the two are never assumed equal.
+if(NOT DEFINED OD_TX_POWER_DBM)
+  set(OD_TX_POWER_DBM 8)
+endif()
+target_compile_definitions(app PRIVATE OD_TX_POWER_DBM=${OD_TX_POWER_DBM})
+
 # OpenDisplay app version string (boot screen + CMD_FIRMWARE_VERSION major.minor.patch).
 # Prefer -DOD_FW_VERSION / -Dzephyr_OD_FW_VERSION; also accept ENV from build.sh
 # because sysbuild does not always forward unprefixed cache vars into the app image.

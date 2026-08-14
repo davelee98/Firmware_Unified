@@ -14,7 +14,7 @@
 #define TOUCH_ISR_ATTR
 #endif
 
-extern struct GlobalConfig globalConfig;
+extern struct od_config globalConfig;
 extern uint8_t dynamicreturndata[11];
 // True while any of DIRECT / PIPE / PARTIAL is streaming (display_service.cpp).
 // Defined unguarded there; both targets consult it in processTouchInput().

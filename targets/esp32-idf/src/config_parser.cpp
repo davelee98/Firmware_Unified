@@ -44,7 +44,7 @@ using namespace Adafruit_LittleFS_Namespace;
 // default OD_LOG_LEVEL (INFO) compiles out entirely -- so they no longer cost
 // serial time in the deep-sleep wake window and need no runtime quiet flag.
 
-extern struct GlobalConfig globalConfig;
+extern struct od_config globalConfig;
 extern uint8_t activeLedInstance;
 extern char wifiSsid[33];
 extern char wifiPassword[33];
@@ -201,8 +201,9 @@ bool clearStoredConfig(void) {
         return false;
     }
     #endif
-    memset(&globalConfig, 0, sizeof(globalConfig));
-    memset(&securityConfig, 0, sizeof(securityConfig));
+    /* One memset, not two: securityConfig is a member of globalConfig now, so zeroing the
+     * config zeroes the key as well. */
+    od_config_reset(&globalConfig);
     wifiConfigured = false;
     wifiSsid[0] = '\0';
     wifiPassword[0] = '\0';
@@ -343,346 +344,204 @@ uint32_t calculateConfigCRC(uint8_t* data, uint32_t len){
     return ~crc;
 }
 
-/* One config packet, bounds already guaranteed by od_config_tlv_walk().
- *
- * THE BOUNDS CHECKS ARE GONE FROM HERE, and that is the promotion: this function used to spell
- * out `offset + sizeof(T) <= configLen - 2` once per packet type -- fifteen independent chances
- * to write the wrong comparison on the pre-auth attack surface. That check now exists once, in
- * shared/core/od_config_tlv.c, with host vectors for truncation and overflow.
- *
- * What is left is the part that is genuinely per-target: where each packet is stored, the
- * instance-count caps, and the logging. Returning false aborts the walk; a packet this build
- * does not implement is NOT a reason to do that.
+/* The WiFi side effects. Deliberately NOT promoted (shared/core/od_config.h): the credential
+ * copies and the server_host numeric-IP coercion are LAN-transport behaviour on the one target
+ * that has a LAN transport, not config parsing. od_config stores the 0x26 packet verbatim; this
+ * turns it into what the listener needs, and runs once per load rather than once per packet.
  */
-static bool onConfigPacket(void *ctx, uint8_t packetId, od_span_t bodySpan) {
-    (void)ctx;
-    /* The span is unpacked ONCE, here, and the per-packet arms below stay as they were imported.
-     * They are already sizeof-bounded against the same declared size the walk checked, so
-     * rewriting thirty memcpy sites would be churn in the one hardware-verified target for no
-     * change in what is guaranteed. The bound that matters is upstream: bodySpan.n cannot
-     * disagree with bodySpan.p, which is the pairing od_span_t removes. */
-    const uint8_t *body = bodySpan.p;
-    switch (packetId) {
+static void applyWifiConfig(const struct WifiConfig &wc) {
+    memcpy(wifiSsid, wc.ssid, sizeof(wc.ssid));
+    wifiSsid[32] = '\0';
+    uint8_t ssidLen = 0;
+    while (ssidLen < 32 && wifiSsid[ssidLen] != '\0') ssidLen++;
 
-            case 0x01: // system_config
-                {
-                    memcpy(&globalConfig.system_config, body, sizeof(struct SystemConfig));
-                }
-                return true;
-            case 0x02: // manufacturer_data
-                {
-                    memcpy(&globalConfig.manufacturer_data, body, sizeof(struct ManufacturerData));
-                }
-                return true;
-            case 0x04: // power_option
-                {
-                    memcpy(&globalConfig.power_option, body, sizeof(struct PowerOption));
-                }
-                return true;
-            case 0x20: // display
-                if (globalConfig.display_count < 4) {
-                    memcpy(&globalConfig.displays[globalConfig.display_count], body, sizeof(struct DisplayConfig));
-                    globalConfig.display_count++;
-                } else {
-                    od_log_warn("WARNING: Maximum display count reached, skipping");
-                }
-                return true;
-            case 0x21: // led
-                if (globalConfig.led_count < 4) {
-                    memcpy(&globalConfig.leds[globalConfig.led_count], body, sizeof(struct LedConfig));
-                    globalConfig.led_count++;
-                    // Reset active LED instance to re-detect RGB LEDs after config change
-                    activeLedInstance = 0xFF;
-                } else {
-                    od_log_warn("WARNING: Maximum LED count reached, skipping");
-                }
-                return true;
-            case 0x23: // sensor_data
-                if (globalConfig.sensor_count < 4) {
-                    memcpy(&globalConfig.sensors[globalConfig.sensor_count], body, sizeof(struct SensorData));
-                    globalConfig.sensor_count++;
-                } else {
-                    od_log_warn("WARNING: Maximum sensor count reached, skipping");
-                }
-                return true;
-            case 0x24: // data_bus
-                if (globalConfig.data_bus_count < 4) {
-                    memcpy(&globalConfig.data_buses[globalConfig.data_bus_count], body, sizeof(struct DataBus));
-                    globalConfig.data_bus_count++;
-                } else {
-                    od_log_warn("WARNING: Maximum data_bus count reached, skipping");
-                }
-                return true;
-            case 0x25: // binary_inputs
-                if (globalConfig.binary_input_count < 4) {
-                    memcpy(&globalConfig.binary_inputs[globalConfig.binary_input_count], body, sizeof(struct BinaryInputs));
-                    globalConfig.binary_input_count++;
-                } else {
-                    od_log_warn("WARNING: Maximum binary_input count reached, skipping");
-                }
-                return true;
-            case 0x28: // touch_controller
-                if (globalConfig.touch_controller_count < 4) {
-                    memcpy(&globalConfig.touch_controllers[globalConfig.touch_controller_count], body, sizeof(struct TouchController));
-                    globalConfig.touch_controller_count++;
-                } else {
-                    od_log_warn("WARNING: Maximum touch_controller count reached, skipping");
-                }
-                return true;
-            case 0x29: // passive_buzzer
-                if (globalConfig.passive_buzzer_count < 4) {
-                    memcpy(&globalConfig.passive_buzzers[globalConfig.passive_buzzer_count], body, sizeof(struct BuzzerConfig));
-                    globalConfig.passive_buzzer_count++;
-                } else {
-                    od_log_warn("WARNING: Maximum passive_buzzer count reached, skipping");
-                }
-                return true;
-            case 0x2C: // data_extended
-                {
-                    memcpy(&globalConfig.data_extended, body, sizeof(struct DataExtended));
-                    globalConfig.data_extended.manufacturer_name[31] = '\0';
-                    globalConfig.data_extended.model_name[31] = '\0';
-                    globalConfig.data_extended.serial_number[31] = '\0';
-                    globalConfig.data_extended.friendly_name[31] = '\0';
-                    globalConfig.data_extended.device_location[31] = '\0';
-                    globalConfig.data_extended.device_id[31] = '\0';
-                    globalConfig.data_extended.custom_string_1[31] = '\0';
-                    globalConfig.data_extended.custom_string_2[31] = '\0';
-                    globalConfig.data_extended.custom_string_3[31] = '\0';
-                    globalConfig.data_extended_loaded = true;
-                }
-                return true;
-            case 0x2A: // nfc_config -- stored, never acted on (no NFC hardware on this target)
-                if (globalConfig.nfc_config_count < 2) {
-                    memcpy(&globalConfig.nfc_configs[globalConfig.nfc_config_count], body, sizeof(struct NfcConfig));
-                    globalConfig.nfc_config_count++;
-                } else {
-                    od_log_warn("WARNING: Maximum nfc_config count reached, skipping");
-                }
-                return true;
-            case 0x2B: // flash_config
-                if (globalConfig.flash_config_count < 2) {
-                    memcpy(&globalConfig.flash_configs[globalConfig.flash_config_count], body, sizeof(struct FlashConfig));
-                    globalConfig.flash_config_count++;
-                } else {
-                    od_log_warn("WARNING: Maximum flash_config count reached, skipping");
-                }
-                return true;
-            case 0x26: // wifi_config (see struct WifiConfig)
-                {
-                    struct WifiConfig wc;
-                    memcpy(&wc, body, sizeof(wc));
+    memcpy(wifiPassword, wc.password, sizeof(wc.password));
+    wifiPassword[32] = '\0';
+    uint8_t passwordLen = 0;
+    while (passwordLen < 32 && wifiPassword[passwordLen] != '\0') passwordLen++;
 
-                    memcpy(wifiSsid, wc.ssid, sizeof(wc.ssid));
-                    wifiSsid[32] = '\0';
-                    uint8_t ssidLen = 0;
-                    while (ssidLen < 32 && wifiSsid[ssidLen] != '\0') ssidLen++;
-
-                    memcpy(wifiPassword, wc.password, sizeof(wc.password));
-                    wifiPassword[32] = '\0';
-                    uint8_t passwordLen = 0;
-                    while (passwordLen < 32 && wifiPassword[passwordLen] != '\0') passwordLen++;
-
-                    wifiEncryptionType = wc.encryption_type;
+    wifiEncryptionType = wc.encryption_type;
 
 #ifdef TARGET_ESP32
-                    memcpy(wifiServerUrl, wc.server_host, 64);
-                    wifiServerUrl[64] = '\0';
+    memcpy(wifiServerUrl, wc.server_host, 64);
+    wifiServerUrl[64] = '\0';
 
-                    bool isStringFormat = false;
-                    for (int i = 0; i < 64; i++) {
-                        if (wifiServerUrl[i] == '\0') {
-                            isStringFormat = true;
-                            break;
-                        }
-                        if (i > 0 && wifiServerUrl[i] < 32 && wifiServerUrl[i] != '\0') {
-                            break;
-                        }
-                    }
+    bool isStringFormat = false;
+    for (int i = 0; i < 64; i++) {
+        if (wifiServerUrl[i] == '\0') {
+            isStringFormat = true;
+            break;
+        }
+        if (i > 0 && wifiServerUrl[i] < 32 && wifiServerUrl[i] != '\0') {
+            break;
+        }
+    }
 
-                    if (!isStringFormat && wifiServerUrl[4] == '\0' &&
-                        (wifiServerUrl[0] != 0 || wifiServerUrl[1] != 0 ||
-                         wifiServerUrl[2] != 0 || wifiServerUrl[3] != 0)) {
-                        uint8_t ip[4];
-                        ip[0] = wc.server_host[0];
-                        ip[1] = wc.server_host[1];
-                        ip[2] = wc.server_host[2];
-                        ip[3] = wc.server_host[3];
-                        snprintf(wifiServerUrl, 65, "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
-                        od_log_debug("Converted numeric IP to string: \"%s\"", wifiServerUrl);
-                    } else if (!isStringFormat && wifiServerUrl[0] != '\0') {
-                        uint32_t ipNum = (uint32_t)wc.server_host[0] |
-                                        ((uint32_t)wc.server_host[1] << 8) |
-                                        ((uint32_t)wc.server_host[2] << 16) |
-                                        ((uint32_t)wc.server_host[3] << 24);
-                        uint8_t ip[4];
-                        ip[0] = (ipNum >> 24) & 0xFF;
-                        ip[1] = (ipNum >> 16) & 0xFF;
-                        ip[2] = (ipNum >> 8) & 0xFF;
-                        ip[3] = ipNum & 0xFF;
-                        snprintf(wifiServerUrl, 65, "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
-                        od_log_debug("Converted 32-bit integer to IP string: \"%s\"", wifiServerUrl);
-                    }
+    if (!isStringFormat && wifiServerUrl[4] == '\0' &&
+        (wifiServerUrl[0] != 0 || wifiServerUrl[1] != 0 ||
+         wifiServerUrl[2] != 0 || wifiServerUrl[3] != 0)) {
+        uint8_t ip[4];
+        ip[0] = wc.server_host[0];
+        ip[1] = wc.server_host[1];
+        ip[2] = wc.server_host[2];
+        ip[3] = wc.server_host[3];
+        snprintf(wifiServerUrl, 65, "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+        od_log_debug("Converted numeric IP to string: \"%s\"", wifiServerUrl);
+    } else if (!isStringFormat && wifiServerUrl[0] != '\0') {
+        uint32_t ipNum = (uint32_t)wc.server_host[0] |
+                        ((uint32_t)wc.server_host[1] << 8) |
+                        ((uint32_t)wc.server_host[2] << 16) |
+                        ((uint32_t)wc.server_host[3] << 24);
+        uint8_t ip[4];
+        ip[0] = (ipNum >> 24) & 0xFF;
+        ip[1] = (ipNum >> 16) & 0xFF;
+        ip[2] = (ipNum >> 8) & 0xFF;
+        ip[3] = ipNum & 0xFF;
+        snprintf(wifiServerUrl, 65, "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+        od_log_debug("Converted 32-bit integer to IP string: \"%s\"", wifiServerUrl);
+    }
 
-                    // server_port is the one BIG-ENDIAN field in WifiConfig; read it byte-wise
-                    // (former reserved[64]=MSB, reserved[65]=LSB).
-                    wifiServerPort = (uint16_t)(((uint16_t)((const uint8_t*)&wc.server_port)[0] << 8) |
-                                                ((const uint8_t*)&wc.server_port)[1]);
-                    if (wifiServerPort == 0) {
-                        wifiServerPort = 2446;
-                    }
+    // server_port is the one BIG-ENDIAN field in WifiConfig; read it byte-wise
+    // (former reserved[64]=MSB, reserved[65]=LSB).
+    wifiServerPort = (uint16_t)(((uint16_t)((const uint8_t*)&wc.server_port)[0] << 8) |
+                                ((const uint8_t*)&wc.server_port)[1]);
+    if (wifiServerPort == 0) {
+        wifiServerPort = 2446;
+    }
 
-                    // wifiServerConfigured is dead: it was only ever read by the log
-                    // lines that used to sit here. It described the old "tag pushes to
-                    // an upload server" model, but the LAN transport inverted that --
-                    // the device listens and the host connects to it, so server_host
-                    // gates nothing. server_host stays part of the 0x26 wire format.
-                    //
-                    // Report the endpoint the LAN listener will actually bind, not just
-                    // the raw config field: the TLS-PSK channel runs on server_port + 1
-                    // and there is no config entry for it.
+    // wifiServerConfigured is dead: it was only ever read by the log
+    // lines that used to sit here. It described the old "tag pushes to
+    // an upload server" model, but the LAN transport inverted that --
+    // the device listens and the host connects to it, so server_host
+    // gates nothing. server_host stays part of the 0x26 wire format.
+    //
+    // Report the endpoint the LAN listener will actually bind, not just
+    // the raw config field: the TLS-PSK channel runs on server_port + 1
+    // and there is no config entry for it.
 #ifdef OPENDISPLAY_HAS_WIFI
-                    od_log_debug("LAN: %s on port %u (server_port %u)",
-                                 lanTlsEnabled() ? "TLS-PSK" : "plaintext",
-                                 (unsigned)lanActivePort(), (unsigned)wifiServerPort);
+    od_log_debug("LAN: %s on port %u (server_port %u)",
+                 lanTlsEnabled() ? "TLS-PSK" : "plaintext",
+                 (unsigned)lanActivePort(), (unsigned)wifiServerPort);
 #else
-                    od_log_debug("LAN: transport not compiled in (server_port %u)", (unsigned)wifiServerPort);
+    od_log_debug("LAN: transport not compiled in (server_port %u)", (unsigned)wifiServerPort);
 #endif
 #endif
-                    wifiConfigured = true;
-                    od_log_info("=== WiFi Configuration Loaded ===");
-                    // Do NOT log the SSID or password (credentials). Presence/length only.
-                    od_log_debug("SSID: (set, %u chars)", ssidLen);
-                    od_log_debug("Password: %s", passwordLen > 0 ? "(set)" : "(empty)");
-                    const char* encTypeStr = "Unknown";
-                    switch (wifiEncryptionType) {
-                        case 0x00: encTypeStr = "None (Open)"; break;
-                        case 0x01: encTypeStr = "WEP"; break;
-                        case 0x02: encTypeStr = "WPA"; break;
-                        case 0x03: encTypeStr = "WPA2"; break;
-                        case 0x04: encTypeStr = "WPA3"; break;
-                    }
-                    od_log_debug("Encryption Type: 0x%02X (%s)", wifiEncryptionType, encTypeStr);
-                    od_log_debug("SSID length: %u bytes", ssidLen);
-                    od_log_debug("Password length: %u bytes", passwordLen);
-                    od_log_debug("WiFi configured: true");
-                }
-                return true;
-            case 0x27: // security_config
-                {
-                    {
-                        memcpy(&securityConfig, body, sizeof(struct SecurityConfig));
-                        // Check if key is all zeros (encryption disabled)
-                        bool keyIsZero = true;
-                        for (int i = 0; i < 16; i++) {
-                            if (securityConfig.encryption_key[i] != 0) {
-                                keyIsZero = false;
-                                break;
-                            }
-                        }
-                        if (keyIsZero) {
-                            securityConfig.encryption_enabled = 0;
-                            od_log_debug("Security config: Encryption disabled (key is all zeros)");
-                        } else if (securityConfig.encryption_enabled) {
-                            od_log_debug("Security config: Encryption enabled");
-                            od_log_debug("Session timeout: %u seconds", securityConfig.session_timeout_seconds);
-                        } else {
-                            od_log_debug("Security config: Encryption disabled (flag set to 0)");
-                        }
-                        // Log security flags
-                        if (securityConfig.flags & OD_SECURITY_FLAG_REWRITE_ALLOWED) {
-                            od_log_debug("Security config: Rewrite allowed (unauthorized config writes permitted)");
-                        }
-                        if (securityConfig.flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN) {
-                            od_log_debug("Security config: Show key on screen enabled (future feature)");
-                        }
-                        if (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_ENABLED) {
-                            od_log_debug("Security config: Reset pin %u enabled (polarity: %s, pullup: %s, pulldown: %s)",
-                                       securityConfig.reset_pin,
-                                       (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_POLARITY) ? "HIGH" : "LOW",
-                                       (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_PULLUP) ? "yes" : "no",
-                                       (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_PULLDOWN) ? "yes" : "no");
-                        } else {
-                            od_log_debug("Security config: Reset pin disabled");
-                        }
-                    }
-                }
-                return true;
-            default:
-                /* Unreachable: od_config_tlv_walk() ends the walk on an id it does not know,
-                 * so an unknown one never reaches this callback. Handled rather than assumed. */
-                return true;
+    wifiConfigured = true;
+    od_log_info("=== WiFi Configuration Loaded ===");
+    // Do NOT log the SSID or password (credentials). Presence/length only.
+    od_log_debug("SSID: (set, %u chars)", ssidLen);
+    od_log_debug("Password: %s", passwordLen > 0 ? "(set)" : "(empty)");
+    const char* encTypeStr = "Unknown";
+    switch (wifiEncryptionType) {
+        case 0x00: encTypeStr = "None (Open)"; break;
+        case 0x01: encTypeStr = "WEP"; break;
+        case 0x02: encTypeStr = "WPA"; break;
+        case 0x03: encTypeStr = "WPA2"; break;
+        case 0x04: encTypeStr = "WPA3"; break;
+    }
+    od_log_debug("Encryption Type: 0x%02X (%s)", wifiEncryptionType, encTypeStr);
+    od_log_debug("SSID length: %u bytes", ssidLen);
+    od_log_debug("Password length: %u bytes", passwordLen);
+    od_log_debug("WiFi configured: true");
+}
+
+/* What the 0x27 arm used to say while it copied. The copy and the zero-key normalisation are
+ * od_config_apply_packet()'s now -- reading securityConfig here reads the normalised value,
+ * which is the point of storing it inside the config rather than beside it. */
+static void logSecurityConfig() {
+    if (!od_config_security_key_set(&securityConfig)) {
+        od_log_debug("Security config: Encryption disabled (key is all zeros)");
+    } else if (securityConfig.encryption_enabled) {
+        od_log_debug("Security config: Encryption enabled");
+        od_log_debug("Session timeout: %u seconds", securityConfig.session_timeout_seconds);
+    } else {
+        od_log_debug("Security config: Encryption disabled (flag set to 0)");
+    }
+    if (securityConfig.flags & OD_SECURITY_FLAG_REWRITE_ALLOWED) {
+        od_log_debug("Security config: Rewrite allowed (unauthorized config writes permitted)");
+    }
+    if (securityConfig.flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN) {
+        od_log_debug("Security config: Show key on screen enabled (future feature)");
+    }
+    if (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_ENABLED) {
+        od_log_debug("Security config: Reset pin %u enabled (polarity: %s, pullup: %s, pulldown: %s)",
+                   securityConfig.reset_pin,
+                   (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_POLARITY) ? "HIGH" : "LOW",
+                   (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_PULLUP) ? "yes" : "no",
+                   (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_PULLDOWN) ? "yes" : "no");
+    } else {
+        od_log_debug("Security config: Reset pin disabled");
     }
 }
 
+/* THE PER-PACKET SWITCH IS GONE, and that is the promotion. It spelled out the instance caps
+ * eight times, the DataExtended terminators once more, and the zero-key rule once -- each an
+ * independent chance to compare against the wrong bound or normalise nothing. Storage now
+ * happens once in shared/core/od_config.c, against the same aggregate every target keeps, and
+ * what is left here is this target's own: the LED re-detect, the WiFi apply, and the logging
+ * the walk cannot do because shared/ has no log seam.
+ */
 bool loadGlobalConfig(){
-    memset(&globalConfig, 0, sizeof(globalConfig));
-    // Initialize security config defaults
-    memset(&securityConfig, 0, sizeof(securityConfig));
-    // Reset pin defaults to disabled (flag not set)
     wifiConfigured = false;
     wifiSsid[0] = '\0';
     wifiPassword[0] = '\0';
     wifiEncryptionType = 0;
-    globalConfig.data_extended_loaded = false;
+
     uint8_t* configData = getConfigScratch();
     uint32_t configLen = MAX_CONFIG_SIZE;
     if (!loadConfig(configData, &configLen)) {
-        globalConfig.loaded = false;
+        od_config_reset(&globalConfig);
         return false;
     }
-    if (configLen < 3) {
-        od_log_error("ERROR: Config too short");
-        globalConfig.loaded = false;
-        return false;
-    }
-    /* The walk itself is shared. version comes back through it; the per-packet copies happen
-     * in onConfigPacket() above. */
-    uint8_t parsedVersion = 0;
-    uint8_t stoppedOnId = 0;
+
+    /* Resets, walks, stores and computes the advisory CRC. globalConfig.loaded is set only on a
+     * clean walk; a blob that truncates half-way keeps the packets that preceded the truncation,
+     * so `loaded` is what consumers must read, not the counts. */
+    struct od_config_report report;
     const enum od_config_tlv_result walk =
-        od_config_tlv_walk(od_span_make(configData, configLen), onConfigPacket, NULL,
-                           &parsedVersion, &stoppedOnId);
-    if (stoppedOnId != 0) {
-        /* Restores the per-packet parser's "Unknown packet ID 0x%02X, skipping" warning. The
-         * walk cannot log -- shared/ has no log seam -- so it reports the id and the target
-         * says it. Losing this in the promotion would have traded a diagnostic for nothing. */
+        od_config_parse(&globalConfig, od_span_make(configData, configLen), &report);
+
+    if (report.unknown_id != 0) {
+        /* The walk reports the id and this target says it. Losing "Unknown packet ID 0x%02X"
+         * in the promotion would have traded a diagnostic for nothing. */
         od_log_warn("WARNING: Unknown packet ID 0x%02X, remainder of config skipped",
-                    stoppedOnId);
+                    report.unknown_id);
     }
-    globalConfig.version = parsedVersion;
-    globalConfig.minor_version = 0;   // not stored in the current format
     if (walk == OD_CFG_TLV_TOO_SHORT) {
         od_log_error("ERROR: Config too short");
-        globalConfig.loaded = false;
         return false;
     }
-    if (walk == OD_CFG_TLV_TRUNCATED) {
-        /* A packet claimed more bytes than the blob holds. Previously reported per packet type
-         * as "Not enough data for <name>"; the walk cannot name the type, so the id is logged
-         * instead -- the same information, from one place. */
+    if (walk != OD_CFG_TLV_OK) {
+        /* A packet claimed more bytes than the blob holds. Reported per packet type before the
+         * walk was shared; the walk cannot name the type, so this is the same information from
+         * one place. */
         od_log_error("ERROR: Config truncated -- a packet claims more data than the blob holds");
-        globalConfig.loaded = false;
         return false;
+    }
+    if (report.dropped_full != 0) {
+        /* Was one "Maximum <type> count reached" per arm. The count is aggregate now; the caps
+         * are identical on every target and a host that hits one has over-sent some type. */
+        od_log_warn("WARNING: %u config packet(s) dropped at an instance cap",
+                    (unsigned)report.dropped_full);
     }
 
     // Advisory (warn-only) validation using CRC-16/CCITT to match the toolbox, nRF and
     // Silabs firmware. Not enforced: a mismatch logs a warning only.
-    //
-    // The guard used to be `if (offset < configLen - 2)`, which never fired for a config
-    // that parsed cleanly: the loop above only exits once offset has REACHED configLen - 2
-    // (or overshot it), so the condition was false for every well-formed config and true
-    // only for one the parser had already decided was truncated. The check therefore ran
-    // exclusively on inputs it could not validate. Same defect in Firmware/src (and so in
-    // the shipped fleet) -- see docs/FOLLOWUPS.md for the upstream propagation.
-    if (configLen >= 2) {
-        uint16_t crcGiven = configData[configLen - 2] | (configData[configLen - 1] << 8);
-        uint16_t crcCalculated = od_config_tlv_crc16(od_span_make(configData, configLen - 2));
-        if (crcGiven != crcCalculated) {
-            od_log_warn("WARNING: Config CRC mismatch (given: 0x%04X, calculated: 0x%04X)", crcGiven, crcCalculated);
-        }
+    if (report.crc_checked && report.crc_stored != report.crc_computed) {
+        od_log_warn("WARNING: Config CRC mismatch (given: 0x%04X, calculated: 0x%04X)",
+                    report.crc_stored, report.crc_computed);
     }
-    globalConfig.loaded = true;
+
+    if (globalConfig.led_count > 0) {
+        // Re-detect RGB LEDs after a config change.
+        activeLedInstance = 0xFF;
+    }
+    if (globalConfig.wifi_config_loaded) {
+        applyWifiConfig(globalConfig.wifi_config);
+    }
+    if (globalConfig.security_loaded) {
+        logSecurityConfig();
+    }
     return true;
 }
 

@@ -9,9 +9,9 @@
 extern "C" {
 #endif
 
-bool parseConfigBytes(uint8_t *configData, uint32_t configLen, struct GlobalConfig *globalConfig);
+bool parseConfigBytes(uint8_t *configData, uint32_t configLen, struct od_config *globalConfig);
 
-bool loadGlobalConfig(struct GlobalConfig *globalConfig);
+bool loadGlobalConfig(struct od_config *globalConfig);
 
 const struct SecurityConfig *od_get_parsed_security(void);
 bool od_security_key_set(void);

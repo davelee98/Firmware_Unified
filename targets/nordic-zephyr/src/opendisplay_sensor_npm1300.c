@@ -36,7 +36,7 @@ static bool s_charging;
 
 static const struct SensorData *npm1300_config(void)
 {
-	const struct GlobalConfig *cfg = opendisplay_get_global_config();
+	const struct od_config *cfg = opendisplay_get_global_config();
 
 	if (cfg == NULL) {
 		return NULL;

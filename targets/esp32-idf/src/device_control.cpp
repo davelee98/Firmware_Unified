@@ -30,7 +30,7 @@ extern "C" void bootloader_util_app_start(uint32_t start_addr);
 #include "ble_transport.h"
 
 extern uint8_t rebootFlag;
-extern struct GlobalConfig globalConfig;
+extern struct od_config globalConfig;
 extern uint8_t activeLedInstance;
 extern bool ledFlashActive;
 extern uint8_t ledFlashPosition;

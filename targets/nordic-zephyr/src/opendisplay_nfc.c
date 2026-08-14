@@ -398,7 +398,7 @@ static bool nfc_encode_ndef(uint8_t rec_type, const uint8_t *data, uint16_t data
 	return true;
 }
 
-void opendisplay_nfc_apply_config(const struct GlobalConfig *cfg)
+void opendisplay_nfc_apply_config(const struct od_config *cfg)
 {
 	const struct NfcConfig *nfc_cfg = NULL;
 	uint8_t i;
@@ -476,7 +476,7 @@ bool opendisplay_ble_nfc_write(uint8_t type, const uint8_t *data, uint16_t data_
 
 #else /* !CONFIG_NFC_T2T_NRFXLIB */
 
-void opendisplay_nfc_apply_config(const struct GlobalConfig *cfg)
+void opendisplay_nfc_apply_config(const struct od_config *cfg)
 {
 	ARG_UNUSED(cfg);
 }

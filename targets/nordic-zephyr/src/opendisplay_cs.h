@@ -5,11 +5,11 @@
 #include <zephyr/bluetooth/bluetooth.h>
 
 struct bt_conn;
-struct GlobalConfig;
+struct od_config;
 
-bool opendisplay_cs_config_enabled(const struct GlobalConfig *cfg);
-unsigned opendisplay_cs_scan_response_count(const struct GlobalConfig *cfg);
-void opendisplay_cs_fill_scan_response(const struct GlobalConfig *cfg,
+bool opendisplay_cs_config_enabled(const struct od_config *cfg);
+unsigned opendisplay_cs_scan_response_count(const struct od_config *cfg);
+void opendisplay_cs_fill_scan_response(const struct od_config *cfg,
 				       struct bt_data *out, unsigned max_entries,
 				       unsigned *count_out);
 void opendisplay_cs_on_connected(struct bt_conn *conn);

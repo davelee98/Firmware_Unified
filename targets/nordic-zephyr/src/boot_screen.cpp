@@ -29,7 +29,7 @@
 static uint8_t s_boot_row_buffer[680];
 static uint8_t s_gray4_plane_scratch[(2720 + 7) / 8];
 
-static const struct GlobalConfig *boot_cfg(void)
+static const struct od_config *boot_cfg(void)
 {
   return opendisplay_get_global_config();
 }
@@ -611,7 +611,7 @@ static void bootGray4FillSwatchCodes(uint16_t panelIc, uint8_t out[4]) {
 }
 
 bool writeBootScreenWithQr(BBEPDISP &epd) {
-    const struct GlobalConfig *cfg = boot_cfg();
+    const struct od_config *cfg = boot_cfg();
     if (cfg == NULL || cfg->display_count == 0u) {
       return false;
     }

@@ -18,7 +18,7 @@ extern "C" {
 #include "nrf_soc.h"
 }
 
-extern struct GlobalConfig globalConfig;
+extern struct od_config globalConfig;
 
 BleTransport ble;
 

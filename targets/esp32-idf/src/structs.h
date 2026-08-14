@@ -8,6 +8,9 @@
 // truth for every config-packet struct; the firmware-only runtime types below
 // are the only definitions that remain local.
 #include "opendisplay_structs.h"
+// The parsed-config aggregate, the instance caps and the two storage normalisations are
+// shared/core/od_config.h. `struct GlobalConfig` was this file's copy of it.
+#include "od_config.h"
 
 #define BOOT_ROW_BUFFER_SIZE 960
 
@@ -114,59 +117,6 @@ struct PipeWriteState {
     uint32_t total_size;        // negotiated decompressed panel byte total
     uint8_t  queued_count;      // reorder-queue occupancy
     uint8_t  queue_high_water;  // diagnostics: max occupancy seen this transfer
-};
-
-// Global configuration structure. Members are the canonical config structs from
-// opendisplay_structs.h; only the aggregation, per-type instance arrays/counts,
-// and load metadata are firmware-local.
-struct GlobalConfig {
-    // Required packets (single instances)
-    struct SystemConfig system_config;
-    struct ManufacturerData manufacturer_data;
-    struct PowerOption power_option;
-
-    // Optional repeatable packets (max 4 instances each)
-    struct DisplayConfig displays[4];
-    uint8_t display_count;      // Number of display instances loaded
-
-    struct LedConfig leds[4];
-    uint8_t led_count;          // Number of LED instances loaded
-
-    struct SensorData sensors[4];
-    uint8_t sensor_count;       // Number of sensor instances loaded
-
-    struct DataBus data_buses[4];
-    uint8_t data_bus_count;     // Number of data bus instances loaded
-
-    struct BinaryInputs binary_inputs[4];
-    uint8_t binary_input_count; // Number of binary input instances loaded
-
-    struct TouchController touch_controllers[4];
-    uint8_t touch_controller_count;
-
-    struct BuzzerConfig passive_buzzers[4];
-    uint8_t passive_buzzer_count;
-
-    // Stored although this target has no NFC hardware and nothing reads these.
-    // Decided 2026-08-13: a target parses and stores every canonical packet whether or not it
-    // can act on it. Using a subsystem is a hardware capability; understanding the config that
-    // describes it is a protocol obligation. Before this, 0x2A was an unknown id here, which
-    // ended the config walk -- so a config carrying NFC silently lost its flash_config and
-    // data_extended packets, and the host had no way to see it. Same field name, cap and order
-    // as targets/nordic-zephyr and targets/efr32bg22-slc, which have always stored it.
-    struct NfcConfig nfc_configs[2];
-    uint8_t nfc_config_count;
-
-    struct FlashConfig flash_configs[2];
-    uint8_t flash_config_count;
-
-    struct DataExtended data_extended;
-    bool data_extended_loaded;
-
-    // Config metadata
-    uint8_t version;            // Protocol version
-    uint8_t minor_version;      // Protocol minor version
-    bool loaded;                // True if config was successfully loaded
 };
 
 #define MAX_BUTTONS 32  // Up to 4 instances * 8 pins = 32 buttons max

@@ -18,7 +18,7 @@
 #include "display_fastepd.h"
 #endif
 
-extern struct GlobalConfig globalConfig;
+extern struct od_config globalConfig;
 extern struct SecurityConfig securityConfig;
 extern BBEPDISP bbep;
 extern uint8_t staticRowBuffer[BOOT_ROW_BUFFER_SIZE];

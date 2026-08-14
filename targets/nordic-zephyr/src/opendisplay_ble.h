@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-struct GlobalConfig;
+struct od_config;
 
 void opendisplay_ble_init(void);
 void opendisplay_ble_process(void);
@@ -16,7 +16,7 @@ void opendisplay_ble_boost_advertising(void);
 void opendisplay_ble_advertising_tick(void);
 bool opendisplay_ble_is_connected(void);
 
-const struct GlobalConfig *opendisplay_get_global_config(void);
+const struct od_config *opendisplay_get_global_config(void);
 void opendisplay_ble_reload_config_from_nvm(void);
 void opendisplay_ble_restart_advertising(void);
 

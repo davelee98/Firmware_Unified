@@ -36,43 +36,13 @@
  * and the config limits. Resolved from shared/protocol via OD_SHARED_INCLUDE_DIRS. */
 #include "opendisplay_structs.h"
 
-/* ------------------------------------------------------------------- RAM-only aggregates --- */
+/* The parsed config aggregate -- `struct od_config`, the instance caps, and the storage rules --
+ * is shared/core/od_config.h. This file carried a copy of it, field for field, alongside the
+ * copies in targets/esp32-idf and targets/efr32bg22-slc. It also brings the security packet
+ * inside the aggregate, which is where the zero-key normalisation now lives. */
+#include "od_config.h"
 
-/* The parsed config, as this firmware holds it in memory. NOT a wire struct: it is not packed,
- * its field order is ours, and the counts and the `loaded` flags have no on-wire representation.
- * The wire form is the TLV blob that opendisplay_config_parser.c walks to fill this in. */
-struct GlobalConfig {
-	struct SystemConfig system_config;
-	struct ManufacturerData manufacturer_data;
-	struct PowerOption power_option;
-	struct DisplayConfig displays[4];
-	uint8_t display_count;
-	struct LedConfig leds[4];
-	uint8_t led_count;
-	struct SensorData sensors[4];
-	uint8_t sensor_count;
-	struct DataBus data_buses[4];
-	uint8_t data_bus_count;
-	struct BinaryInputs binary_inputs[4];
-	uint8_t binary_input_count;
-	struct TouchController touch_controllers[4];
-	uint8_t touch_controller_count;
-	/* Canonical spelling is BuzzerConfig; the member keeps the passive_buzzers name the parser
-	 * and every caller already use, matching targets/esp32-idf/src/structs.h. */
-	struct BuzzerConfig passive_buzzers[4];
-	uint8_t passive_buzzer_count;
-	struct NfcConfig nfc_configs[2];
-	uint8_t nfc_config_count;
-	struct FlashConfig flash_configs[2];
-	uint8_t flash_config_count;
-	struct DataExtended data_extended;
-	bool data_extended_loaded;
-	struct WifiConfig wifi_config;
-	bool wifi_config_loaded;
-	uint8_t version;
-	uint8_t minor_version;
-	bool loaded;
-};
+/* ------------------------------------------------------------------- RAM-only aggregates --- */
 
 /* Live session state for an authenticated link. Also RAM-only: the replay window, the activity
  * clocks and the attempt counters are this firmware's business and never leave the device. */

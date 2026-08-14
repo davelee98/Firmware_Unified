@@ -28,7 +28,7 @@
 #include "session_guard.h"
 
 bool isAuthenticated();
-extern struct GlobalConfig globalConfig;
+extern struct od_config globalConfig;
 
 // F4 -- command origin marker. The shared dispatcher (imageDataWritten) and the
 // response senders read this to (a) BYPASS the app-layer AES-CCM envelope for

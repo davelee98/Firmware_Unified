@@ -17,6 +17,7 @@
 #include "opendisplay_sensor_npm1300.h"
 #include "opendisplay_nfc.h"
 #include "od_board.h"
+#include "od_advert.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -38,9 +39,13 @@
 #endif
 #include <errno.h>
 
-#define OPENDISPLAY_COMPANY_ID 0x2446u
-#define MSD_PAYLOAD_LEN        16u
+#define MSD_PAYLOAD_LEN        OD_ADVERT_MSD_LEN
 #define OD_NAME_PREFIX         "OD"
+/* Set by zephyr/CMakeLists.txt, which explains why this is not a Kconfig. Mirrored here so the
+ * file still compiles if it is ever built outside that CMake. */
+#ifndef OD_TX_POWER_DBM
+#define OD_TX_POWER_DBM 8
+#endif
 #ifndef OD_FW_VERSION
 #define OD_FW_VERSION ""
 #endif
@@ -175,9 +180,9 @@ static uint8_t fw_patch_from_build_version(void)
 #define OD_ADV_BOOST_INTERVAL_MAX 48u   /* 30 ms */
 #define OD_ADV_BOOST_MS           3000u
 
-static struct GlobalConfig s_od_global_config;
+static struct od_config s_od_global_config;
 static uint8_t msd_payload[MSD_PAYLOAD_LEN];
-static uint8_t dynamic_return[11];
+static uint8_t dynamic_return[OD_ADVERT_DYNAMIC_LEN];
 static char s_dev_name[16];
 static struct bt_conn *s_conn;
 static bool s_notify_enabled;
@@ -413,11 +418,8 @@ static void read_chip_temperature(void)
 
 static void update_msd_payload(void)
 {
+	struct od_advert_inputs adv;
 	uint16_t battery_voltage_10mv;
-	int16_t temp_encoded;
-	uint8_t temperature_byte;
-	uint8_t battery_voltage_low_byte;
-	uint8_t status_byte;
 
 	/* Mirror the reference updatemsdata() ordering: refresh the sensor
 	 * dynamic slots, then the battery source (BQ27220-preferred, else SAADC),
@@ -430,30 +432,20 @@ static void update_msd_payload(void)
 	 * of this function runs after bt_enable(). */
 	read_chip_temperature();
 
-	temp_encoded = (int16_t)((s_chip_temperature + 40.0f) * 2.0f);
-	if (temp_encoded < 0) {
-		temp_encoded = 0;
-	} else if (temp_encoded > 255) {
-		temp_encoded = 255;
-	}
-	temperature_byte = (uint8_t)temp_encoded;
-	battery_voltage_low_byte = (uint8_t)(battery_voltage_10mv & 0xFFu);
-	/* Matches nRF52840 Firmware status byte (display_service.cpp:1293-1297):
-	 * bit0 battery high bit, bit1 rebootFlag, bit2 connectionRequested,
-	 * bits 4-7 loop counter. */
-	status_byte = (uint8_t)(((battery_voltage_10mv >> 8) & 0x01u) |
-				((s_reboot_flag & 0x01u) << 1) |
-				((s_connection_requested & 0x01u) << 2) |
-				((s_msd_loop_counter & 0x0Fu) << 4));
+	/* Encoding -- company id, the (t + 40) * 2 temperature step, the 10-bit battery
+	 * split across battery_voltage_low and status bit0, the status bit positions --
+	 * belongs to shared/core/od_advert.c. What stays here is acquisition: the polls
+	 * above, and a battery module that already reports the wire's 10 mV units. */
+	memset(&adv, 0, sizeof(adv));
+	adv.dynamic = dynamic_return;
+	adv.chip_temperature_c = s_chip_temperature;
+	adv.battery_10mv = battery_voltage_10mv;
+	adv.reboot_flag = (s_reboot_flag != 0u);
+	adv.connection_requested = (s_connection_requested != 0u);
+	adv.loop_counter = s_msd_loop_counter;
+	od_advert_build(&adv, msd_payload);
 
-	memset(msd_payload, 0, sizeof(msd_payload));
-	msd_payload[0] = (uint8_t)(OPENDISPLAY_COMPANY_ID & 0xFFu);
-	msd_payload[1] = (uint8_t)((OPENDISPLAY_COMPANY_ID >> 8) & 0xFFu);
-	memcpy(&msd_payload[2], dynamic_return, sizeof(dynamic_return));
-	msd_payload[13] = temperature_byte;
-	msd_payload[14] = battery_voltage_low_byte;
-	msd_payload[15] = status_byte;
-	s_msd_loop_counter = (uint8_t)((s_msd_loop_counter + 1u) & 0x0Fu);
+	s_msd_loop_counter = od_advert_advance_counter(s_msd_loop_counter);
 }
 
 static void log_msd(int level, const char *tag)
@@ -624,7 +616,7 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.recycled = recycled,
 };
 
-const struct GlobalConfig *opendisplay_get_global_config(void)
+const struct od_config *opendisplay_get_global_config(void)
 {
 	return &s_od_global_config;
 }
@@ -707,7 +699,16 @@ void opendisplay_ble_set_dynamic_byte(uint8_t index, uint8_t value)
 static void apply_tx_power(uint8_t handle_type, uint16_t handle)
 {
 #if defined(CONFIG_BT_HCI_VS)
-	int8_t requested = (int8_t)s_od_global_config.power_option.tx_power;
+	/* Config wins when it states a power; 0 means "unstated" and takes the build default.
+	 *
+	 * The wire field is one UNSIGNED byte read as signed dBm, so every level the radio supports
+	 * stays expressible except exactly 0 dBm -- -8 dBm is 0xF8, not 0. What 0 actually is, in
+	 * practice, is the zero-filled value carried by a device whose config omits the field or that
+	 * has no stored config at all, and 0 dBm is never what a battery tag on a weak link wants.
+	 * Treating it as "unstated" is therefore a reinterpretation of exactly one value, and the
+	 * only one where the wire cannot distinguish a request from a default. */
+	int8_t configured = (int8_t)s_od_global_config.power_option.tx_power;
+	int8_t requested = (configured != 0) ? configured : (int8_t)OD_TX_POWER_DBM;
 	struct bt_hci_cp_vs_write_tx_power_level *cp;
 	struct bt_hci_rp_vs_write_tx_power_level *rp;
 	struct net_buf *buf;

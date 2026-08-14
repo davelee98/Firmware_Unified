@@ -76,7 +76,7 @@ static void dw_init_mark(const char *tag)
 
 static const struct DisplayConfig *display_cfg(void)
 {
-  const struct GlobalConfig *cfg = opendisplay_get_global_config();
+  const struct od_config *cfg = opendisplay_get_global_config();
   if (cfg == nullptr || cfg->display_count == 0u) {
     return nullptr;
   }
@@ -130,7 +130,7 @@ void opendisplay_display_park_pins(void)
 
 static bool display_power_set(bool on)
 {
-  const struct GlobalConfig *cfg = opendisplay_get_global_config();
+  const struct od_config *cfg = opendisplay_get_global_config();
   const struct DisplayConfig *d = display_cfg();
   uint8_t p;
 

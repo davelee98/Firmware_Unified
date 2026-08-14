@@ -6,7 +6,7 @@
 #include "od_hal_i2c.h"
 #include "od_hal_time.h"
 
-extern struct GlobalConfig globalConfig;
+extern struct od_config globalConfig;
 extern uint8_t dynamicreturndata[11];
 
 static_assert(sizeof(SensorData) == 30, "SensorData must remain 30 bytes");

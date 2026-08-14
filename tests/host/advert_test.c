@@ -43,8 +43,8 @@ static const char *g_case = "(none)";
 
 /* ----------------------------------------------------- the shipped implementations, retyped --- */
 
-/* THE REFERENCE: transcribed from targets/esp32-idf/src/display_service.cpp:1886-1918, the
- * Firmware-repo algorithm. It assembles the canonical packed struct and memcpys it, which is
+/* THE REFERENCE: the Firmware-repo algorithm, as targets/esp32-idf shipped it before that target
+ * called od_advert. It assembles the canonical packed struct and memcpys it, which is
  * why this transcription is host-endian-dependent where the shared encoder is not -- the host
  * is little-endian, so the two agree here, and od_advert.c is the one that stays correct on a
  * big-endian toolchain.
@@ -84,10 +84,14 @@ static void shipped_msd_firmware(uint8_t out[16], const uint8_t dynamic[11],
     memcpy(out, &m, sizeof m);
 }
 
-/* THE COPY: transcribed from targets/nordic-zephyr/src/opendisplay_ble.c:400-439, which places
- * the bytes by hand rather than through the struct (byte-for-byte the same assembly as
- * targets/efr32bg22-slc/opendisplay_ble.c:1678-1748). Swept for agreement with the reference
- * above, not used as the standard. */
+/* THE COPY: the encoder targets/nordic-zephyr and targets/efr32bg22-slc both shipped -- one
+ * algorithm, written out twice, placing the bytes by hand rather than through the struct. Swept
+ * for agreement with the reference above, not used as the standard.
+ *
+ * ALL THREE TARGETS NOW CALL od_advert, so these two functions are the only surviving statement
+ * of what they used to broadcast. That is the point of keeping them: without them the sweep
+ * below would compare the encoder against itself and prove nothing. Do not "update" either one
+ * to match od_advert -- if they disagree, the sweep is doing its job. */
 static void shipped_msd_nrf54(uint8_t out[16], const uint8_t dynamic[11], float chip_temperature_c,
                               uint16_t battery_10mv, int reboot_flag, int connection_requested,
                               uint8_t loop_counter)

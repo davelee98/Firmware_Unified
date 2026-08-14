@@ -287,9 +287,11 @@ enum od_config_tlv_result od_config_parse(struct od_config *cfg, od_span_t blob,
     }
 
     if (walk != OD_CFG_TLV_OK) {
-        /* loaded stays false: a truncated blob leaves a ZEROED config, not a half-filled one,
-         * because the reset above ran before the walk. A caller that ignores this return still
-         * cannot mistake a partial parse for a real config. */
+        /* loaded stays false, and it is the ONLY thing separating a partial parse from a real
+         * config. The walk applies each packet as it reaches it, so a blob that truncates
+         * half-way leaves every packet before the truncation stored -- the reset above cleared
+         * whatever was there before, it does not un-store what the walk just did. A caller that
+         * ignores both this return and cfg->loaded reads those packets as a whole config. */
         return walk;
     }
 

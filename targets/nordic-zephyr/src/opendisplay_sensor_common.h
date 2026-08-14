@@ -14,7 +14,7 @@
  */
 static inline bool od_sensor_bus_for(uint8_t bus_id, struct od_i2c_bus *out)
 {
-	const struct GlobalConfig *cfg = opendisplay_get_global_config();
+	const struct od_config *cfg = opendisplay_get_global_config();
 
 	if (cfg == NULL) {
 		return false;
