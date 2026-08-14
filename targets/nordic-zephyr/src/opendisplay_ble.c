@@ -182,7 +182,8 @@ static char s_dev_name[16];
 static struct bt_conn *s_conn;
 static bool s_notify_enabled;
 static bool s_adv_active;
-static uint32_t s_adv_boost_until_ms;
+static uint32_t s_adv_boost_start_ms;
+static bool s_adv_boost_on;
 static uint8_t s_msd_loop_counter;
 static uint32_t s_last_adv_retry_ms;
 static uint8_t s_reboot_flag = 1; /* set after boot, cleared on first BLE connect */
@@ -344,7 +345,7 @@ static void schedule_msd_publish(void)
 	(void)k_work_schedule(&s_adv_restart_work, K_NO_WAIT);
 }
 
-static void chip_id_hex6(char out[7])
+uint32_t opendisplay_ble_chip_id_last24(void)
 {
 	uint8_t id[8];
 	uint64_t uid = 0;
@@ -354,6 +355,11 @@ static void chip_id_hex6(char out[7])
 		uid = (uid << 8) | id[i];
 	}
 	/*
+	 * THIS IS THE DISPLAY/ADVERTISING IDENTITY ONLY. The session-auth device_id is a
+	 * DIFFERENT FICR word by contract -- getAuthDeviceIdBytes() uses DEVICEID[0] while
+	 * getChipIdHex() uses DEVICEID[1] -- so opendisplay_pipe.c derives its own and must
+	 * not be routed through here. Aligning them would change every derived session key.
+	 *
 	 * WHICH FICR WORD THIS TAKES IS A COMPATIBILITY CONTRACT, NOT A DETAIL.
 	 *
 	 * Zephyr's nRF hwinfo driver returns be32(DEVICEID[1]) || be32(DEVICEID[0])
@@ -374,7 +380,15 @@ static void chip_id_hex6(char out[7])
 #if defined(OD_BOARD_XIAO_NRF52840)
 	uid >>= 32; /* DEVICEID[1] -- match the Arduino nRF52 firmware. */
 #endif
-	snprintf(out, 7, "%06lX", (unsigned long)(uid & 0xFFFFFFu));
+	return (uint32_t)(uid & 0xFFFFFFu);
+}
+
+/* Every consumer of the advertised identity goes through opendisplay_ble_chip_id_last24():
+ * the boot screen used to re-derive it and omitted the board conditional above, so an
+ * nRF52840 printed one OD<id> on screen and advertised another. */
+static void chip_id_hex6(char out[7])
+{
+	snprintf(out, 7, "%06lX", (unsigned long)opendisplay_ble_chip_id_last24());
 }
 
 static float s_chip_temperature = -999.0f;
@@ -442,22 +456,24 @@ static void update_msd_payload(void)
 	s_msd_loop_counter = (uint8_t)((s_msd_loop_counter + 1u) & 0x0Fu);
 }
 
-static void log_msd(const char *tag)
+static void log_msd(int level, const char *tag)
 {
 #if defined(OD_LOW_POWER_QUIET)
+	ARG_UNUSED(level);
 	ARG_UNUSED(tag);
 #else
 	/* Gate BEFORE formatting, using the constant-fold `if` idiom od_log.h documents rather
-	 * than `#if`: the body still compiles at every level, but a build below INFO does no
-	 * snprintf work. od_log_info()'s own gate is inside the macro, so it cannot elide the
-	 * argument formatting this helper does -- and this runs on every MSD publish. */
-	if (OD_LOG_LEVEL >= OD_LOG_INFO) {
+	 * than `#if`: the body still compiles at every level, but a build below the caller's
+	 * level does no snprintf work. The od_log_*() macros gate inside themselves, so they
+	 * cannot elide the argument formatting this helper does -- and this runs on every MSD
+	 * publish and every 0x0044 read. */
+	if (OD_LOG_LEVEL >= level) {
 		char label[32];
 		char line[96];
 
 		snprintf(label, sizeof(label), "[OD] msd %s: ", tag);
 		od_log_hex_line(line, sizeof(line), label, msd_payload, MSD_PAYLOAD_LEN);
-		od_log_info("%s", line);
+		_od_log(level, "%s", line);
 	}
 #endif
 }
@@ -526,7 +542,7 @@ static bool publish_msd_to_advertising(void)
 	}
 	memcpy(s_last_published_msd, msd_payload, MSD_PAYLOAD_LEN);
 	s_msd_published = true;
-	log_msd("publish");
+	log_msd(OD_LOG_INFO, "publish");
 
 	if (s_adv_active) {
 		unsigned sd_count = sd_prepare();
@@ -637,7 +653,9 @@ float opendisplay_ble_get_chip_temperature(void)
 
 void opendisplay_ble_copy_msd_bytes(uint8_t out[16])
 {
-	log_msd("read 0x0044");
+	/* DEBUG, not INFO: a polling host emits one of these per read. Matches the ESP32,
+	 * which logs the read at debug and the publish at info. */
+	log_msd(OD_LOG_DEBUG, "read 0x0044");
 	memcpy(out, msd_payload, 16);
 }
 
@@ -723,15 +741,24 @@ static void apply_tx_power(uint8_t handle_type, uint16_t handle)
 #endif
 }
 
+/*
+ * ELAPSED SINCE START, never a stored deadline. k_uptime_get_32() wraps every 49.7 days, and
+ * an absolute `now < deadline` test reads false for a boost that straddles the wrap, ending
+ * it the moment it begins. Unsigned subtraction is correct across the wrap. The separate flag
+ * carries "boosting at all" so no uptime value has to double as a not-boosting sentinel.
+ */
+static bool adv_boost_active(uint32_t now)
+{
+	return s_adv_boost_on && ((now - s_adv_boost_start_ms) < OD_ADV_BOOST_MS);
+}
+
 static void apply_adv_interval(void)
 {
-	uint32_t now = k_uptime_get_32();
-
-	if (s_adv_boost_until_ms != 0u && now < s_adv_boost_until_ms) {
+	if (adv_boost_active(k_uptime_get_32())) {
 		s_adv_param.interval_min = OD_ADV_BOOST_INTERVAL_MIN;
 		s_adv_param.interval_max = OD_ADV_BOOST_INTERVAL_MAX;
 	} else {
-		s_adv_boost_until_ms = 0;
+		s_adv_boost_on = false;
 		s_adv_param.interval_min = OD_ADV_INTERVAL_MIN;
 		s_adv_param.interval_max = OD_ADV_INTERVAL_MAX;
 	}
@@ -826,10 +853,10 @@ void opendisplay_ble_restart_advertising(void)
 void opendisplay_ble_boost_advertising(void)
 {
 	uint32_t now = k_uptime_get_32();
-	const bool already_boosting =
-		(s_adv_boost_until_ms != 0u && now < s_adv_boost_until_ms);
+	const bool already_boosting = adv_boost_active(now);
 
-	s_adv_boost_until_ms = now + OD_ADV_BOOST_MS;
+	s_adv_boost_start_ms = now;
+	s_adv_boost_on = true;
 	/* Only restart advertising when entering boost (interval must change).
 	 * Refreshing boost while already boosted must not stop/start ADV — NFC
 	 * field chatter was spamming start_advertising(). */
@@ -840,20 +867,17 @@ void opendisplay_ble_boost_advertising(void)
 
 void opendisplay_ble_advertising_tick(void)
 {
-	uint32_t now = k_uptime_get_32();
-	const bool boosting = (s_adv_boost_until_ms != 0u && now < s_adv_boost_until_ms);
-
-	if (boosting) {
+	if (adv_boost_active(k_uptime_get_32())) {
 		s_adv_was_boosted = true;
 		return;
 	}
 	if (!s_adv_was_boosted || s_conn != NULL || !s_adv_active) {
 		s_adv_was_boosted = false;
-		s_adv_boost_until_ms = 0;
+		s_adv_boost_on = false;
 		return;
 	}
 	s_adv_was_boosted = false;
-	s_adv_boost_until_ms = 0;
+	s_adv_boost_on = false;
 	schedule_adv_restart(0);
 }
 

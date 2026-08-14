@@ -39,6 +39,11 @@ bool opendisplay_ble_pipe_notify_enabled(void);
 void opendisplay_ble_pipe_on_write(const uint8_t *data, uint16_t len, bool write_cmd);
 void opendisplay_ble_pipe_on_connection_closed(void);
 
+/* Low 24 bits of the advertised identity -- the "xxxxxx" in OD<xxxxxx>. Boards differ in
+ * which FICR word this comes from, so every consumer must call this rather than re-derive it.
+ * NOT the session-auth device id, which is a different word by contract. */
+uint32_t opendisplay_ble_chip_id_last24(void);
+
 void opendisplay_ble_schedule_dfu(void);
 void opendisplay_ble_schedule_deep_sleep(void);
 bool opendisplay_ble_nfc_read(uint8_t *type_out, uint8_t *data_out, uint16_t *data_len_io,
