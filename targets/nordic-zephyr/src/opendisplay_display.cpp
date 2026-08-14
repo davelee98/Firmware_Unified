@@ -138,36 +138,53 @@ static bool display_power_set(bool on)
     od_log_error("panel: global config unavailable");
     return false;
   }
-  if (!on) {
-    opendisplay_display_park_pins();
-  }
   p = cfg->system_config.pwr_pin;
-  if (p == 0xFFu) {
-    od_log_error("panel: pwr_pin not set; refusing to drive an unsafe fallback");
-    return false;
-  }
-  if (on) {
-    od_board_prepare_epd_rail();
-  }
-  od_gpio_configure_output(p, on);
+  /*
+   * 0xFF means the pin is NOT PRESENT: the rail is permanently powered and cannot be turned
+   * off. There is then no pin to drive, no rail settle to wait for, and nothing to park --
+   * the panel stays live either way, so leaving its signal lines driven at their idle levels
+   * is safer than floating them into a powered controller.
+   *
+   * What must never happen is substituting a fallback pin number; driving a guessed pin is
+   * the unsafe case, not this configuration. 0xFF is the contract's documented default
+   * (opendisplay_structs.h: "primary power-management pin; 0xFF = not present"), so refusing
+   * it outright disabled the display on every board wired without a rail switch.
+   * Matches pwrmgm() (esp32-idf main.cpp:1382 on, :1422 off).
+   */
+  const bool has_pwr_pin = (p != 0xFFu);
+
   if (!on) {
+    if (has_pwr_pin) {
+      opendisplay_display_park_pins();
+      od_gpio_configure_output(p, false);
+    }
     return true;
   }
 
-  /* The deployed nRF52840 board requires the donor firmware's one-time cold
-   * rail conditioning: BS low, on 50 ms, off 50 ms, BS low, on. nRF54 board
-   * implementations return false and retain their existing single power-on. */
-  if (!s_epd_rail_conditioned && od_board_epd_requires_cold_cycle()) {
-    od_msleep(50);
-    od_gpio_configure_output(p, false);
-    od_msleep(50);
-    od_board_prepare_epd_rail();
+  /* Boost-select conditioning is a panel-interface setting, not a rail switch: the panel
+   * needs it whether or not this board can cut power. */
+  od_board_prepare_epd_rail();
+
+  if (!has_pwr_pin) {
+    od_log_warn("panel: pwr_pin not present; rail is permanently powered");
+  } else {
     od_gpio_configure_output(p, true);
+
+    /* The deployed nRF52840 board requires the donor firmware's one-time cold
+     * rail conditioning: BS low, on 50 ms, off 50 ms, BS low, on. nRF54 board
+     * implementations return false and retain their existing single power-on. */
+    if (!s_epd_rail_conditioned && od_board_epd_requires_cold_cycle()) {
+      od_msleep(50);
+      od_gpio_configure_output(p, false);
+      od_msleep(50);
+      od_board_prepare_epd_rail();
+      od_gpio_configure_output(p, true);
+    }
+    s_epd_rail_conditioned = true;
+    od_log_debug("panel: rail on (pwr_pin=%u), settling %u ms", (unsigned)p,
+                 (unsigned)OD_PANEL_RAIL_SETTLE_MS);
+    od_msleep(OD_PANEL_RAIL_SETTLE_MS);
   }
-  s_epd_rail_conditioned = true;
-  od_log_debug("panel: rail on (pwr_pin=%u), settling %u ms", (unsigned)p,
-               (unsigned)OD_PANEL_RAIL_SETTLE_MS);
-  od_msleep(OD_PANEL_RAIL_SETTLE_MS);
 
   /* Pre-drive the signal lines to their idle levels, exactly as pwrmgm() does, so the panel
    * comes out of its own power-on reset seeing a quiet bus rather than floating inputs. */
@@ -852,7 +869,8 @@ extern "C" bool opendisplay_display_boot_apply(void)
 
     memset(&s_epd, 0, sizeof(s_epd));
     if (!display_power_set(true)) {
-      return false;
+      od_log_error("boot display: panel power unavailable (attempt %u)", attempt);
+      continue;
     }
     if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
       od_log_error("boot display: setPanelType failed (attempt %u)", attempt);
