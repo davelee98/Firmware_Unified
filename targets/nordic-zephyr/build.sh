@@ -207,7 +207,17 @@ if [[ "${BOARD}" == xiao_ble* ]]; then
     echo "Flash: ./flash-nrf52840.sh"
   fi
 else
-  echo "Flash: ./flash-nrf54.sh"
+  # Per-board front doors: the board is in the script name, not an argument, so a
+  # wrong-image flash is a visible typo rather than a positional mistake.
+  if [[ "${BOARD}" == *lm20* ]]; then
+    od_flash_script="./flash-nrf54lm20.sh"
+  else
+    od_flash_script="./flash-nrf54l15.sh"
+  fi
+  if [[ "${PROFILE}" == debug ]]; then
+    od_flash_script="${od_flash_script%.sh}-debug.sh"
+  fi
+  echo "Flash: ${od_flash_script}"
 fi
 if [[ -f "${CONF}" ]]; then
   echo "Profile: ${PROFILE}  serial=$(grep -E '^CONFIG_SERIAL=|^# CONFIG_SERIAL is not set' "${CONF}" | head -1)"
