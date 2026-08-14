@@ -30,7 +30,7 @@ struct EncryptionSession {
     uint32_t server_nonce_time;
 };
 
-extern struct SecurityConfig securityConfig;
+extern struct SecurityConfig &securityConfig;
 extern EncryptionSession encryptionSession;
 extern bool encryptionInitialized;
 

@@ -273,7 +273,7 @@ static void buzzer_tone_timer_cb(struct k_timer *timer)
 
 void opendisplay_buzzer_init(void)
 {
-	const struct GlobalConfig *gc = opendisplay_get_global_config();
+	const struct od_config *gc = opendisplay_get_global_config();
 
 	k_timer_init(&s_step_timer, buzzer_step_timer_cb, NULL);
 	k_timer_init(&s_tone_timer, buzzer_tone_timer_cb, NULL);
@@ -308,7 +308,7 @@ int opendisplay_buzzer_activate(const uint8_t *data, uint16_t len)
 		return 1;
 	}
 	uint8_t inst = data[0];
-	const struct GlobalConfig *gc = opendisplay_get_global_config();
+	const struct od_config *gc = opendisplay_get_global_config();
 
 	if (gc == NULL || !gc->loaded || inst >= gc->passive_buzzer_count) {
 		return 2;

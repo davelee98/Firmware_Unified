@@ -6,22 +6,17 @@
  * od_adv_control wrong makes a device unreachable, getting this wrong makes every host
  * misread a temperature. Neither one calls the other.
  *
- * WHY IT IS WORTH PROMOTING. Three targets encode this same wire structure three different
- * ways today:
+ * WHY IT IS WORTH PROMOTING. Three targets encoded this same wire structure three different
+ * ways: a struct-and-memcpy on ESP32, hand-placed bytes at [0][1][2][13][14][15] on Nordic
+ * whose only specification was a comment citing the ESP32's line numbers, and the same
+ * byte-offset form again on Silabs. A comment that points at another target's line numbers IS
+ * a shared module -- just one the compiler cannot check. The (t + 40) * 2 temperature encoding
+ * and the 511 cap on the 10-bit battery field were written out three times each; they agreed by
+ * luck rather than structure, since nothing failed when an edit made them disagree.
  *
- *   targets/esp32-idf/src/display_service.cpp:1886   struct MsdAdvertisement + memcpy, the
- *                                                    OD_MSD_STATUS_* macros, and a hardcoded
- *                                                    company id literal 0x2446
- *   targets/nordic-zephyr/src/opendisplay_ble.c:400  bytes placed at [0][1][2][13][14][15] by
- *                                                    hand, status bits open-coded, with a
- *                                                    comment citing the ESP32's line numbers
- *                                                    as the specification
- *   targets/efr32bg22-slc/opendisplay_ble.c:1678     the same byte-offset form again
- *
- * A comment that points at another target's line numbers IS a shared module -- just one the
- * compiler cannot check. The (t + 40) * 2 temperature encoding and the 511 cap on the 10-bit
- * battery field are written out three times each; they agree today, which is luck rather than
- * structure, since nothing fails when a fourth target or an edit makes them disagree.
+ * All three targets call this now; no open-coded copy is left. tests/host/advert_test.c holds
+ * the two encoders they shipped and sweeps them against this one -- that sweep is the only thing
+ * still able to catch a change here that would alter what a device broadcasts.
  *
  * NO HAL. Inputs are five scalars and an 11-byte block the caller already owns; the output is
  * 16 bytes into the caller's buffer. No allocation, no clock, no storage, no logging -- this

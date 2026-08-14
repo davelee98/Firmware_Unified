@@ -13,11 +13,13 @@
  *
  *   1. THE ZERO-KEY RULE, and it is a security divergence rather than a cosmetic one. Firmware
  *      clears encryption_enabled when all 16 key bytes are zero, so such a config leaves the
- *      device honestly unencrypted. Nordic and Silabs never normalised it: their gate is a bare
- *      `sec->encryption_enabled != 0` (targets/nordic-zephyr/src/opendisplay_ble.c:246,
- *      targets/efr32bg22-slc/opendisplay_pipe.c:100), so the same config leaves those devices
- *      demanding authentication against a key any client can guess -- the worst of both, since
- *      it reads as protected. Promoted as Firmware has it.
+ *      device honestly unencrypted. Nordic reached the same answer by its own route -- it
+ *      normalised at parse time into a security struct held beside the config, which is what its
+ *      bare `sec->encryption_enabled != 0` gate then read. Silabs does not normalise at all
+ *      (targets/efr32bg22-slc/opendisplay_pipe.c:100 gates on the raw field), so the same config
+ *      leaves a BG22 demanding authentication against a key any client can guess -- the worst of
+ *      both, since it reads as protected. Promoted as Firmware has it, and held INSIDE the
+ *      aggregate so the normalisation cannot be separated from the parse that applies it.
  *
  *   2. INSTANCE CAPS SKIP, they do not overwrite. A packet arriving past the cap is dropped and
  *      counted; the earlier instances stand. All three agreed here.
@@ -198,9 +200,11 @@ enum od_config_apply od_config_apply_packet(struct od_config *cfg, uint8_t packe
 
 /* Reset, walk, store, then compute the advisory CRC.
  *
- * cfg->loaded is set only on OD_CFG_TLV_OK, matching Firmware's loadGlobalConfig(): a blob that
- * is too short or truncated leaves a zeroed config marked not-loaded, so a caller that ignores
- * the result still cannot read a half-parsed config as a real one. report may be NULL.
+ * cfg->loaded is set only on OD_CFG_TLV_OK, matching Firmware's loadGlobalConfig(). It is the
+ * only marker: the walk applies each packet as it reaches it, so a blob that truncates half-way
+ * leaves the packets before the truncation STORED, with loaded false. Read the result or
+ * cfg->loaded -- the instance counts alone cannot tell a partial parse from a whole one.
+ * report may be NULL.
  */
 enum od_config_tlv_result od_config_parse(struct od_config *cfg, od_span_t blob,
                                           struct od_config_report *report);

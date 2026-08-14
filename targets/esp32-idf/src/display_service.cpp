@@ -83,7 +83,7 @@ extern "C" {
 #include "command_queue.h"
 
 extern BBEPDISP bbep;
-extern struct GlobalConfig globalConfig;
+extern struct od_config globalConfig;
 extern uint8_t msd_payload[16];
 extern uint8_t dynamicreturndata[11];
 extern uint8_t rebootFlag;

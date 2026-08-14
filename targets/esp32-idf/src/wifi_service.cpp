@@ -31,7 +31,7 @@
 #define COMM_MODE_WIFI (1 << 2)
 #endif
 
-extern struct GlobalConfig globalConfig;
+extern struct od_config globalConfig;
 extern char wifiSsid[33];
 extern char wifiPassword[33];
 extern uint8_t wifiEncryptionType;

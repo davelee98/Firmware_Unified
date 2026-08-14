@@ -17,7 +17,7 @@
 #include <string.h>
 #include <FastEPD.h>
 
-extern struct GlobalConfig globalConfig;
+extern struct od_config globalConfig;
 
 // FastEPD compiles these IT8951 helpers into FastEPD.cpp (via FastEPD.inl).
 extern void it8951WaitForReady(FASTEPDSTATE* pState);

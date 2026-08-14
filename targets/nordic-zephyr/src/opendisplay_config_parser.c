@@ -1,3 +1,25 @@
+/*
+ * Config load for targets/nordic-zephyr.
+ *
+ * THE WALK AND THE STORE ARE BOTH SHARED NOW. What was here was a 530-line switch that
+ * re-derived, per packet type, the offset arithmetic, the "does this fit" comparison against
+ * configLen - 2, the instance caps, and its own CRC-16 and packet-size table. All of that is
+ * shared/core/od_config_tlv.c (the walk) and shared/core/od_config.c (the store); what is left
+ * is this target's own: reading the blob out of storage, and saying what happened.
+ *
+ * Two things this file used to do are deliberately NOT carried across:
+ *
+ *   rescan_security_packet(). It scanned the raw blob for an 0x27 the walk had stepped past, and
+ *   existed because an unknown id ends the walk: a blob carrying 0x2C on a build that did not
+ *   know 0x2C dropped the security packet behind it. The shared size table knows every canonical
+ *   id, so the case it recovered from cannot arise for a canonical packet; keeping the scan would
+ *   carry a workaround into the one path a client can write pre-auth, and would leave the next
+ *   missing id silently survivable. See shared/core/od_config.h.
+ *
+ *   The per-packet "known-unparsed, skipping N bytes" arm. Every id in the table is dispatched
+ *   and stored now, so there is no such thing as known-but-unparsed here.
+ */
+
 #include "opendisplay_config_parser.h"
 #include "od_log.h"
 #include "opendisplay_constants.h"
@@ -6,711 +28,125 @@
 #include <stdio.h>
 #include <string.h>
 
-static struct SecurityConfig s_od_security_parsed;
+/* The config parsed last, for the two security accessors below. A pointer rather than a copy:
+ * security lives inside the aggregate so that nothing can read an encryption_enabled the
+ * zero-key rule has not been applied to, and a second copy here would be exactly that hole. */
+static const struct od_config *s_parsed;
 
-static bool security_key_bytes_set(const uint8_t key[16])
-{
-  if (key[0] != 0u) {
-    return true;
-  }
-  return memcmp(key, key + 1, 15) != 0;
-}
-
-/*
- * The zero-key rule: a config asking for encryption while carrying an all-zero
- * key does not get it, or the device demands authentication against a key any
- * client knows. Applied wherever the parsed security struct is populated, so no
- * consumer can read an un-normalised encryption_enabled.
- */
-static void apply_zero_key_rule(void)
-{
-  if (s_od_security_parsed.encryption_enabled != 0u &&
-      !security_key_bytes_set(s_od_security_parsed.encryption_key)) {
-    s_od_security_parsed.encryption_enabled = 0u;
-    od_log_info("Security: encryption disabled (key is all zeros)");
-  }
-}
+/* Returned before any parse has run. Non-NULL so the callers that check for NULL keep their
+ * meaning: no config means no encryption, not "unknown". */
+static const struct SecurityConfig s_no_security;
 
 const struct SecurityConfig *od_get_parsed_security(void)
 {
-  return &s_od_security_parsed;
+	return (s_parsed != NULL) ? &s_parsed->security : &s_no_security;
 }
 
 bool od_security_key_set(void)
 {
-  return security_key_bytes_set(s_od_security_parsed.encryption_key);
+	return od_config_security_key_set(od_get_parsed_security());
 }
 
-static void data_extended_null_terminate(struct DataExtended *de)
+static void log_parse_result(const struct od_config *cfg, const struct od_config_report *report)
 {
-  de->manufacturer_name[31] = '\0';
-  de->model_name[31] = '\0';
-  de->serial_number[31] = '\0';
-  de->friendly_name[31] = '\0';
-  de->device_location[31] = '\0';
-  de->device_id[31] = '\0';
-  de->custom_string_1[31] = '\0';
-  de->custom_string_2[31] = '\0';
-  de->custom_string_3[31] = '\0';
+	if (report->unknown_id != 0u) {
+		od_log_info("Unknown pkt 0x%02X, remainder of config skipped", report->unknown_id);
+	}
+	if (report->dropped_full != 0u) {
+		od_log_info("%u pkt(s) dropped at an instance cap", (unsigned)report->dropped_full);
+	}
+	if (report->dropped_not_built != 0u) {
+		od_log_info("%u pkt(s) for subsystems not built in",
+			    (unsigned)report->dropped_not_built);
+	}
+	if (report->crc_checked && report->crc_stored != report->crc_computed) {
+		od_log_info("CRC mismatch: 0x%04X vs 0x%04X", report->crc_stored,
+			    report->crc_computed);
+	}
+
+	if ((cfg->system_config.device_flags & DEVICE_FLAG_CHANNEL_SOUNDING) != 0u) {
+		od_log_info("system_config: CHANNEL_SOUNDING enabled");
+	}
+	/* Panel bring-up leans on these four lines more than on anything else this file logs: a
+	 * wrong pin or a wrong IC shows up here and nowhere else until the display stays blank. */
+	for (uint8_t i = 0; i < cfg->display_count; i++) {
+		const struct DisplayConfig *d = &cfg->displays[i];
+
+		od_log_info("Display %u: ic=0x%04X %dx%d", (unsigned)i, d->panel_ic_type,
+			    d->pixel_width, d->pixel_height);
+		od_log_info("Display %u: RST=%d BUSY=%d DC=%d", (unsigned)i, d->reset_pin,
+			    d->busy_pin, d->dc_pin);
+		od_log_info("Display %u: CS=%d DATA=%d CLK=%d", (unsigned)i, d->cs_pin,
+			    d->data_pin, d->clk_pin);
+		od_log_info("Display %u: color=%d modes=0x%02X", (unsigned)i, d->color_scheme,
+			    d->transmission_modes);
+	}
+	if (cfg->security_loaded) {
+		od_log_info("Security: enabled=%d, flags=0x%02X, reset_pin=%d",
+			    (int)cfg->security.encryption_enabled, (unsigned)cfg->security.flags,
+			    (int)cfg->security.reset_pin);
+	}
+	od_log_info("Config parsed: version=%d, displays=%d, leds=%d, sensors=%d, data_buses=%d, binary_inputs=%d, buzzers=%d, nfc=%d, flash=%d",
+		    cfg->version, cfg->display_count, cfg->led_count, cfg->sensor_count,
+		    cfg->data_bus_count, cfg->binary_input_count, cfg->passive_buzzer_count,
+		    cfg->nfc_config_count, cfg->flash_config_count);
 }
 
-/*
- * If an unknown packet (e.g. 0x2C before this was implemented) caused the main
- * parser to jump to CRC, security_config (0x27) after it was never loaded.
- * Scan the raw blob for a security packet as a fallback.
- */
-static void rescan_security_packet(const uint8_t *configData, uint32_t configLen)
+bool parseConfigBytes(uint8_t *configData, uint32_t configLen, struct od_config *globalConfig)
 {
-  if (od_security_key_set() || s_od_security_parsed.encryption_enabled != 0u) {
-    return;
-  }
-  for (uint32_t i = 3u; i + 2u + sizeof(struct SecurityConfig) <= configLen - 2u; i++) {
-    if (configData[i + 1u] != CONFIG_PKT_SECURITY) {
-      continue;
-    }
-    const struct SecurityConfig *candidate =
-        (const struct SecurityConfig *)&configData[i + 2u];
-    if (candidate->encryption_enabled != 0u ||
-        security_key_bytes_set(candidate->encryption_key)) {
-      memcpy(&s_od_security_parsed, candidate, sizeof(struct SecurityConfig));
-      apply_zero_key_rule();
-      od_log_info("Security: recovered from scan @%u (enabled=%d)",
-             (unsigned)i, (int)s_od_security_parsed.encryption_enabled);
-      return;
-    }
-  }
+	struct od_config_report report;
+	enum od_config_tlv_result walk;
+
+	if (globalConfig == NULL || configData == NULL) {
+		od_log_info("Invalid parameters for parseConfigBytes");
+		return false;
+	}
+
+	od_log_info("Parsing config: %u bytes", (unsigned)configLen);
+
+	/* Resets, walks, stores, normalises, and computes the advisory CRC. globalConfig->loaded is
+	 * set only on a clean walk; a blob that truncates half-way keeps the packets that preceded
+	 * the truncation, so `loaded` is what callers must read, not the counts. */
+	walk = od_config_parse(globalConfig, od_span_make(configData, configLen), &report);
+	s_parsed = globalConfig;
+
+	if (walk == OD_CFG_TLV_TOO_SHORT) {
+		od_log_info("Config too short: %u bytes", (unsigned)configLen);
+		return false;
+	}
+	if (walk != OD_CFG_TLV_OK) {
+		/* Reported per packet type before the walk was shared ("system_config: need %zu,
+		 * have %u"); the walk cannot name the type, so this is the same fact, once. */
+		od_log_info("Config truncated: a packet claims more data than the blob holds");
+		return false;
+	}
+
+	log_parse_result(globalConfig, &report);
+	return true;
 }
 
-
-#define TRANSMISSION_MODE_CLEAR_ON_BOOT (1 << 7)
-
-static uint16_t crc16_ccitt_feed(uint16_t crc, uint8_t b)
+bool loadGlobalConfig(struct od_config *globalConfig)
 {
-    crc ^= (uint16_t)((uint16_t)b << 8);
-    for (int j = 0; j < 8; j++) {
-        if ((crc & 0x8000U) != 0U) {
-            crc = (uint16_t)(((uint32_t)crc << 1) ^ 0x1021U);
-        } else {
-            crc = (uint16_t)((uint32_t)crc << 1);
-        }
-    }
-    return crc;
-}
+	static uint8_t configData[MAX_CONFIG_SIZE];
+	uint32_t configLen = MAX_CONFIG_SIZE;
 
-static uint16_t config_toolbox_outer_crc16(const uint8_t *data, uint32_t body_len)
-{
-    if (body_len < 2U) {
-        uint16_t crc = 0xFFFFU;
+	if (globalConfig == NULL) {
+		od_log_info("Invalid parameter for loadGlobalConfig");
+		return false;
+	}
 
-        for (uint32_t i = 0; i < body_len; i++) {
-            crc = crc16_ccitt_feed(crc, data[i]);
-        }
-        return crc;
-    }
-    uint16_t crc = 0xFFFFU;
+	od_config_reset(globalConfig);
+	s_parsed = globalConfig;
 
-    crc = crc16_ccitt_feed(crc, 0);
-    crc = crc16_ccitt_feed(crc, 0);
-    for (uint32_t i = 2U; i < body_len; i++) {
-        crc = crc16_ccitt_feed(crc, data[i]);
-    }
-    return crc;
-}
+	if (!initConfigStorage()) {
+		od_log_info("Failed to initialize config storage");
+		return false;
+	}
 
-/*
- * On-wire data size (excluding the 2-byte [number][type] header) of every known
- * config packet type. Returns 0 for a genuinely unknown type.
- *
- * These sizes are cross-checked three ways and all agree: the reference firmware
- * structs (Firmware/src/structs.h), the canonical wire contract
- * (shared/protocol/opendisplay_structs.h -- this port carried a hand-written subset
- * of it when this table was written, and now takes the real thing), and the
- * py-opendisplay serializer docstrings (protocol/config_serializer.py).
- * The one place the old code disagreed with the wire was wifi_config (0x26):
- * this port skipped a hardcoded 162 bytes, but the serializer emits 160
- * ("Serialize WifiConfig to 160 bytes") and the reference struct is 160 — the
- * extra 2 bytes desynced every packet after wifi. Corrected to 160 here.
- *
- * 0x28 (touch_controller) and 0x29 (passive_buzzer) have no parse case on this
- * branch, but are sized here so the default branch skips them by their true size
- * instead of dropping every packet after them. Sibling PRs add real parse cases;
- * the sized skip is exactly what lets those branches stay independent.
- */
-static uint16_t config_packet_data_size(uint8_t packetId)
-{
-    switch (packetId) {
-        case CONFIG_PKT_SYSTEM:        return 22u;   /* 0x01 system_config      */
-        case CONFIG_PKT_MANUFACTURER:  return 22u;   /* 0x02 manufacturer_data  */
-        case CONFIG_PKT_POWER:         return 30u;   /* 0x04 power_option       */
-        case CONFIG_PKT_DISPLAY:       return 46u;   /* 0x20 display            */
-        case CONFIG_PKT_LED:           return 22u;   /* 0x21 led                */
-        case CONFIG_PKT_SENSOR:        return 30u;   /* 0x23 sensor_data        */
-        case CONFIG_PKT_DATA_BUS:      return 30u;   /* 0x24 data_bus           */
-        case CONFIG_PKT_BINARY_INPUT:  return 30u;   /* 0x25 binary_inputs      */
-        case CONFIG_PKT_WIFI:          return 160u;  /* 0x26 wifi_config        */
-        case CONFIG_PKT_SECURITY:      return 64u;   /* 0x27 security_config    */
-        case CONFIG_PKT_TOUCH:         return 32u;   /* 0x28 touch_controller   */
-        case CONFIG_PKT_PASSIVE_BUZZER:return 32u;   /* 0x29 passive_buzzer     */
-        case CONFIG_PKT_NFC:           return 32u;   /* 0x2A nfc_config         */
-        case CONFIG_PKT_FLASH:         return 32u;   /* 0x2B flash_config       */
-        case CONFIG_PKT_DATA_EXTENDED: return 288u;  /* 0x2C data_extended      */
-        default:                       return 0u;
-    }
-}
+	if (!loadConfig(configData, &configLen)) {
+		od_log_info("No config found");
+		return false;
+	}
 
-bool parseConfigBytes(uint8_t* configData, uint32_t configLen, struct GlobalConfig* globalConfig) {
-    if (globalConfig == NULL || configData == NULL) {
-        od_log_info("Invalid parameters for parseConfigBytes");
-        return false;
-    }
-    
-    memset(globalConfig, 0, sizeof(struct GlobalConfig));
-    memset(&s_od_security_parsed, 0, sizeof(s_od_security_parsed));
-    globalConfig->data_extended_loaded = false;
-    
-    if (configLen < 3) {
-        od_log_info("Config too short: %u bytes", (unsigned)configLen);
-        globalConfig->loaded = false;
-        return false;
-    }
-    
-    od_log_info("Parsing config: %u bytes", (unsigned)configLen);
-    
-    uint32_t offset = 0;
-    offset += 2;
-    
-    globalConfig->version = configData[offset++];
-    globalConfig->minor_version = 0; // Not stored in current format
-    
-    uint32_t packetIndex = 0;
-    while (offset < configLen - 2) { // -2 for CRC
-        if (offset > configLen) {
-            od_log_info("Offset overflow: offset=%u > configLen=%u", (unsigned)offset, (unsigned)configLen);
-            globalConfig->loaded = false;
-            return false;
-        }
-        
-        uint32_t remaining = configLen - 2 - offset;
-        if (offset + 2 > configLen - 2) {
-            od_log_info("Loop exit: not enough for header (need 2, have %u)", (unsigned)remaining);
-            break;
-        }
-        
-        uint8_t packetNum = configData[offset];
-        uint8_t packetId = configData[offset + 1];
-        offset += 2; // Advance past packet header
-        
-        if (offset > configLen) {
-            od_log_info("Offset overflow after header: offset=%u > configLen=%u", (unsigned)offset, (unsigned)configLen);
-            globalConfig->loaded = false;
-            return false;
-        }
-        
-        packetIndex++; // Count this packet (before processing, so we count even if we skip it)
-        if (packetId == CONFIG_PKT_SYSTEM || packetId == CONFIG_PKT_MANUFACTURER || 
-            packetId == CONFIG_PKT_POWER || packetId == CONFIG_PKT_DISPLAY) {
-            od_log_info("Pkt #%u ID=0x%02X", (unsigned)packetNum, packetId);
-        }
-        
-        switch (packetId) {
-            case CONFIG_PKT_SYSTEM: // system_config
-                if (offset > configLen) {
-                    od_log_info("Offset overflow before system_config");
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                if (offset + sizeof(struct SystemConfig) <= configLen - 2) {
-                    memcpy(&globalConfig->system_config, &configData[offset], sizeof(struct SystemConfig));
-                    offset += sizeof(struct SystemConfig);
-                    if ((globalConfig->system_config.device_flags & DEVICE_FLAG_CHANNEL_SOUNDING) != 0u) {
-                        od_log_info("system_config: CHANNEL_SOUNDING enabled");
-                    }
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after system_config");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                } else {
-                    od_log_info("system_config: need %zu, have %u", sizeof(struct SystemConfig), (unsigned)(configLen - 2 - offset));
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                break;
-                
-            case CONFIG_PKT_MANUFACTURER: // manufacturer_data
-                if (offset > configLen) {
-                    od_log_info("Offset overflow before manufacturer_data");
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                if (offset + sizeof(struct ManufacturerData) <= configLen - 2) {
-                    memcpy(&globalConfig->manufacturer_data, &configData[offset], sizeof(struct ManufacturerData));
-                    offset += sizeof(struct ManufacturerData);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after manufacturer_data");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                } else {
-                    od_log_info("manufacturer_data: need %zu, have %u", sizeof(struct ManufacturerData), (unsigned)(configLen - 2 - offset));
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                break;
-                
-            case CONFIG_PKT_POWER: // power_option
-                if (offset > configLen) {
-                    od_log_info("Offset overflow before power_option");
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                if (offset + sizeof(struct PowerOption) <= configLen - 2) {
-                    memcpy(&globalConfig->power_option, &configData[offset], sizeof(struct PowerOption));
-                    offset += sizeof(struct PowerOption);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after power_option");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                } else {
-                    od_log_info("power_option: need %zu, have %u", sizeof(struct PowerOption), (unsigned)(configLen - 2 - offset));
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                break;
-                
-            case CONFIG_PKT_DISPLAY: // display
-                if (offset > configLen) {
-                    od_log_info("Offset overflow before display");
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                if (globalConfig->display_count < 4 && offset + sizeof(struct DisplayConfig) <= configLen - 2) {
-                    memcpy(&globalConfig->displays[globalConfig->display_count], &configData[offset], sizeof(struct DisplayConfig));
-                    od_log_info("Display: ic=0x%04X %dx%d", 
-                                 globalConfig->displays[globalConfig->display_count].panel_ic_type,
-                                 globalConfig->displays[globalConfig->display_count].pixel_width,
-                                 globalConfig->displays[globalConfig->display_count].pixel_height);
-                    od_log_info("Display: RST=%d BUSY=%d DC=%d", 
-                                 globalConfig->displays[globalConfig->display_count].reset_pin,
-                                 globalConfig->displays[globalConfig->display_count].busy_pin,
-                                 globalConfig->displays[globalConfig->display_count].dc_pin);
-                    od_log_info("Display: CS=%d DATA=%d CLK=%d", 
-                                 globalConfig->displays[globalConfig->display_count].cs_pin,
-                                 globalConfig->displays[globalConfig->display_count].data_pin,
-                                 globalConfig->displays[globalConfig->display_count].clk_pin);
-                    od_log_info("Display: color=%d modes=0x%02X", 
-                                 globalConfig->displays[globalConfig->display_count].color_scheme,
-                                 globalConfig->displays[globalConfig->display_count].transmission_modes);
-                    offset += sizeof(struct DisplayConfig);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after display");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                    globalConfig->display_count++;
-                } else if (globalConfig->display_count >= 4) {
-                    offset += sizeof(struct DisplayConfig);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after display (skipped)");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                } else {
-                    od_log_info("display: need %zu, have %u", sizeof(struct DisplayConfig), (unsigned)(configLen - 2 - offset));
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                break;
-                
-            case CONFIG_PKT_LED: // led - parse but don't log
-                if (offset > configLen) {
-                    od_log_info("Offset overflow before led");
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                if (globalConfig->led_count < 4 && offset + sizeof(struct LedConfig) <= configLen - 2) {
-                    memcpy(&globalConfig->leds[globalConfig->led_count], &configData[offset], sizeof(struct LedConfig));
-                    offset += sizeof(struct LedConfig);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after led");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                    globalConfig->led_count++;
-                } else if (globalConfig->led_count >= 4) {
-                    offset += sizeof(struct LedConfig);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after led (skipped)");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                } else {
-                    od_log_info("led: need %zu, have %u", sizeof(struct LedConfig), (unsigned)(configLen - 2 - offset));
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                break;
-                
-            case CONFIG_PKT_SENSOR: // sensor_data - parse but don't log
-                if (offset > configLen) {
-                    od_log_info("Offset overflow before sensor");
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                if (globalConfig->sensor_count < 4 && offset + sizeof(struct SensorData) <= configLen - 2) {
-                    memcpy(&globalConfig->sensors[globalConfig->sensor_count], &configData[offset], sizeof(struct SensorData));
-                    offset += sizeof(struct SensorData);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after sensor");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                    globalConfig->sensor_count++;
-                } else if (globalConfig->sensor_count >= 4) {
-                    offset += sizeof(struct SensorData);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after sensor (skipped)");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                } else {
-                    od_log_info("sensor: need %zu, have %u", sizeof(struct SensorData), (unsigned)(configLen - 2 - offset));
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                break;
-                
-            case CONFIG_PKT_DATA_BUS: // data_bus - parse but don't log
-                if (offset > configLen) {
-                    od_log_info("Offset overflow before data_bus");
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                if (globalConfig->data_bus_count < 4 && offset + sizeof(struct DataBus) <= configLen - 2) {
-                    memcpy(&globalConfig->data_buses[globalConfig->data_bus_count], &configData[offset], sizeof(struct DataBus));
-                    offset += sizeof(struct DataBus);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after data_bus");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                    globalConfig->data_bus_count++;
-                } else if (globalConfig->data_bus_count >= 4) {
-                    offset += sizeof(struct DataBus);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after data_bus (skipped)");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                } else {
-                    od_log_info("data_bus: need %zu, have %u", sizeof(struct DataBus), (unsigned)(configLen - 2 - offset));
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                break;
-                
-            case CONFIG_PKT_BINARY_INPUT: // binary_inputs - parse but don't log
-                if (offset > configLen) {
-                    od_log_info("Offset overflow before binary_input");
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                if (globalConfig->binary_input_count < 4 && offset + sizeof(struct BinaryInputs) <= configLen - 2) {
-                    memcpy(&globalConfig->binary_inputs[globalConfig->binary_input_count], &configData[offset], sizeof(struct BinaryInputs));
-                    offset += sizeof(struct BinaryInputs);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after binary_input");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                    globalConfig->binary_input_count++;
-                } else if (globalConfig->binary_input_count >= 4) {
-                    offset += sizeof(struct BinaryInputs);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after binary_input (skipped)");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                } else {
-                    od_log_info("binary_input: need %zu, have %u", sizeof(struct BinaryInputs), (unsigned)(configLen - 2 - offset));
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                break;
-
-            case CONFIG_PKT_TOUCH: // touch_controller (0x28) - parse but don't log
-                if (offset > configLen) {
-                    od_log_info("Offset overflow before touch_controller");
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                if (globalConfig->touch_controller_count < 4 && offset + sizeof(struct TouchController) <= configLen - 2) {
-                    memcpy(&globalConfig->touch_controllers[globalConfig->touch_controller_count], &configData[offset], sizeof(struct TouchController));
-                    offset += sizeof(struct TouchController);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after touch_controller");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                    globalConfig->touch_controller_count++;
-                } else if (globalConfig->touch_controller_count >= 4) {
-                    offset += sizeof(struct TouchController);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after touch_controller (skipped)");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                } else {
-                    od_log_info("touch_controller: need %zu, have %u", sizeof(struct TouchController), (unsigned)(configLen - 2 - offset));
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                break;
-
-            case CONFIG_PKT_PASSIVE_BUZZER: // passive_buzzer (0x29) - parse but don't log
-                if (offset > configLen) {
-                    od_log_info("Offset overflow before passive_buzzer");
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                if (globalConfig->passive_buzzer_count < 4 && offset + sizeof(struct BuzzerConfig) <= configLen - 2) {
-                    memcpy(&globalConfig->passive_buzzers[globalConfig->passive_buzzer_count], &configData[offset], sizeof(struct BuzzerConfig));
-                    offset += sizeof(struct BuzzerConfig);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after passive_buzzer");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                    globalConfig->passive_buzzer_count++;
-                } else if (globalConfig->passive_buzzer_count >= 4) {
-                    offset += sizeof(struct BuzzerConfig);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after passive_buzzer (skipped)");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                } else {
-                    od_log_info("passive_buzzer: need %zu, have %u", sizeof(struct BuzzerConfig), (unsigned)(configLen - 2 - offset));
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                break;
-
-            case CONFIG_PKT_WIFI: // wifi_config (0x26)
-                /* The nRF54 radio has no Wi-Fi, but the packet is still parsed and
-                 * stored (not skipped) so a client's Wi-Fi settings survive a config
-                 * read-back. The old code skipped a hardcoded 162 bytes; the packet
-                 * is 160 bytes on the wire, so that off-by-2 desynced every packet
-                 * after wifi. */
-                if (offset > configLen) {
-                    od_log_info("Offset overflow before wifi");
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                if (offset + sizeof(struct WifiConfig) <= configLen - 2) {
-                    memcpy(&globalConfig->wifi_config, &configData[offset], sizeof(struct WifiConfig));
-                    globalConfig->wifi_config_loaded = true;
-                    offset += sizeof(struct WifiConfig);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after wifi");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                } else {
-                    od_log_info("wifi_config: need %zu, have %u",
-                           sizeof(struct WifiConfig), (unsigned)(configLen - 2 - offset));
-                    offset = configLen - 2; // Skip to CRC
-                }
-                break;
-
-            case CONFIG_PKT_SECURITY: // security_config (0x27)
-                if (offset > configLen) {
-                    od_log_info("Offset overflow before security_config");
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                if (offset + sizeof(struct SecurityConfig) <= configLen - 2) {
-                    memcpy(&s_od_security_parsed, &configData[offset], sizeof(struct SecurityConfig));
-                    apply_zero_key_rule();
-                    offset += sizeof(struct SecurityConfig);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after security_config");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                    od_log_info("Security: enabled=%d, flags=0x%02X, reset_pin=%d",
-                                 s_od_security_parsed.encryption_enabled,
-                                 s_od_security_parsed.flags,
-                                 s_od_security_parsed.reset_pin);
-                } else {
-                    od_log_info("security_config: need %zu, have %u",
-                                  sizeof(struct SecurityConfig), (unsigned)(configLen - 2 - offset));
-                    offset = configLen - 2;
-                }
-                break;
-
-            case CONFIG_PKT_NFC: // nfc_config (0x2A)
-                if (offset > configLen) {
-                    od_log_info("Offset overflow before nfc_config");
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                if (globalConfig->nfc_config_count < 2 && offset + sizeof(struct NfcConfig) <= configLen - 2) {
-                    memcpy(&globalConfig->nfc_configs[globalConfig->nfc_config_count], &configData[offset], sizeof(struct NfcConfig));
-                    offset += sizeof(struct NfcConfig);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after nfc_config");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                    globalConfig->nfc_config_count++;
-                } else if (globalConfig->nfc_config_count >= 2) {
-                    offset += sizeof(struct NfcConfig);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after nfc_config (skipped)");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                } else {
-                    od_log_info("nfc_config: need %zu, have %u", sizeof(struct NfcConfig), (unsigned)(configLen - 2 - offset));
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                break;
-
-            case CONFIG_PKT_FLASH: // flash_config (0x2B)
-                if (offset > configLen) {
-                    od_log_info("Offset overflow before flash_config");
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                if (globalConfig->flash_config_count < 2 && offset + sizeof(struct FlashConfig) <= configLen - 2) {
-                    memcpy(&globalConfig->flash_configs[globalConfig->flash_config_count], &configData[offset], sizeof(struct FlashConfig));
-                    offset += sizeof(struct FlashConfig);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after flash_config");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                    globalConfig->flash_config_count++;
-                } else if (globalConfig->flash_config_count >= 2) {
-                    offset += sizeof(struct FlashConfig);
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after flash_config (skipped)");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                } else {
-                    od_log_info("flash_config: need %zu, have %u", sizeof(struct FlashConfig), (unsigned)(configLen - 2 - offset));
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                break;
-
-            case CONFIG_PKT_DATA_EXTENDED:
-                if (offset > configLen) {
-                    od_log_info("Offset overflow before data_extended");
-                    globalConfig->loaded = false;
-                    return false;
-                }
-                if (offset + sizeof(struct DataExtended) <= configLen - 2) {
-                    memcpy(&globalConfig->data_extended, &configData[offset],
-                           sizeof(struct DataExtended));
-                    data_extended_null_terminate(&globalConfig->data_extended);
-                    offset += sizeof(struct DataExtended);
-                    globalConfig->data_extended_loaded = true;
-                    if (offset > configLen) {
-                        od_log_info("Offset overflow after data_extended");
-                        globalConfig->loaded = false;
-                        return false;
-                    }
-                } else {
-                    od_log_info("data_extended: need %zu, have %u",
-                           sizeof(struct DataExtended),
-                           (unsigned)(configLen - 2 - offset));
-                    offset = configLen - 2;
-                }
-                break;
-                
-            default: {
-                /*
-                 * A type with no parse case above (e.g. 0x28 touch / 0x29 buzzer on
-                 * this branch). Skip it by its known on-wire size so later packets
-                 * are still parsed, instead of jumping to the CRC and silently
-                 * dropping everything after it. Only a genuinely unknown type ID
-                 * (not in the size table) forces skip-to-CRC, because the TLV format
-                 * carries no per-packet length to recover from.
-                 */
-                uint16_t knownSize = config_packet_data_size(packetId);
-                if (knownSize != 0u) {
-                    if (offset + knownSize <= configLen - 2) {
-                        od_log_info("Known-unparsed pkt 0x%02X @%u, skipping %u B",
-                               packetId, (unsigned)(offset - 2), (unsigned)knownSize);
-                        offset += knownSize;
-                    } else {
-                        od_log_info("Known-unparsed pkt 0x%02X @%u: need %u, have %u",
-                               packetId, (unsigned)(offset - 2), (unsigned)knownSize,
-                               (unsigned)(configLen - 2 - offset));
-                        offset = configLen - 2; // Truncated packet; stop.
-                    }
-                } else {
-                    od_log_info("Unknown pkt 0x%02X @%u, skip-to-CRC (drops later pkts)",
-                           packetId, (unsigned)(offset - 2));
-                    offset = configLen - 2; // Skip to CRC
-                }
-                break;
-            }
-        }
-    }
-    
-    od_log_info("Parsed %u pkts, offset=%u/%u", (unsigned)packetIndex, (unsigned)offset, (unsigned)(configLen - 2));
-
-    rescan_security_packet(configData, configLen);
-    if (od_security_key_set() || s_od_security_parsed.encryption_enabled != 0u) {
-        od_log_info("Security: enabled=%d, flags=0x%02X, key_set=%d",
-               (int)s_od_security_parsed.encryption_enabled,
-               (unsigned)s_od_security_parsed.flags,
-               (int)od_security_key_set());
-    }
-    
-    if (configLen >= 2) {
-        uint16_t crcGiven = configData[configLen - 2] | (configData[configLen - 1] << 8);
-        uint16_t crcCalculated = config_toolbox_outer_crc16(configData, configLen - 2);
-        if (crcGiven != crcCalculated) {
-            od_log_info("CRC mismatch: 0x%04X vs 0x%04X", crcGiven, crcCalculated);
-        }
-    }
-    
-    globalConfig->loaded = true;
-    od_log_info("Config parsed successfully: version=%d, displays=%d, leds=%d, sensors=%d, data_buses=%d, binary_inputs=%d, buzzers=%d, nfc=%d, flash=%d",
-                 globalConfig->version, globalConfig->display_count, globalConfig->led_count,
-                 globalConfig->sensor_count, globalConfig->data_bus_count, globalConfig->binary_input_count,
-                 globalConfig->passive_buzzer_count, globalConfig->nfc_config_count, globalConfig->flash_config_count);
-    return true;
-}
-
-bool loadGlobalConfig(struct GlobalConfig* globalConfig) {
-    if (globalConfig == NULL) {
-        od_log_info("Invalid parameter for loadGlobalConfig");
-        return false;
-    }
-    
-    memset(globalConfig, 0, sizeof(struct GlobalConfig));
-    globalConfig->loaded = false;
-    
-    static uint8_t configData[MAX_CONFIG_SIZE];
-    uint32_t configLen = MAX_CONFIG_SIZE;
-    
-    if (!initConfigStorage()) {
-        od_log_info("Failed to initialize config storage");
-        return false;
-    }
-    
-    if (!loadConfig(configData, &configLen)) {
-        od_log_info("No config found");
-        return false;
-    }
-    
-    return parseConfigBytes(configData, configLen, globalConfig);
+	return parseConfigBytes(configData, configLen, globalConfig);
 }

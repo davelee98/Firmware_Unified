@@ -27,7 +27,7 @@ static void idle_delay_ms(uint32_t delay_ms)
 
 int main(void)
 {
-	const struct GlobalConfig *cfg;
+	const struct od_config *cfg;
 	uint32_t ticks = 0;
 
 	/* Compatibility hook before the first application record. */

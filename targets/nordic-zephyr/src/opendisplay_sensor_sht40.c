@@ -160,7 +160,7 @@ static void write_sht40_invalid(uint8_t start)
 
 void opendisplay_sensor_sht40_init(void)
 {
-	const struct GlobalConfig *cfg = opendisplay_get_global_config();
+	const struct od_config *cfg = opendisplay_get_global_config();
 
 	if (cfg == NULL) {
 		return;
@@ -192,7 +192,7 @@ void opendisplay_sensor_sht40_poll(void)
 	static bool have_polled;
 	static bool logged_fail;
 
-	const struct GlobalConfig *cfg = opendisplay_get_global_config();
+	const struct od_config *cfg = opendisplay_get_global_config();
 
 	if (cfg == NULL) {
 		return;

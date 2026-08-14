@@ -324,7 +324,7 @@ static void led_run_step(void)
 
 void opendisplay_led_init(void)
 {
-  const struct GlobalConfig *gc = opendisplay_get_global_config();
+  const struct od_config *gc = opendisplay_get_global_config();
 
   k_timer_init(&s_led_timer, led_timer_cb, NULL);
   if (gc == NULL || !gc->loaded || gc->led_count == 0u) {
@@ -347,7 +347,7 @@ void opendisplay_led_init(void)
 
 int opendisplay_led_activate(uint8_t instance, const uint8_t *rest, uint16_t rest_len)
 {
-  struct GlobalConfig *gc = (struct GlobalConfig *)opendisplay_get_global_config();
+  struct od_config *gc = (struct od_config *)opendisplay_get_global_config();
   struct LedConfig *led;
 
   if (gc == NULL || !gc->loaded || instance >= gc->led_count) {

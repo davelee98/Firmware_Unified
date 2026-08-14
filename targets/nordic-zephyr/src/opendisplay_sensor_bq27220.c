@@ -23,7 +23,7 @@ static bool valid_pin(uint8_t pin)
 
 static const struct SensorData *bq27220_config(void)
 {
-	const struct GlobalConfig *cfg = opendisplay_get_global_config();
+	const struct od_config *cfg = opendisplay_get_global_config();
 
 	if (cfg == NULL) {
 		return NULL;
@@ -65,7 +65,7 @@ static bool bq27220_read_block(const struct SensorData *s, uint8_t cmd,
 
 static bool charger_gpio_charging(void)
 {
-	const struct GlobalConfig *cfg = opendisplay_get_global_config();
+	const struct od_config *cfg = opendisplay_get_global_config();
 
 	if (cfg == NULL) {
 		return false;
@@ -94,7 +94,7 @@ float opendisplay_sensor_bq27220_voltage_volts(void)
 
 void opendisplay_sensor_bq27220_init(void)
 {
-	const struct GlobalConfig *cfg = opendisplay_get_global_config();
+	const struct od_config *cfg = opendisplay_get_global_config();
 
 	if (cfg == NULL) {
 		return;

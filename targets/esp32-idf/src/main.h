@@ -276,11 +276,14 @@ void getCurrentNonce(uint8_t* nonce);
 /* chunkedWriteState is GONE -- see config_parser.h. The 4 KB reassembly buffer now lives in
  * communication.cpp's g_configAsm (shared/core/od_config_asm.h). Same one buffer, same static
  * allocation; it simply is not defined in a header any more. */
-struct GlobalConfig globalConfig = {0};
+struct od_config globalConfig = {0};
 uint8_t configReadResponseBuffer[128];
 
-// Security configuration
-struct SecurityConfig securityConfig = {0};
+// Security configuration. An ALIAS, not a second object: security is a member of the parsed
+// config so the zero-key normalisation cannot be separated from the parse that applies it
+// (shared/core/od_config.h). Keeping the old name means the consumers in encryption.cpp,
+// boot_screen.cpp and communication.cpp do not care where it now lives.
+struct SecurityConfig &securityConfig = globalConfig.security;
 EncryptionSession encryptionSession = {0};
 bool encryptionInitialized = false;
 

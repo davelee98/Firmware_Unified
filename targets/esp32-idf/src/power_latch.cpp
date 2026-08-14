@@ -34,7 +34,7 @@
 #define DEVICE_FLAG_PWR_LATCH_DFF (1 << 4)
 #endif
 
-extern struct GlobalConfig globalConfig;
+extern struct od_config globalConfig;
 
 namespace {
 

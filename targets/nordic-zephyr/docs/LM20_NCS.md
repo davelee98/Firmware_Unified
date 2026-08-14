@@ -24,6 +24,16 @@ RTT console (reset + dump):
 BUILD_DIR=build-lm20 DURATION=20 ./rtt.sh
 ```
 
+`rtt.sh` takes the control block address from `_SEGGER_RTT` in the build's ELF.
+Do not substitute `pyocd rtt`: it searches the target's declared RAM region, and
+pyocd's `nrf54lm20a` map claims 512 KB while cpuapp SRAM ends at `0x2007fe40`,
+so the search dies with `Memory transfer fault (FAULT ACK) @
+0x2007fc00-0x2007ffff`. Bound it if you must: `-a 0x20000000 -s 0x20000`.
+
+Silence on RTT usually means MCUboot never chainloaded. A truncated primary slot
+does that — validation fails, `main.c` hits `FIH_PANIC`, and the core spins in
+the bootloader with the app's RAM (and its RTT block) never initialised.
+
 Board-specific `zephyr/boards/xiao_nrf54lm20a_nrf54lm20a_cpuapp.conf` is
 auto-picked (disables `CONFIG_BT_CTLR_ASSERT_OPTIMIZE_FOR_SIZE`).
 

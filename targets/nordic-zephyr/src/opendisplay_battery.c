@@ -5,6 +5,7 @@
 #include "opendisplay_sensor_npm1300.h"
 #include "od_runtime_types.h"
 #include "od_gpio.h"
+#include "od_advert.h"
 
 #include <stdio.h>
 #include <zephyr/devicetree.h>
@@ -118,7 +119,7 @@ static int32_t saadc_read_mv(const struct adc_dt_spec *spec)
 /* Uncached SAADC path. Returns volts, or -1.0f if unavailable. */
 static float battery_read_saadc_volts(void)
 {
-	const struct GlobalConfig *cfg = opendisplay_get_global_config();
+	const struct od_config *cfg = opendisplay_get_global_config();
 
 	if (cfg == NULL) {
 		return -1.0f;
@@ -229,10 +230,5 @@ uint16_t opendisplay_battery_get_10mv(void)
 	if (volts < 0.0f) {
 		return 0u;
 	}
-	uint16_t mv = (uint16_t)(volts * 1000.0f);
-	uint16_t v10 = (uint16_t)(mv / 10u);
-	if (v10 > 511u) {
-		v10 = 511u;
-	}
-	return v10;
+	return od_advert_battery_10mv_from_mv((uint16_t)(volts * 1000.0f));
 }

@@ -5,7 +5,7 @@
 #include "od_hal_time.h"
 #include <string.h>
 
-extern struct GlobalConfig globalConfig;
+extern struct od_config globalConfig;
 void sendResponse(uint8_t* response, uint16_t len);
 
 static_assert(sizeof(BuzzerConfig) == 32, "BuzzerConfig must be 32 bytes");

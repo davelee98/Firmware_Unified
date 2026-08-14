@@ -4,6 +4,7 @@
 #include "opendisplay_led.h"
 #include "opendisplay_pipe.h"
 #include "opendisplay_constants.h"
+#include "od_advert.h"
 #include "app.h"
 #include "app_assert.h"
 #include "gatt_db.h"
@@ -19,8 +20,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define OPENDISPLAY_COMPANY_ID 0x2446u
-#define MSD_PAYLOAD_LEN        16u
+#define MSD_PAYLOAD_LEN        OD_ADVERT_MSD_LEN
 #define OD_NAME_PREFIX         "OD"
 #ifndef OD_FW_VERSION
 #define OD_FW_VERSION ""
@@ -179,7 +179,7 @@ static uint8_t fw_patch_from_build_version(void)
 
 static uint8_t msd_payload[MSD_PAYLOAD_LEN];
 static uint8_t msd_loop_counter;
-static uint8_t dynamic_return[11];
+static uint8_t dynamic_return[OD_ADVERT_DYNAMIC_LEN];
 static uint8_t reboot_flag = 1u;
 static uint8_t connection_requested = 0u;
 
@@ -1678,29 +1678,17 @@ static void chip_id_hex6(char out[7])
 static void update_msd_payload(bool quick)
 {
   float chip_temperature = EMU_TemperatureGet();
-  int16_t temp_encoded;
-  uint16_t battery_voltage_10mv = 0u;
   uint32_t now_ms = sl_sleeptimer_tick_to_ms(sl_sleeptimer_get_tick_count());
   bool measure_batt = !quick
                       && ((s_batt_voltage_mv_cache == 0u)
                           || ((now_ms - s_last_batt_measure_ms) > OD_MSD_UPDATE_INTERVAL_MS));
-  uint8_t temperature_byte;
-  uint8_t battery_voltage_low_byte;
-  uint8_t status_byte;
+  struct od_advert_inputs adv_in;
   uint32_t sample;
   IADC_Init_t init = IADC_INIT_DEFAULT;
   IADC_AllConfigs_t initAllConfigs = IADC_ALLCONFIGS_DEFAULT;
   IADC_InitSingle_t initSingle = IADC_INITSINGLE_DEFAULT;
   IADC_SingleInput_t initSingleInput = IADC_SINGLEINPUT_DEFAULT;
 
-  /* MSD temperature: 0.5 C steps, range -40.0C..+87.5C (OpenDisplay BLE encoding). */
-  temp_encoded = (int16_t)((chip_temperature + 40.0f) * 2.0f);
-  if (temp_encoded < 0) {
-    temp_encoded = 0;
-  } else if (temp_encoded > 255) {
-    temp_encoded = 255;
-  }
-  temperature_byte = (uint8_t)temp_encoded;
   if (measure_batt) {
     CMU_ClockEnable(cmuClock_IADC0, true);
     IADC_reset(IADC0);
@@ -1728,24 +1716,20 @@ static void update_msd_payload(bool quick)
     IADC_reset(IADC0);
     CMU_ClockEnable(cmuClock_IADC0, false);
   }
-  battery_voltage_10mv = (uint16_t)(s_batt_voltage_mv_cache / 10u);
-  if (battery_voltage_10mv > 511u) {
-    battery_voltage_10mv = 511u;
-  }
-  battery_voltage_low_byte = (uint8_t)(battery_voltage_10mv & 0xFFu);
-  status_byte = (uint8_t)(((battery_voltage_10mv >> 8) & 0x01u)
-                           | ((reboot_flag & 0x01u) << 1)
-                           | ((connection_requested & 0x01u) << 2)
-                           | ((msd_loop_counter & 0x0Fu) << 4));
+  /* Encoding -- company id, the 0.5 C / -40 C temperature step, the 10-bit battery split across
+   * battery_voltage_low and status bit0, the status bit positions -- is shared/core/od_advert.c.
+   * What stays here is acquisition: the die temperature and the IADC read above, which are the
+   * only parts of this that are the BG22's own. */
+  memset(&adv_in, 0, sizeof(adv_in));
+  adv_in.dynamic = dynamic_return;
+  adv_in.chip_temperature_c = chip_temperature;
+  adv_in.battery_10mv = od_advert_battery_10mv_from_mv(s_batt_voltage_mv_cache);
+  adv_in.reboot_flag = (reboot_flag != 0u);
+  adv_in.connection_requested = (connection_requested != 0u);
+  adv_in.loop_counter = msd_loop_counter;
+  od_advert_build(&adv_in, msd_payload);
 
-  memset(msd_payload, 0, sizeof(msd_payload));
-  msd_payload[0] = (uint8_t)(OPENDISPLAY_COMPANY_ID & 0xFFu);
-  msd_payload[1] = (uint8_t)((OPENDISPLAY_COMPANY_ID >> 8) & 0xFFu);
-  memcpy(&msd_payload[2], dynamic_return, sizeof(dynamic_return));
-  msd_payload[13] = temperature_byte;
-  msd_payload[14] = battery_voltage_low_byte;
-  msd_payload[15] = status_byte;
-  msd_loop_counter = (uint8_t)((msd_loop_counter + 1u) & 0x0Fu);
+  msd_loop_counter = od_advert_advance_counter(msd_loop_counter);
 }
 
 static sl_status_t set_gap_device_name(const char *name)
@@ -1829,12 +1813,13 @@ static void build_and_apply_adv(uint8_t adv_set, const char *name, bool quick)
   adv[ai++] = 0x01u;
   adv[ai++] = 0x06u;
 
-  adv[ai++] = 17u;
+  /* The AD structure is the 0xFF type byte plus the 16 MSD bytes. Copied whole: bytes 0-1 of
+   * msd_payload ARE the company id, so writing it again here was a second definition of the
+   * constant that could disagree with the encoder's. */
+  adv[ai++] = 1u + OD_ADVERT_MSD_LEN;
   adv[ai++] = 0xFFu;
-  adv[ai++] = (uint8_t)(OPENDISPLAY_COMPANY_ID & 0xFFu);
-  adv[ai++] = (uint8_t)((OPENDISPLAY_COMPANY_ID >> 8) & 0xFFu);
-  memcpy(&adv[ai], &msd_payload[2], 14);
-  ai += 14;
+  memcpy(&adv[ai], msd_payload, OD_ADVERT_MSD_LEN);
+  ai += OD_ADVERT_MSD_LEN;
 
   if (ai + 2 + nl > sizeof(adv)) {
     nl = sizeof(adv) - ai - 2;

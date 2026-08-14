@@ -42,7 +42,7 @@ static bool read_logical_pressed(const ButtonState *btn)
 
 void opendisplay_button_init(void)
 {
-  const struct GlobalConfig *cfg = opendisplay_get_global_config();
+  const struct od_config *cfg = opendisplay_get_global_config();
 
   memset(s_buttons, 0, sizeof(s_buttons));
   s_button_count = 0;

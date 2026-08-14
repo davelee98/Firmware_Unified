@@ -290,7 +290,7 @@ static void gt911_clear_status(const struct TouchBus *b, uint8_t addr7, bool reg
 
 static bool touch_get_bus(const struct TouchController *tc, struct TouchBus *out)
 {
-  const struct GlobalConfig *cfg = opendisplay_get_global_config();
+  const struct od_config *cfg = opendisplay_get_global_config();
   uint8_t bid = tc->bus_id;
 
   if (cfg == NULL) {
@@ -459,7 +459,7 @@ static bool touch_light_resume_gt911(const struct TouchController *tc, struct To
 
 static void apply_touch_map(const struct TouchController *tc, uint16_t *x, uint16_t *y)
 {
-  const struct GlobalConfig *cfg = opendisplay_get_global_config();
+  const struct od_config *cfg = opendisplay_get_global_config();
   uint16_t w = 0;
   uint16_t h = 0;
 
@@ -490,7 +490,7 @@ static void apply_touch_map(const struct TouchController *tc, uint16_t *x, uint1
 
 void opendisplay_touch_init(void)
 {
-  const struct GlobalConfig *cfg = opendisplay_get_global_config();
+  const struct od_config *cfg = opendisplay_get_global_config();
 
   memset(s_touch_rt, 0, sizeof(s_touch_rt));
   s_any_initialized = false;
@@ -536,7 +536,7 @@ void opendisplay_touch_init(void)
 
 bool opendisplay_touch_gpio_is_touch_int(uint8_t pin)
 {
-  const struct GlobalConfig *cfg = opendisplay_get_global_config();
+  const struct od_config *cfg = opendisplay_get_global_config();
 
   if (pin == 0xFFu || cfg == NULL) {
     return false;
@@ -552,7 +552,7 @@ bool opendisplay_touch_gpio_is_touch_int(uint8_t pin)
 
 void opendisplay_touch_resume_after_refresh(void)
 {
-  const struct GlobalConfig *cfg = opendisplay_get_global_config();
+  const struct od_config *cfg = opendisplay_get_global_config();
 
   if (!s_any_initialized || cfg == NULL) {
     return;
@@ -577,7 +577,7 @@ void opendisplay_touch_resume_after_refresh(void)
 
 void opendisplay_touch_process(void)
 {
-  const struct GlobalConfig *cfg = opendisplay_get_global_config();
+  const struct od_config *cfg = opendisplay_get_global_config();
   uint32_t now;
 
   if (!s_any_initialized || cfg == NULL || cfg->touch_controller_count == 0u) {

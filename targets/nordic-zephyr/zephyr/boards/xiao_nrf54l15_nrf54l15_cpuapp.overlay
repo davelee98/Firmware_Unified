@@ -43,3 +43,28 @@
 &i2c22 {
 	status = "disabled";
 };
+
+/*
+ * RECLAIM THE FLPR's SRAM: 188 KB -> 256 KB.
+ *
+ * The stock nrf54l15.dtsi splits the part's 256 KB as 188 KB cpuapp + 68 KB cpuflpr_sram at
+ * 0x2002f000. That split is a devicetree convention, not hardware arbitration: the nRF54L MPC
+ * has two owners -- KMU and everything else -- so the M33 and the FLPR are the same owner, and
+ * the only hardware-fixed override protects CRACEN RAM. Nordic ships this same override in the
+ * Matter lighting-app sample, and their own non-secure cpuapp dtsi already gives the app all
+ * 256 KB.
+ *
+ * VALID ONLY WHILE NO FLPR IMAGE RUNS. This firmware never builds or starts one, and a secure
+ * cpuapp build deletes the cpuflpr_sram/cpuflpr_rram nodes outright, leaving the region
+ * unowned. Enabling the nordic-flpr snippet would move the boundary again (to 160 KB) and this
+ * override must be dropped in the same change.
+ *
+ * cpuapp_rram is deliberately NOT widened. Its FLPR reservation begins at 0x165000, exactly
+ * where the partition table ends, so claiming it means growing slot0 and slot1 -- which
+ * MCUboot's swap requires to stay equal in size -- and that moves slot1's base address,
+ * breaking DFU against already-fielded devices. The SRAM reclaim carries no such cost.
+ */
+&cpuapp_sram {
+	reg = <0x20000000 DT_SIZE_K(256)>;
+	ranges = <0x0 0x20000000 0x40000>;
+};
