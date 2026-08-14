@@ -884,6 +884,13 @@ void opendisplay_ble_init(void)
 	opendisplay_led_init();
 	opendisplay_buzzer_init();
 
+	/* Before bt_enable(): its failure path returns early, and the main loop keeps
+	 * calling opendisplay_ble_process(), whose adv fallback schedules this work.
+	 * A work item scheduled before k_work_init() runs a NULL handler. */
+	k_work_init_delayable(&s_adv_restart_work, adv_work_handler);
+	k_work_init_delayable(&s_dfu_work, dfu_work_handler);
+	k_work_init(&s_boot_display_work, boot_display_work_handler);
+
 	od_log_info("enabling Bluetooth");
 	err = bt_enable(NULL);
 	if (err != 0) {
@@ -897,9 +904,6 @@ void opendisplay_ble_init(void)
 
 	opendisplay_button_init();
 	opendisplay_touch_init();
-	k_work_init_delayable(&s_adv_restart_work, adv_work_handler);
-	k_work_init_delayable(&s_dfu_work, dfu_work_handler);
-	k_work_init(&s_boot_display_work, boot_display_work_handler);
 	/* After SoftDevice + adv work init (NFC field MSD uses schedule_msd_publish). */
 	opendisplay_nfc_apply_config(&s_od_global_config);
 	/* Match Adafruit: hide SMP when encryption is on until CMD_ENTER_DFU. */
