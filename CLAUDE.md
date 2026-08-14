@@ -12,6 +12,14 @@ prerequisite. This file already distils it — don't open a doc to re-confirm a 
 to answer what a grep answers. Dated files (`*_REVIEW_<date>`, `FINDINGS*`, NEXT_STEPS.md) are
 archive. One doc per task, at most; past that, write the code and flag the uncertainty.
 
+## Comments
+
+Say what the code does and why it is the way it is. Do not narrate history — no "this used to",
+no "before the promotion", no recounting the bug that prompted the change. Git and the commit
+message hold that. A comment longer than the code it explains is almost always history in
+disguise. Keep the non-obvious constraint (a wire contract, a RAM ceiling, an ordering that
+looks arbitrary and is not); delete the story.
+
 ## Status
 
 - **`targets/esp32-idf/` is the only HARDWARE-VERIFIED target** — 10 boards, run on an ESP32-S3.

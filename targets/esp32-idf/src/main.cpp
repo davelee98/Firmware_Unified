@@ -996,6 +996,14 @@ void loop() {
     epdSessionTick();   // od_hal_uptime_ms()-poll: power the panel down screen_timeout_seconds after last release
     buzzerService();
 
+#ifdef TARGET_ESP32
+    // Reconcile advertising before any branch can claim the pass: this is the only path to
+    // ble_gap_adv_start(), so a policy branch that returns early must not be able to skip it.
+    // Policy belongs in the argument -- while a refresh runs a NEW start waits, but a running
+    // advertisement is never withdrawn for one.
+    (void)od_ble_service_advertising(!epdRefreshInProgress);
+#endif
+
     if (platformLoopPrologue()) return;
 
     // WITHIN-PASS ORDER IS NORMATIVE (CONNECTION_POLICY R7d), not incidental:
@@ -1039,18 +1047,9 @@ void loop() {
         updatemsdata();
     }
     serviceBleAdvertisingRestart();   // no-op where the stack re-arms itself
-#ifdef TARGET_ESP32
-    // Reconcile advertising, every pass, on THIS task. The NimBLE callbacks no longer start or
-    // stop advertising -- they publish facts and this drives one step (F4).
-    //
-    // Unconditional by design. serviceBleAdvertisingRestart() above still owns the "should we
-    // WANT to advertise" decision and the pending-flag bookkeeping; this owns "given what is
-    // wanted and what the stack is doing, what is the single next action". The refresh gate is
-    // passed in rather than checked inside, because it is an application fact the BLE layer
-    // has no business knowing: while a refresh runs, a NEW start waits -- but a running
-    // advertisement is never withdrawn for it.
-    (void)od_ble_service_advertising(!epdRefreshInProgress);
-#endif
+    // Advertising is reconciled at the top of loop(), above platformLoopPrologue(), so no early
+    // return can skip it. serviceBleAdvertisingRestart() above owns whether we WANT to
+    // advertise; the pump owns what to do about it.
 
     // Session watchdogs. Shared as of Phase 4: these are transport-agnostic and
     // were ESP32-only for no reason other than living in the ESP32 loop arm, so

@@ -334,9 +334,22 @@ bool BleTransport::begin(const char* deviceName) {
 }
 
 void BleTransport::startAdvertising() {
-    if (!s_ready) return;
+    if (!s_ready) {
+        od_log_warn("=== BLE advertising NOT started: transport not ready ===");
+        return;
+    }
+    /* od_ble_restart_advertising() only records intent; the pump makes the stack call. Drive it
+     * to an outcome so the log reports what happened, not what was asked for. Bounded so a start
+     * that cannot complete does not hang setup(); the pump's stall report escalates from there. */
     od_ble_restart_advertising();
-    od_log_info("=== BLE advertising started successfully ===");
+    for (unsigned pass = 0; pass < 8u && !od_ble_advertising_active(); ++pass) {
+        (void)od_ble_service_advertising(true);
+    }
+    if (od_ble_advertising_active()) {
+        od_log_info("=== BLE advertising started successfully ===");
+    } else {
+        od_log_warn("=== BLE advertising requested but NOT running after 8 passes ===");
+    }
 }
 
 void BleTransport::restartAdvertising() {

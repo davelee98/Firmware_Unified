@@ -18,6 +18,8 @@
 /* The shared advertising HAL this file implements at the bottom, and OD_ADV_MSD_LEN. Both are
  * plain-C shared headers; nothing from shared/ is called from here yet. */
 #include "od_hal_adv.h"
+/* od_hal_uptime_ms(), for the advertising stall report below. */
+#include "od_hal_time.h"
 #include "od_adv_control.h"
 
 #include "esp_log.h"
@@ -201,6 +203,14 @@ static char s_name[32] = "OpenDisplay";
  * callback -- that would recreate the defect with more code.
  */
 static struct od_adv_control s_adv;
+
+/* Stall reporting. Every way advertising can fail to start is a silent transient -- RETRY from a
+ * missing identity or BLE_HS_ENOMEM, a start gated off, a connection that never cleared. Report
+ * the condition (intent held without advertising) rather than the events, which would spam at
+ * loop rate. Loop-task only, like everything else touching s_adv. */
+#define OD_ADV_STALL_REPORT_MS 5000u
+static uint32_t s_adv_wanted_since_ms = 0;   /* 0 = not currently stalled */
+static uint32_t s_adv_stall_logged_ms = 0;
 
 /* The one fact the stack must hand across: advertising is no longer running.
  *
@@ -984,7 +994,35 @@ bool od_ble_service_advertising(bool start_allowed)
     }
 
     const enum od_adv_process_result r = od_adv_process(&s_adv, start_allowed);
+
+    /* Advertising wanted but not running, once every 5 s. The fields are the ones
+     * od_adv_process() branches on, so the line names the gate that is stuck. */
+    if (s_adv.desired && !s_adv.active) {
+        const uint32_t now = od_hal_uptime_ms();
+        if (s_adv_wanted_since_ms == 0u) {
+            s_adv_wanted_since_ms = (now != 0u) ? now : 1u;
+        } else if ((now - s_adv_wanted_since_ms) >= OD_ADV_STALL_REPORT_MS &&
+                   (now - s_adv_stall_logged_ms) >= OD_ADV_STALL_REPORT_MS) {
+            s_adv_stall_logged_ms = now;
+            ESP_LOGW(TAG,
+                     "advertising WANTED but not running for %u ms: stack_ready=%d conns=%u "
+                     "payload_valid=%d payload_dirty=%d faulted=%d start_allowed=%d step=%d",
+                     (unsigned)(now - s_adv_wanted_since_ms), (int)s_adv.stack_ready,
+                     (unsigned)s_adv.connection_count, (int)s_adv.payload_valid,
+                     (int)s_adv.payload_dirty, (int)s_adv.faulted, (int)start_allowed, (int)r);
+        }
+    } else {
+        s_adv_wanted_since_ms = 0u;
+        s_adv_stall_logged_ms = 0u;
+    }
+
     return r == OD_ADV_ACTED;
+}
+
+bool od_ble_advertising_active(void)
+{
+    /* The controller's belief, reconciled against the stack every pass. Loop-task only. */
+    return s_adv.active;
 }
 
 void od_ble_set_preferred_mtu(uint16_t mtu)
