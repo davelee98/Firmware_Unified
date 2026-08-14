@@ -120,6 +120,11 @@ void od_ble_set_manufacturer_data(const uint8_t *msd, uint8_t len);
  */
 bool od_ble_service_advertising(bool start_allowed);
 
+/* Is the radio advertising, as far as the controller that owns it knows? Distinct from "was it
+ * requested": od_ble_restart_advertising() records intent and makes no stack call, so ask this
+ * only after driving the pump. */
+bool od_ble_advertising_active(void);
+
 /* ------------------------------------------------------------------ connections */
 
 /* Number of live connections. This is the stack's peer count, maintained across the
