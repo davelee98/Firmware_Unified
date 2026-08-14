@@ -14,6 +14,12 @@
 #define LED_FLAG_INVERT_LED4   0x08u
 #define LED_DELAY_FACTOR_MS    100u
 #define LED_PWM_DELAY_US       100u
+/* Floor for a scheduled step, so the runner yields to the main loop at least
+ * once per flash and once per group cycle even when every configured delay is
+ * zero. grouprepeats == 255 means repeat forever and is a supported pattern;
+ * this target has no watchdog, so a runner that never returned would wedge the
+ * main thread permanently. */
+#define LED_MIN_STEP_DELAY_MS  1u
 
 typedef enum {
   LED_PHASE_IDLE = 0,
@@ -221,12 +227,15 @@ static void led_run_step(void)
       }
       od_flash_led(led, s_run.c1, s_run.brightness);
       s_run.i1++;
+      /* Return after every flash; with no configured delay the step is still
+       * scheduled, so the next flash comes from the next process() call. */
       if (s_run.loop1delay > 0u) {
         s_run.phase = LED_PHASE_LOOP1_DELAY;
         led_schedule_delay_ms((uint16_t)(s_run.loop1delay * LED_DELAY_FACTOR_MS));
-        return;
+      } else {
+        led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
       }
-      break;
+      return;
     case LED_PHASE_LOOP1_DELAY:
       if (!led_delay_ready()) {
         return;
@@ -254,9 +263,10 @@ static void led_run_step(void)
       if (s_run.loop2delay > 0u) {
         s_run.phase = LED_PHASE_LOOP2_DELAY;
         led_schedule_delay_ms((uint16_t)(s_run.loop2delay * LED_DELAY_FACTOR_MS));
-        return;
+      } else {
+        led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
       }
-      break;
+      return;
     case LED_PHASE_LOOP2_DELAY:
       if (!led_delay_ready()) {
         return;
@@ -276,18 +286,22 @@ static void led_run_step(void)
           led_schedule_delay_ms((uint16_t)(s_run.ildelay3 * LED_DELAY_FACTOR_MS));
           return;
         }
+        /* Group-closing edge: also the only yield when every loop count is
+         * zero and no flash ever runs. */
         s_run.group_pos++;
         s_run.phase = LED_PHASE_GROUP;
-        break;
+        led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
+        return;
       }
       od_flash_led(led, s_run.c3, s_run.brightness);
       s_run.i3++;
       if (s_run.loop3delay > 0u) {
         s_run.phase = LED_PHASE_LOOP3_DELAY;
         led_schedule_delay_ms((uint16_t)(s_run.loop3delay * LED_DELAY_FACTOR_MS));
-        return;
+      } else {
+        led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
       }
-      break;
+      return;
     case LED_PHASE_LOOP3_DELAY:
       if (!led_delay_ready()) {
         return;
