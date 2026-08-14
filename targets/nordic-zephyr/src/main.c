@@ -4,6 +4,7 @@
 #include "opendisplay_config_parser.h"
 #include "opendisplay_display.h"
 #include "od_runtime_types.h"
+#include "od_watchdog_app.h"
 
 #include <stdio.h>
 #include <zephyr/kernel.h>
@@ -19,6 +20,11 @@ static void idle_delay_ms(uint32_t delay_ms)
 	while (remaining > 0u) {
 		uint32_t step = (remaining > chunk_ms) ? chunk_ms : remaining;
 
+		/* The idle wait is chunked at one second, so feeding here rather than only in the
+		 * caller is what keeps a configured sleep_timeout_ms of minutes from looking like
+		 * a hang. Reaching this line proves the thread is running, which is the whole
+		 * requirement for a feed site. */
+		od_watchdog_app_service();
 		opendisplay_ble_process();
 		k_msleep(step);
 		remaining -= step;
@@ -37,6 +43,12 @@ int main(void)
 #else
 	od_log_info("OpenDisplay %s starting", od_board_name());
 #endif
+	/* Before anything can touch the panel: this decides whether the previous run ended in a
+	 * watchdog reset, and whether three of them in a row mean this boot must skip the panel
+	 * entirely. Arming comes after, so a hang inside boot_init cannot be masked by a reset. */
+	od_watchdog_app_boot();
+	od_watchdog_app_arm();
+
 	od_board_early_init();
 	opendisplay_ble_init();
 #if defined(CONFIG_BOOTLOADER_MCUBOOT)
@@ -45,6 +57,7 @@ int main(void)
 #endif
 
 	while (1) {
+		od_watchdog_app_service();
 		cfg = opendisplay_get_global_config();
 
 		if (opendisplay_ble_is_connected()) {

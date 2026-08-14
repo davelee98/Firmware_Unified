@@ -30,6 +30,7 @@
 #include "link_owner.h"
 #include "session_guard.h"
 #include "od_log.h"
+#include "od_watchdog_app.h"
 
 #ifdef TARGET_ESP32
 /* The log port itself lives in hal/od_hal_log.c now -- including the UART-number choice and
@@ -243,6 +244,11 @@ void setup() {
         od_log_info("Deep sleep count (RTC): %u", (unsigned)deep_sleep_count);
     }
     #endif
+    /* Before anything can touch the panel, and before the watchdog is armed: this decides
+     * whether the previous run ended in a watchdog reset, and whether three of them in a row
+     * mean this boot must skip the panel entirely. */
+    od_watchdog_app_boot();
+    od_watchdog_app_arm();
     od_log_info("Starting setup...");
     if (is_deep_sleep_wake) { od_log_info("[wake] >> full_config_init"); od_log_flush(); }
 #if defined(TARGET_NRF) && defined(OPENDISPLAY_BOOT_DIAG)
@@ -991,6 +997,9 @@ static void platformIdle() {
 // One loop body for both targets. The per-target policy that genuinely differs
 // lives in the two hooks above; everything here is shared.
 void loop() {
+    /* First statement in the pass, so no early return below can skip it and so the feed is
+     * evidence that loop() itself is running rather than that some subset of it completed. */
+    od_watchdog_app_service();
     serviceBleEvents();
     processLedFlash();
     epdSessionTick();   // od_hal_uptime_ms()-poll: power the panel down screen_timeout_seconds after last release

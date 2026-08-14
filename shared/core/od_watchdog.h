@@ -1,14 +1,12 @@
 /* od_watchdog.h -- portable watchdog policy: strike counting, safe mode, breadcrumbs.
  *
- * SCAFFOLD. The policy and its host tests are real; NO TARGET IMPLEMENTS od_hal_wdt.h YET, so
- * nothing arms a watchdog by linking this. Landing the policy first is deliberate: it is the
- * part that must behave identically on four chips, and it is the part that is cheap to get
- * subtly wrong in a way only a field boot-loop reveals.
+ * WHO IMPLEMENTS od_hal_wdt.h. targets/esp32-idf (hal/od_hal_wdt.c, over the Task Watchdog) and
+ * targets/nordic-zephyr (src/od_hal_wdt.c, over the devicetree watchdog0 and gpregret2 nodes).
+ * targets/efr32bg22-slc does not, and therefore does not compile this file.
  *
- * THE PROBLEM THIS SOLVES. targets/nordic-zephyr has no watchdog at all, while the Arduino
- * nRF52840 it replaces ships one (Firmware/src/watchdog_nrf.cpp). That is the one place the
- * migrated firmware is strictly WORSE than what is already in the field, and it blocks
- * deploying the Zephyr build to a real tag. This is the portable half of closing that gap.
+ * THE PROBLEM THIS SOLVES. targets/nordic-zephyr had no watchdog at all, while the Arduino
+ * nRF52840 it replaces ships one (Firmware/src/watchdog_nrf.cpp). This is the portable half of
+ * closing that gap, and the half that must behave identically on every chip.
  *
  * WHAT A WATCHDOG COSTS IF YOU GET IT WRONG, stated first because it drives every decision
  * below: a watchdog that resets a device which wedges during BOOT turns one hang into an

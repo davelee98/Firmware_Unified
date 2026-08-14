@@ -68,3 +68,19 @@
 	reg = <0x20000000 DT_SIZE_K(256)>;
 	ranges = <0x0 0x20000000 0x40000>;
 };
+
+/*
+ * Watchdog and its retained byte. Both ship disabled on nRF54L (the SoC dtsi does not enable
+ * either), while the nRF52840 gets both from nrf52840.dtsi -- so this overlay is what makes one
+ * src/od_hal_wdt.c serve all three boards.
+ *
+ * gpregret2 and NOT gpregret1: gpregret1 is retained-register 0, which MCUboot and the DFU
+ * handshake use. See src/od_hal_wdt.c.
+ */
+&wdt31 {
+	status = "okay";
+};
+
+&gpregret2 {
+	status = "okay";
+};

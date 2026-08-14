@@ -44,12 +44,15 @@
 #                                                                 normalisation is promoted and
 #                                                                 the other two targets' lack of
 #                                                                 it is the divergence settled.)
-#   core/od_watchdog.c    strike/safe-mode/breadcrumb policy     (LANDED — SCAFFOLD: no target
-#                         implements hal/od_hal_wdt.h yet, so nothing arms a watchdog by linking
-#                         it. Policy first because it must behave identically on four chips and
-#                         is cheap to get wrong in a way only a field boot-loop reveals.
-#                         Like od_adv_control.c this has no wire surface, so it is not a
-#                         reordering of the protocol subsystem sequence below.)
+#   core/od_watchdog.c    strike/safe-mode/breadcrumb policy     (LANDED — called on
+#                         esp32-idf and nordic-zephyr, which implement hal/od_hal_wdt.h over the
+#                         Task Watchdog and the devicetree watchdog0/gpregret2 nodes
+#                         respectively. efr32bg22-slc does not implement it and does not take
+#                         this tier. Policy landed before either HAL because it must behave
+#                         identically on four chips and is cheap to get wrong in a way only a
+#                         field boot-loop reveals. Like od_adv_control.c this has no wire
+#                         surface, so it is not a reordering of the protocol subsystem
+#                         sequence below.)
 #   core/od_advert.c      16-byte MSD build                   (LANDED — moved AHEAD of the
 #                         protocol subsystems below, deliberately. It was the only remaining
 #                         item needing no HAL and no state machine, so every target can take it
@@ -78,7 +81,8 @@ get_filename_component(OD_SHARED_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
 #
 # WHY THE SPLIT EXISTS. A target part-way through migration can consume the sources whose HAL it
 # has and add the rest as each HAL lands, instead of waiting to take all of shared/ at once. That
-# is a real state — targets/nordic-zephyr implements NEITHER HAL today — and the alternative was
+# is a real state — targets/nordic-zephyr implements HAL_WDT but not HAL_ADV, and
+# targets/efr32bg22-slc implements neither — and the alternative was
 # a target that consumes nothing from shared/ for as long as one unimplemented HAL exists.
 #
 # THIS DOES NOT WEAKEN THE ONE-LIST RULE. OD_SHARED_SOURCES is COMPOSED from the tiers below, not
