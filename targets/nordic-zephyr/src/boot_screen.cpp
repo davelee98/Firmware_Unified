@@ -41,13 +41,10 @@ static const struct SecurityConfig *boot_sec(void)
 
 static uint32_t boot_chip_id_last24(void)
 {
-  uint8_t id[8];
-  uint64_t uid = 0;
-  (void)od_hwinfo_get_device_id(id, sizeof(id));
-  for (unsigned i = 0; i < sizeof(id); i++) {
-    uid = (uid << 8) | id[i];
-  }
-  return (uint32_t)(uid & 0xFFFFFFu);
+  /* The screen and the QR must name the device the scanner will actually find, so this is
+   * the advertised identity, not a second derivation of it. Which FICR word that is depends
+   * on the board (opendisplay_ble_chip_id_last24()). */
+  return opendisplay_ble_chip_id_last24();
 }
 
 static uint8_t boot_fw_major(void)

@@ -18,12 +18,23 @@
 };
 
 /*
- * The display is driven by a GPIO bit-bang SPI on the OpenDisplay config pins
- * (P2.1 CLK, P2.2 DATA). The board enables the spi00 SPIM peripheral on those
- * same pads, so leaving it on lets the peripheral contend with the bit-bang
- * output and corrupts the panel data. No firmware path uses the Zephyr SPI API,
- * so keep the pins as plain GPIO.
+ * spi23 IS THE XIAO SPI ON THIS BOARD, and it sits on the panel bus.
+ *
+ * seeed_xiao_connector.dtsi maps `xiao_spi: &spi23`, and spi23_default psels are
+ * SPIM_SCK P1.04 (D8) and SPIM_MOSI P1.06 (D10) -- the two pads the panel's CLK and DATA
+ * are wired to. The board DTS leaves spi23 status = "okay", so the SPIM peripheral and the
+ * firmware's bit-bang both drive them: two owners, one pad. The panel then receives no
+ * valid transaction, never asserts BUSY, and every refresh ends in the 60 s
+ * "BUSY NEVER ASSERTED" while the BLE image upload itself succeeds.
+ *
+ * spi00 is a different instance on P2.01/P2.02/P2.04 (the nRF54L15's panel bus, not this
+ * board's). Nothing here uses the Zephyr SPI API, so both stay disabled and the pads stay
+ * plain GPIO.
  */
+&spi23 {
+	status = "disabled";
+};
+
 &spi00 {
 	status = "disabled";
 };
@@ -34,11 +45,10 @@
 };
 
 /*
- * The board enables i2c22 on P1.10 (D4) and P1.11 (D5) as open-drain I2C with
- * pull-ups. The display BUSY line is on D5/P1.11, so leaving i2c22 on pins BUSY
- * high permanently (the I2C idle level) instead of following the panel — which
- * makes every bbepWaitBusy() time out. No firmware path uses the Zephyr I2C API,
- * so free the pin for GPIO use.
+ * i2c22 is the XIAO I2C here (seeed_xiao_connector.dtsi: `xiao_i2c: &i2c22`), and its
+ * TWIM_SCL psel is P1.07 -- D5, the display BUSY line. Left enabled, the open-drain pull-up
+ * holds BUSY at the I2C idle level instead of following the panel, so every bbepWaitBusy()
+ * times out. TWIM_SDA is P1.03 (D4). No firmware path uses the Zephyr I2C API.
  */
 &i2c22 {
 	status = "disabled";
