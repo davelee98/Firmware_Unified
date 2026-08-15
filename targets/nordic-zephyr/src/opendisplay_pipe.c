@@ -80,6 +80,26 @@ static uint32_t od_now_ms(void);
 
 static struct od_session s_session;
 
+/* Budgets for the nonce-rejection logs. Nonce failures deliberately do not count toward
+ * integrity_failures, so nothing else throttles a peer that drives these lines, and
+ * out-of-window fires routinely on a lossy link.
+ *
+ * One budget PER SITE, not one shared: a stale client spamming session-id mismatches must not
+ * be able to silence the out-of-window line, which is the one that reports real transfer loss. */
+static uint32_t s_nonce_log_window_ms;   /* replay / out-of-window */
+static uint32_t s_nonce_log_other_ms;    /* wrong session, bad tag, malformed, engine fault */
+
+static bool nonce_log_allowed(uint32_t *last_ms)
+{
+  const uint32_t now = od_now_ms();
+
+  if (*last_ms != 0u && (uint32_t)(now - *last_ms) < 5000u) {
+    return false;
+  }
+  *last_ms = now;
+  return true;
+}
+
 static void clear_session(void)
 {
   od_session_clear(&s_session);
@@ -996,13 +1016,30 @@ static void on_pipe_write(uint8_t connection, const uint8_t *data, uint16_t len,
       /* The envelope [nonce:16][ciphertext][tag:12] is contiguous behind the two command bytes,
        * so it is one span. s_plain_buf must hold the decrypted [len:1][payload] frame -- one byte
        * more than plain_len ends up being. */
+      struct od_session_report report;
       enum od_session_open opened =
         od_session_open(&s_session, cmd, od_span_make(&frame[2], (size_t)(frame_len - 2u)),
-                        s_plain_buf, sizeof(s_plain_buf), &plain_len, od_now_ms(), NULL);
+                        s_plain_buf, sizeof(s_plain_buf), &plain_len, od_now_ms(), &report);
       if (opened != OD_SESSION_OPEN_OK) {
         uint8_t err[] = { 0x00u, frame[1], 0xFFu };
-        od_log_warn("decrypt failed: cmd=0x%04X rc=%d envelope=%u B",
-                    (unsigned)cmd, (int)opened, (unsigned)(frame_len - 2u));
+        /* A PIPE DATA frame refused for a NONCE reason is ordinary packet loss, and the answer
+         * is SILENCE. pipe-write-protocol.md 5.1 makes a 0x81 NACK unconditionally fatal and 5.2
+         * reserves NACKs for unrecoverable conditions, so answering here kills the upload on the
+         * first dropped frame. Saying nothing leaves the seq absent from the next SACK; the host
+         * retransmits under a fresh higher counter, which the window accepts unconditionally.
+         * This target ships PIPE_MAX_W 32, so reordering reaches the window in normal use.
+         *
+         * Deliberately narrow: a TAG failure keeps the NACK -- it is tamper evidence, not loss. */
+        const bool nonce_loss = (report.nonce_reason == (uint8_t)NONCE_OUT_OF_WINDOW ||
+                                 report.nonce_reason == (uint8_t)NONCE_REPLAY);
+        if (nonce_loss && cmd == CMD_PIPE_WRITE_DATA) {
+          return;
+        }
+        if (nonce_log_allowed(nonce_loss ? &s_nonce_log_window_ms : &s_nonce_log_other_ms)) {
+          od_log_warn("decrypt failed: cmd=0x%04X rc=%d nonce_reason=%u envelope=%u B",
+                      (unsigned)cmd, (int)opened, (unsigned)report.nonce_reason,
+                      (unsigned)(frame_len - 2u));
+        }
         pipe_send(connection, err, sizeof(err));
         return;
       }

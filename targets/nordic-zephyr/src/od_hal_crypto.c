@@ -153,6 +153,7 @@ enum od_hal_crypto_status od_hal_crypto_cmac(const uint8_t key[16], const uint8_
     psa_key_id_t key_id = 0;
     size_t mac_len = 0;
     psa_status_t status;
+    psa_status_t destroy_status = PSA_SUCCESS;
 
     if (crypto_init_once() != OD_HAL_CRYPTO_OK || key == NULL ||
         (msg == NULL && msg_len != 0u) || out == NULL) {
@@ -166,10 +167,19 @@ enum od_hal_crypto_status od_hal_crypto_cmac(const uint8_t key[16], const uint8_
     psa_reset_key_attributes(&attr);
     if (status == PSA_SUCCESS) {
         status = psa_mac_compute(key_id, PSA_ALG_CMAC, msg, msg_len, out, 16, &mac_len);
-        (void)psa_destroy_key(key_id);
+        /* Tracked separately, not discarded: a failed destroy loses the only handle to a live
+         * key, and PSA slots are a finite pool. Reporting success there would leak one slot per
+         * call and present months later as "authentication stops working after a while" -- the
+         * slow exhaustion the prepared-slot API exists to prevent for the CCM key. The operation
+         * status wins so a real crypto failure is never masked by cleanup. */
+        destroy_status = psa_destroy_key(key_id);
     }
     if (status != PSA_SUCCESS || mac_len != 16u) {
         od_log_error("crypto: PSA CMAC failed: %ld", (long)status);
+        return OD_HAL_CRYPTO_ERROR;
+    }
+    if (destroy_status != PSA_SUCCESS) {
+        od_log_error("crypto: PSA key destroy after CMAC failed: %ld", (long)destroy_status);
         return OD_HAL_CRYPTO_ERROR;
     }
     return OD_HAL_CRYPTO_OK;
@@ -182,6 +192,7 @@ enum od_hal_crypto_status od_hal_crypto_aes_ecb(const uint8_t key[16], const uin
     psa_key_id_t key_id = 0;
     size_t out_len = 0;
     psa_status_t status;
+    psa_status_t destroy_status = PSA_SUCCESS;
 
     if (crypto_init_once() != OD_HAL_CRYPTO_OK || key == NULL || in == NULL || out == NULL) {
         return OD_HAL_CRYPTO_ERROR;
@@ -194,10 +205,14 @@ enum od_hal_crypto_status od_hal_crypto_aes_ecb(const uint8_t key[16], const uin
     psa_reset_key_attributes(&attr);
     if (status == PSA_SUCCESS) {
         status = psa_cipher_encrypt(key_id, PSA_ALG_ECB_NO_PADDING, in, 16, out, 16, &out_len);
-        (void)psa_destroy_key(key_id);
+        destroy_status = psa_destroy_key(key_id);   /* see the note in od_hal_crypto_cmac */
     }
     if (status != PSA_SUCCESS || out_len != 16u) {
         od_log_error("crypto: PSA AES-ECB failed: %ld", (long)status);
+        return OD_HAL_CRYPTO_ERROR;
+    }
+    if (destroy_status != PSA_SUCCESS) {
+        od_log_error("crypto: PSA key destroy after AES-ECB failed: %ld", (long)destroy_status);
         return OD_HAL_CRYPTO_ERROR;
     }
     return OD_HAL_CRYPTO_OK;

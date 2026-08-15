@@ -206,6 +206,189 @@ static void test_capacity_is_transactional(void)
           == OD_SESSION_AUTH_CHALLENGE);
 }
 
+/* ------------------------------------------------- regressions for the landed-code review --- */
+
+/* Full-state identity, so a "transactional" claim is tested as written rather than by sampling
+ * the two or three fields the author happened to think of. */
+static bool session_state_equal(const struct od_session *a, const struct od_session *b)
+{
+    return memcmp(a, b, sizeof *a) == 0;
+}
+
+/* OD-S2. The rate limiter used to run BEFORE the step-specific capacity preflight, so a call that
+ * could not possibly reply still spent an attempt and opened the 60 s idle window. Enough of them
+ * and a peer is rate-limited having never been answered once. */
+static void test_no_room_mutates_nothing(void)
+{
+    struct od_session s, before;
+    uint8_t rsp[32];
+    uint16_t rl;
+    uint8_t b1[1] = { 0x00 };
+    uint8_t b2[OD_SESSION_STEP2_BODY_LEN];
+    uint8_t server_nonce[16];
+    size_t cap;
+    unsigned k;
+
+    CASE("step 1: every rsp_cap below 23 leaves the session bit-identical");
+    for (cap = 0; cap < OD_SESSION_STEP1_REPLY_LEN; ++cap) {
+        fake_reset(); sec_init(0);
+        od_session_init(&s, 0);
+        before = s;
+        rl = 0xFFFFu;
+        CHECK(od_session_authenticate(&s, &g_sec, DEVICE_ID, od_span_make(b1, 1), 1000u,
+                                      rsp, cap, &rl, NULL) == OD_SESSION_AUTH_NO_ROOM);
+        CHECK(session_state_equal(&s, &before));
+        CHECK(rl == 0u);
+        CHECK(g_key_set_calls == 0u);
+    }
+
+    CASE("step 2: every rsp_cap below 19 leaves the session bit-identical");
+    for (cap = 0; cap < OD_SESSION_STEP2_REPLY_LEN; ++cap) {
+        fake_reset(); sec_init(0);
+        od_session_init(&s, 0);
+        /* A real challenge first, so the short-capacity call is a genuine step 2 rather than a
+         * request refused earlier for having no challenge behind it. */
+        CHECK(od_session_authenticate(&s, &g_sec, DEVICE_ID, od_span_make(b1, 1), 1000u,
+                                      rsp, sizeof rsp, &rl, NULL) == OD_SESSION_AUTH_CHALLENGE);
+        memcpy(server_nonce, rsp + 3, 16u);
+        memset(b2, 0xA5, sizeof b2);
+        before = s;
+        rl = 0xFFFFu;
+        CHECK(od_session_authenticate(&s, &g_sec, DEVICE_ID,
+                                      od_span_make(b2, sizeof b2), 1000u,
+                                      rsp, cap, &rl, NULL) == OD_SESSION_AUTH_NO_ROOM);
+        CHECK(session_state_equal(&s, &before));   /* challenge still pending, attempts unmoved */
+        CHECK(s.challenge_pending);
+        CHECK(g_key_set_calls == 0u);          /* refused before any key was derived */
+    }
+
+    CASE("repeated NO_ROOM never reaches RATE_LIMITED");
+    fake_reset(); sec_init(0);
+    od_session_init(&s, 0);
+    for (k = 0; k < OD_SESSION_RATE_MAX_ATTEMPTS * 3u; ++k) {
+        CHECK(od_session_authenticate(&s, &g_sec, DEVICE_ID, od_span_make(b1, 1), 1000u,
+                                      rsp, 3u, &rl, NULL) == OD_SESSION_AUTH_NO_ROOM);
+    }
+    /* A full-capacity call still works, which it would not if the window had opened. */
+    CHECK(od_session_authenticate(&s, &g_sec, DEVICE_ID, od_span_make(b1, 1), 1000u,
+                                  rsp, sizeof rsp, &rl, NULL) == OD_SESSION_AUTH_CHALLENGE);
+}
+
+/* OD-S3. One challenge answers one step 2. Four failure paths used to leave it pending, so a peer
+ * could re-present against the same server nonce after malformed input or an engine fault. */
+static void test_challenge_is_consumed_on_every_failure(void)
+{
+    struct od_session s;
+    uint8_t rsp[32];
+    uint16_t rl;
+    uint8_t b1[1] = { 0x00 };
+    uint8_t b2[OD_SESSION_STEP2_BODY_LEN];
+    uint8_t junk[7];
+    uint8_t server_nonce[16];
+
+    memset(b2, 0x5A, sizeof b2);
+    memset(junk, 0x11, sizeof junk);
+
+    CASE("a malformed body spends a pending challenge");
+    fake_reset(); sec_init(0);
+    od_session_init(&s, 0);
+    CHECK(handshake_step1(&s, 1000u, server_nonce, rsp, &rl));
+    CHECK(s.challenge_pending);
+    CHECK(od_session_authenticate(&s, &g_sec, DEVICE_ID, od_span_make(junk, sizeof junk), 1000u,
+                                  rsp, sizeof rsp, &rl, NULL) == OD_SESSION_AUTH_MALFORMED);
+    CHECK(!s.challenge_pending);
+    CHECK(s.challenge_ms == 0u);
+
+    CASE("a wrong proof spends it");
+    fake_reset(); sec_init(0);
+    od_session_init(&s, 0);
+    CHECK(handshake_step1(&s, 1000u, server_nonce, rsp, &rl));
+    CHECK(od_session_authenticate(&s, &g_sec, DEVICE_ID, od_span_make(b2, sizeof b2), 1000u,
+                                  rsp, sizeof rsp, &rl, NULL) == OD_SESSION_AUTH_REJECTED);
+    CHECK(!s.challenge_pending);
+
+    CASE("an engine fault mid-step-2 spends it, and reports the real status");
+    fake_reset(); sec_init(0);
+    od_session_init(&s, 0);
+    CHECK(handshake_step1(&s, 1000u, server_nonce, rsp, &rl));
+    g_force_status = OD_HAL_CRYPTO_UNSUPPORTED;      /* the very next HAL call fails */
+    {
+        struct od_session_report rep;
+        CHECK(od_session_authenticate(&s, &g_sec, DEVICE_ID, od_span_make(b2, sizeof b2), 1000u,
+                                      rsp, sizeof rsp, &rl, &rep)
+              == OD_SESSION_AUTH_CRYPTO_ERROR);
+        /* OD-S6: this used to report OD_HAL_CRYPTO_OK -- enum zero, what report_reset leaves --
+         * on every engine failure, hiding exactly the evidence first hardware needs. */
+        CHECK(rep.crypto_status == OD_HAL_CRYPTO_UNSUPPORTED);
+    }
+    CHECK(!s.challenge_pending);
+    g_force_status = OD_HAL_CRYPTO_OK;
+
+    CASE("expiry spends it; rate limiting does NOT");
+    fake_reset(); sec_init(0);
+    od_session_init(&s, 0);
+    CHECK(handshake_step1(&s, 1000u, server_nonce, rsp, &rl));
+    CHECK(od_session_authenticate(&s, &g_sec, DEVICE_ID, od_span_make(b2, sizeof b2),
+                                  1000u + OD_SESSION_CHALLENGE_WINDOW_MS + 1u,
+                                  rsp, sizeof rsp, &rl, NULL) == OD_SESSION_AUTH_EXPIRED);
+    CHECK(!s.challenge_pending);
+
+    fake_reset(); sec_init(0);
+    od_session_init(&s, 0);
+    CHECK(handshake_step1(&s, 1000u, server_nonce, rsp, &rl));
+    {
+        unsigned k;
+        for (k = 0; k < OD_SESSION_RATE_MAX_ATTEMPTS + 2u; ++k) {
+            (void)od_session_authenticate(&s, &g_sec, DEVICE_ID, od_span_make(b1, 1), 1000u,
+                                          rsp, sizeof rsp, &rl, NULL);
+        }
+    }
+    /* Throttled, but a client that already holds a challenge must still be able to answer it once
+     * the window clears -- so RATE_LIMITED must never have consumed one. */
+    CHECK(od_session_authenticate(&s, &g_sec, DEVICE_ID, od_span_make(b2, sizeof b2), 1000u,
+                                  rsp, sizeof rsp, &rl, NULL) == OD_SESSION_AUTH_RATE_LIMITED);
+    CHECK(s.challenge_pending);
+}
+
+/* OD-S5. plain_frame.n is a size_t and used to be narrowed to uint16_t BEFORE the bounds test, so
+ * a length whose low 16 bits happened to be small passed and sealed the wrong thing. */
+static void test_seal_rejects_wrapping_lengths(void)
+{
+    struct od_session s;
+    uint8_t server_nonce[16];
+    uint8_t out[OD_SESSION_SEALED_MAX];
+    uint8_t frame[OD_SESSION_PLAIN_FRAME_MAX];
+    uint16_t out_len;
+    uint64_t tx_before;
+    static const size_t WRAPPERS[] = { 65538u, 65536u + 2u, 0x10000u, (size_t)-1 };
+    unsigned k;
+
+    fake_reset(); sec_init(0);
+    od_session_init(&s, 0);
+    CHECK(handshake(&s, 1000u, server_nonce, false) == OD_SESSION_AUTH_ESTABLISHED);
+    memset(frame, 0x42, sizeof frame);
+
+    CASE("exactly OD_SESSION_PLAIN_FRAME_MAX seals; one more is TOO_LONG");
+    CHECK(od_session_seal(&s, od_span_make(frame, OD_SESSION_PLAIN_FRAME_MAX),
+                          out, sizeof out, &out_len, 2000u, NULL) == OD_SESSION_SEAL_OK);
+    CHECK(out_len == OD_SESSION_SEALED_MAX);
+    tx_before = s.tx_counter;
+    CHECK(od_session_seal(&s, od_span_make(frame, OD_SESSION_PLAIN_FRAME_MAX + 1u),
+                          out, sizeof out, &out_len, 2000u, NULL) == OD_SESSION_SEAL_TOO_LONG);
+    CHECK(s.tx_counter == tx_before);        /* a length error must not burn a counter */
+
+    CASE("lengths that wrap a uint16_t are TOO_LONG, not silently truncated");
+    for (k = 0; k < sizeof WRAPPERS / sizeof WRAPPERS[0]; ++k) {
+        tx_before = s.tx_counter;
+        /* The span is deliberately longer than `frame`; seal must reject on LENGTH before it
+         * dereferences anything, which is the property under test. */
+        CHECK(od_session_seal(&s, od_span_make(frame, WRAPPERS[k]),
+                              out, sizeof out, &out_len, 2000u, NULL)
+              == OD_SESSION_SEAL_TOO_LONG);
+        CHECK(s.tx_counter == tx_before);
+    }
+}
+
 static void test_clock_starting_at_zero(void)
 {
     struct od_session s;
@@ -690,6 +873,9 @@ int main(void)
     test_step1_over_live_session();
     test_capacity_is_transactional();
     test_clock_starting_at_zero();
+    test_no_room_mutates_nothing();
+    test_challenge_is_consumed_on_every_failure();
+    test_seal_rejects_wrapping_lengths();
 
     test_replay_bitmap_sweep();
     test_replay_exact_counter();

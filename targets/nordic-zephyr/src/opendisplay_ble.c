@@ -206,6 +206,9 @@ static struct k_work s_boot_display_work;
 static struct k_work_q s_display_work_q;
 static K_THREAD_STACK_DEFINE(s_display_wq_stack, 8192);
 static bool s_display_wq_started;
+/* Gives once the boot-display work item returns, success or failure. opendisplay_ble_init()
+ * blocks on this before start_advertising() -- see its call site for why. */
+static struct k_sem s_boot_display_done;
 static bool s_adv_work_msd_publish;
 /* When encryption is on, SMP stays hidden until CMD_ENTER_DFU unlocks it
  * for this boot (Adafruit bledfu.begin() gating). */
@@ -304,11 +307,22 @@ static void boot_display_work_handler(struct k_work *work)
 	if (!opendisplay_display_boot_apply()) {
 		od_log_error("boot display failed after bounded retry");
 	}
+	/* Given on both the success and failure arms above: the waiter in opendisplay_ble_init()
+	 * cares that the panel is no longer being touched, not that the render succeeded. */
+	k_sem_give(&s_boot_display_done);
 }
+
+/* Deliberately shorter than opendisplay_display_boot_apply()'s worst legitimate case (two
+ * attempts of ~900 ms rail settle + a 60 s wait_for_refresh() each, ~125 s): BLE reachability
+ * within 30 s wins over waiting out a slow-but-healthy render. A render still in flight past
+ * this point keeps running on s_display_work_q after advertising opens -- the race the wait
+ * exists to close (see the call site) is narrowed, not eliminated, for that tail case. */
+#define OD_BOOT_DISPLAY_WAIT_MS 30000u
 
 static void schedule_boot_display_apply(void)
 {
 	if (!s_display_wq_started) {
+		k_sem_init(&s_boot_display_done, 0, 1);
 		k_work_queue_init(&s_display_work_q);
 		k_work_queue_start(&s_display_work_q, s_display_wq_stack,
 				   K_THREAD_STACK_SIZEOF(s_display_wq_stack), 14, NULL);
@@ -936,6 +950,23 @@ void opendisplay_ble_init(void)
 	/* Match Adafruit: hide SMP when encryption is on until CMD_ENTER_DFU. */
 	od_smp_sync();
 	update_msd_payload();
+
+	/* BLOCKS until the boot screen is off the panel, or the bound below expires. Matches
+	 * esp32-idf/main.cpp's "SoftDevice must start before display/SPI; advertising starts
+	 * after boot screen" -- the BT stack is already up (bt_enable() above), but nothing may
+	 * be able to CONNECT yet, because a connected central can push a direct-write immediately,
+	 * and opendisplay_display_direct_write_start() touches the same BBEPDISP s_epd and the
+	 * same panel GPIOs/SPI device the boot-display work queue thread is mid-sequence on, with
+	 * no lock between them. A wedge on either side used to surface as a frozen, unpainted
+	 * boot screen with no way to tell why. The timeout keeps a genuinely stuck render from
+	 * also taking BLE reachability down with it -- staying reachable over BLE/DFU even with a
+	 * bad panel is the same trade-off od_watchdog_app_safe_mode() makes elsewhere. */
+	schedule_boot_display_apply();
+	if (k_sem_take(&s_boot_display_done, K_MSEC(OD_BOOT_DISPLAY_WAIT_MS)) != 0) {
+		od_log_error("boot display: still running after %u ms - advertising anyway",
+			     (unsigned)OD_BOOT_DISPLAY_WAIT_MS);
+	}
+
 	err = start_advertising();
 	if (err != 0) {
 		od_log_info("initial adv failed: %d (will retry)", err);
@@ -944,7 +975,6 @@ void opendisplay_ble_init(void)
 		apply_tx_power(BT_HCI_VS_LL_HANDLE_TYPE_ADV, 0);
 	}
 	od_log_info("BLE ready as %s", s_dev_name);
-	schedule_boot_display_apply();
 }
 
 void opendisplay_ble_process(void)

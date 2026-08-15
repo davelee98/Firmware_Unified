@@ -26,10 +26,16 @@ static void od_secure_zero(void *p, size_t n)
     }
 }
 
-/* Runs over attacker-supplied bytes; an early exit leaks how many led. */
+/* Runs over attacker-supplied bytes; an early exit leaks how many led.
+ *
+ * The accumulator is volatile so the optimiser may not reason about its value and short-circuit
+ * the loop once it is non-zero. The loop bound is data-independent either way, but "the compiler
+ * has no reason to do that today" is not a property to rest a timing argument on. This is
+ * best-effort portable constant-time code, not a guarantee ISO C offers -- verifying it means
+ * reading the optimised target assembly at the 8-byte session-id and 16-byte proof call sites. */
 static bool od_ct_equal(const uint8_t *a, const uint8_t *b, size_t len)
 {
-    uint8_t diff = 0u;
+    volatile uint8_t diff = 0u;
     size_t i;
 
     for (i = 0; i < len; ++i) {
@@ -79,7 +85,10 @@ static void report_reset(struct od_session_report *r)
                           + OD_SESSION_NONCE_LEN + OD_SESSION_NONCE_LEN + 2u)
 OD_STATIC_ASSERT(OD_KDF_INPUT_LEN == 58u, "the KDF input is 58 bytes");
 
-static bool derive_session_key(const uint8_t master[16], const uint8_t client_nonce[16],
+/* Returns the HAL status rather than a bool: a tag/policy rejection and an engine fault are
+ * different diagnoses, and collapsing them here is what made every CRYPTO_ERROR report OK. */
+static enum od_hal_crypto_status derive_session_key(const uint8_t master[16],
+                               const uint8_t client_nonce[16],
                                const uint8_t server_nonce[16],
                                const uint8_t device_id[OD_SESSION_DEVICE_ID_LEN],
                                uint8_t session_key[16])
@@ -88,7 +97,7 @@ static bool derive_session_key(const uint8_t master[16], const uint8_t client_no
     uint8_t intermediate[16];
     uint8_t final_in[16];
     size_t off = 0;
-    bool ok = false;
+    enum od_hal_crypto_status cs;
 
     memcpy(in + off, OD_KDF_LABEL, OD_KDF_LABEL_LEN); off += OD_KDF_LABEL_LEN;
     in[off++] = 0x00u;
@@ -98,59 +107,58 @@ static bool derive_session_key(const uint8_t master[16], const uint8_t client_no
     in[off++] = 0x00u;
     in[off++] = 0x80u;
 
-    if (od_hal_crypto_cmac(master, in, (uint32_t)off, intermediate) != OD_HAL_CRYPTO_OK) {
+    cs = od_hal_crypto_cmac(master, in, (uint32_t)off, intermediate);
+    if (cs != OD_HAL_CRYPTO_OK) {
         goto cleanup;
     }
     od_be64(final_in, 1u);
     memcpy(final_in + 8, intermediate, 8u);
-    if (od_hal_crypto_aes_ecb(master, final_in, session_key) != OD_HAL_CRYPTO_OK) {
-        goto cleanup;
-    }
-    ok = true;
+    cs = od_hal_crypto_aes_ecb(master, final_in, session_key);
 
 cleanup:
     od_secure_zero(in, sizeof in);
     od_secure_zero(intermediate, sizeof intermediate);
     od_secure_zero(final_in, sizeof final_in);
-    return ok;
+    return cs;
 }
 
-static bool derive_session_id(const uint8_t session_key[16], const uint8_t client_nonce[16],
+static enum od_hal_crypto_status derive_session_id(const uint8_t session_key[16],
+                              const uint8_t client_nonce[16],
                               const uint8_t server_nonce[16], uint8_t session_id[8])
 {
     uint8_t in[32];
     uint8_t mac[16];
-    bool ok = false;
+    enum od_hal_crypto_status cs;
 
     memcpy(in, client_nonce, 16u);
     memcpy(in + 16, server_nonce, 16u);
-    if (od_hal_crypto_cmac(session_key, in, 32u, mac) != OD_HAL_CRYPTO_OK) {
+    cs = od_hal_crypto_cmac(session_key, in, 32u, mac);
+    if (cs != OD_HAL_CRYPTO_OK) {
         memset(session_id, 0, OD_SESSION_ID_LEN);   /* the caller rejects an all-zero id */
         goto cleanup;
     }
     memcpy(session_id, mac, OD_SESSION_ID_LEN);
-    ok = true;
 
 cleanup:
     od_secure_zero(mac, sizeof mac);
-    return ok;
+    return cs;
 }
 
 /* The proof both directions compute, over nonce_a ‖ nonce_b ‖ device_id. The client's is keyed
  * with the MASTER key and the server's with the SESSION key, which is the only difference. */
-static bool derive_proof(const uint8_t key[16], const uint8_t nonce_a[16],
+static enum od_hal_crypto_status derive_proof(const uint8_t key[16], const uint8_t nonce_a[16],
                          const uint8_t nonce_b[16],
                          const uint8_t device_id[OD_SESSION_DEVICE_ID_LEN], uint8_t out[16])
 {
     uint8_t in[36];
-    bool ok;
+    enum od_hal_crypto_status cs;
 
     memcpy(in, nonce_a, 16u);
     memcpy(in + 16, nonce_b, 16u);
     memcpy(in + 32, device_id, OD_SESSION_DEVICE_ID_LEN);
-    ok = (od_hal_crypto_cmac(key, in, 36u, out) == OD_HAL_CRYPTO_OK);
+    cs = od_hal_crypto_cmac(key, in, 36u, out);
     od_secure_zero(in, sizeof in);
-    return ok;
+    return cs;
 }
 
 /* ------------------------------------------------------------------------------- lifecycle --- */
@@ -251,6 +259,30 @@ static enum od_session_auth auth_fail(uint8_t status, uint8_t *rsp, uint16_t *rs
     return result;
 }
 
+/* CRYPTO_ERROR with the HAL's own status attached. Without this every engine failure reported
+ * OD_HAL_CRYPTO_OK (enum zero, what report_reset leaves behind), which is exactly the evidence
+ * needed to tell a PSA key-policy rejection from a generic fault on first hardware. */
+static enum od_session_auth auth_crypto_fail(enum od_hal_crypto_status cs, uint8_t *rsp,
+                                             uint16_t *rsp_len, struct od_session_report *report)
+{
+    if (report != NULL) {
+        report->crypto_status = cs;
+    }
+    return auth_fail(AUTH_STATUS_ERROR, rsp, rsp_len, report, OD_SESSION_AUTH_CRYPTO_ERROR);
+}
+
+/* ONE CHALLENGE ANSWERS ONE STEP 2. Consumed by every step-2 outcome that reaches the request
+ * shape -- success, wrong proof, expiry, malformed body, and any crypto failure -- so an attacker
+ * cannot grind proofs against a fixed server nonce. Deliberately NOT called by RATE_LIMITED,
+ * BAD_ARGUMENT or the capacity preflight: all three return before the request is examined, and a
+ * throttled client must still be able to answer the challenge it already holds. */
+static void challenge_consume(struct od_session *s)
+{
+    s->challenge_pending = false;
+    s->challenge_ms = 0u;
+    od_secure_zero(s->pending_server_nonce, OD_SESSION_NONCE_LEN);
+}
+
 enum od_session_auth od_session_authenticate(struct od_session *s,
         const struct SecurityConfig *sec,
         const uint8_t device_id[OD_SESSION_DEVICE_ID_LEN],
@@ -258,6 +290,10 @@ enum od_session_auth od_session_authenticate(struct od_session *s,
         uint8_t *rsp, size_t rsp_cap, uint16_t *rsp_len,
         struct od_session_report *report)
 {
+    bool is_step1;
+    bool is_step2;
+    enum od_hal_crypto_status cs;
+
     report_reset(report);
 
     if (s == NULL || device_id == NULL || rsp == NULL || rsp_len == NULL) {
@@ -273,7 +309,21 @@ enum od_session_auth od_session_authenticate(struct od_session *s,
                          OD_SESSION_AUTH_NOT_CONFIGURED);
     }
 
-    /* RATE LIMIT FIRST, before the request shape is examined -- the shipped order. The window
+    /* CAPACITY PREFLIGHT AHEAD OF THE RATE LIMITER. Classifying the body only READS it, and
+     * rsp_cap is a caller-local property no peer can influence, so nothing peer-observable moves:
+     * what this buys is that a NO_ROOM return cannot consume an attempt or open the rate window,
+     * which is what "capacity is checked before any state change" in the header actually claims. */
+    is_step1 = (od_span_has(body, 1u) && body.n == 1u && body.p[0] == 0x00u);
+    is_step2 = (od_span_has(body, OD_SESSION_STEP2_BODY_LEN) &&
+                body.n == OD_SESSION_STEP2_BODY_LEN);
+    if (is_step1 && rsp_cap < OD_SESSION_STEP1_REPLY_LEN) {
+        return OD_SESSION_AUTH_NO_ROOM;
+    }
+    if (is_step2 && rsp_cap < OD_SESSION_STEP2_REPLY_LEN) {
+        return OD_SESSION_AUTH_NO_ROOM;
+    }
+
+    /* RATE LIMIT next, before the request shape is ACTED ON -- the shipped order. The window
      * resets on a 60 s IDLE GAP, not 60 s from the first attempt: last_auth_ms is rewritten by
      * every attempt, so a peer pacing one attempt per 59 s stays throttled forever after ten.
      * auth_attempts == 0 means "no window open", which is why there is no separate flag. */
@@ -299,22 +349,17 @@ enum od_session_auth od_session_authenticate(struct od_session *s,
     }
 
     /* ---- STEP 1: issue a challenge ---- */
-    if (od_span_has(body, 1u) && body.n == 1u && body.p[0] == 0x00u) {
-        if (rsp_cap < OD_SESSION_STEP1_REPLY_LEN) {
-            return OD_SESSION_AUTH_NO_ROOM;      /* preflight: nothing minted */
-        }
+    if (is_step1) {
         /* A step 1 over a live session replaces it. AUTH_STATUS_ALREADY exists in the protocol
          * and is deliberately never sent; re-authentication is the normal recovery path. */
         if (s->authenticated) {
             od_session_clear(s);
         }
-        if (od_hal_crypto_random(s->pending_server_nonce, OD_SESSION_NONCE_LEN)
-            != OD_HAL_CRYPTO_OK) {
+        cs = od_hal_crypto_random(s->pending_server_nonce, OD_SESSION_NONCE_LEN);
+        if (cs != OD_HAL_CRYPTO_OK) {
             /* No challenge is outstanding: never offer one the device cannot honour. */
-            s->challenge_pending = false;
-            od_secure_zero(s->pending_server_nonce, OD_SESSION_NONCE_LEN);
-            return auth_fail(AUTH_STATUS_ERROR, rsp, rsp_len, report,
-                             OD_SESSION_AUTH_CRYPTO_ERROR);
+            challenge_consume(s);
+            return auth_crypto_fail(cs, rsp, rsp_len, report);
         }
         s->challenge_ms = now_ms;
         s->challenge_pending = true;             /* set only AFTER the RNG succeeded */
@@ -332,7 +377,7 @@ enum od_session_auth od_session_authenticate(struct od_session *s,
     }
 
     /* ---- STEP 2: verify the proof ---- */
-    if (od_span_has(body, OD_SESSION_STEP2_BODY_LEN) && body.n == OD_SESSION_STEP2_BODY_LEN) {
+    if (is_step2) {
         const uint8_t *client_nonce = body.p;
         const uint8_t *client_proof = body.p + OD_SESSION_NONCE_LEN;
         uint8_t expected[16];
@@ -342,46 +387,38 @@ enum od_session_auth od_session_authenticate(struct od_session *s,
         unsigned i;
         bool id_ok;
 
-        if (rsp_cap < OD_SESSION_STEP2_REPLY_LEN) {
-            return OD_SESSION_AUTH_NO_ROOM;      /* preflight: no key derived, no session */
-        }
         if (!s->challenge_pending) {
             return auth_fail(AUTH_STATUS_ERROR, rsp, rsp_len, report, OD_SESSION_AUTH_MALFORMED);
         }
         /* `>` and not `>=`: exactly OD_SESSION_CHALLENGE_WINDOW_MS is still accepted. This is the
          * opposite convention from the session timeout above, and both match what shipped. */
         if ((now_ms - s->challenge_ms) > OD_SESSION_CHALLENGE_WINDOW_MS) {
-            s->challenge_pending = false;
-            od_secure_zero(s->pending_server_nonce, OD_SESSION_NONCE_LEN);
+            challenge_consume(s);
             return auth_fail(AUTH_STATUS_ERROR, rsp, rsp_len, report, OD_SESSION_AUTH_EXPIRED);
         }
 
-        if (!derive_proof(sec->encryption_key, s->pending_server_nonce, client_nonce,
-                          device_id, expected)) {
-            result = auth_fail(AUTH_STATUS_ERROR, rsp, rsp_len, report,
-                               OD_SESSION_AUTH_CRYPTO_ERROR);
+        cs = derive_proof(sec->encryption_key, s->pending_server_nonce, client_nonce,
+                          device_id, expected);
+        if (cs != OD_HAL_CRYPTO_OK) {
+            result = auth_crypto_fail(cs, rsp, rsp_len, report);
             goto step2_cleanup;
         }
         if (!od_ct_equal(client_proof, expected, OD_SESSION_MAC_LEN)) {
-            /* The challenge is spent on a wrong answer: one challenge answers one step 2, so an
-             * attacker cannot grind proofs against a fixed server nonce. */
-            s->challenge_pending = false;
-            od_secure_zero(s->pending_server_nonce, OD_SESSION_NONCE_LEN);
             result = auth_fail(AUTH_STATUS_FAILED, rsp, rsp_len, report,
                                OD_SESSION_AUTH_REJECTED);
             goto step2_cleanup;
         }
 
-        if (!derive_session_key(sec->encryption_key, client_nonce, s->pending_server_nonce,
-                                device_id, session_key)) {
-            result = auth_fail(AUTH_STATUS_ERROR, rsp, rsp_len, report,
-                               OD_SESSION_AUTH_CRYPTO_ERROR);
+        cs = derive_session_key(sec->encryption_key, client_nonce, s->pending_server_nonce,
+                                device_id, session_key);
+        if (cs != OD_HAL_CRYPTO_OK) {
+            result = auth_crypto_fail(cs, rsp, rsp_len, report);
             goto step2_cleanup;
         }
-        if (!derive_session_id(session_key, client_nonce, s->pending_server_nonce,
-                               s->session_id)) {
-            result = auth_fail(AUTH_STATUS_ERROR, rsp, rsp_len, report,
-                               OD_SESSION_AUTH_CRYPTO_ERROR);
+        cs = derive_session_id(session_key, client_nonce, s->pending_server_nonce,
+                               s->session_id);
+        if (cs != OD_HAL_CRYPTO_OK) {
+            result = auth_crypto_fail(cs, rsp, rsp_len, report);
             goto step2_cleanup;
         }
         /* An all-zero session id would make every nonce collide with a cleared session. */
@@ -390,23 +427,22 @@ enum od_session_auth od_session_authenticate(struct od_session *s,
             if (s->session_id[i] != 0u) { id_ok = true; break; }
         }
         if (!id_ok) {
-            result = auth_fail(AUTH_STATUS_ERROR, rsp, rsp_len, report,
-                               OD_SESSION_AUTH_CRYPTO_ERROR);
+            result = auth_crypto_fail(OD_HAL_CRYPTO_ERROR, rsp, rsp_len, report);
             goto step2_cleanup;
         }
 
         /* The server proof is keyed with the SESSION key and takes the nonces in the opposite
          * order to the client's -- server first. */
-        if (!derive_proof(session_key, s->pending_server_nonce, client_nonce, device_id, proof)) {
+        cs = derive_proof(session_key, s->pending_server_nonce, client_nonce, device_id, proof);
+        if (cs != OD_HAL_CRYPTO_OK) {
             od_session_clear(s);
-            result = auth_fail(AUTH_STATUS_ERROR, rsp, rsp_len, report,
-                               OD_SESSION_AUTH_CRYPTO_ERROR);
+            result = auth_crypto_fail(cs, rsp, rsp_len, report);
             goto step2_cleanup;
         }
-        if (od_hal_crypto_key_set(s->slot, session_key) != OD_HAL_CRYPTO_OK) {
+        cs = od_hal_crypto_key_set(s->slot, session_key);
+        if (cs != OD_HAL_CRYPTO_OK) {
             od_session_clear(s);
-            result = auth_fail(AUTH_STATUS_ERROR, rsp, rsp_len, report,
-                               OD_SESSION_AUTH_CRYPTO_ERROR);
+            result = auth_crypto_fail(cs, rsp, rsp_len, report);
             goto step2_cleanup;
         }
 
@@ -416,9 +452,7 @@ enum od_session_auth od_session_authenticate(struct od_session *s,
         s->timeout_ms = (uint32_t)sec->session_timeout_seconds * 1000u;
         s->session_start_ms = now_ms;
         s->last_activity_ms = now_ms;
-        s->challenge_pending = false;
-        od_secure_zero(s->pending_server_nonce, OD_SESSION_NONCE_LEN);
-        s->challenge_ms = 0u;
+        challenge_consume(s);
         s->auth_attempts = 0u;            /* a good handshake ends the run */
 
         rsp[0] = RESP_ACK;
@@ -432,12 +466,19 @@ enum od_session_auth od_session_authenticate(struct od_session *s,
         result = OD_SESSION_AUTH_ESTABLISHED;
 
 step2_cleanup:
+        /* Every step-2 path that reached the proof check spends the challenge, whatever the
+         * outcome. Idempotent, so the success and wrong-proof paths above may also call it. */
+        challenge_consume(s);
         od_secure_zero(expected, sizeof expected);
         od_secure_zero(session_key, sizeof session_key);
         od_secure_zero(proof, sizeof proof);
         return result;
     }
 
+    /* Neither shape. A pending challenge is spent here too: the plan lists a malformed body among
+     * the consuming outcomes, and a garbage frame from a client holding a challenge is exactly
+     * the case where leaving it alive serves nobody. No-op when none is pending. */
+    challenge_consume(s);
     return auth_fail(AUTH_STATUS_ERROR, rsp, rsp_len, report, OD_SESSION_AUTH_MALFORMED);
 }
 
@@ -596,10 +637,15 @@ enum od_session_seal od_session_seal(struct od_session *s, od_span_t plain_frame
     if (plain_frame.n < 2u) {
         return OD_SESSION_SEAL_TOO_SHORT;      /* no cmd bytes to echo or use as AAD */
     }
-    payload_len = (uint16_t)(plain_frame.n - 2u);
-    if (payload_len > OD_SESSION_PAYLOAD_MAX) {
+    /* Bound the frame in the size_t domain FIRST. Narrowing before the test discards the high
+     * bits that make it over-long: plain_frame.n == 65538 becomes payload_len 0, passes the
+     * maximum check, and seals an empty payload instead of returning TOO_LONG. No target call
+     * site can reach that today -- every one passes a statically bounded frame -- but the span
+     * length is a size_t precisely so the public API does not depend on that. */
+    if (plain_frame.n > (size_t)OD_SESSION_PLAIN_FRAME_MAX) {
         return OD_SESSION_SEAL_TOO_LONG;
     }
+    payload_len = (uint16_t)(plain_frame.n - 2u);
     sealed_len = (uint16_t)(plain_frame.n + OD_SESSION_NONCE_LEN + 1u + OD_HAL_CRYPTO_TAG_LEN);
     /* Preflight: a short output buffer must not burn a counter value. */
     if (out_cap < sealed_len) {

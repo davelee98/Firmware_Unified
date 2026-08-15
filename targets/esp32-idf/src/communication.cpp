@@ -118,6 +118,22 @@ static const char* originTag(void) {
 #define OD_AUTH_ABUSE_DWELL_FALLBACK_MS 50
 #endif
 
+// Budgets for the nonce-rejection logs. Once nonce failures stop counting toward
+// integrity_failures, nothing else throttles a peer that drives these lines, and
+// out-of-window fires routinely on a lossy link.
+//
+// One budget PER SITE, deliberately, not one shared: a stale client spamming session-id
+// mismatches must not be able to silence the out-of-window line, which is the one that
+// reports real transfer loss.
+static uint32_t s_nonceLogWindowMs = 0;   // replay / out-of-window
+static uint32_t s_nonceLogOtherMs  = 0;   // wrong session, bad tag, malformed, engine fault
+static bool nonceLogAllowed(uint32_t* last_ms) {
+    const uint32_t now = od_hal_uptime_ms();
+    if (*last_ms != 0 && (uint32_t)(now - *last_ms) < 5000u) return false;
+    *last_ms = now;
+    return true;
+}
+
 // Set by any RESP_AUTH_REQUIRED answer for the frame being dispatched, on EVERY
 // transport. Read once after the dispatch switch to decide whether the frame was
 // activity. Loop-task-only, like g_commandOrigin.
@@ -838,17 +854,38 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
         // screen. It moves to the failure path below, where it is the only thing that
         // separates a replay-window jump from nonce reuse from a wrong session key,
         // and where nRF (which has no RX hex line at all) would otherwise be blind.
+        struct od_session_report report;
         const enum od_session_open opened =
             od_session_open(&g_session, command, od_span_make(nonce_full, envelope_len),
                             plaintext, sizeof(plaintext), &plaintext_len,
-                            od_hal_uptime_ms(), NULL);
+                            od_hal_uptime_ms(), &report);
         if (opened != OD_SESSION_OPEN_OK) {
-            // 16 bytes render as 47 chars + NUL, an exact fit in 48; sized past that
-            // so a future ENCRYPTION_NONCE_SIZE bump truncates nothing.
-            char nonceHex[64];
-            od_log_hex_line(nonceHex, sizeof(nonceHex), "", nonce_full, ENCRYPTION_NONCE_SIZE);
-            od_log_error("ERROR: Decryption failed (0x%04X, rc=%d, %u B envelope, nonce %s)",
-                         (unsigned)command, (int)opened, (unsigned)envelope_len, nonceHex);
+            // A PIPE DATA frame refused for a NONCE reason is ordinary packet loss, not tamper
+            // evidence, and the answer is SILENCE. pipe-write-protocol.md 5.1 makes a 0x81 NACK
+            // unconditionally fatal and 5.2 reserves NACKs for unrecoverable conditions, so
+            // answering here kills the upload on the first dropped frame -- the client raises
+            // IntegrityCheckError, which its send loop does not catch. Saying nothing instead
+            // leaves the seq absent from the next SACK; the host retransmits it under a fresh
+            // higher counter, which the window accepts unconditionally (no forward bound).
+            //
+            // Deliberately narrow: a TAG failure keeps the NACK because it IS tamper evidence,
+            // and 0x0071 legacy DIRECT_WRITE_DATA is left alone -- its ACK discipline differs
+            // and has not been analysed. Not an oversight.
+            const bool nonce_loss = (report.nonce_reason == (uint8_t)NONCE_OUT_OF_WINDOW ||
+                                     report.nonce_reason == (uint8_t)NONCE_REPLAY);
+            if (nonce_loss && command == CMD_PIPE_WRITE_DATA) {
+                return;
+            }
+            if (nonceLogAllowed(nonce_loss ? &s_nonceLogWindowMs : &s_nonceLogOtherMs)) {
+                // 16 bytes render as 47 chars + NUL, an exact fit in 48; sized past that
+                // so a future ENCRYPTION_NONCE_SIZE bump truncates nothing.
+                char nonceHex[64];
+                od_log_hex_line(nonceHex, sizeof(nonceHex), "", nonce_full, ENCRYPTION_NONCE_SIZE);
+                od_log_error("ERROR: Decryption failed (0x%04X, rc=%d, nonce_reason=%u, "
+                             "%u B envelope, nonce %s)",
+                             (unsigned)command, (int)opened, (unsigned)report.nonce_reason,
+                             (unsigned)envelope_len, nonceHex);
+            }
             uint8_t response[] = {RESP_ACK, (uint8_t)(command & 0xFF), RESP_NACK};
             sendResponseUnencrypted(response, sizeof(response));
             return;

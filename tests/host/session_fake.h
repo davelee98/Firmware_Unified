@@ -49,4 +49,9 @@ void sec_init(uint16_t timeout_s);
 enum od_session_auth handshake(struct od_session *s, uint32_t now_ms,
                                uint8_t server_nonce_out[16], bool corrupt_proof);
 
+/* Step 1 ONLY: mint a challenge and stop, for cases about what happens to a PENDING challenge.
+ * Returns true when the challenge was issued; server_nonce_out and rsp receive the reply. */
+bool handshake_step1(struct od_session *s, uint32_t now_ms, uint8_t server_nonce_out[16],
+                     uint8_t *rsp, uint16_t *rsp_len);
+
 #endif /* OD_TEST_SESSION_FAKE_H */

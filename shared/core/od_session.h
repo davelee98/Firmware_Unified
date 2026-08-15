@@ -98,7 +98,15 @@ OD_STATIC_ASSERT(AUTH_STATUS_SUCCESS == AUTH_STATUS_CHALLENGE,
 /* The smallest legal envelope: nonce + one encrypted length byte + tag. */
 #define OD_SESSION_ENVELOPE_MIN (OD_SESSION_NONCE_LEN + 1u + OD_HAL_CRYPTO_TAG_LEN)  /* 29 */
 
+/* The largest complete [cmd:2][payload] frame od_session_seal accepts. NOT to be confused with
+ * OD_SESSION_PLAIN_MAX above: that is the CCM plaintext [len:1][payload] (223), this is what the
+ * CALLER hands in (224). They differ by one and mean different things, so seal() bounds against
+ * this one in the size_t domain before it narrows anything. */
+#define OD_SESSION_PLAIN_FRAME_MAX (2u + OD_SESSION_PAYLOAD_MAX)         /* 224 */
+
 OD_STATIC_ASSERT(OD_SESSION_PAYLOAD_MAX <= 255u, "the inner length prefix is one byte");
+OD_STATIC_ASSERT(OD_SESSION_PLAIN_FRAME_MAX + OD_SESSION_NONCE_LEN + 1u + OD_HAL_CRYPTO_TAG_LEN
+                 == OD_SESSION_SEALED_MAX, "sealing adds exactly 29 bytes to the plain frame");
 OD_STATIC_ASSERT(OD_SESSION_ENVELOPE_MIN < OD_SESSION_ENVELOPE_MAX, "envelope bounds ordered");
 
 /* --------------------------------------------------------------------------- replay window --- */
@@ -285,8 +293,10 @@ void od_session_touch(struct od_session *s, uint32_t now_ms);
  * and consumes it on every outcome that reaches the proof check -- success, wrong proof, expiry,
  * malformed body, crypto failure -- so one challenge answers one step 2 and an attacker cannot
  * grind proofs against a fixed server nonce. RATE_LIMITED, BAD_ARGUMENT and NO_ROOM do NOT consume
- * it: they return before the request shape is examined, matching the shipped order, so a throttled
- * client can still answer the challenge it holds once the window clears.
+ * it, and none of the three mutates any session state, so a throttled client can still answer the
+ * challenge it holds once the window clears. NO_ROOM does READ the body far enough to know which
+ * reply size is required -- that is what makes the capacity preflight step-specific, and it must
+ * stay ahead of the rate limiter, which is the first thing that mutates.
  *
  * A step 1 arriving over a live session CLEARS it and issues a fresh challenge, which is what
  * shipped; AUTH_STATUS_ALREADY is defined by the protocol and never sent.

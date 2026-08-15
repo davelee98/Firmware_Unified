@@ -5,7 +5,9 @@
 # means NOTHING RUNS UNLESS SOMEONE RUNS IT. Run this before you push.
 #
 #   tools/check.sh                 boundary + host suites + sanitizers + fuzz + shim ratchet
-#   tools/check.sh --esp32         also builds the ESP32 boards and checks the sdkconfig baseline
+#   tools/check.sh --targets       also builds BOTH target families (ESP32 boards + sdkconfig
+#                                  baseline, and all three Nordic boards). Required before merge.
+#   tools/check.sh --esp32         ESP32 only, as --targets used to be
 #   tools/check.sh --fuzz-time 300 longer fuzz budget per target (default 60 s)
 #   tools/check.sh --latest        also replay the corpus against the NEWEST py-opendisplay
 #   tools/check.sh --list          print the checks and exit
@@ -23,11 +25,14 @@ cd "$REPO"
 
 FUZZ_TIME=60
 DO_ESP32=0
+DO_NORDIC=0
 DO_LATEST=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --esp32)      DO_ESP32=1 ;;
+        --nordic)     DO_NORDIC=1 ;;
+        --targets)    DO_ESP32=1; DO_NORDIC=1 ;;
         --latest)     DO_LATEST=1 ;;
         --fuzz-time)  FUZZ_TIME="${2:?--fuzz-time needs a value}"; shift ;;
         --list)
@@ -249,7 +254,21 @@ esp32_baseline() {
 if [ "$DO_ESP32" = 1 ]; then
     check "esp32: sdkconfig baseline (${SDKCONFIG_BOARDS[*]})" esp32_baseline
 else
-    skip "esp32: sdkconfig baseline" "needs --esp32 (builds ${#SDKCONFIG_BOARDS[@]} boards)"
+    skip "esp32: sdkconfig baseline" "needs --esp32/--targets (builds ${#SDKCONFIG_BOARDS[@]} boards)"
+fi
+
+# ====================================================================================== nordic ==
+# Nordic has no cheap check at all -- no ratchet, no baseline -- so without this the crypto HAL and
+# the session adapter on this target are covered by nothing but somebody remembering to build. It
+# is opt-in only because it needs the nRF toolchain and several minutes, NOT because it is
+# optional before merge.
+nordic_all() {
+    ( cd targets/nordic-zephyr && ./build.sh --all )
+}
+if [ "$DO_NORDIC" = 1 ]; then
+    check "nordic: all three boards" nordic_all
+else
+    skip "nordic: all three boards" "needs --nordic/--targets (nRF toolchain, several minutes)"
 fi
 
 # ===================================================================================== summary ==

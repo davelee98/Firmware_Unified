@@ -37,7 +37,8 @@ looks arbitrary and is not); delete the story.
 - **THERE IS NO CI. `tools/check.sh` (repo root) is every gate this repo has, and nothing runs
   it but you.** Boundary greps, the host suite under gcc + clang, the same suite under
   ASan/UBSan, the pre-auth fuzz targets, the py-opendisplay wire corpus, and the shim ratchet;
-  `--esp32` adds the board builds and the sdkconfig baseline. **A SKIP IS NOT A PASS** — missing
+  `--targets` adds both target families (ESP32 boards + sdkconfig baseline, all three Nordic
+  boards) and is required before merge. **A SKIP IS NOT A PASS** — missing
   clang or ESP-IDF skips rather than fails, so read the summary, which reprints skips and exits
   2 when there were any.
 - Paths in this bullet are relative to `targets/esp32-idf/`. `./build.sh` there builds every board

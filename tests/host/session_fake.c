@@ -208,6 +208,20 @@ void sec_init(uint16_t timeout_s)
     g_sec.session_timeout_seconds = timeout_s;
 }
 
+bool handshake_step1(struct od_session *s, uint32_t now_ms, uint8_t server_nonce_out[16],
+                     uint8_t *rsp, uint16_t *rsp_len)
+{
+    uint8_t body1[1] = { 0x00 };
+
+    if (od_session_authenticate(s, &g_sec, DEVICE_ID, od_span_make(body1, 1), now_ms,
+                                rsp, OD_SESSION_REPLY_MAX, rsp_len, NULL)
+        != OD_SESSION_AUTH_CHALLENGE) {
+        return false;
+    }
+    memcpy(server_nonce_out, rsp + 3, 16u);
+    return true;
+}
+
 /* Drive a full handshake. Returns the od_session_auth of step 2 and, on success, leaves the
  * session open. server_nonce_out receives the challenge so tests can recompute proofs. */
 enum od_session_auth handshake(struct od_session *s, uint32_t now_ms,
