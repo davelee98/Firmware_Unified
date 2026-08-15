@@ -1,7 +1,8 @@
 # Plan: `od_dispatch` — one command path for BLE ingress, dispatch and writeback
 
-**Status:** revision 6, 2026-08-14. Not started.
-**Depends on:** [OD_SESSION_PLAN_2026-08-15.md](OD_SESSION_PLAN_2026-08-15.md) landing first.
+**Status:** revision 7, 2026-08-15. Not started. `od_session` prerequisite landed in `66ef1cb`.
+**Execution gate:** close the ESP32-S3 `od_session` hardware pass before C8; the Nordic
+`xiao_nrf52840` pass is complete, but the ESP32 mbedTLS arm has never run on silicon.
 **Prior art:** [DIVERGENCE_MATRIX.md](../docs/DIVERGENCE_MATRIX.md) § 1,
 [SHARED_API_DESIGN.md](../docs/SHARED_API_DESIGN.md) § "Layering", `tests/vectors/dispatch.json`.
 
@@ -42,6 +43,14 @@ adds 29 bytes to its input plain frame. The largest supported producer is the ca
 222 payload bytes, 224 bytes including the response pair, and 253 bytes sealed. The one-byte
 length field's theoretical 255 and the old 512/543-byte scratch limits are not frame ceilings.
 
+**Draft 6 → 7.** Reconciled the plan against landed `od_session`, its post-landing review, and
+the fixed target adapters. The target-owned session state now has an explicit app seam; every
+`od_session_open`/`seal` result has a wire disposition; PIPE replay/out-of-window remains silent;
+authentication and firmware discovery no longer masquerade as ordinary activity; NACK/plaintext
+selection is explicit rather than inferred from overloaded bytes; and `CONFIG_READ` becomes
+resumable in C8, when backpressure is introduced, rather than two commits later. The Nordic
+218-byte NFC read cap is already landed and is now a baseline to preserve, not work for C8.
+
 ---
 
 ## 1. What exists today
@@ -50,10 +59,11 @@ length field's theoretical 255 and the old 512/543-byte scratch limits are not f
 |---|---|---|
 | BLE ingress | SPSC ring, `PIPE_MAX_W + 2` × 256 B ≈ 8.7 KB, owner `tag` | `K_MSGQ` 40 × 512 B ≈ **20.5 KB**, `gen` |
 | LAN ingress | direct from loop, `wifi_service.cpp:1610-1626` | n/a |
-| Gate / switch | `communication.cpp:764-857` / `:909-975` | `opendisplay_pipe.c:1387-1440` / `:1220-1385` |
+| Session owner | `g_session` in `encryption.cpp` | file-static `s_session` in `opendisplay_pipe.c` |
+| Gate / switch | `communication.cpp:784-897` / `:934-1023` | `opendisplay_pipe.c:1010-1087` / `:839-1007` |
 | Egress | 10-slot `{data,len}` ring + `serviceBleTx()` | inline notify, 200 × `k_msleep(1)` |
 | Pre-refresh flush | one bounded `serviceBleTx()` pass, **no deadline** (`display_service.cpp:2336`) | implicit, via the retry |
-| Seal predicate | on `response[2]` (`communication.cpp:385-397`) | on `data[0]` (`opendisplay_pipe.c:600-607`) |
+| Seal predicate | status at `response[2]`, with PIPE-ACK carve-out | landed composite: status at byte 2, hard-NACK byte 0, and PIPE-ACK carve-out |
 
 Matrix § 1.7 records the Nordic queue as 8 × 514 B — pre-import. Correct it.
 
@@ -97,19 +107,15 @@ buffer sizes or authorize a 286-byte sealed response. The dispatcher rejects a 2
 frame before calling `od_session_seal()` so no nonce is burned. A wider TX slot cannot raise this
 ceiling — it would only move the failure to the radio.
 
-**This exposes a latent Nordic defect, and D-A brings it forward.** The NFC read fills
-`max_out = OD_PIPE_MAX_PAYLOAD - 6` = 238 payload bytes after a 6-byte header
-(`opendisplay_pipe.c:1076-1078`), i.e. 244 plaintext → **273 sealed**, which exceeds 253. It works
-today only because Nordic negotiates `CONFIG_BT_L2CAP_TX_MTU=512` (`prj.conf:58`) — the same
-oversized MTU whose RX side D-A narrows to 256. Narrowing admission while leaving TX at 512 would
-be incoherent, so this must be settled here:
-
-**Decision: cap the NFC tag data at 218 bytes** (218 tag-data bytes + 4 NFC metadata bytes = the
-222-byte session payload; adding `[status][cmd_echo]` makes a 224-byte plain frame and a 253-byte
-sealed value) and record it as a Nordic behaviour change. The alternative —
-keeping a 512-byte TX MTU for one opcode — reintroduces the wire divergence D-A removes. Larger
-tag contents need the chunked NFC path, not an oversized frame. **Check py-opendisplay's NFC read
-expectations before landing**, since this shortens a response a deployed host may size against.
+**Landed baseline: Nordic NFC tag data is capped at 218 bytes** (`opendisplay_pipe.c:691-709`):
+218 tag-data bytes + 4 NFC metadata bytes = the 222-byte session payload; adding
+`[status][cmd_echo]` makes a 224-byte plain frame and a 253-byte sealed value. C9 removes the
+oversized Nordic MTU/buffer configuration but does not change this bound. Records above 218 bytes
+can still be *written* by the existing chunked write path, but the current protocol has no chunked read; a read of one must
+return the existing NFC read error rather than truncate. `py-opendisplay` currently exposes NFC
+write but no NFC-read API, so there is no host read-size assumption to preserve. The cap remains a
+documented Nordic behaviour change and a hardware acceptance item because it has not run on a
+board.
 
 PIPE stays forbidden on LAN. **ESP32 behaviour change:** 245–256-byte BLE frames now NACK;
 `dispatch.json:123`'s note is corrected in the same commit.
@@ -132,40 +138,67 @@ entry for that tag · **`ERROR` drop this entry only, log, continue** — it is 
 stack-refusal condition, never retried (a retry loop on a permanent error is how a drain becomes a
 spin) and never grounds for tearing down the tag.
 
-### 3.2 Reservation is a capacity counter *(decided)*
+### 3.2 Reservation is a capacity counter with an ownership token *(decided)*
 
 ```c
-od_txq_status_t od_txq_reserve(uint8_t count);   /* capacity only; no slot address */
-void            od_txq_release(uint8_t unused);
-od_txq_status_t od_reply(const od_reply_t *rp, const uint8_t *frame, uint16_t len);
-od_txq_status_t od_reply_plain(const od_reply_t *rp, const uint8_t *frame, uint16_t len);
+typedef struct { uint8_t remaining; } od_tx_reservation_t;
+
+typedef enum {
+    OD_TXQ_OK, OD_TXQ_FULL, OD_TXQ_GONE, OD_TXQ_TIMEOUT,
+    OD_TXQ_TOO_LARGE,       /* generic hard NACK already queued */
+    OD_TXQ_SEAL_FAILED,     /* generic hard NACK already queued */
+    OD_TXQ_INVARIANT
+} od_txq_status_t;
+
+od_txq_status_t od_txq_reserve(uint8_t count, od_tx_reservation_t *r);
+void            od_txq_release(od_tx_reservation_t *r);
+od_txq_status_t od_reply(od_tx_reservation_t *r, const od_reply_t *rp,
+                         const uint8_t *frame, uint16_t len);
+od_txq_status_t od_reply_plain(od_tx_reservation_t *r, const od_reply_t *rp,
+                               const uint8_t *frame, uint16_t len);
 ```
 
-`available = free_slots − reserved_count`. `od_reply()` seals into the shared encrypt buffer (D-C)
-and copies into a slot the counter guarantees is free.
+`available = free_slots − reserved_count`. A successful reserve increments the global counter and
+sets `r->remaining`; each reply consumes exactly one unit from both. `od_txq_release()` returns only
+that token's unused units. A reply with no remaining unit is an invariant failure, not permission to
+borrow another frame's reservation. This matters once a config producer and an incoming command can
+coexist across loop passes.
+
+`od_reply()` is the normal protected-response path: it seals when a live CCM session and origin
+require it, then copies the final bytes into the slot the token guarantees. `od_reply_plain()` is
+the explicit control/error path and never seals. Neither function accepts a BLE value above 253;
+`OD_TX_FRAME_MAX == 256` is storage width, not permission to hand a 256-byte value to ATT.
+`FULL` is returned by reserve before any handler mutation. `TOO_LARGE` and `SEAL_FAILED` mean the
+token was consumed by the generic plaintext hard NACK described in § 3.7; the caller must not emit
+a second reply. `TIMEOUT` is a flush result and leaves queued entries intact.
 
 A reserved-but-uncommitted *slot* would be a hole in a FIFO, so the § 3.5 flush would stall on it —
 the exact failure the barrier prevents, since `0x72` holds a reservation across a 60 s refresh. A
 counter has no holes. Cost is one `memcpy` of ≤`OD_TX_FRAME_MAX` per response. Safe as a plain
-counter because every reserve, commit and drain runs on the loop task.
+counter because every reserve, commit and drain runs on the loop task; the small token supplies the
+ownership that a bare global counter did not.
 
 ### 3.3 Ordering is normative
 
-> **structural validation + tag liveness → response budget → reserve → auth/decrypt gate → handler**
+> **structural validation + tag liveness + producer conflict check → response budget → reserve
+> → auth/decrypt gate → handler**
 
 Reservation precedes the **gate**, not just the handler: the gate itself emits `[0x00][cmd][0xFE]`
 and `[0x00][cmd][0xFF]`, so it needs a slot too. It precedes **decrypt** because decrypt advances
-the replay window (`communication.cpp:962-966`) and rewrites the ring slot in place
-(`command_queue.h:99-101`) — deferring a decrypted frame replays it on re-dispatch, and three
-strikes tear down the session (`encryption.cpp:740-746`). **`OD_FRAME_DEFERRED` is returnable only
-before decrypt.** The budget is keyed on the outer opcode, which is AAD-authenticated.
+the replay window after successful authentication and the dispatch scratch replaces the queued
+sealed bytes — deferring a decrypted frame replays it on re-dispatch. **`OD_FRAME_DEFERRED` is
+returnable only before decrypt.** The budget is keyed on the outer opcode, which is later verified
+as CCM AAD; using an unauthenticated value to reserve at most three slots is bounded and causes no
+state mutation. The producer-conflict check is also pre-decrypt: a config-mutating command or
+second CONFIG_READ waits behind an active read, so returning `DEFERRED` leaves both the replay
+window and the caller's input bytes untouched.
 
 | Opcode | Reserve | Basis |
 |---|---|---|
 | `0x81` PIPE_WRITE_DATA | **3** | worst case: `sendPipeAck()` **and** END ack **and** refresh status (`display_service.cpp:2793-2797`) |
 | `0x71` DIRECT_WRITE_DATA | **2** | ack *or* END — never both (`:2242-2247`); END path is ack + refresh status |
 | `0x72`, `0x82` END | **2** | END ack, then post-refresh status (`:2326, 2372-2377`) |
-| `0x40` CONFIG_READ | see § 3.4 | |
+| `0x40` CONFIG_READ | **1 transferred to producer** | first chunk or immediate read error; later chunks reserve one at a time |
 | everything else | 1 | |
 
 The END reservation is **held across the refresh** — free under § 3.2, and why
@@ -173,18 +206,25 @@ The END reservation is **held across the refresh** — free under § 3.2, and wh
 
 ### 3.4 `CONFIG_READ`
 
-**From C10 it is a resumable producer** holding `{od_reply_t copied by value, next_chunk}`, and it
-**owns `getConfigScratch()` until it completes**. The current safety argument is pure synchronicity
-(`communication.cpp:529-532`); resumption breaks it, because `CONFIG_WRITE` →
-`reloadConfigAfterSave()` → `loadGlobalConfig()` overwrites the same buffer (`:634-640`,
-`config_parser.cpp:109-113`), splicing two configs into one CRC-valid read-back. **Any
-config-mutating command cancels an active read**; also cancel on `od_core_reset()` or tag death; a
-second read replaces the first.
+It becomes a resumable producer in **C8, in the same commit that introduces finite egress
+backpressure**. There is no safe synchronous interim: after a flush deadline leaves the queue full,
+the NACK promised by revision 6 has nowhere to go.
 
-**Until C10** (see § 7) it stays synchronous, calls `od_txq_flush()` between chunks — bounded, which
-preserves Nordic's current behaviour and gives ESP32 the deadline it lacks — and **checks
-`od_reply()`'s status**: on `FULL` after a flush it aborts the read with a NACK rather than
-truncating silently. No stage of this plan ever loses config bytes without telling the host.
+The producer holds `{od_reply_t copied by value, next_chunk, first reservation}` and owns
+`getConfigScratch()` until completion. The dispatcher's initial one-frame reservation is
+transferred to it and pays for the first chunk or an immediate read error. After that, each pass
+reserves one slot before constructing the next chunk; `FULL` simply leaves the producer pending.
+It never truncates, never spins, and never needs a failure frame merely to report backpressure.
+
+Resumption breaks the current scratch-safety argument: `CONFIG_WRITE` →
+`reloadConfigAfterSave()` → `loadGlobalConfig()` overwrites the same buffer, which could splice two
+configs into one CRC-valid read-back. **While a read is active, any config-mutating command and a
+second CONFIG_READ return `DEFERRED` before decrypt/reservation and are retried after the producer
+completes.** BLE retains the ring head; the LAN entry retains one input frame and stops reading the
+socket until it can retry. This also preserves the first read's declared chunk count—canceling it
+after some chunks were already queued would otherwise leave the host waiting forever. Only
+`od_core_reset()` or tag death cancels a read; cancellation releases its unused reservation, and
+queued entries for the dead tag are discarded by the ordinary `GONE` path.
 
 ### 3.5 The pre-refresh drain barrier
 
@@ -203,14 +243,77 @@ late, never dropped.
 begins *when the transport becomes writable within the deadline*. If it does not, a late ACK is the
 specified outcome, not a failure. The test asserts the writable case and records the unwritable one.
 
-### 3.6 The seal-or-plain predicate must be assigned
+### 3.6 Plaintext is explicit; response bytes are not a type system
 
-ESP32 keys on `response[2]` with a carve-out for the 7-byte pipe ACK (`communication.cpp:385-397`);
-Nordic keys on `data[0]` (`opendisplay_pipe.c:600-607`). They disagree on the wire: a 2-byte NACK
-`{0xFF,0x72}` is **sealed on ESP32** (len < 3 → status 0x00 → encrypts) and **plaintext on Nordic**.
+The landed Nordic fix proved that inferring disposition from an overloaded byte is unsafe: reading
+byte 0 missed `{0x00,cmd,0xFE/0xFF}`, while reading byte 2 mistakes a 7-byte PIPE ACK whose
+`highest_seen` happens to be FE/FF for an error. The shared rule is therefore expressed by the call:
 
-**Decision:** dispatcher owns the predicate at seal time, ESP32's form is authoritative (CLAUDE.md),
-Nordic's delta recorded in `DIVERGENCE_MATRIX.md` § 1.5b as part of C8.
+- `od_reply_plain()` for AUTHENTICATE, FIRMWARE_VERSION, auth-required, decrypt-failure, every
+  hard NACK beginning `0xFF`, and the generic seal-failure NACK;
+- `od_reply()` for successful application replies, including all PIPE ACKs;
+- TLS-LAN is always emitted plain at the application layer even through `od_reply()`, because TLS
+  already protects it.
+
+This adopts `DIVERGENCE_MATRIX.md` § 1.5b's plaintext-NACK resolution and changes ESP32's cases
+that its byte-2 heuristic currently seals. No handler may select confidentiality by inspecting its
+own payload. Tests pin every polymorphic shape, especially a PIPE ACK with `highest_seen` FE/FF.
+
+### 3.7 `od_session` binding and complete result disposition
+
+The target keeps the singleton and the facts that `od_session` deliberately did not promote. C8
+adds a link-time app seam used by shared egress and the ESP32 dispatcher immediately; C10 binds the
+same seam to Nordic:
+
+```c
+enum od_session_app_op { OD_SESSION_APP_ALIVE, OD_SESSION_APP_AUTH,
+                         OD_SESSION_APP_OPEN, OD_SESSION_APP_SEAL };
+
+struct od_session       *od_session_app_state(void);       /* g_session / s_session */
+const struct SecurityConfig *od_session_app_security(void);
+uint32_t                 od_session_app_now_ms(void);
+void                     od_session_app_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN]);
+void                     od_session_app_report(enum od_session_app_op op, int result,
+                                               uint16_t cmd,
+                                               const struct od_session_report *report);
+```
+
+The report callback preserves target logging without importing target log headers into `shared/`.
+Nonce failures remain rate-limited per site at five seconds. It is called **before** the dispatcher
+takes the PIPE silent-return arm, so loss telemetry cannot disappear again. Existing teardown
+continues through each target's session owner; `od_core_reset()` calls `od_session_clear()` through
+this seam and never `memset`s the state.
+
+Inbound disposition is exhaustive:
+
+| `od_session_open()` | Wire/action | Outcome |
+|---|---|---|
+| `OK` | dispatch returned payload | handler-derived |
+| `NO_SESSION` | plaintext `{0x00,cmd,0xFE}` | `AUTH_REQUIRED` |
+| `REPLAY` with `NONCE_REPLAY`/`NONCE_OUT_OF_WINDOW` and cmd `0x81` | **silence**, consume frame, log first | `CRYPTO_DROPPED` |
+| `WRONG_SESSION`, other `REPLAY`, `BAD_TAG`, `BAD_LENGTH`, `SHORT`, `TOO_LONG`, `CRYPTO_ERROR` | plaintext `{0x00,cmd,0xFF}` | `CRYPTO_FAILED` |
+| `NO_ROOM` | invariant failure: log, send the same plaintext FF, never read the output scratch | `CRYPTO_FAILED` |
+
+Only `BAD_TAG` spends an integrity strike; dispatch never adds a second strike or increments the
+link auth-abuse run for any crypto failure.
+
+Authentication disposition is also exhaustive. `CHALLENGE` returns the core's plaintext 23-byte
+reply and `AUTH_CONTROL`; `ESTABLISHED` returns the plaintext 19-byte reply and
+`AUTH_ESTABLISHED`; `REJECTED`, `RATE_LIMITED`, `NOT_CONFIGURED`, `MALFORMED`, `EXPIRED`, and
+`CRYPTO_ERROR` return the core's plaintext error reply and `AUTH_CONTROL`. The dispatcher always
+supplies `OD_SESSION_REPLY_MAX`, a non-null device id and a non-null result length, so `NO_ROOM` and
+`BAD_ARGUMENT` are invariants; if reached, log and synthesize plaintext
+`{0x00,0x50,AUTH_STATUS_ERROR}` without treating the attempt as established or as link activity.
+
+Outbound disposition is likewise exhaustive. `OK` queues the sealed bytes. `TOO_LONG` and
+`NO_ROOM` are producer/invariant failures detected before a nonce and become a plaintext generic
+hard NACK `{0xFF,cmd,0x00}` plus a non-OK `od_txq_status_t`. `TOO_SHORT` has no command byte from
+which a valid fallback can be built, so it returns `OD_TXQ_INVARIANT`, emits nothing, and leaves the
+reservation for the caller's mandatory release. `NO_SESSION` never leaks the original response
+plaintext and substitutes the generic hard NACK. `CRYPTO_ERROR` may have spent exactly one counter;
+it substitutes the hard NACK and is never retried or resealed. `COUNTER_EXHAUSTED` clears the
+session, substitutes the hard NACK, and requires re-authentication on the next command. A queued
+sealed entry is immutable: radio `RETRY` spends **no additional nonce**.
 
 ---
 
@@ -240,24 +343,39 @@ while transfer handlers are target-local. Bounded by the watchdog, not by this A
 ## 5. Outcome and handler contract
 
 ```c
-typedef enum { OD_CMD_OK, OD_CMD_NACK, OD_CMD_AUTH_REJECTED, OD_CMD_DEFER } od_cmd_result_t;
+typedef enum { OD_CMD_OK, OD_CMD_NACK, OD_CMD_AUTH_REJECTED } od_cmd_result_t;
 
 typedef enum {
     OD_FRAME_ACCEPTED, OD_FRAME_HANDLER_NACK,
+    OD_FRAME_AUTH_CONTROL,     /* challenge or refused handshake; plaintext, not activity */
+    OD_FRAME_AUTH_ESTABLISHED, /* plaintext success; resets abuse, still not activity */
+    OD_FRAME_DISCOVERY,        /* FIRMWARE_VERSION; plaintext, not activity */
     OD_FRAME_AUTH_REQUIRED,   /* answered [0x00][cmd][0xFE] — gate OR handler */
-    OD_FRAME_CRYPTO_FAILED,   /* decrypt/replay failure, answered [0x00][cmd][0xFF] */
+    OD_FRAME_CRYPTO_FAILED,   /* crypto refusal answered [0x00][cmd][0xFF] */
+    OD_FRAME_CRYPTO_DROPPED,  /* PIPE replay/out-of-window: logged, deliberately silent */
     OD_FRAME_REJECTED_FRAME, OD_FRAME_UNKNOWN_OPCODE, OD_FRAME_STALE_TAG, OD_FRAME_DEFERRED
 } od_frame_outcome_t;
 
 void od_core_frame_done(const od_reply_t *rp, od_frame_outcome_t outcome);   /* target */
 ```
 
+Handlers cannot defer. The dispatcher resolves capacity and producer conflicts before decrypt, so
+once invoked a handler must complete and return one of these three results.
+
 `OD_CMD_AUTH_REJECTED` exists because handlers issue auth rejections themselves
 (`communication.cpp:614-621`, `:689-697`); without it a TLS client's refused `CONFIG_WRITE` stamps
 activity and holds the exclusive slot forever — the bug `:984-988` records as fixed.
 `AUTH_REQUIRED` and `CRYPTO_FAILED` are separate because only the first calls `noteAuthRejected()`
-(`:806-821` vs `:839-849`); decrypt failure carries the session's own 3-strike rule
-(`encryption.cpp:778-782`) and must not also advance the link-level counter.
+(`:826-839` vs `:862-896`); `od_session` itself counts only `BAD_TAG` toward its three-strike rule,
+while nonce loss and engine faults count nothing. Dispatch must not add a second strike or advance
+the link-level counter for any of them.
+
+The control outcomes are not cosmetic. ESP32 currently returns from AUTHENTICATE and
+FIRMWARE_VERSION before the activity block, so treating either as ordinary `ACCEPTED` would let a
+discovery poll hold the exclusive link indefinitely. A successful step-2 authentication does
+reset the abuse run, but it still does not stamp activity. Every other authentication result is
+`AUTH_CONTROL`; all handshake reply bytes returned by `od_session_authenticate()` use
+`od_reply_plain()`.
 
 **Outcome → policy. The activity stamp and the abuse counter have different origin scopes** —
 `communication.cpp:998` has no origin test, the BLE gate is inside `noteAuthRejected()` (`:136`,
@@ -267,14 +385,20 @@ activity and holds the exclusive slot forever — the bug `:984-988` records as 
 |---|---|---|---|
 | `ACCEPTED` | yes | reset | yes |
 | `HANDLER_NACK` | **yes** | reset | yes |
+| `AUTH_ESTABLISHED` | no | **reset** | yes |
+| `AUTH_CONTROL` / `DISCOVERY` | no | no change | yes |
 | `AUTH_REQUIRED` | no | **increment** | yes |
-| `CRYPTO_FAILED` | no | no change | yes |
+| `CRYPTO_FAILED` / `CRYPTO_DROPPED` | no | no change | yes |
 | `REJECTED_FRAME` / `UNKNOWN_OPCODE` / `STALE_TAG` | no | no change | yes |
 | `DEFERRED` | no | no change | **no** |
 
 Both columns require `linkIsOwnerWord(tag)` (`:143`, `:998`). Getting the left column wrong stops
 an active LAN client's idle clock and disconnects it mid-session. These gates live target-side in
-`od_core_frame_done()`.
+`od_core_frame_done()`. An activity stamp performs both pieces of the existing policy:
+`od_session_touch(od_session_app_state(), now)` and the target's owner-clock stamp. The first is
+diagnostic/idle session state; the second drives the exclusive-link idle timeout. Calling touch
+after a successful BLE decrypt is harmlessly idempotent and is required for accepted TLS-LAN
+frames, which correctly bypass `od_session_open()`.
 
 Handlers take the reply context explicitly — no current-origin global:
 
@@ -294,33 +418,67 @@ no vtable (decision 2).
 | # | Decision |
 |---|---|
 | D-A | Origin-specific gates; **Nordic BLE admission narrows to 256** with an ATT-layer reject (§ 2). Correct `dispatch.json:123`. |
-| D-B | TX ring with `{origin,tag}`, typed results incl. `ERROR` semantics, counter reservation, § 3.5 barrier. |
+| D-B | TX ring with `{origin,tag}`, typed results incl. `ERROR` semantics, token-owned capacity reservation, § 3.5 barrier. |
 | D-C | Shared **decrypt** scratch is sized to `OD_SESSION_PLAIN_MAX` = **223**, the largest supported CCM plaintext `[len:1][payload:222]`. `od_session_open()` accepts at most a 251-byte envelope after the two command bytes and returns at most 222 payload bytes after validating/removing the length prefix. `Firmware`'s 512-byte scratch and 255-byte representational check are defensive implementation details, not producer limits. LAN-plain *unsealed* frames reach 4094 but dispatch in place and never transit this scratch, so it does not need 4 KB — which BG22 could not pay. |
-| **D-C2 (new)** | `OD_TX_FRAME_MAX` = `OD_BLE_MAX_FRAME` = **256** (usable value 253). Dispatch and `od_session` accept a complete plain response frame of at most **224**, carrying at most **222 payload bytes**, and seal it into at most **253** bytes (§ 2). The shared encrypt scratch is 253. **Nordic's NFC tag data is capped to 218 bytes** as a consequence. |
-| D-D | Typed outcome + the § 5 table, with the two different origin scopes. |
+| D-C2 | `OD_TX_FRAME_MAX` = `OD_BLE_MAX_FRAME` = **256** (usable value 253). Dispatch and `od_session` accept a complete plain response frame of at most **224**, carrying at most **222 payload bytes**, and seal it into at most **253** bytes (§ 2). The shared encrypt scratch is 253. Preserve the already-landed Nordic 218-byte NFC read-data cap. |
+| D-D | Typed outcome + the § 5 table, including auth/discovery control outcomes and silent PIPE nonce loss. |
 | D-E | **NFC 0x83 is NOT added to ESP32** — header `@targets` reads "NOT Firmware", `communication.cpp:866` records the omission, and `NFC_ERR_*` has no "unsupported" code. **`SHARED_API_DESIGN.md:680` currently says a disabled NFC implementation NACKs — update it.** **Nordic gains 0x52 → `[0xFF][0x52][0x00][0x00]`** (`device_control.cpp:1003`). |
 | D-F | RX slot width 256 both targets; depth `PIPE_MAX_W + 2`, asserted. |
 | D-G | Dispatcher owns the command banner and quiet-frame predicate. |
-| D-H | `sources.cmake` gains a **`HAL_RADIO`** tier; coordinate with the session plan's crypto tier. |
-| D-I | Seal-or-plain predicate dispatcher-owned, ESP32 authoritative (§ 3.6). |
+| D-H | `sources.cmake` gains a **`HAL_RADIO`** tier and the target-owned `od_session_app` binding in § 3.7; the landed crypto HAL tier is unchanged. |
+| D-I | Plain-vs-protected is selected explicitly by `od_reply_plain()` / `od_reply()`; all NACKs are plaintext and PIPE ACK contents never affect the choice (§ 3.6). |
+| D-J | Every landed `od_session_authenticate`/`open`/`seal` result has the disposition in § 3.7; no default branch may silently alias a new enum member. |
 
 ---
 
 ## 7. Sequence
 
-**Prerequisite — `od_session` lands first**, the whole of `plans/OD_SESSION_PLAN_2026-08-15.md`
-(its C0–C7). This plan's commits continue that sequence as **C8–C12**, so a commit label means one
-thing across both documents. ESP32 first within each step. Every commit adds its sources to
-`shared/sources.cmake`, **and its host tests, in the same commit** — C-side coverage is not deferred
-to C12.
+The `od_session` prerequisite (C0–C7) is landed. Before C8, flash an ESP32-S3 and close the missing
+session hardware gate; otherwise dispatch and egress failures would be stacked on an unverified
+mbedTLS integration. This plan continues the sequence as **C8–C12**, with ESP32's vertical adoption
+first and Nordic's second. Every commit adds its sources to `shared/sources.cmake` **and its host tests in
+the same commit**; run `tools/check.sh --targets` with zero failures and zero skips before each
+commit is accepted. C12 adds the cross-corpus runner, not the first C-side coverage.
 
 | Commit | Content |
 |---|---|
-| **C8** | `od_hal_radio`, TX ring (`{origin,tag}`, `OD_TX_FRAME_MAX`, typed results, counter reserve/release), § 3.5 barrier, § 3.6 seal predicate. Nordic's blanket inline retry retires — **but `CONFIG_READ` stays synchronous and uses the bounded `od_txq_flush()` between chunks, aborting with a NACK on `FULL`** (§ 3.4). That preserves Nordic's behaviour, gives ESP32 a deadline it never had, and needs no `od_core_process()`. |
-| **C9** | Shared BLE RX ring; Nordic admission narrowed to 256. Each target keeps its existing pump and dispatcher, called from the new drain. LAN untouched. |
-| **C10** | `od_dispatch.c` — validation, reservation, gate, opcode switch, `od_core_process()` — **together**, one target at a time. Resumable `CONFIG_READ` lands here, where its driver exists. |
-| **C11** | Delete `communication.cpp`'s dispatch half and `command_queue.cpp`; shrink `opendisplay_pipe.c`. Update matrix § 1.5b / § 1.7, `SHARED_API_DESIGN.md:680`, `CLAUDE.md`. |
+| **C8** | Shared foundation plus an **ESP32 vertical adoption**: `od_session_app` seam; `od_hal_radio`; TX ring and reservation tokens; explicit plain/protected replies; exhaustive authenticate/open/seal mapping; typed outcomes; § 3.5 barrier; resumable `CONFIG_READ`; and `od_dispatch.c`. The existing ESP RX pump calls shared dispatch and `od_txq_process()`. Nordic remains on its landed dispatcher/inline notify in this commit, so no half-migrated reservation has to hide in a current-origin global. |
+| **C9** | Shared BLE RX ring on both targets; delete ESP32 `command_queue.cpp`; narrow Nordic admission and MTU/buffers to 256. Nordic's existing main-thread pump calls its existing dispatcher from the new ring for this one commit; LAN remains direct. |
+| **C10** | **Nordic vertical adoption** of the C8 egress, resumable config producer, session seam and shared dispatcher; compose RX, TX and producer work in `od_core_process()`. Retire Nordic's blanket inline retry only here. Preserve log-before-silence and the control-frame activity policy. |
+| **C11** | Remove dead dispatch/egress helpers from `communication.cpp`; finish shrinking `opendisplay_pipe.c`; shrink both target session adapters to the § 3.7 seam. **Also fix the three landed crypto-HAL defects below**, which live in exactly the code this commit rewrites. Update matrix § 1.5b / § 1.7, `SHARED_API_DESIGN.md:680`, `CLAUDE.md`, and `docs/OD_SESSION.md` verification status. |
 | **C12** | C corpus runner + hardware passes. |
+
+### 7.1 Landed crypto-HAL defects folded into C11
+
+Found by the post-merge integration review, deferred here rather than fixed on `main` because C11
+rewrites these files anyway. The first is an availability bug, not a hardening item.
+
+**Nordic `slot_release()` latches the prepared slot.** `targets/nordic-zephyr/src/od_hal_crypto.c`
+returns `OD_HAL_CRYPTO_ERROR` on a `psa_destroy_key` failure **without clearing
+`s_slot_ready[slot]`**, and `od_hal_crypto_key_set()` calls it first and bails when it fails. So a
+single failed destroy latches the slot: every later handshake returns
+`OD_SESSION_AUTH_CRYPTO_ERROR` and the device is **unauthenticatable until reboot**. It also
+breaks the contract at `od_hal_crypto.h`, which requires `key_set` to be "idempotent and
+self-repairing", and `od_hal_crypto_key_clear()` is `void`, so `od_session_clear()` believes a key
+is released that is not.
+
+This is the same latch class removed from the one-shot path in `c0b3206`, sitting in the
+prepared-slot path that runs on **every** handshake. Take the same decision: clear the tracking
+regardless, accept the leaked slot, report the failure. A reusable slot beats an unreachable one,
+and holding the id was already rejected — retrying needs it kept somewhere, and PSA may reissue a
+held id to another key.
+
+**ESP32's CSPRNG cannot report failure.** `targets/esp32-idf/hal/od_hal_crypto.c` wraps the `void`
+`esp_fill_random()` and always returns OK, so `od_session_authenticate`'s "never offer a challenge
+the device cannot honour" branch is unreachable on that target while Nordic honours it. Benign
+today — a `0x0050` implies a live BLE link, and ESP-IDF's RNG is true while RF is on — but the two
+HALs disagree on a contract the header states.
+
+**`od_session_seal()` omits upstream's activity stamp.** `../Firmware/src/encryption.cpp:841`
+stamps activity at the end of `encryptResponse()`; the port stamps only in `od_session_open()`, so
+an outbound-heavy session's `last_activity_ms` goes stale. No consumer today (the timeout is
+absolute and nothing reads the field), but `od_session.h` advertises it as the basis for a target
+idle policy, and C11 is where the adapters that would use it are rewritten.
 
 ---
 
@@ -332,26 +490,48 @@ Landing with the commit that introduces the code, not at C12.
   plaintext, sealed, corrupt sealed} × {BLE, LAN plain, LAN TLS} → handler call, reply bytes,
   outcome. Plus BLE 245 → NACK; BLE 257 → ATT reject; LAN DIRECT_WRITE at 4092 data bytes →
   accepted.
+- **Session-result matrix** — one case for every `od_session_authenticate`, `od_session_open`, and
+  `od_session_seal` enum member, checking wire bytes, outcome/status, session clear/retain, counter
+  delta, output-scratch access,
+  and report callback.
+  **PREREQUISITE, and it is not optional: the fake crypto HAL cannot express these cases today.**
+  `g_force_status` in `tests/host/session_fake.c` fails *every* subsequent HAL call, so the first
+  call swallows the injection and four of the five step-2 crypto-failure paths are unreachable —
+  including the all-zero-session-id rejection and both `od_session_clear()` calls that stop a
+  half-derived session persisting. A mutation audit confirmed each is currently uncovered. The fake
+  needs fail-on-the-Nth-call before this matrix can be written; writing it against today's fake
+  produces cases that pass without reaching the code they name. The same applies to the report
+  callback: one of nine `struct od_session_report` fields is asserted anywhere today. A compile-time switch ratchet or equivalent fails when a new enum member is
+  added without a disposition.
+- **PIPE loss** — replay and out-of-window `0x81` consume the RX entry, call the throttled report
+  before returning, emit no frame, spend no integrity strike, and leave the transfer alive. The
+  same nonce result on `0x71`, and a `BAD_TAG` on either opcode, emits plaintext FF.
 - **Frame sizing** — a 224-byte plain response frame (222-byte payload) seals to exactly 253 and
   is accepted; 225 is rejected as `OD_SESSION_SEAL_TOO_LONG` before sealing (so no nonce is
-  burned). Nordic: an NFC read returning the maximum 218 tag-data bytes fits; a producer attempting
-  219 fails the build's `OD_STATIC_ASSERT`.
+  burned). Nordic: a 218-byte NFC read fits and seals; a stored 219-byte record produces the
+  existing runtime NFC read error and never truncates or overruns the response buffer.
 - **Robustness (not conforming traffic)** — an inbound sealed LAN-**plain** frame with a 251-byte
   envelope (253 bytes including the command) is accepted; a 252-byte envelope is rejected before
   the cipher is touched. With security on the device serves TLS, so this exercises the shared
   session bound, not a shipping path.
 - **Outcome → policy** — one case per § 5 row asserting stamp/abuse/consume, **including an
   accepted LAN command that stamps activity** and a LAN auth rejection that does *not* advance the
-  BLE counter.
+  BLE counter. AUTH challenge/refusal and FIRMWARE_VERSION do not stamp; AUTH established resets
+  the abuse run without stamping.
 - **Reservation** — `0x81` auto-complete needs 3 against rings with 3, 2 and 1 free (the last must
   `DEFER` without executing); a reservation held across a simulated 60 s refresh does not stall
-  `od_txq_flush`; `DEFERRED` only pre-decrypt with the replay window unadvanced.
-- **Egress** — sustained `RETRY` (order preserved, nonce not advanced); `GONE` drops one tag only;
-  `ERROR` drops one entry and continues; `TOO_LARGE` vs `FULL`; deadline expiry leaves frames
-  queued.
-- **`CONFIG_READ`** — C8: aborts with a NACK, never truncates, when the ring stays full through the
-  flush deadline. C10: completes across a multi-pass stall; cancelled by an interleaved
-  `CONFIG_WRITE`; cancelled on tag death; second read replaces the first.
+  `od_txq_flush`; one token cannot consume another token's reservation; release returns only unused
+  units; `DEFERRED` is possible only pre-decrypt with the replay window unadvanced.
+- **Egress** — sustained `RETRY` preserves order and spends exactly one nonce at enqueue, never one
+  per retry; `GONE` drops one tag only; `ERROR` drops one entry and continues; usable BLE value 253
+  vs slot width 256; `TOO_LARGE` vs `FULL`; deadline expiry leaves frames queued. FE/FF controls,
+  every hard NACK, and a PIPE ACK with `highest_seen` FE/FF pin the explicit disposition rule.
+- **`CONFIG_READ`** — completes across a multi-pass permanent-then-recovering stall without loss or
+  spin; owns its scratch; an interleaved `CONFIG_WRITE` and second read defer pre-decrypt and run
+  only after completion; the LAN caller retains its deferred input; tag death/reset cancels and
+  releases the token.
+- **Session app seam** — target fakes provide state/config/clock/device-id/report independently;
+  timeout, auth, open and seal reports reach the callback, and nonce-loss logging precedes silence.
 - **Ring** — wrap, full, empty, stale-tag discard, and the legal reset-racing-a-producer case.
   *Not* "reset from the wrong thread": a `void` API cannot identify its caller. Cover the contract
   instead by asserting Nordic still defers disconnect cleanup through `s_close_pending`.
@@ -360,28 +540,52 @@ Landing with the commit that introduces the code, not at C12.
 
 ## 9. Hardware acceptance
 
-Per target at C8, C9, C10: encrypted upload; config write → chunk → read-back → reboot → re-parse;
-LED/buzzer/`READ_MSD`/`FIRMWARE_VERSION`; auth failure `{0x00,cmd,0xFE}` and ten rejections still
-dropping the ESP32 link; unknown opcode silent; 245-byte BLE frame NACKed; **END ACK on air before
-physical refresh, given a writable transport within the deadline** (§ 3.5). Nordic also: encrypted
-an encrypted NFC read at the new 218-byte cap, delivered whole on a 256-byte frame (D-C2). ESP32 also: PIPE at small `ack_every`, PIPE-over-LAN refused,
-TLS-LAN dispatched without CCM, LAN DIRECT_WRITE at 4092-byte chunks, **and an active LAN session
-that stays connected across a long idle-plus-traffic cycle** (§ 5).
+**Before C8:** ESP32-S3 passes the landed `od_session` Gate 2 unchanged: authenticate, encrypted
+traffic, timeout/re-authentication, and config persistence. Record the board and commit. This
+separates an mbedTLS integration failure from a later dispatch regression.
+
+At C8, run the full matrix below on ESP32. At C9, repeat ingress/admission, encrypted upload and
+disconnect/reset coverage on both targets. At C10, run the full matrix on Nordic and repeat the
+ESP32 smoke path. The full matrix is: encrypted upload; config write → chunk → read-back → reboot
+→ re-parse; a config read surviving induced TX backpressure; LED/buzzer/`READ_MSD`/
+`FIRMWARE_VERSION`; no-session `{0x00,cmd,0xFE}` and decrypt-failure `{0x00,cmd,0xFF}` visibly
+plaintext; ten BLE auth rejections still dropping the ESP32 link; a successful authentication
+clearing a nine-rejection run without stamping the owner activity clock; unknown opcode silent;
+245-byte BLE frame NACKed; and **END ACK on air before physical refresh, given a writable transport
+within the deadline** (§ 3.5).
+
+At C10/C12 deliberately induce encrypted PIPE loss or reordering on each available board: a replay
+or out-of-window `0x81` produces no response, appears in throttled telemetry, and the upload
+recovers. This is mandatory because the landed OD-S1 fix has never run on hardware and a normal
+encrypted upload does not exercise it.
+
+Nordic also: encrypted NFC read with exactly 218 tag-data bytes delivered whole in a 253-byte
+value; a stored 219-byte record returns the NFC read error without truncation. ESP32 also: PIPE at
+small `ack_every`, PIPE-over-LAN refused, TLS-LAN dispatched without CCM, LAN DIRECT_WRITE at
+4092-byte chunks, and an active LAN session that stays connected across a long
+idle-plus-accepted-traffic cycle (§ 5).
 
 ## 10. Risks
 
 - **§ 3.5 is the regression-prone change** — verify on air, not by reasoning.
 - **§ 3.3's ordering is load-bearing** — reserve before gate *and* before decrypt; get it wrong and
-  a full TX ring during a PIPE burst tears down the session in three frames.
+  a full TX ring can consume a replay-window entry for a command that is then neither executed nor
+  safely retryable. PIPE loss may be silent, but other commands would still be lost.
+- **§ 3.7 is a security-policy seam** — `od_session_report.nonce_reason`, log-before-silence, and
+  the no-plaintext-on-seal-failure rule need mutation-style tests, not only happy-path vectors.
 - **D-A** changes ESP32 behaviour for 245–256-byte BLE frames and narrows Nordic admission.
+- **D-I changes ESP32 NACK confidentiality** to the matrix's plaintext rule. Pin host behavior for
+  every NACK shape before swapping the target.
 - **`od_cmd.h` becoming permanent** — mitigated by the shrink schedule and doing `od_xfer_direct` next.
 
 ## 11. Out of scope
 
-Transfer state machines, the PIPE window, session crypto, `link_owner` / `session_guard`, the LAN
-transport, Silabs, and any new opcode or error code.
+Transfer state machines, the PIPE window algorithm, session cryptographic algorithms,
+`link_owner` / `session_guard` policy, the LAN transport, Silabs, and any new opcode or error code.
+This plan necessarily binds the landed session and calls the existing owner-policy seams; it does
+not redesign either subsystem.
 
-**Cross-plan note:** `OD_SESSION_PLAN_2026-08-15.md` uses the same maxima as § 2/D-C: 222-byte
-payload, 224-byte plain frame, 223-byte CCM plaintext, 251-byte envelope after the command, and
-253-byte sealed value. `Firmware` defines the envelope shape; the actual producers plus transport
-define the supported ceiling.
+**Landed-session note:** `docs/OD_SESSION.md` and `shared/core/od_session.h` are now the source of
+truth for the dependency: 222-byte payload, 224-byte plain frame, 223-byte CCM plaintext,
+251-byte envelope after the command, and 253-byte sealed value. `Firmware` defines the envelope
+shape; the actual producers plus transport define the supported ceiling.

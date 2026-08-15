@@ -159,5 +159,12 @@ likewise unexercised.
   decrypt so it cancels as an oracle (needs RFC 3610 vectors); `OD_SESSION_OPEN_REPLAY` is
   unreachable in both open fuzzers; the fake's error injection is all-or-nothing, so four of five
   step-2 crypto-failure paths never run; one of nine `od_session_report` fields is asserted.
-- P3s from the integration review: Nordic's `slot_release` is not self-repairing, ESP32's RNG has
-  no failure path, `od_session_seal` dropped upstream's activity stamp.
+- **Nordic's `slot_release()` latches the prepared key slot** — a single `psa_destroy_key` failure
+  leaves `s_slot_ready` set, `key_set()` then fails forever, and the device is UNAUTHENTICATABLE
+  until reboot. Same latch class removed from the one-shot path in `c0b3206`; the fix is the same
+  decision (clear the tracking, accept the leak). Deliberately deferred to `od_dispatch` C11, which
+  rewrites that file — see `plans/PLAN_OD_DISPATCH_2026-08-14.md` § 7.1. Needs a PSA fault to
+  trigger, which is why it is scheduled rather than hotfixed.
+- Smaller, same commit: ESP32's RNG wrapper cannot report failure (so the "never offer a challenge
+  the device cannot honour" branch is unreachable there), and `od_session_seal()` dropped upstream's
+  activity stamp.
