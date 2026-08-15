@@ -1,6 +1,8 @@
 #ifndef COMMUNICATION_H
 #define COMMUNICATION_H
 
+#include "od_cmd.h"
+
 #include <stdint.h>
 
 void sendResponseUnencrypted(uint8_t* response, uint16_t len);
@@ -10,11 +12,11 @@ uint8_t getFirmwareMajor();
 uint8_t getFirmwareMinor();
 uint8_t getFirmwarePatch();
 const char* getFirmwareShaString();
-void handleFirmwareVersion();
-void handleReadMSD();
-void handleReadConfig();
-void handleWriteConfig(uint8_t* data, uint16_t len);
-void handleWriteConfigChunk(uint8_t* data, uint16_t len);
+od_cmd_result_t handleFirmwareVersion(const od_cmd_ctx_t *ctx);
+od_cmd_result_t handleReadMSD(const od_cmd_ctx_t *ctx);
+od_cmd_result_t handleReadConfig(const od_cmd_ctx_t *ctx);
+od_cmd_result_t handleWriteConfig(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
+od_cmd_result_t handleWriteConfigChunk(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 
 // The shared command dispatcher, serving nRF BLE, ESP32 BLE and the ESP32 LAN
 // transport. Both leading parameters are unused by the dispatch logic, so they

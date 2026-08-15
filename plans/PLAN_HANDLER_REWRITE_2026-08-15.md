@@ -134,7 +134,7 @@ which egress is live* (one atomic step).
 | **1** | `od_cmd_ctx_t` in `od_cmd.h`. A temporary `od_cmd_reply{,_plain}(ctx, ...)` adapter that makes the § 3.6 classification explicit at the call site but **routes to the legacy sender**. No behaviour change. |
 | **2** | `buzzer_control.cpp` (10). The smallest complete file: it proves the shape end to end before the shape is applied 68 more times. |
 | **3** | `device_control.cpp` (11). |
-| **4** | `communication.cpp`'s handler sites — **not** the two entry points, which step 8 removes. |
+| **4** | `communication.cpp`'s handler sites — **not** the two entry points, which step 8 removes. `handleReadConfig()` keeps its synchronous loop here and converts only its reply CALLS; it becomes `od_config_read_start()` at step 8, in the commit that adds the pump. Revision 1 put the producer swap here, which would have broken config read immediately: the producer emits chunk 0 and then needs `od_config_read_pump()`, which nothing calls until the cutover. |
 | **5** | `display_service.cpp` (30). Largest, and the one holding a reservation across a refresh. |
 | **6** | Handlers return `od_cmd_result_t`; `od_cmd_dispatch()` is implemented over the existing switch; `od_cmd_mutates_config()` lands. Still legacy egress. |
 | **7** | The pre-refresh barrier, target-side: one helper used by **every** END path, calling `od_txq_flush()` repeatedly against a deadline while feeding the watchdog. Still legacy egress, so it is a no-op until step 8 — but it is written and reviewed before the cutover rather than during it. |

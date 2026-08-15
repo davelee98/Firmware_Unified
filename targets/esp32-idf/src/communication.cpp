@@ -24,6 +24,7 @@
 /* Chunked CONFIG_WRITE reassembly, promoted to shared/core (F3). */
 #include "od_config_asm.h"
 #include "od_dispatch.h"   /* od_dispatch_budget, for the migration's legacy reservations */
+#include "od_cmd_reply.h"
 
 /* Calls a handler that has been converted to the od_cmd_ctx_t shape, with a reservation taken
  * from the SHARED budget table -- so the migration's legacy caller and od_dispatch cannot drift on
@@ -468,14 +469,15 @@ void sendResponse(uint8_t* response, uint16_t len) {
     }
 }
 
-void handleReadMSD() {
+od_cmd_result_t handleReadMSD(const od_cmd_ctx_t *ctx) {
     uint8_t response[2 + 16];
     uint16_t responseLen = 0;
     response[responseLen++] = RESP_ACK;
     response[responseLen++] = RESP_MSD_READ;
     memcpy(&response[responseLen], msd_payload, sizeof(msd_payload));
     responseLen += sizeof(msd_payload);
-    sendResponse(response, responseLen);
+    (void)od_cmd_reply(ctx, response, responseLen);
+    return OD_CMD_OK;
     od_log_debug("MSD read response sent (%u bytes)", responseLen);
 }
 
@@ -511,7 +513,7 @@ const char* getFirmwareShaString() {
     return SHA_STRING_LOCAL;
 }
 
-void handleFirmwareVersion() {
+od_cmd_result_t handleFirmwareVersion(const od_cmd_ctx_t *ctx) {
     uint8_t major = getFirmwareMajor();
     uint8_t minor = getFirmwareMinor();
     uint8_t patch = getFirmwarePatch();
@@ -559,10 +561,18 @@ void handleFirmwareVersion() {
         response[offset++] = (uint8_t)sha[i];
     }
     response[offset++] = patch;
-    sendResponse(response, offset);
+    /* PLAIN. A client must be able to identify a device before it can authenticate, and one whose
+     * key the host has lost must stay identifiable -- which is also why od_dispatch exempts this
+     * opcode from the session gate. */
+    (void)od_cmd_reply_plain(ctx, response, offset);
+    return OD_CMD_OK;
 }
 
-void handleReadConfig() {
+/* STILL SYNCHRONOUS. The plan's step 4 said this becomes od_config_read_start() here; that was
+ * wrong and would have broken config read immediately -- the producer emits chunk 0 and then needs
+ * od_config_read_pump(), which nothing calls until step 8. It converts its REPLY CALLS now and
+ * becomes the producer at the cutover, in the commit that adds the pump. */
+od_cmd_result_t handleReadConfig(const od_cmd_ctx_t *ctx) {
     // Shared scratch rather than a 4 KB stack array: this runs on the loop task,
     // where a 4 KB frame is a real overflow risk. Nothing below re-enters a config
     // path, so no other consumer can claim the scratch while we hold it.
@@ -592,7 +602,7 @@ void handleReadConfig() {
             memcpy(configReadResponseBuffer + responseLen, configData + offset, chunkSize);
             responseLen += chunkSize;
             if (responseLen > MAX_RESPONSE_DATA_SIZE || responseLen == 0) break;
-            sendResponse(configReadResponseBuffer, responseLen);
+            (void)od_cmd_reply(ctx, configReadResponseBuffer, responseLen);
             offset += chunkSize;
             remaining -= chunkSize;
             chunkNumber++;
@@ -607,10 +617,13 @@ void handleReadConfig() {
             // and drops 50 ms per chunk.
             serviceBleTx();
         }
-    } else {
-        uint8_t errorResponse[] = {RESP_NACK, RESP_CONFIG_READ, 0x00, 0x00};
-        sendResponse(errorResponse, sizeof(errorResponse));
+        return OD_CMD_OK;
     }
+    {
+        uint8_t errorResponse[] = {RESP_NACK, RESP_CONFIG_READ, 0x00, 0x00};
+        (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
+    }
+    return OD_CMD_NACK;
 }
 
 // Outcome of "is this frame allowed to MUTATE stored configuration?".
@@ -648,14 +661,19 @@ static ConfigWriteGate configWriteGate(void) {
     return rewriteAllowed ? CONFIG_WRITE_ALLOWED_ERASE : CONFIG_WRITE_DENIED;
 }
 
-void handleWriteConfig(uint8_t* data, uint16_t len) {
-    if (len == 0) return;
+od_cmd_result_t handleWriteConfig(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
+    if (len == 0) return OD_CMD_NACK;
     const ConfigWriteGate gate = configWriteGate();
     if (gate == CONFIG_WRITE_DENIED) {
+        /* AUTH_REJECTED, not NACK. Section 5 separates them because only this advances the
+         * link's abuse run -- collapsing it lets a TLS client repeat a refused CONFIG_WRITE and
+         * hold the exclusive link forever, which is the bug communication.cpp:1035 records as
+         * already fixed once. noteAuthRejected() stays here until step 8 moves that policy into
+         * od_core_frame_done(). */
         noteAuthRejected();
         uint8_t response[] = {RESP_ACK, (uint8_t)(CMD_CONFIG_WRITE & 0xFF), RESP_AUTH_REQUIRED};
-        sendResponseUnencrypted(response, sizeof(response));
-        return;
+        (void)od_cmd_reply_plain(ctx, response, sizeof(response));
+        return OD_CMD_AUTH_REJECTED;
     }
     if (gate == CONFIG_WRITE_ALLOWED_ERASE) {
         secureEraseConfig();
@@ -674,12 +692,18 @@ void handleWriteConfig(uint8_t* data, uint16_t len) {
         if (ok) {
             reloadConfigAfterSave();
         }
-        sendResponse(ok ? responseOk : responseErr, 4);
-        return;
+        /* SPLIT, not a ternary: the ACK is an application reply and the NACK is a hard NACK, so
+         * the two branches take different paths. A ternary chose one path for both. */
+        if (ok) {
+            (void)od_cmd_reply(ctx, responseOk, sizeof(responseOk));
+            return OD_CMD_OK;
+        }
+        (void)od_cmd_reply_plain(ctx, responseErr, sizeof(responseErr));
+        return OD_CMD_NACK;
     }
     case OD_CONFIG_ASM_ACCEPTED:
-        sendResponse(responseOk, sizeof(responseOk));
-        return;
+        (void)od_cmd_reply(ctx, responseOk, sizeof(responseOk));
+        return OD_CMD_OK;
     case OD_CONFIG_ASM_COMPLETE: {
         /* Not reachable today -- a chunked start never completes on its own frame -- but
          * handled rather than assumed, so a future single-frame-with-prefix shape cannot fall
@@ -689,8 +713,12 @@ void handleWriteConfig(uint8_t* data, uint16_t len) {
             reloadConfigAfterSave();
         }
         od_config_asm_reset(&g_configAsm);
-        sendResponse(ok ? responseOk : responseErr, 4);
-        return;
+        if (ok) {
+            (void)od_cmd_reply(ctx, responseOk, sizeof(responseOk));
+            return OD_CMD_OK;
+        }
+        (void)od_cmd_reply_plain(ctx, responseErr, sizeof(responseErr));
+        return OD_CMD_NACK;
     }
     case OD_CONFIG_ASM_REJECTED:
     default:
@@ -698,25 +726,26 @@ void handleWriteConfig(uint8_t* data, uint16_t len) {
          * storage symbol to reach, so a rejection cannot have altered NVS. */
         od_log_error("ERROR: [%s] malformed CONFIG_WRITE (%u B) -- nothing stored",
                      originTag(), (unsigned)len);
-        sendResponse(responseErr, sizeof(responseErr));
-        return;
+        (void)od_cmd_reply_plain(ctx, responseErr, sizeof(responseErr));
+        return OD_CMD_NACK;
     }
 }
 
-void handleClearConfig(void) {
+od_cmd_result_t handleClearConfig(const od_cmd_ctx_t *ctx) {
     uint8_t responseOk[] = {RESP_ACK, RESP_CONFIG_CLEAR, 0x00, 0x00};
     uint8_t responseErr[] = {RESP_NACK, RESP_CONFIG_CLEAR, 0x00, 0x00};
 
     if (!clearStoredConfig()) {
-        sendResponse(responseErr, sizeof(responseErr));
-        return;
+        (void)od_cmd_reply_plain(ctx, responseErr, sizeof(responseErr));
+        return OD_CMD_NACK;
     }
 
     od_log_info("Stored config cleared");
-    sendResponse(responseOk, sizeof(responseOk));
+    (void)od_cmd_reply(ctx, responseOk, sizeof(responseOk));
+    return OD_CMD_OK;
 }
 
-void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
+od_cmd_result_t handleWriteConfigChunk(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
     uint8_t ok_resp[]  = {RESP_ACK,  RESP_CONFIG_CHUNK, 0x00, 0x00};
     uint8_t err_resp[] = {RESP_NACK, RESP_CONFIG_CHUNK, 0x00, 0x00};
 
@@ -729,8 +758,8 @@ void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
             od_config_asm_reset(&g_configAsm);
             noteAuthRejected();
             uint8_t response[] = {RESP_ACK, (uint8_t)(CMD_CONFIG_CHUNK & 0xFF), RESP_AUTH_REQUIRED};
-            sendResponseUnencrypted(response, sizeof(response));
-            return;
+            (void)od_cmd_reply_plain(ctx, response, sizeof(response));
+            return OD_CMD_AUTH_REJECTED;
         }
         if (gate == CONFIG_WRITE_ALLOWED_ERASE) {
             secureEraseConfig();
@@ -739,8 +768,8 @@ void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
 
     switch (od_config_asm_chunk(&g_configAsm, od_span_make(data, len))) {
     case OD_CONFIG_ASM_ACCEPTED:
-        sendResponse(ok_resp, sizeof(ok_resp));
-        return;
+        (void)od_cmd_reply(ctx, ok_resp, sizeof(ok_resp));
+        return OD_CMD_OK;
     case OD_CONFIG_ASM_COMPLETE: {
         /* Committed on an EXACT byte count, never a chunk count -- the F3 fix. */
         const bool saved = saveConfig(g_configAsm.buffer, (uint16_t)g_configAsm.total_size);
@@ -748,16 +777,20 @@ void handleWriteConfigChunk(uint8_t* data, uint16_t len) {
             reloadConfigAfterSave();
         }
         od_config_asm_reset(&g_configAsm);
-        sendResponse(saved ? ok_resp : err_resp, 4);
-        return;
+        if (saved) {
+            (void)od_cmd_reply(ctx, ok_resp, sizeof(ok_resp));
+            return OD_CMD_OK;
+        }
+        (void)od_cmd_reply_plain(ctx, err_resp, sizeof(err_resp));
+        return OD_CMD_NACK;
     }
     case OD_CONFIG_ASM_SINGLE:
     case OD_CONFIG_ASM_REJECTED:
     default:
         od_log_error("ERROR: [%s] bad CONFIG_CHUNK (%u B) -- transfer dropped, nothing stored",
                      originTag(), (unsigned)len);
-        sendResponse(err_resp, sizeof(err_resp));
-        return;
+        (void)od_cmd_reply_plain(ctx, err_resp, sizeof(err_resp));
+        return OD_CMD_NACK;
     }
 }
 
@@ -832,7 +865,7 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
     }
 
     if (command == CMD_FIRMWARE_VERSION) {
-        handleFirmwareVersion();
+        OD_CALL_CONVERTED(CMD_FIRMWARE_VERSION, handleFirmwareVersion(&ctx));
         return;
     }
 
@@ -977,19 +1010,19 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
             reboot();
             break;
         case CMD_CONFIG_READ:         // 0x0040
-            handleReadConfig();
+            OD_CALL_CONVERTED(CMD_CONFIG_READ, handleReadConfig(&ctx));
             break;
         case CMD_CONFIG_WRITE:        // 0x0041
-            handleWriteConfig(data + 2, len - 2);
+            OD_CALL_CONVERTED(CMD_CONFIG_WRITE, handleWriteConfig(&ctx, data + 2, len - 2));
             break;
         case CMD_CONFIG_CHUNK:        // 0x0042
-            handleWriteConfigChunk(data + 2, len - 2);
+            OD_CALL_CONVERTED(CMD_CONFIG_CHUNK, handleWriteConfigChunk(&ctx, data + 2, len - 2));
             break;
         case CMD_READ_MSD:            // 0x0044
-            handleReadMSD();
+            OD_CALL_CONVERTED(CMD_READ_MSD, handleReadMSD(&ctx));
             break;
         case CMD_CONFIG_CLEAR:        // 0x0045
-            handleClearConfig();
+            OD_CALL_CONVERTED(CMD_CONFIG_CLEAR, handleClearConfig(&ctx));
             break;
         case CMD_ENTER_DFU:           // 0x0051
             enterDFUMode();

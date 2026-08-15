@@ -8,6 +8,7 @@
  * which this build does not define (it takes the __LINUX__ branch), so nothing is laundered
  * in through it. */
 #include "structs.h"
+#include "od_cmd.h"   /* od_cmd_result_t / od_cmd_ctx_t, for the handler declarations below */
 #include "uzlib.h"
 #include <bb_epaper.h>
 #include "encryption_state.h"
@@ -232,11 +233,11 @@ void initSensors();
 void initAXP2101(uint8_t busId);
 void updatemsdata();
 uint16_t calculateCRC16CCITT(uint8_t* data, uint32_t len);
-void handleReadConfig();
-void handleWriteConfig(uint8_t* data, uint16_t len);
-void handleWriteConfigChunk(uint8_t* data, uint16_t len);
-void handleFirmwareVersion();
-void handleReadMSD();  // Read Manufacturer Specific Data (MSD) payload
+od_cmd_result_t handleReadConfig(const od_cmd_ctx_t *ctx);
+od_cmd_result_t handleWriteConfig(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
+od_cmd_result_t handleWriteConfigChunk(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
+od_cmd_result_t handleFirmwareVersion(const od_cmd_ctx_t *ctx);
+od_cmd_result_t handleReadMSD(const od_cmd_ctx_t *ctx);  // Read Manufacturer Specific Data (MSD) payload
 const char* getFirmwareShaString();
 void cleanupDirectWriteState(bool refreshDisplay);
 void handleDirectWriteStart(uint8_t* data, uint16_t len);
