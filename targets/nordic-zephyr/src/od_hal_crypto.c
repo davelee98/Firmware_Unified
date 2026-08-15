@@ -155,6 +155,10 @@ enum od_hal_crypto_status od_hal_crypto_ccm_decrypt(od_hal_crypto_slot_t slot,
  * point, which bounds the damage to at most OD_ORPHAN_MAX live strays and gives a transient
  * fault (a busy driver, a momentary storage error) the chance to clear on the next call.
  *
+ * The list is a HARD GATE, not just a record: orphans_full() below refuses to import while it is
+ * full, so every id this file creates is either destroyed or tracked. Without that the bound is
+ * only on the LIST -- the leak itself stays unbounded, one slot per call, forever.
+ *
  * Four is not a tuned number -- it is "more than any plausible transient burst, small enough to
  * be free". If it ever fills, the log line is the finding: destruction is failing persistently
  * and the pool is genuinely leaking. */
@@ -169,10 +173,29 @@ static void orphan_park(psa_key_id_t id)
         od_log_error("crypto: parked undestroyable key id %lu (%u held)",
                      (unsigned long)id, (unsigned)s_orphan_count);
     } else {
-        od_log_error("crypto: orphan list FULL - key id %lu leaked permanently; "
-                     "PSA key destruction is failing persistently",
+        /* UNREACHABLE while orphans_full() gates every import: nothing may create a key it
+         * cannot track. Kept as the detector for that invariant being broken later, because the
+         * alternative -- discarding the id -- is a permanent leak of a pool other subsystems
+         * share. */
+        od_log_error("crypto: BUG - orphan list full at park time, key id %lu leaked",
                      (unsigned long)id);
     }
+}
+
+/* Refuse to import while every tracking slot is taken. Bounded-then-unbounded is strictly worse
+ * than fail-closed here, and the reason is the shared pool: PSA key slots on this SoC are not
+ * ours alone, so leaking one per operation eventually takes BLE pairing down with it. Failing our
+ * own authentication, loudly and with a cause in the log, contains the damage to this subsystem.
+ * Reaching this state at all requires psa_destroy_key() to fail four times with no successful
+ * drain between, which means destruction is persistently broken, not transiently. */
+static bool orphans_full(void)
+{
+    if (s_orphan_count >= OD_ORPHAN_MAX) {
+        od_log_error("crypto: %u undestroyable PSA keys held - refusing to import another",
+                     (unsigned)s_orphan_count);
+        return true;
+    }
+    return false;
 }
 
 /* Retry every parked id, compacting the ones that are now gone. Cheap: the list is empty on every
@@ -204,6 +227,9 @@ enum od_hal_crypto_status od_hal_crypto_cmac(const uint8_t key[16], const uint8_
         return OD_HAL_CRYPTO_ERROR;
     }
     orphan_drain();
+    if (orphans_full()) {
+        return OD_HAL_CRYPTO_ERROR;
+    }
     psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
     psa_set_key_bits(&attr, 128);
     psa_set_key_algorithm(&attr, PSA_ALG_CMAC);
@@ -248,6 +274,9 @@ enum od_hal_crypto_status od_hal_crypto_aes_ecb(const uint8_t key[16], const uin
         return OD_HAL_CRYPTO_ERROR;
     }
     orphan_drain();
+    if (orphans_full()) {
+        return OD_HAL_CRYPTO_ERROR;
+    }
     psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
     psa_set_key_bits(&attr, 128);
     psa_set_key_algorithm(&attr, PSA_ALG_ECB_NO_PADDING);

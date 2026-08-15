@@ -59,6 +59,28 @@ A follow-up pass on the fixes raised four more, all verified and all real:
   retried at the top of every entry point, and a cleanup failure is logged even when the operation
   also failed.
 
+### Re-evaluation round 3 (2026-08-15)
+
+One finding, on the round-2 orphan list itself: once its four entries were full, the one-shot
+paths still imported another key, so a further destroy failure discarded the only handle. The
+bound was on the LIST, not on the LEAK — repeated authentication could then shed one PSA slot per
+operation indefinitely.
+
+Fixed by making the list a hard gate: `orphans_full()` refuses to import while it is full, so
+every key id this file creates is either destroyed or tracked. `orphan_park()`'s full branch is
+now unreachable by construction and kept only as the detector for that invariant breaking.
+
+The fail-closed direction was the real decision, and it turns on the pool being SHARED. Leaking
+lets the device keep authenticating for a while and then fail confusingly — but PSA key slots on
+this SoC are not `od_session`'s alone, so a slow leak eventually takes BLE pairing down with it.
+Refusing our own authentication, loudly and with a cause in the log, contains the failure to the
+subsystem that caused it. Reaching the state at all requires `psa_destroy_key()` to fail four
+times with no successful drain between, i.e. persistently rather than transiently.
+
+**Not covered by any test.** `od_hal_crypto.c` is target code with no host harness, and PSA
+destroy failure is not injectable from a board. This is reasoned code, verified only by review and
+by compiling — the same standing as the rest of that file.
+
 § 8 (bidirectional nonce reuse) is unchanged and remains a protocol-revision item, filed as
 `FOLLOWUPS.md` § 5.
 
