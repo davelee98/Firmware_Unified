@@ -295,55 +295,48 @@ holds no key material after establish, a real reduction in what a memory dump yi
 `SecurityConfig` — safe *only because* a config save clears the session, which the header must
 state so nobody removes that call.
 
-**Bitmap.** Bit *i* = "counter `rx_last - i` accepted"; bit 0 is `rx_last`.
-```
-#define OD_REPLAY_WINDOW_HALF 32u
-OD_STATIC_ASSERT(OD_REPLAY_WINDOW_HALF < 64u, "the seen bitmap is one uint64_t");
+**THE REPLAY WINDOW IS PORTED, NOT DESIGNED. Corrected 2026-08-15.** Upstream `Firmware` — the
+authority repo — has already replaced the 64-entry ring with a bitmap: `../Firmware/src/
+nonce_window.h`, zero-dependency, with an 816-line host test at `../Firmware/tools/
+test_nonce_window.cpp`. This repo's `targets/esp32-idf/src/encryption.cpp` is an *older import*
+and does not reflect it. C4 lands that header as `shared/core/od_nonce_window.h` with the `od_`
+prefix and **no logic change**, per CLAUDE.md's "Firmware is the authority" and "import working
+drivers as-is".
 
-check(c):                                  /* PURE — never mutates */
-  reject unless authenticated
-  reject unless ct_equal(nonce[0..7], session_id, 8)
-  if c > rx_last:  reject if (c - rx_last) > 32; else accept
-  else:            d = rx_last - c; reject if d > 32; reject if (rx_seen >> d) & 1; else accept
+**Earlier revisions of this plan specified a bitmap I designed, and it was worse in two
+security-relevant ways.** Recorded because the reasoning is the point:
 
-advance(c):                                /* ONLY after ccm_decrypt returned OK */
-  if c > rx_last: shift = c - rx_last; rx_seen = (shift >= 64) ? 0 : (rx_seen << shift);
-                  rx_seen |= 1; rx_last = c;
-  else:           rx_seen |= (uint64_t)1 << (rx_last - c);
-```
-**How this closes `diff == 0`:** the old ring scan was skipped entirely when the difference was
-zero (`encryption.cpp:178`, Nordic `:461`, Silabs `:383`), so a replay at exactly `last_seen` always
-passed. Here `d == 0` is just bit 0, and advance sets bit 0 on every forward accept — no special
-case, which is why it stays fixed. Keep the `shift >= 64` guard even though `shift ≤ 32` is
-provable: a shift ≥ 64 is UB and a future window change is exactly how that lands.
+- **I bounded the forward direction at ±32. Upstream leaves it unbounded** — any counter above
+  `last_seen` is accepted, and only the *backward* window is bounded (256 bits). Upstream's
+  "Reversal of Decision A" shows no forward cap can be sized safely: once a gap exceeds it,
+  nothing commits, `last_seen` never advances, and every later frame is rejected further out than
+  the last. That strands the session rather than rejecting a frame.
+- **I used signed difference arithmetic. Upstream is plain unsigned, deliberately.** The counter
+  is parsed off the wire *before* the tag is verified, so an attacker controls both operands.
+  Signed differences mean converting a `uint64_t >= 2^63` to `int64_t` (implementation-defined
+  before C++20), signed overflow, and negating `INT64_MIN` — three routes to UB on
+  attacker-chosen input. Upstream uses only unsigned comparison and one subtraction guarded by
+  its own branch.
 
-**Accept-set delta vs the ring: TWO intended divergences, not one.**
-1. The `d == 0` replay, as above — the fix.
-2. **Counter value 0 arriving as a backfill.** All three shipped rings are zero-filled at auth
-   (`encryption.cpp:709`, `opendisplay_pipe.c:744`, `efr32bg22-slc:663`) and the scan compares raw
-   values (`encryption.cpp:180-185`), so **counter 0 is indistinguishable from an empty slot**:
-   send 1 then 0 and the shipped code rejects the 0 as a replay it never saw, until all 64 slots
-   have been overwritten. The bitmap accepts it once, which is correct. Reachable in practice —
-   under PIPE reordering frame 0 can arrive after frame 1.
+Both of my "two intended divergences" (`diff == 0`, and counter 0 as a backfill) are divergences
+from the **stale import**, not from current Firmware: upstream's `od_nonce_check` tests bit 0 like
+any other bit, and its all-zero bitmap accepts counter 0 exactly once with no sentinel. So the
+differential reference is **`tools/test_nonce_window.cpp`, ported**, not a transcription of the
+ring — which is a strictly better oracle than anything C0's capture would have given for this
+subsystem.
 
-Both must be written into the differential test's oracle, or the sweep goes red on the first
-counter-0 backfill and the likely "fix" is to corrupt the reference. **The sweep's oracle is a
-true seen-set model**; the ring transcription is compared only outside these two carve-outs.
-Otherwise the accept sets match: every counter the ring could remember but the bitmap cannot is
-one the ±32 gate already rejects.
+Sizes change with it: the backward window is **256 bits = 32 B**, not 8 B, so the saving against
+the 512 B ring is **480 B** rather than 504, and `sizeof(struct od_session)` is 112 against a
+128-byte ratchet. Its width is **not** a replay-security parameter and is deliberately not derived
+from the PIPE window — upstream says so explicitly, which retires the coupling assert below.
 
-What the check/advance split gives up: nothing. The only thing the single mutating function
-"provided" was advancing the window for frames that are later rejected — ESP32 mutates at
-`encryption.cpp:740` even for a frame it refuses at `:758`. Closing that is the point.
-
-**The PIPE-window assert, on both targets.** `SHARED_API_DESIGN.md:711` wants it in shared/, but
-the constant is target-local and spelled `PIPE_MAX_W` — there is no `OD_PIPE_MAX_W` anywhere yet,
-and no `od_pipe.h`. So: `od_session.h` carries the assert **guarded** by `#ifdef OD_PIPE_MAX_W`
-(inert today, fires the day od_pipe lands and names it), and **both** targets get an unguarded
-`OD_STATIC_ASSERT(PIPE_MAX_W <= OD_REPLAY_WINDOW_HALF, ...)` next to their own definition —
-`esp32-idf/src/structs.h:51,55` (16 or 32) and `nordic-zephyr/src/opendisplay_pipe_write.cpp:9`
-(32). **Both ship PIPE**: Nordic dispatches all three opcodes at `opendisplay_pipe.c:1372-1380`
-and carries the 33-slot reorder queue. Any plan text claiming otherwise is wrong.
+**The PIPE-window coupling assert is RETIRED.** `SHARED_API_DESIGN.md:711` wanted
+`OD_PIPE_MAX_W <= OD_REPLAY_WINDOW_HALF`, which made sense against a ±32 window. Upstream's
+`nonce_window.h` states the opposite outright: the width is only reordering tolerance, "narrowing
+or widening it cannot create a replay hole", and there is "deliberately no attempt to derive it
+from the client's pipe window". A backward rejection is self-healing, because the client
+re-encrypts every retransmission under a higher counter. Delete the assert from the design doc
+rather than carrying it into shared/.
 
 ### 4. `od_session.h` — the API
 

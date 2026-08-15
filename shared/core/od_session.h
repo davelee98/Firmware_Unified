@@ -102,16 +102,36 @@ OD_STATIC_ASSERT(OD_SESSION_ENVELOPE_MIN < OD_SESSION_ENVELOPE_MAX, "envelope bo
 
 /* --------------------------------------------------------------------------- replay window --- */
 
-/* Half-width of the accepted counter window, either direction. 32 is the shipped wire behaviour
- * and the bound the PIPE window is sized against: a sender with W > 32 would have its own frames
- * refused as out-of-window under reorder. */
-#define OD_REPLAY_WINDOW_HALF 32u
-OD_STATIC_ASSERT(OD_REPLAY_WINDOW_HALF < 64u, "the seen bitmap is one uint64_t");
-/* Fires the day od_pipe.h lands and names this constant; inert until then. Each target also
- * asserts it beside its own PIPE_MAX_W, which is where the coupling is checkable today. */
-#ifdef OD_PIPE_MAX_W
-OD_STATIC_ASSERT(OD_PIPE_MAX_W <= OD_REPLAY_WINDOW_HALF, "PIPE window exceeds replay window");
-#endif
+/* THE REPLAY WINDOW IS NOT DESIGNED HERE. It is ported from the authority repo:
+ * ../Firmware/src/nonce_window.h, a zero-dependency state machine with its own 816-line host test
+ * (../Firmware/tools/test_nonce_window.cpp). CLAUDE.md: Firmware is the authority, and working
+ * implementations are imported as-is rather than re-derived. C4 lands it as
+ * shared/core/od_nonce_window.h with the od_ prefix and no logic change.
+ *
+ * Do not substitute the ±32 signed-difference form still present in this repo's imported
+ * targets/esp32-idf/src/encryption.cpp. Upstream replaced it, and the two reasons are both
+ * security-relevant:
+ *
+ *   - THE FORWARD DIRECTION IS UNBOUNDED. Any counter above last_seen is accepted; only the
+ *     BACKWARD window is bounded. A forward cap cannot be sized safely -- once a gap exceeded it
+ *     nothing would commit, last_seen would never advance, and every later frame would be
+ *     rejected further out than the last until re-authentication. That is a stranded session, not
+ *     a rejected frame.
+ *   - COMPARISON IS PLAIN NUMERIC, NEVER MODULAR OR SIGNED. The counter is parsed off the wire
+ *     BEFORE the tag is verified, so an attacker controls both operands. Signed differences mean
+ *     a uint64_t >= 2^63 converted to int64_t (implementation-defined before C++20), signed
+ *     overflow, and negating INT64_MIN -- three ways to be undefined on attacker-chosen input.
+ *     Only unsigned comparison and one subtraction guarded by its own branch are used.
+ *
+ * Both of this module's replay-related results map onto that header's three-valued NonceResult:
+ * NONCE_REPLAY and NONCE_OUT_OF_WINDOW both surface as OD_SESSION_OPEN_REPLAY, because a caller
+ * cannot act differently on them -- but the report carries which it was.
+ *
+ * ORDERING: od_nonce_check() decides, CCM verifies, and only then does od_nonce_commit() run.
+ * That is RFC 4303 Appendix A2's "if the MAC is valid, the window is updated", and it is what
+ * stops a forged frame from moving last_seen. */
+#define OD_NONCE_BACKWARD_BITS 256u
+#define OD_NONCE_BITMAP_WORDS  (OD_NONCE_BACKWARD_BITS / 64u)
 
 /* ------------------------------------------------------------------------------- policy --- */
 
@@ -141,7 +161,7 @@ enum od_session_open {
     OD_SESSION_OPEN_SHORT,           /* envelope below OD_SESSION_ENVELOPE_MIN, or bad argument */
     OD_SESSION_OPEN_TOO_LONG,        /* envelope above OD_SESSION_ENVELOPE_MAX */
     OD_SESSION_OPEN_WRONG_SESSION,   /* nonce session_id mismatch */
-    OD_SESSION_OPEN_REPLAY,          /* counter replayed, or outside +-OD_REPLAY_WINDOW_HALF */
+    OD_SESSION_OPEN_REPLAY,          /* NONCE_REPLAY or NONCE_OUT_OF_WINDOW; report says which */
     OD_SESSION_OPEN_BAD_TAG,         /* CCM authentication failed */
     OD_SESSION_OPEN_BAD_LENGTH,      /* inner length byte disagrees with the decrypted size */
     OD_SESSION_OPEN_NO_ROOM,         /* out_cap too small */
@@ -182,7 +202,10 @@ struct od_session {
 
     uint64_t tx_counter;          /* device->host, monotonic */
     uint64_t rx_last;             /* highest ACCEPTED inbound counter */
-    uint64_t rx_seen;             /* bit i set == counter (rx_last - i) accepted; bit 0 is rx_last */
+    uint64_t rx_seen[OD_NONCE_BITMAP_WORDS];  /* bit i == counter (rx_last - i) consumed; bit 0 is
+                                               * rx_last. 256 bits of reordering tolerance; the
+                                               * width is NOT a replay-security parameter and is
+                                               * deliberately not derived from the PIPE window. */
 
     uint32_t session_start_ms;    /* ABSOLUTE lifetime basis, never last-activity */
     uint32_t last_activity_ms;    /* diagnostics and the target's idle policy; NOT the timeout */
@@ -197,7 +220,9 @@ struct od_session {
 };
 
 /* A RAM ratchet, not a coincidence: this struct lands on a part with 32 KB total. */
-OD_STATIC_ASSERT(sizeof(struct od_session) <= 96u, "od_session state grew past its BG22 budget");
+/* A RAM ratchet. 32 B of this is the ported 256-bit replay bitmap, which still returns 480 B
+ * against the 512 B ring it replaces. */
+OD_STATIC_ASSERT(sizeof(struct od_session) <= 128u, "od_session state grew past its BG22 budget");
 
 /* ---------------------------------------------------------------------------- interface --- */
 
