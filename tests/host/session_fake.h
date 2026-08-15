@@ -35,6 +35,19 @@ extern uint8_t  g_slot_key[OD_HAL_CRYPTO_KEY_SLOTS][16];
  * four-valued status exists for. */
 extern enum od_hal_crypto_status g_force_status;
 
+/* How many HAL calls to let succeed before g_force_status starts being returned. 0 (the
+ * fake_reset default) fails from the first call; N reaches the N+1'th; -1 injects nothing.
+ * Without this a single flag is swallowed by whichever call happens to come first, which is why
+ * most of od_session.c's crypto-failure exits had no coverage. g_hal_calls is the running count
+ * and is readable so a test can assert how far it got. */
+extern int32_t  g_force_after;
+extern unsigned g_hal_calls;
+
+/* Make the Nth CMAC succeed but return an all-zero MAC. The only way to reach od_session.c's
+ * all-zero-session-id rejection, which cannot be produced by an error injection because the
+ * derivation has to SUCCEED and yield zeros. -1 = never. */
+extern int32_t  g_zero_cmac_after;
+
 /* ----------------------------------------------------------------------------- the fixture --- */
 
 extern const uint8_t MASTER[16];

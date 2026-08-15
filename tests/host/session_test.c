@@ -605,6 +605,118 @@ static void test_host_cmac_rfc4493(void)
     }
 }
 
+/* Every step-2 crypto-failure exit, one per HAL call. Only the FIRST of these was reachable while
+ * the fake's injection was all-or-nothing: a single flag is consumed by whichever call comes
+ * first, so derive_session_key, derive_session_id, the all-zero-session-id rejection and the
+ * server-proof/key_set exits -- including both od_session_clear() calls that stop a half-derived
+ * session persisting -- had no coverage at all. Prerequisite for the dispatch plan's
+ * session-result matrix, which needs one case per enum member. */
+static void test_every_step2_crypto_exit(void)
+{
+    /* HAL call indices inside a step-2, counted from the start of the handshake:
+     *   0  step-1 random (server nonce)
+     *   1  derive_proof(master)          -> the expected client proof
+     *   2  derive_session_key: cmac
+     *   3  derive_session_key: aes_ecb
+     *   4  derive_session_id:  cmac
+     *   5  derive_proof(session)         -> the server proof
+     *   6  key_set                       -> loads the slot
+     * Each is forced in turn; all must land on CRYPTO_ERROR with no session and no live key. */
+    static const struct { int32_t after; const char *what; } EXITS[] = {
+        { 1, "derive_proof(master) fails" },
+        { 2, "derive_session_key CMAC fails" },
+        { 3, "derive_session_key AES-ECB fails" },
+        { 4, "derive_session_id CMAC fails" },
+        { 5, "derive_proof(session) fails" },
+        { 6, "key_set fails" }
+    };
+    struct od_session s;
+    uint8_t server_nonce[16];
+    unsigned i;
+
+    for (i = 0; i < sizeof EXITS / sizeof EXITS[0]; ++i) {
+        struct od_session_report rep;
+        uint8_t rsp[OD_SESSION_REPLY_MAX];
+        uint16_t rl = 0;
+        uint8_t body2[OD_SESSION_STEP2_BODY_LEN];
+        uint8_t proof_in[36], proof[16];
+
+        CASE(EXITS[i].what);
+        fake_reset(); sec_init(0);
+        od_session_init(&s, 0);
+        CHECK(handshake_step1(&s, 1000u, server_nonce, rsp, &rl));
+
+        /* A CORRECT proof, so the run reaches the derivations rather than stopping at REJECTED. */
+        memcpy(proof_in, server_nonce, 16u);
+        memcpy(proof_in + 16, CLIENT_NONCE, 16u);
+        memcpy(proof_in + 32, DEVICE_ID, OD_SESSION_DEVICE_ID_LEN);
+        host_cmac(MASTER, proof_in, 36u, proof);
+        memcpy(body2, CLIENT_NONCE, 16u);
+        memcpy(body2 + 16, proof, 16u);
+
+        g_force_status = OD_HAL_CRYPTO_UNSUPPORTED;
+        g_force_after = EXITS[i].after;
+        CHECK(od_session_authenticate(&s, &g_sec, DEVICE_ID, od_span_make(body2, sizeof body2),
+                                      1000u, rsp, sizeof rsp, &rl, &rep)
+              == OD_SESSION_AUTH_CRYPTO_ERROR);
+        g_force_status = OD_HAL_CRYPTO_OK;
+        g_force_after = 0;
+
+        /* The reply is well-formed, the status is reported, and nothing is left half-built. */
+        CHECK(rl == 3u);
+        CHECK(rsp[2] == AUTH_STATUS_ERROR);
+        CHECK(rep.crypto_status == OD_HAL_CRYPTO_UNSUPPORTED);
+        CHECK(!od_session_authenticated(&s));
+        CHECK(!s.challenge_pending);          /* the challenge is spent on every one of these */
+        /* Past the server proof the code has already touched session_id/slot, so the exits there
+         * must CLEAR rather than merely return -- that is what stops a half-derived session
+         * looking live to od_session_alive(). */
+        CHECK(!s.key_loaded);
+        /* session_id must be zero on EVERY one of these exits. Past the id derivation the field
+         * is populated, so the two exits after it rely on od_session_clear() to wipe it -- and
+         * removing that clear is otherwise invisible, since a stale id on a session with
+         * authenticated == false is inert through the public API. Pinned here so it stays
+         * defence in depth rather than quietly becoming nothing. */
+        {
+            unsigned k, nonzero = 0;
+            for (k = 0; k < OD_SESSION_ID_LEN; ++k) { nonzero |= s.session_id[k]; }
+            CHECK(nonzero == 0u);
+        }
+    }
+}
+
+/* The all-zero session id is rejected. Reachable only by making the id derivation produce zeros,
+ * which needs the fake to fail nothing and instead return a zero MAC -- so it is driven through
+ * the same counter with a dedicated knob rather than an error. */
+static void test_all_zero_session_id_rejected(void)
+{
+    struct od_session s;
+    uint8_t server_nonce[16];
+    uint8_t rsp[OD_SESSION_REPLY_MAX];
+    uint16_t rl = 0;
+    uint8_t body2[OD_SESSION_STEP2_BODY_LEN];
+    uint8_t proof_in[36], proof[16];
+
+    CASE("a derivation yielding an all-zero session id is refused, not accepted");
+    fake_reset(); sec_init(0);
+    od_session_init(&s, 0);
+    CHECK(handshake_step1(&s, 1000u, server_nonce, rsp, &rl));
+    memcpy(proof_in, server_nonce, 16u);
+    memcpy(proof_in + 16, CLIENT_NONCE, 16u);
+    memcpy(proof_in + 32, DEVICE_ID, OD_SESSION_DEVICE_ID_LEN);
+    host_cmac(MASTER, proof_in, 36u, proof);
+    memcpy(body2, CLIENT_NONCE, 16u);
+    memcpy(body2 + 16, proof, 16u);
+
+    g_zero_cmac_after = 4;                 /* the derive_session_id CMAC returns all zeros */
+    CHECK(od_session_authenticate(&s, &g_sec, DEVICE_ID, od_span_make(body2, sizeof body2),
+                                  1000u, rsp, sizeof rsp, &rl, NULL)
+          == OD_SESSION_AUTH_CRYPTO_ERROR);
+    g_zero_cmac_after = -1;
+    CHECK(!od_session_authenticated(&s));
+    CHECK(!s.key_loaded);
+}
+
 static void test_clock_starting_at_zero(void)
 {
     struct od_session s;
@@ -1090,6 +1202,8 @@ int main(void)
     test_capacity_is_transactional();
     test_clock_starting_at_zero();
     test_host_cmac_rfc4493();
+    test_every_step2_crypto_exit();
+    test_all_zero_session_id_rejected();
     test_step2_reply_bytes();
     test_expired_session_refuses_open_and_seal();
     test_security_enabled_is_fail_safe();
