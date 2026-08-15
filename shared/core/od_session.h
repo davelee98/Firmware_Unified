@@ -34,6 +34,7 @@
 #include <stdint.h>
 
 #include "od_hal_crypto.h"
+#include "od_nonce_window.h"
 #include "od_span.h"
 #include "opendisplay_protocol.h"
 #include "opendisplay_structs.h"
@@ -132,8 +133,8 @@ OD_STATIC_ASSERT(OD_SESSION_ENVELOPE_MIN < OD_SESSION_ENVELOPE_MAX, "envelope bo
  * ORDERING: od_nonce_check() decides, CCM verifies, and only then does od_nonce_commit() run.
  * That is RFC 4303 Appendix A2's "if the MAC is valid, the window is updated", and it is what
  * stops a forged frame from moving last_seen. */
-#define OD_NONCE_BACKWARD_BITS 256u
-#define OD_NONCE_BITMAP_WORDS  (OD_NONCE_BACKWARD_BITS / 64u)
+/* OD_NONCE_BACKWARD_BITS and OD_NONCE_BITMAP_WORDS come from od_nonce_window.h, which is the
+ * ported upstream header -- they are deliberately NOT redefined here. */
 
 /* ------------------------------------------------------------------------------- policy --- */
 

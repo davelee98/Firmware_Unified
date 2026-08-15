@@ -107,6 +107,19 @@ add_executable(od_config_test config_test.c)
 target_link_libraries(od_config_test od_shared)
 add_test(NAME config COMMAND od_config_test)
 
+# session: the handshake, KDF, replay window and CCM envelope against a fake crypto HAL built on
+# the host AES core. DIFFERENTIAL where it matters -- the replay window is upstream Firmware's
+# own nonce_window.h, ported verbatim, so this suite exercises the shipped state machine rather
+# than a re-derivation of it.
+#
+# What a green run does NOT prove: that mbedTLS or PSA is driven correctly, that a PSA key policy
+# is right, or that a real backend's tag matches this one. Those need the targets and C5/C6
+# hardware. With the C0 capture skipped, the reference here is transcription plus a ported header,
+# not bytes a device emitted.
+add_executable(od_session_test session_test.c aes128.c)
+target_link_libraries(od_session_test od_shared)
+add_test(NAME session COMMAND od_session_test)
+
 # aes128: FIPS-197 known-answer vectors for the host AES core (tests/host/aes128.c).
 #
 # TEST SUPPORT, not a shared/ module -- but it is registered, and deliberately, because it is the
