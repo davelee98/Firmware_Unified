@@ -477,8 +477,8 @@ od_cmd_result_t handleReadMSD(const od_cmd_ctx_t *ctx) {
     memcpy(&response[responseLen], msd_payload, sizeof(msd_payload));
     responseLen += sizeof(msd_payload);
     (void)od_cmd_reply(ctx, response, responseLen);
-    return OD_CMD_OK;
     od_log_debug("MSD read response sent (%u bytes)", responseLen);
+    return OD_CMD_OK;
 }
 
 uint16_t calculateCRC16CCITT(uint8_t* data, uint32_t len) {
