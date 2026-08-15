@@ -141,7 +141,10 @@ buffer with the CCM plaintext buffer, and shrink the replay window (below).
 
    The security-sensitivity warning was right and was honoured: the `diff == 0` replay hole
    closed in the same change (`DIVERGENCE_MATRIX` § 6.6), along with the window-advance ordering
-   (§ 6.7). **None of it is hardware-verified yet.**
+   (§ 6.7). **Hardware-verified on `nordic-zephyr`/`xiao_nrf52840` (2026-08-15, Gate 2); still
+   unverified on `esp32-idf`.** The bitmap carried real encrypted traffic on the nRF52840, but
+   not under deliberately induced reordering, so the backward window's depth is not yet exercised
+   by anything but the host sweep.
 
 ### RAM sizing rules for `shared/core`
 

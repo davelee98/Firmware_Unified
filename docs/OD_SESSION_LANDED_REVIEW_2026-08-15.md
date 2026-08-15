@@ -4,7 +4,40 @@
 **Branch reviewed:** `feat/od-session`  
 **Reviewed tip:** `db54c5c` (`docs(session): record what the od_session promotion decided...`)  
 **Plan:** [`plans/OD_SESSION_PLAN_2026-08-15.md`](../plans/OD_SESSION_PLAN_2026-08-15.md)  
-**Disposition:** **Not ready for correctness sign-off**
+**Disposition at time of review:** **Not ready for correctness sign-off**
+
+---
+
+## RESOLUTION (2026-08-15, added after the review)
+
+**All eight findings were verified as real and fixed in `797ccc0`.** Each was checked against the
+code and against `../Firmware` before being acted on; none was a false positive. The new
+regression tests were validated by REVERTING each fix and confirming they go red — OD-S3 + OD-S5
+produce 9 failures, OD-S2 alone produces 57, including the exact "repeated `NO_ROOM` reaches
+`RATE_LIMITED`" scenario predicted in § OD-S2. Suite 11,195 → 11,444 checks.
+
+§ 7.2 is also closed: `tools/check.sh` gained `nordic: all three boards`, plus a `--targets` mode
+covering both families, now named in CLAUDE.md as the pre-merge gate. A full run is 11 passed,
+0 failed, 0 skipped.
+
+**§ 7.1 is PARTLY closed. Gate 2 passed on `nordic-zephyr` / `xiao_nrf52840` (2026-08-15)**,
+which retires the risk this review and the plan both ranked first: native PSA CCM with the
+12-byte shortened-tag key policy authenticates real traffic on silicon.
+
+Three things this resolution does NOT cover, and they are the honest remainder:
+
+1. **`esp32-idf` has no hardware result at all.** C5's session swap and C1's mbedTLS arm are
+   unproven. The authority target is now the one trailing.
+2. **The OD-S1 fix itself is unexercised.** The nRF52840 pass completed an encrypted upload but
+   did not deliberately induce loss or reordering, so the silence path — the entire point of that
+   P1 — has never run. It is not host-testable by construction.
+3. **§ 7.3 and § 7.4 stand as written.** CI is gone by decision, and the C0 capture was skipped,
+   so the crypto oracle still agrees with a transcription rather than with captured device bytes.
+
+§ 8 (bidirectional nonce reuse) is unchanged and remains a protocol-revision item, filed as
+`FOLLOWUPS.md` § 5.
+
+---
 
 ## 1. Executive summary
 

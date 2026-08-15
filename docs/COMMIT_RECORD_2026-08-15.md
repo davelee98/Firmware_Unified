@@ -19,8 +19,9 @@ the review-fix work and swept in by a `git add -A`. It was already pushed by the
 noticed, and separating it would mean force-pushing `feat/od-session` — rewriting history already
 on the remote. Correcting the record was judged the better trade.
 
-**Verification status.** It was present in the tree for the full `tools/check.sh --targets` run
-that `797ccc0` reports, so all three Nordic boards built with it and the gate was green. That is
-a build result only. The change is **not hardware-verified**, and its behaviour — advertising
-deferred by up to 30 s on a slow panel — is exactly the kind that only a flashed board shows.
-Fold it into the Nordic hardware pass alongside `od_session`.
+**Verification status: HARDWARE-VERIFIED 2026-08-15.** It was present in the tree for the full
+`tools/check.sh --targets` run that `797ccc0` reports, and it was on the `xiao_nrf52840` that
+subsequently passed MIGRATION.md's Gate 2 — so the gate it introduces did not prevent the board
+from advertising, connecting, authenticating, or completing an encrypted upload. What that pass
+does not tell you is how the 30 s bound behaves against a genuinely stuck panel, since the render
+on that board completed normally; the timeout arm is still untested.

@@ -29,8 +29,9 @@ looks arbitrary and is not); delete the story.
 ## Status
 
 - **Two HARDWARE-VERIFIED targets.** `targets/esp32-idf/` — 10 boards, run on an ESP32-S3. And
-  `targets/nordic-zephyr/` **as of 2026-08-14, on the `xiao_nrf52840` board only**: image upload,
-  config write + reload, and host-side MSD decode all exercised on a flashed device. Its other
+  `targets/nordic-zephyr/` **as of 2026-08-14, extended 2026-08-15, on the `xiao_nrf52840` board
+  only**: image upload, config write + reload and host-side MSD decode, then MIGRATION.md's full
+  Gate 2 including the encrypted/authenticated path, all exercised on a flashed device. Its other
   two boards (`xiao_nrf54l15`, `xiao_nrf54lm20a`) still build clean but have NOT been flashed, so
   the target is verified, the L15 is not. `efr32bg22-slc` builds headless
   (`./build-and-flash.sh --no-flash`) and has never been flashed.
@@ -52,22 +53,29 @@ looks arbitrary and is not); delete the story.
   host tests and `esp32-idf` take the aggregate; `nordic-zephyr` takes PURE + HAL_CRYPTO +
   HAL_WDT; `efr32bg22-slc` takes PURE only — called on Nordic, still compiled-only on Silabs
   except `od_advert`.
-  **`od_session` is CALLED ON BOTH `esp32-idf` AND `nordic-zephyr` AND HARDWARE-VERIFIED ON
-  NEITHER** (C5 2026-08-15, C6 2026-08-15). It owns the 0x0050 handshake, the KDF, the replay
-  window and the CCM envelope in both directions; each target keeps only its clock, its device
-  identity and its logging. `esp32-idf/src/encryption.cpp` went 863 → 285 lines (the swap, plus
+  **`od_session` is CALLED ON BOTH `esp32-idf` AND `nordic-zephyr`, AND HARDWARE-VERIFIED ON
+  `nordic-zephyr`/`xiao_nrf52840` ONLY** (C5 2026-08-15, C6 2026-08-15; Gate 2 passed on the
+  nRF52840 2026-08-15). It owns the 0x0050 handshake, the KDF, the replay window and the CCM
+  envelope in both directions; each target keeps only its clock, its device identity and its
+  logging. `esp32-idf/src/encryption.cpp` went 863 → 285 lines (the swap, plus
   the CC310 arm and the crypto forwarders it orphaned) and `nordic-zephyr/src/opendisplay_pipe.c`
   1320 → 1082; both `struct EncryptionSession`s are gone, and the session object went 632→112 B
   and 640→112 B respectively.
-  **Two unverified swaps are stacked on a CCM path no board has ever executed** — `od_hal_crypto`
-  (C1) replaced Nordic's hand-rolled RFC 3610 with `psa_aead_*` and repointed ESP32 onto prepared
-  mbedTLS slots, and that is unproven too. The likeliest first-flash failure is Nordic's PSA key
-  policy: importing with plain `PSA_ALG_CCM` pins a 16-byte tag and fails every operation with
-  `NOT_PERMITTED`, which presents as "PSA CCM doesn't work". The promotion also carries five
-  deliberate behaviour changes — `DIVERGENCE_MATRIX` § 6.5-6.9 — of which the `diff == 0` replay
-  fix and the exact inner-length check are the two that could refuse a frame the old code
-  accepted. Nordic additionally caps NFC read tag data at 218 B (was 238) so a sealed response
-  still fits a BLE frame.
+  **NATIVE PSA CCM IS PROVEN ON SILICON** (nRF52840, 2026-08-15) — `od_hal_crypto` (C1) replaced
+  Nordic's hand-rolled RFC 3610 with `psa_aead_*`, and the shortened-tag key policy
+  (`PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 12)`) accepts and authenticates real traffic.
+  That was the single likeliest first-flash failure and it is retired: plain `PSA_ALG_CCM` pins a
+  16-byte tag and would have failed every operation with `NOT_PERMITTED`.
+  **`esp32-idf` IS STILL UNVERIFIED** — C5's swap and C1's mbedTLS arm have never run on a board,
+  so the authority target is the one now trailing. Two things there that only hardware shows: the
+  `diff == 0` replay fix and the exact inner-length check are the two behaviour changes
+  (`DIVERGENCE_MATRIX` § 6.5-6.9) that can refuse a frame the old code accepted.
+  **The `OD-S1` PIPE silence fix is UNPROVEN on either target.** The nRF52840 pass completed an
+  encrypted upload but did not deliberately induce loss or reordering, so the path that stays
+  quiet on a nonce-rejected `0x81` frame — instead of sending the NACK that kills the upload —
+  has never been exercised. It is not host-testable; forcing reorder on a board is the only way.
+  Nordic additionally caps NFC read tag data at 218 B (was 238) so a sealed response still fits a
+  BLE frame; that cap is also unexercised.
   The one flaw the promotion could NOT fix is filed: `FOLLOWUPS.md` § 5, **bidirectional nonce
   reuse** — both directions share one `session_id` and both counters start at 0, so the same
   CCM nonce is used under one key each way. It needs a protocol revision, not a firmware change.
