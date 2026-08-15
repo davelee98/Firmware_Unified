@@ -26,22 +26,6 @@
 #include "od_dispatch.h"   /* od_dispatch_budget, for the migration's legacy reservations */
 #include "od_cmd_reply.h"
 
-/* Calls a handler that has been converted to the od_cmd_ctx_t shape, with a reservation taken
- * from the SHARED budget table -- so the migration's legacy caller and od_dispatch cannot drift on
- * the one table where drift is expensive (0x82 was already wrong once). In legacy mode nothing is
- * committed against the reservation, so this is accounting that exercises the path the cutover
- * will depend on. Disappears with the switch itself at step 8. */
-#define OD_CALL_CONVERTED(cmd_, call_)                                                        \
-    do {                                                                                      \
-        od_tx_reservation_t r_;                                                               \
-        if (od_txq_reserve(od_dispatch_budget(cmd_), &r_) == OD_TXQ_OK) {                      \
-            const od_cmd_ctx_t ctx = { { (od_origin_t)g_commandOrigin, g_commandInstance },   \
-                                       &r_ };                                                 \
-            (void)(call_);                                                                    \
-            od_txq_release(&r_);                                                              \
-        }                                                                                     \
-    } while (0)
-
 /* The CCM envelope, both directions. g_session is this target's one session (encryption_state.h). */
 #include "od_session.h"
 #include "od_span.h"
@@ -865,7 +849,14 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
     }
 
     if (command == CMD_FIRMWARE_VERSION) {
-        OD_CALL_CONVERTED(CMD_FIRMWARE_VERSION, handleFirmwareVersion(&ctx));
+        /* Answered before the session gate, as od_dispatch also does: a client must be able to
+         * identify a device before it can authenticate. */
+        od_tx_reservation_t r;
+        if (od_txq_reserve(od_dispatch_budget(CMD_FIRMWARE_VERSION), &r) == OD_TXQ_OK) {
+            const od_cmd_ctx_t ctx = { { (od_origin_t)g_commandOrigin, g_commandInstance }, &r };
+            (void)handleFirmwareVersion(&ctx);
+            od_txq_release(&r);
+        }
         return;
     }
 
@@ -1004,72 +995,25 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
         return;
     }
 
-    switch (command) {
-        case CMD_REBOOT:              // 0x000F
-            od_hal_delay_ms(100);
-            reboot();
-            break;
-        case CMD_CONFIG_READ:         // 0x0040
-            OD_CALL_CONVERTED(CMD_CONFIG_READ, handleReadConfig(&ctx));
-            break;
-        case CMD_CONFIG_WRITE:        // 0x0041
-            OD_CALL_CONVERTED(CMD_CONFIG_WRITE, handleWriteConfig(&ctx, data + 2, len - 2));
-            break;
-        case CMD_CONFIG_CHUNK:        // 0x0042
-            OD_CALL_CONVERTED(CMD_CONFIG_CHUNK, handleWriteConfigChunk(&ctx, data + 2, len - 2));
-            break;
-        case CMD_READ_MSD:            // 0x0044
-            OD_CALL_CONVERTED(CMD_READ_MSD, handleReadMSD(&ctx));
-            break;
-        case CMD_CONFIG_CLEAR:        // 0x0045
-            OD_CALL_CONVERTED(CMD_CONFIG_CLEAR, handleClearConfig(&ctx));
-            break;
-        case CMD_ENTER_DFU:           // 0x0051
-            enterDFUMode();
-            break;
-        case CMD_POWER_OFF:           // 0x0052
-            OD_CALL_CONVERTED(CMD_POWER_OFF, handlePowerOffCommand(&ctx, data + 2, len - 2));
-            break;
-        case CMD_DEEP_SLEEP:          // 0x0053
-            OD_CALL_CONVERTED(CMD_DEEP_SLEEP, handleDeepSleepCommand(&ctx, data + 2, len - 2));
-            break;
-        case CMD_DIRECT_WRITE_START:  // 0x0070
-            OD_CALL_CONVERTED(CMD_DIRECT_WRITE_START, handleDirectWriteStart(&ctx, data + 2, len - 2));
-            break;
-        case CMD_DIRECT_WRITE_DATA:   // 0x0071
-            OD_CALL_CONVERTED(CMD_DIRECT_WRITE_DATA, handleDirectWriteData(&ctx, data + 2, len - 2));
-            break;
-        case CMD_DIRECT_WRITE_END:    // 0x0072
-            OD_CALL_CONVERTED(CMD_DIRECT_WRITE_END, handleDirectWriteEnd(&ctx, data + 2, len - 2));
-            break;
-        case CMD_LED_ACTIVATE:        // 0x0073
-            OD_CALL_CONVERTED(CMD_LED_ACTIVATE, handleLedActivate(&ctx, data + 2, len - 2));
-            break;
-        case CMD_LED_STOP:            // 0x0075
-            OD_CALL_CONVERTED(CMD_LED_STOP, handleLedStop(&ctx, data + 2, len - 2));
-            break;
-        case CMD_PARTIAL_WRITE_START: // 0x0076
-            OD_CALL_CONVERTED(CMD_PARTIAL_WRITE_START, handlePartialWriteStart(&ctx, data + 2, len - 2));
-            break;
-        case CMD_BUZZER:              // 0x0077
-            OD_CALL_CONVERTED(CMD_BUZZER, handleBuzzerActivate(&ctx, data + 2, len - 2));
-            break;
-        case CMD_PIPE_WRITE_START:    // 0x0080
-            OD_CALL_CONVERTED(CMD_PIPE_WRITE_START, handlePipeWriteStart(&ctx, data + 2, len - 2));
-            break;
-        case CMD_PIPE_WRITE_DATA:     // 0x0081
-            // The replay counter (verifyNonceReplay) already advanced at decrypt time,
-            // above this switch, for every 0x0081 frame — including ones the handler
-            // then queues or discards — so drops/dupes never desync it and the counter
-            // delta stays within in-flight <= W <= 32 <= the +-32 replay window.
-            OD_CALL_CONVERTED(CMD_PIPE_WRITE_DATA, handlePipeWriteData(&ctx, data + 2, len - 2));
-            break;
-        case CMD_PIPE_WRITE_END:      // 0x0082
-            OD_CALL_CONVERTED(CMD_PIPE_WRITE_END, handlePipeWriteEnd(&ctx, data + 2, len - 2));
-            break;
-        default:
-            od_log_error("ERROR: Unknown command: 0x%04X", command);
-            break;
+    /* THE SWITCH IS GONE FROM HERE. It lives in od_cmd_app.cpp as od_cmd_dispatch(), which the
+     * shared dispatcher will call directly at the cutover; this call site is the same shape a
+     * commit early, so the only thing step 8 changes is WHO calls it and what surrounds it.
+     *
+     * One reservation per dispatch, from the shared budget table, replacing the per-case ones. In
+     * legacy mode nothing is committed against it, so it is still accounting -- but it is now the
+     * accounting the cutover depends on, exercised on every command rather than on eleven of
+     * them. */
+    {
+        od_tx_reservation_t r;
+        if (od_txq_reserve(od_dispatch_budget(command), &r) == OD_TXQ_OK) {
+            const od_cmd_ctx_t ctx = { { (od_origin_t)g_commandOrigin, g_commandInstance }, &r };
+            const od_cmd_result_t rc =
+                od_cmd_dispatch(&ctx, command, od_span_make(data + 2, (size_t)(len - 2)));
+            od_txq_release(&r);
+            if (rc == OD_CMD_UNKNOWN) {
+                od_log_error("ERROR: Unknown command: 0x%04X", command);
+            }
+        }
     }
 
     // R4 ACTIVITY, decided HERE -- after dispatch, on the OUTCOME rather than on a
