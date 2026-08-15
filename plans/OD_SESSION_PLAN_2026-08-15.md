@@ -82,6 +82,48 @@ cites *rev-4's* labels historically and is deliberately left alone.
 
 ## Findings that shaped the design
 
+### THE REFERENCE IS `../Firmware/src/`, NOT THIS REPO'S IMPORT
+
+**Read this before writing a line of C4.** `targets/esp32-idf/src/encryption.cpp` is an *older
+import*. Upstream `Firmware` — which CLAUDE.md names the authority — has moved on, and every
+mistake found in this plan so far came from treating the import as the shipped algorithm. A full
+diff of the subsystem (upstream vs the import at `80cc028`, taken 2026-08-15) found **seven items
+of genuine drift**, three of which had already been designed wrongly here:
+
+1. **`nonce_window.h` (206 lines, new).** The replay window extracted as a zero-dependency state
+   machine with an 816-line host test at `../Firmware/tools/test_nonce_window.cpp`. 512 B ring →
+   32 B bitmap. **C4 ports it as `shared/core/od_nonce_window.h` with no logic change**, and ports
+   its test as the differential oracle. Do not write a replacement — see the replay section for
+   the two ways the one designed here was worse.
+2. **`NonceResult` is four-valued:** `OK`, `REPLAY`, `OUT_OF_WINDOW`, `BAD_SESSION`. The session-id
+   mismatch became a nonce result rather than a separate branch.
+3. **Nonce failures no longer count toward `integrity_failures`.** Only the CCM tag is a tamper
+   oracle; nonce failures are evidence of a lossy link. **This plan had it backwards** — `REPLAY`
+   and `WRONG_SESSION` counted, which lets ordinary packet loss tear a live session down after
+   three frames. Same self-DoS shape this plan flags elsewhere, built straight in.
+4. **`BAD_SESSION` routes to that same non-counting path**, deliberately: a session-id mismatch is
+   what a stale client sends after the device re-authenticated.
+5. **`decryptCommand` gained a `NonceResult *reason_out`** so the caller can separate a
+   nonce-reason rejection — ordinary loss, which must **not** draw a fatal NACK on the pipe path —
+   from a tag failure. This plan collapsed both into one result and asserted the caller could not
+   act differently. It can, and must; `report->nonce_reason` carries it.
+6. **`resetNonceState()`** resets the four nonce fields together and zeroes the device's **own
+   outbound** counter on re-auth: carrying it across while the client restarts at 0 reproduces
+   keystream reuse against itself.
+7. **Nonce logging is rate-limited per site** (5 s each), because once these stop counting toward
+   the strike limit nothing else throttles a peer driving them, and out-of-window fires routinely
+   on a lossy link.
+
+**Not drift — correct adaptations, leave them:** `securityConfig` as a reference (the `od_config`
+promotion), `getChipIdHex()` in char-buffer form rather than Arduino `String`, `<Arduino.h>`
+dropped, and `session_guard.cpp` on `od_hal_time`. `session_guard.h` is byte-identical.
+
+**Unchanged upstream, so these findings stand:** the wrap-unsafe session timeout, and the
+idle-gap rate limiter.
+
+**The rule for C4:** when this plan and the import disagree, check `../Firmware/src/` before
+assuming either. The import is a snapshot; the authority is upstream.
+
 **PSA's native CCM is available and simply switched off.** `prj.conf:99-106` enables only CMAC and
 ECB; the generated `build-*/zephyr/generated/library_nrf_security_psa/nrf-psa-crypto-config.h` shows
 `/* #undef PSA_WANT_ALG_CCM */`. The symbol is live (Kconfig prints "not set" only for known
@@ -706,6 +748,13 @@ dead on ESP32 (aggregate) and in the host build. **Gate 1 closes here — includ
 which is part of this commit and not a loose intention:** the `fuzz-short` job lands in
 `.github/workflows/host-tests.yml` here. There is no `session_vectors_gen.py --check` job and no
 `session.json` — C0 is skipped, so `replay_vectors.py` is untouched by this plan.
+
+**First move of C4: port, don't write.** `../Firmware/src/nonce_window.h` →
+`shared/core/od_nonce_window.h`, `od_` prefix and no logic change, and
+`../Firmware/tools/test_nonce_window.cpp` → the host suite as its differential oracle. That is
+~206 lines of already-tested, already-argued state machine this plan would otherwise re-derive
+worse. Everything else in `od_session.c` is written against `../Firmware/src/encryption.cpp` — the
+upstream file, not the import — with the seven drift items above applied.
 
 **C5 — ESP32 swaps** (first, per CLAUDE.md:171 — the authority target is the reference). ~350
 lines out of `encryption.cpp`; `struct EncryptionSession` deleted from `encryption_state.h`.
