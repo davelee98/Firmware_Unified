@@ -300,10 +300,28 @@ static void pipe_send(uint8_t connection, const uint8_t *data, uint16_t len)
     pipe_send_raw(connection, data, len);
     return;
   }
-  status = data[0];
   cmd = data[1];
-  force_plain = (status == RESP_AUTH_REQUIRED || status == 0xFFu || cmd == RESP_AUTHENTICATE
-                 || cmd == RESP_FIRMWARE_VERSION);
+  /* THE STATUS IS BYTE 2, not byte 0. Every frame this file builds leads with 0x00 for an ACK or
+   * 0xFF for a hard error, and puts the FE/FF outcome in byte 2 -- {0x00, cmd, 0xFF} for a
+   * rejected decrypt, {0x00, cmd, 0xFE} for auth-required. Reading byte 0 meant neither test
+   * could ever fire for those two, so a rejected command was SEALED, and py-opendisplay decrypts
+   * any frame of 31 bytes or more and returns immediately (device.py:830), never reaching its
+   * raw[2] == 0xFF guard. The 2-byte echo then validates as an ACK and the host reports success
+   * for a command the device refused. Error frames are plaintext by contract
+   * (py-opendisplay protocol/responses.py) -- this is the same rule esp32-idf applies at
+   * communication.cpp:412.
+   *
+   * The 7-byte PIPE data ACK {0x00,0x81,highest_seen,mask:4} carries a rolling seq at byte 2, so
+   * a highest_seen of 0xFE/0xFF on any image of 255+ chunks must not be mistaken for a status;
+   * pipe ACKs encrypt normally. Other pipe shapes cannot collide: 0x80's byte 2 is a version,
+   * a pipe NACK's is an error code 0x01-0x04, and 0x82 acks are two bytes. */
+  {
+    const bool pipe_data_ack = (len == 7u && data[0] == 0x00u && data[1] == 0x81u);
+    status = (len >= 3u && !pipe_data_ack) ? data[2] : 0x00u;
+  }
+  force_plain = (status == RESP_AUTH_REQUIRED || status == RESP_NACK
+                 || data[0] == 0xFFu           /* 4-byte hard-error frames lead with 0xFF */
+                 || cmd == RESP_AUTHENTICATE || cmd == RESP_FIRMWARE_VERSION);
   if (force_plain || !session_alive()) {
     pipe_send_raw(connection, data, len);
     return;
