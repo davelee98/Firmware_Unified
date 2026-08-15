@@ -38,6 +38,31 @@ extern "C" {
 od_txq_status_t od_cmd_reply(const od_cmd_ctx_t *ctx, const uint8_t *frame, uint16_t len);
 od_txq_status_t od_cmd_reply_plain(const od_cmd_ctx_t *ctx, const uint8_t *frame, uint16_t len);
 
+/* Drain queued replies before a blocking panel refresh. Call it AFTER the END ack is queued and
+ * IMMEDIATELY BEFORE the refresh, on every path that blocks: a full-image refresh and both partial
+ * ones (direct and PIPE).
+ *
+ * The loop task is the queue's only drainer, and a refresh plus its wait occupies that task for
+ * seconds -- up to the ~240 s panel bound the watchdog is sized for. An ack still sitting in the
+ * queue when the refresh starts therefore does not reach air until the panel is finished, by which
+ * time the host has spent its 500 ms tail-flush read, dup-probed three times and aborted a transfer
+ * that in fact completed. Only the full-image path drains today (an inline serviceBleTx()); both
+ * partial paths go straight into the refresh, which is the bug this closes.
+ *
+ * BOUNDED, because the peer can vanish mid-refresh and a queue that never drains must not wedge the
+ * loop. On the deadline od_txq_flush() reports TIMEOUT and LEAVES THE ENTRIES QUEUED -- they go out
+ * after the refresh, late rather than dropped -- so there is nothing here to report and no caller
+ * decision to make. Hence void.
+ *
+ * The deadline is half the host's tail-flush read, so a delayed ack still beats the first PTO probe
+ * rather than racing it; at a slow 30 ms connection interval it also covers ~8 notification
+ * opportunities against a deepest tail of 3 frames.
+ *
+ * Inert until the cutover: under legacy routing od_cmd_reply() hands frames to the shipped sender,
+ * so the queue is empty and the first flush returns OK. It is wired now so that the cutover flips
+ * routing only, with the barrier already in place on all three paths. */
+void od_cmd_flush_before_refresh(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -2280,6 +2280,7 @@ od_cmd_result_t handleDirectWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uin
         int refreshMode = REFRESH_PARTIAL;
         if (data != nullptr && len >= 1 && data[0] == REFRESH_FULL) refreshMode = REFRESH_FULL;
         else if (data != nullptr && len >= 1 && data[0] == REFRESH_FAST) refreshMode = REFRESH_FAST;
+        od_cmd_flush_before_refresh();
         bool refreshSuccess = partial_write_to_panel(refreshMode);
         if (refreshSuccess) {
             displayed_etag = partialCtx.new_etag;
@@ -2341,8 +2342,14 @@ static od_cmd_result_t directWriteFinishAndRefresh(const od_cmd_ctx_t *ctx, uint
     //
     // Portable as of Phase 3: nRF used to notify() inline from the BLE callback
     // task and so never needed this, but it now shares the ring and the loop task.
+    //
+    // Two drains, one per egress, for exactly as long as both exist: serviceBleTx() empties the
+    // shipped ring that legacy routing still feeds, od_cmd_flush_before_refresh() empties od_txq.
+    // Each is inert against the other's queue, so the pair is correct in both routing modes and
+    // the serviceBleTx() call leaves with the ring at the cutover.
     serviceBleTx();
     od_hal_delay_ms(20);
+    od_cmd_flush_before_refresh();
     epdRefreshInProgress = true;
     bool refreshSuccess = false;
     uint32_t newEtag = 0;
@@ -2904,6 +2911,7 @@ od_cmd_result_t handlePipeWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uint1
         else if (data != nullptr && len >= 1 && data[0] == REFRESH_FAST) refreshMode = REFRESH_FAST;
         // new_etag rides the END tail [refresh:1][new_etag:4 BE]; absent => 0.
         uint32_t newEtag = (len >= 5) ? parse_be_u32(data + 1) : 0;
+        od_cmd_flush_before_refresh();
         bool refreshSuccess = partial_write_to_panel(refreshMode);
         if (refreshSuccess) {
             displayed_etag = newEtag;
