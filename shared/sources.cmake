@@ -131,6 +131,7 @@ set(OD_SHARED_SOURCES_HAL_RADIO
 set(OD_SHARED_SOURCES_APP_SESSION
     "${CMAKE_CURRENT_LIST_DIR}/core/od_reply.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_gate.c"
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_config_read.c"
 )
 
 set(OD_SHARED_SOURCES_HAL_WDT

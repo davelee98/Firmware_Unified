@@ -140,6 +140,16 @@ add_executable(od_gate_test gate_test.c)
 target_link_libraries(od_gate_test od_session_fake)
 add_test(NAME gate COMMAND od_gate_test)
 
+# config_read: CONFIG_READ as a resumable producer, driven against a queue that keeps filling.
+#
+# The property is NO TRUNCATION AND NO DUPLICATION UNDER BACKPRESSURE. The shipped handler emitted
+# every chunk in one call and drained the ring between them, which only worked because it could
+# block the loop task it ran on. The reassembly check is what makes a dropped or repeated chunk
+# visible -- a count alone would not.
+add_executable(od_config_read_test config_read_test.c)
+target_link_libraries(od_config_read_test od_session_fake)
+add_test(NAME config_read COMMAND od_config_read_test)
+
 # session: the handshake, KDF, replay window and CCM envelope against a fake crypto HAL built on
 # the host AES core. DIFFERENTIAL where it matters -- the replay window is upstream Firmware's
 # own nonce_window.h, ported verbatim, so this suite exercises the shipped state machine rather
