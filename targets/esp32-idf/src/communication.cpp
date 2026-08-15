@@ -24,6 +24,11 @@
 /* Chunked CONFIG_WRITE reassembly, promoted to shared/core (F3). */
 #include "od_config_asm.h"
 
+/* The CCM envelope, both directions. g_session is this target's one session (encryption_state.h). */
+#include "od_session.h"
+#include "od_span.h"
+#include "encryption_state.h"
+
 #include "link_owner.h"
 #include "session_guard.h"
 
@@ -112,6 +117,22 @@ static const char* originTag(void) {
 // hard-code -- see BleTransport::connIntervalMs().
 #define OD_AUTH_ABUSE_DWELL_FALLBACK_MS 50
 #endif
+
+// Budgets for the nonce-rejection logs. Once nonce failures stop counting toward
+// integrity_failures, nothing else throttles a peer that drives these lines, and
+// out-of-window fires routinely on a lossy link.
+//
+// One budget PER SITE, deliberately, not one shared: a stale client spamming session-id
+// mismatches must not be able to silence the out-of-window line, which is the one that
+// reports real transfer loss.
+static uint32_t s_nonceLogWindowMs = 0;   // replay / out-of-window
+static uint32_t s_nonceLogOtherMs  = 0;   // wrong session, bad tag, malformed, engine fault
+static bool nonceLogAllowed(uint32_t* last_ms) {
+    const uint32_t now = od_hal_uptime_ms();
+    if (*last_ms != 0 && (uint32_t)(now - *last_ms) < 5000u) return false;
+    *last_ms = now;
+    return true;
+}
 
 // Set by any RESP_AUTH_REQUIRED answer for the frame being dispatched, on EVERY
 // transport. Read once after the dispatch switch to decide whether the frame was
@@ -229,12 +250,9 @@ static void reloadConfigAfterSave(void) {
     initWiFi(false);
 #endif
 }
-bool encryptResponse(uint8_t* plaintext, uint16_t plaintext_len, uint8_t* ciphertext,
-                    uint16_t* ciphertext_len, uint8_t* nonce, uint8_t* auth_tag);
 bool isEncryptionEnabled();
 void sendResponseUnencrypted(uint8_t* response, uint16_t len);
 void secureEraseConfig();
-extern struct SecurityConfig securityConfig;
 // chunked_write_state_t comes from config_parser.h; this file used to redefine it
 // with a hardcoded 4096 in place of MAX_CONFIG_SIZE.
 extern uint8_t configReadResponseBuffer[128];
@@ -395,10 +413,12 @@ void sendResponse(uint8_t* response, uint16_t len) {
         // Encrypt all authenticated responses except auth/version handshakes and FE/FF status.
         // Direct-write / partial-write / LED acks must be encrypted too; LAN/BLE clients decrypt every response.
         if (command != CMD_AUTHENTICATE && command != CMD_FIRMWARE_VERSION && status != RESP_AUTH_REQUIRED && status != RESP_NACK) {
-            uint8_t nonce[ENCRYPTION_NONCE_SIZE];
-            uint8_t auth_tag[ENCRYPTION_TAG_SIZE];
+            /* od_session_seal takes the complete [cmd:2][payload] frame: the two command bytes
+             * are the AAD as well as the echoed prefix, so they travel with the payload. */
             uint16_t encrypted_len = 0;
-            if (encryptResponse(response, len, encrypted_response, &encrypted_len, nonce, auth_tag)) {
+            if (od_session_seal(&g_session, od_span_make(response, len),
+                                encrypted_response, sizeof(encrypted_response),
+                                &encrypted_len, od_hal_uptime_ms(), NULL) == OD_SESSION_SEAL_OK) {
                 response = encrypted_response;
                 len = encrypted_len;
                 wasEncrypted = true;
@@ -820,15 +840,13 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
             return;
         }
 
-        uint8_t nonce_full[ENCRYPTION_NONCE_SIZE];
-        uint8_t auth_tag[ENCRYPTION_TAG_SIZE];
-        static uint8_t plaintext[512];
+        // The envelope [nonce:16][ciphertext][tag:12] is contiguous behind the two command
+        // bytes, so it is one span. out_cap covers the decrypted [len:1][payload] frame, one
+        // byte more than plaintext_len ends up being.
+        static uint8_t plaintext[OD_SESSION_PLAIN_MAX];
         uint16_t plaintext_len = 0;
-
-        memcpy(nonce_full, data + BLE_CMD_HEADER_SIZE, ENCRYPTION_NONCE_SIZE);
-        memcpy(auth_tag, data + len - ENCRYPTION_TAG_SIZE, ENCRYPTION_TAG_SIZE);
-
-        uint16_t encrypted_data_len = len - BLE_CMD_HEADER_SIZE - ENCRYPTION_NONCE_SIZE - ENCRYPTION_TAG_SIZE;
+        const uint8_t* nonce_full = data + BLE_CMD_HEADER_SIZE;
+        const uint16_t envelope_len = len - BLE_CMD_HEADER_SIZE;
 
         // The nonce is no longer dumped per frame: the banner above already reports
         // this frame as "enc", and on ESP32 the transport's RX line dumps the first
@@ -836,13 +854,43 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
         // screen. It moves to the failure path below, where it is the only thing that
         // separates a replay-window jump from nonce reuse from a wrong session key,
         // and where nRF (which has no RX hex line at all) would otherwise be blind.
-        if (!decryptCommand(data + BLE_CMD_HEADER_SIZE + ENCRYPTION_NONCE_SIZE, encrypted_data_len, plaintext, &plaintext_len, nonce_full, auth_tag, command)) {
-            // 16 bytes render as 47 chars + NUL, an exact fit in 48; sized past that
-            // so a future ENCRYPTION_NONCE_SIZE bump truncates nothing.
-            char nonceHex[64];
-            od_log_hex_line(nonceHex, sizeof(nonceHex), "", nonce_full, ENCRYPTION_NONCE_SIZE);
-            od_log_error("ERROR: Decryption failed (0x%04X, %u B payload, nonce %s)",
-                         (unsigned)command, (unsigned)encrypted_data_len, nonceHex);
+        struct od_session_report report;
+        const enum od_session_open opened =
+            od_session_open(&g_session, command, od_span_make(nonce_full, envelope_len),
+                            plaintext, sizeof(plaintext), &plaintext_len,
+                            od_hal_uptime_ms(), &report);
+        if (opened != OD_SESSION_OPEN_OK) {
+            // A PIPE DATA frame refused for a NONCE reason is ordinary packet loss, not tamper
+            // evidence, and the answer is SILENCE. pipe-write-protocol.md 5.1 makes a 0x81 NACK
+            // unconditionally fatal and 5.2 reserves NACKs for unrecoverable conditions, so
+            // answering here kills the upload on the first dropped frame -- the client raises
+            // IntegrityCheckError, which its send loop does not catch. Saying nothing instead
+            // leaves the seq absent from the next SACK; the host retransmits it under a fresh
+            // higher counter, which the window accepts unconditionally (no forward bound).
+            //
+            // Deliberately narrow: a TAG failure keeps the NACK because it IS tamper evidence,
+            // and 0x0071 legacy DIRECT_WRITE_DATA is left alone -- its ACK discipline differs
+            // and has not been analysed. Not an oversight.
+            const bool nonce_loss = (report.nonce_reason == (uint8_t)NONCE_OUT_OF_WINDOW ||
+                                     report.nonce_reason == (uint8_t)NONCE_REPLAY);
+            // LOG BEFORE THE SILENT RETURN. Upstream logs the rejection inside decryptCommand
+            // (encryption.cpp:745), so its PIPE early-return never costs telemetry; this port
+            // moved logging to the call site, where returning first would make the replay and
+            // out-of-window events -- the exact condition the throttle exists to let you watch
+            // -- invisible on the one path that produces them routinely.
+            if (nonceLogAllowed(nonce_loss ? &s_nonceLogWindowMs : &s_nonceLogOtherMs)) {
+                // 16 bytes render as 47 chars + NUL, an exact fit in 48; sized past that
+                // so a future ENCRYPTION_NONCE_SIZE bump truncates nothing.
+                char nonceHex[64];
+                od_log_hex_line(nonceHex, sizeof(nonceHex), "", nonce_full, ENCRYPTION_NONCE_SIZE);
+                od_log_error("ERROR: Decryption failed (0x%04X, rc=%d, nonce_reason=%u, "
+                             "%u B envelope, nonce %s)",
+                             (unsigned)command, (int)opened, (unsigned)report.nonce_reason,
+                             (unsigned)envelope_len, nonceHex);
+            }
+            if (nonce_loss && command == CMD_PIPE_WRITE_DATA) {
+                return;      // silence is the wire answer; the line above is the record of it
+            }
             uint8_t response[] = {RESP_ACK, (uint8_t)(command & 0xFF), RESP_NACK};
             sendResponseUnencrypted(response, sizeof(response));
             return;

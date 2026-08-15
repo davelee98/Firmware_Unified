@@ -156,8 +156,14 @@ split into start + `busy()` poll (the panel model, §3).
 >
 > **UPDATE 2026-08-04: `od_hal_panel` HAS now been implemented** — `targets/esp32-idf/hal/`
 > `od_hal_panel.{h,c}` plus `panel/od_panel_bbep.cpp` and `panel/od_panel_fastepd.cpp`. The
-> base rate held: **five more corrections**, listed at the end of that section. `od_hal_crypto`
-> and `od_hal_radio` remain unverified.
+> base rate held: **five more corrections**, listed at the end of that section.
+>
+> **UPDATE 2026-08-15: `od_hal_crypto` HAS now been implemented** — `shared/hal/od_hal_crypto.h`
+> plus both target backends. The base rate held again: the shipped interface differs from this
+> document's sketch in **four** ways (enum instead of `int`, prepared key slots instead of a key
+> per call, one combined `ciphertext||tag` buffer instead of two pointers, and no `tag_len`
+> parameter). That section has been rewritten to the shipped contract. **`od_hal_radio` remains
+> unverified** — it is the next one this warning applies to.
 
 ### `od_hal_time` — already exists in embryo
 
@@ -349,36 +355,85 @@ than becoming a constant, because the HAL should not have to be recompiled to ch
 core owns, and because it keeps the bound explicit at the call site. On BG22 this is the
 4112-byte NVM3 record; see MEMORY_CONSTRAINTS.md item 3 for what that costs there.
 
-### `od_hal_crypto` — the CCM decision
+### `od_hal_crypto` — **SHIPPED**, and the header is now the contract
 
-Firmware uses mbedTLS/CC310 **native CCM**; NRF54 and Silabs **hand-roll CCM over PSA AES-ECB**
-(RFC 3610, `opendisplay_pipe.c:282-405`) because `PSA_ALG_CCM` isn't pulled in, at a cost of a
-key import/destroy per 16-byte block. Right design: **expose CCM as the primitive** (every SDK
-has native CCM — mbedTLS `mbedtls_ccm_*`, PSA `psa_aead_*`, CC3xx), and keep the RFC-3610-over-
-ECB code as a *shared* soft fallback (`OD_CRYPTO_SOFT_CCM`) so a target lacking native CCM
-selects it once instead of copying it. The five primitives the two `#ifdef` arms of
-`encryption.cpp:31-42` already share are the exact seam:
+**Implemented 2026-08-15 (`shared/hal/od_hal_crypto.h`, C1 of the od_session plan). The
+signatures below are what shipped; the one-shot sketch this section used to carry is superseded.**
+Per CLAUDE.md decision 14, read the header over this doc where they differ.
+
+Firmware used mbedTLS native CCM; NRF54 and Silabs hand-rolled CCM over PSA AES-ECB (RFC 3610) at
+a cost of a key import/destroy **per 16-byte block**. The cause turned out to be one missing
+Kconfig line rather than a missing capability: `CONFIG_PSA_WANT_ALG_CCM` was never set, while the
+Oberon software driver and the CRACEN hardware driver both implement AES-CCM in this NCS tree.
+Nordic now uses native `psa_aead_*`, ESP32 native `mbedtls_ccm_*`, and the hand-rolled code is
+gone — preserved as `tests/host/session_ccm_reference.inc` for differential testing.
 
 ```c
-/* AEAD — one-shot. nonce is the 13-byte CCM nonce; aad is the 2 opcode bytes; tag 12 B. */
-int  od_hal_ccm_encrypt(const uint8_t key[16], const uint8_t *nonce, uint8_t nonce_len,
-                        const uint8_t *aad, uint8_t aad_len,
-                        const uint8_t *plain, uint16_t plain_len,
-                        uint8_t *cipher, uint8_t *tag, uint8_t tag_len);
-int  od_hal_ccm_decrypt(const uint8_t key[16], const uint8_t *nonce, uint8_t nonce_len,
-                        const uint8_t *aad, uint8_t aad_len,
-                        const uint8_t *cipher, uint16_t cipher_len,
-                        const uint8_t *tag, uint8_t tag_len, uint8_t *plain);
-int  od_hal_cmac(const uint8_t key[16], const uint8_t *msg, uint32_t msg_len, uint8_t out[16]);
-int  od_hal_aes_ecb(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]);  /* KDF only */
-int  od_hal_random(uint8_t *buf, uint16_t len);
+enum od_hal_crypto_status {          /* four values, and the distinction is load-bearing */
+    OD_HAL_CRYPTO_OK = 0,
+    OD_HAL_CRYPTO_AUTH_FAILED,       /* decrypt only: tag mismatch, NEVER an engine fault */
+    OD_HAL_CRYPTO_UNSUPPORTED,
+    OD_HAL_CRYPTO_ERROR
+};
+#define OD_HAL_CRYPTO_TAG_LEN 12u
+#ifndef OD_HAL_CRYPTO_KEY_SLOTS
+#define OD_HAL_CRYPTO_KEY_SLOTS 1u
+#endif
+typedef uint8_t od_hal_crypto_slot_t;
+
+/* PREPARED KEY SLOTS. key_set is idempotent: it releases whatever the slot held first. */
+enum od_hal_crypto_status od_hal_crypto_key_set(od_hal_crypto_slot_t slot, const uint8_t key[16]);
+void                      od_hal_crypto_key_clear(od_hal_crypto_slot_t slot);
+
+/* AEAD over a prepared slot. ONE combined ciphertext||tag buffer; NO tag_len parameter. */
+enum od_hal_crypto_status od_hal_crypto_ccm_encrypt(od_hal_crypto_slot_t slot,
+        const uint8_t *nonce, uint8_t nonce_len, const uint8_t *aad, uint8_t aad_len,
+        const uint8_t *plain, uint16_t plain_len,
+        uint8_t *ct, uint16_t ct_cap, uint16_t *ct_len);
+enum od_hal_crypto_status od_hal_crypto_ccm_decrypt(od_hal_crypto_slot_t slot,
+        const uint8_t *nonce, uint8_t nonce_len, const uint8_t *aad, uint8_t aad_len,
+        const uint8_t *ct, uint16_t ct_len,
+        uint8_t *plain, uint16_t plain_cap, uint16_t *plain_len);
+
+/* One-shot, key-per-call. ECB is KDF finalisation only, not a payload primitive. */
+enum od_hal_crypto_status od_hal_crypto_cmac(const uint8_t key[16], const uint8_t *msg,
+                                             uint32_t msg_len, uint8_t out[16]);
+enum od_hal_crypto_status od_hal_crypto_aes_ecb(const uint8_t key[16], const uint8_t in[16],
+                                                uint8_t out[16]);
+enum od_hal_crypto_status od_hal_crypto_random(uint8_t *buf, uint16_t len);
 ```
 
-`od_hal_aes_ecb` is needed by the KDF (`deriveSessionKey` finalizes with one ECB block); it is
-*not* the CCM primitive in this design. `od_hal_cmac` handles auth challenge + session-id + PSK.
-On Silabs/nRF, `od_hal_ccm_*` can be the shared soft implementation calling `od_hal_aes_ecb`
-internally; on ESP32 it maps to native CCM. Verified API-identical PSA usage on nRF54 and Silabs
-means one implementation covers both.
+**Four decisions worth not re-litigating.**
+
+*An enum, not `int`.* A tag mismatch must count toward the session's 3-strike teardown and an
+engine fault must not — counting an allocation failure as an attack turns a transient OOM into a
+forced re-authentication. All three targets collapsed both into `false`, so the distinction never
+existed; a shared strike counter is what makes it matter. Vendor status values stay in `targets/`,
+where the implementation can log the raw `psa_status_t`/mbedTLS `ret` at the point of failure.
+
+*Slots, not a key inside the caller's state.* An embedded `psa_key_id_t` would make
+`memset(&session, 0, sizeof session)` — which is literally how the targets clear a session —
+silently drop a live PSA handle. PSA slots are a finite pool, so that leaks a few hundred
+re-authentications deep and presents months later as "auth stops working after a while". The slot
+keeps one `uint8_t` in `shared/` and the vendor context entirely in `targets/`. It also removes
+the last nested resource lifetime from `od_session.c`, which is what settles CLAUDE.md decision
+1's C-vs-C++ revisit in favour of C.
+
+*One combined `ciphertext||tag` buffer.* PSA consumes and emits them contiguously; separate
+pointers would make adjacency an unwritten precondition the signature cannot enforce, and would
+need a bounce buffer on every Nordic call.
+
+*Tag length pinned at the contract.* PSA imports the prepared key with
+`PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 12)`, and the key policy pins the algorithm
+*including* tag length — so a per-call length would fail `NOT_PERMITTED` on PSA while succeeding
+on mbedTLS. One HAL, two behaviours, findable only on hardware.
+
+**`OD_CRYPTO_SOFT_CCM` is deferred, with a stated trigger.** Both targets have native CCM, so a
+shared soft path would be a `shared/` source no consumer compiles. Native CCM measured **+2,320 B
+flash, +0 B RAM** on nRF52840, nowhere near a level that would justify it. The trigger is a target
+with no native CCM, or an unacceptable flash cost — and when it fires, that implementation needs
+`od_hal_crypto_ecb_prepared()` so its per-block primitive reuses a prepared key rather than
+reintroducing the per-block import this design removed.
 
 ### `od_hal_radio` — transport-agnostic framed egress + origin
 

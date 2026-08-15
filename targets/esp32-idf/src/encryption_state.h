@@ -4,34 +4,15 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "structs.h"
-#ifdef TARGET_ESP32
-#include "mbedtls/ccm.h"
-#endif
+#include "od_session.h"
 
-struct EncryptionSession {
-    bool authenticated;
-    uint8_t session_key[16];
-    uint8_t session_id[8];
-#ifdef TARGET_ESP32
-    mbedtls_ccm_context ccm_ctx;
-    bool is_ccm_ready;
-#endif
-    uint64_t nonce_counter;
-    uint64_t last_seen_counter;
-    uint64_t replay_window[64];
-    uint32_t last_activity;
-    uint8_t integrity_failures;
-    uint32_t session_start_time;
-    uint8_t auth_attempts;
-    uint32_t last_auth_time;
-    uint8_t client_nonce[16];
-    uint8_t server_nonce[16];
-    uint8_t pending_server_nonce[16];
-    uint32_t server_nonce_time;
-};
+/* The one BLE session. Session state lives in shared/core/od_session.h; the session key is not in
+ * this struct at all -- it lives in an od_hal_crypto slot, so g_session stays trivially zeroable
+ * and a memory dump of it yields no key material. Never memset it: od_session_clear() is the only
+ * teardown, because it also releases the slot and preserves the slot index. */
+extern struct od_session g_session;
 
 extern struct SecurityConfig &securityConfig;
-extern EncryptionSession encryptionSession;
 extern bool encryptionInitialized;
 
 #endif

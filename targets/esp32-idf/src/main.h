@@ -265,11 +265,6 @@ void clearEncryptionSession();
 bool checkEncryptionSessionTimeout();
 void updateEncryptionSessionActivity();
 bool handleAuthenticate(uint8_t* data, uint16_t len);
-bool decryptCommand(uint8_t* ciphertext, uint16_t ciphertext_len, uint8_t* plaintext, uint16_t* plaintext_len, uint8_t* nonce, uint8_t* auth_tag, uint16_t command_header);
-bool encryptResponse(uint8_t* plaintext, uint16_t plaintext_len, uint8_t* ciphertext, uint16_t* ciphertext_len, uint8_t* nonce, uint8_t* auth_tag);
-bool verifyNonceReplay(uint8_t* nonce);
-void incrementNonceCounter();
-void getCurrentNonce(uint8_t* nonce);
 
 // chunked_write_state_t comes from config_parser.h so this file and
 // communication.cpp cannot drift apart on the buffer size.
@@ -284,7 +279,6 @@ uint8_t configReadResponseBuffer[128];
 // (shared/core/od_config.h). Keeping the old name means the consumers in encryption.cpp,
 // boot_screen.cpp and communication.cpp do not care where it now lives.
 struct SecurityConfig &securityConfig = globalConfig.security;
-EncryptionSession encryptionSession = {0};
 bool encryptionInitialized = false;
 
 #ifdef TARGET_ESP32

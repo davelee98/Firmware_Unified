@@ -9,12 +9,14 @@
 #include "opendisplay_protocol.h"
 #include "opendisplay_config_parser.h"
 #include "od_runtime_types.h"
+#include "od_session.h"
+#include "od_span.h"
 #include "opendisplay_pipe_write.h"
+#include "od_hal_crypto.h"
 #include <stdio.h>
 #include <string.h>
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/kernel.h>
-#include <psa/crypto.h>
 
 #ifndef SHA
 #define SHA ""
@@ -66,13 +68,103 @@ typedef struct {
 static bool s_notify;
 static od_chunked_config_t s_cfg_chunk;
 static uint8_t s_cfg_read_buf[MAX_RESPONSE_DATA_SIZE];
-static struct EncryptionSession s_session;
+/* The uptime clock, defined below with the other Zephyr shims. */
+static uint32_t od_now_ms(void);
+
+/* ============================================================================================
+ * THE SESSION ADAPTER. The handshake, KDF, replay window and CCM envelope are
+ * shared/core/od_session.c; what stays here is this target's half -- the clock, the nRF device
+ * identity, and the Zephyr logging. od_session sends nothing itself, which is why
+ * authenticate_handle still returns its reply for dispatch() to send.
+ * ============================================================================================ */
+
+static struct od_session s_session;
+
+/* Budgets for the nonce-rejection logs. Nonce failures deliberately do not count toward
+ * integrity_failures, so nothing else throttles a peer that drives these lines, and
+ * out-of-window fires routinely on a lossy link.
+ *
+ * One budget PER SITE, not one shared: a stale client spamming session-id mismatches must not
+ * be able to silence the out-of-window line, which is the one that reports real transfer loss. */
+static uint32_t s_nonce_log_window_ms;   /* replay / out-of-window */
+static uint32_t s_nonce_log_other_ms;    /* wrong session, bad tag, malformed, engine fault */
+
+static bool nonce_log_allowed(uint32_t *last_ms)
+{
+  const uint32_t now = od_now_ms();
+
+  if (*last_ms != 0u && (uint32_t)(now - *last_ms) < 5000u) {
+    return false;
+  }
+  *last_ms = now;
+  return true;
+}
+
+static void clear_session(void)
+{
+  od_session_clear(&s_session);
+}
+
+/* Mutating by design: an expired session is torn down by the act of asking, which is what every
+ * call site here already relied on. */
+static bool session_alive(void)
+{
+  return od_session_alive(&s_session, od_now_ms(), NULL);
+}
+
+/* The four device-id bytes that feed both the KDF and the auth proof: the low 32 bits of the
+ * 64-bit hwinfo id, big-endian. Wire-visible identity -- a different packing is a different
+ * device to the host. */
+static void od_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN])
+{
+  uint8_t id[8];
+  uint64_t uid = 0;
+  unsigned i;
+
+  (void)hwinfo_get_device_id(id, sizeof(id));
+  for (i = 0; i < sizeof(id); i++) {
+    uid = (uid << 8) | id[i];
+  }
+  out[0] = (uint8_t)((uid >> 24) & 0xFFu);
+  out[1] = (uint8_t)((uid >> 16) & 0xFFu);
+  out[2] = (uint8_t)((uid >> 8) & 0xFFu);
+  out[3] = (uint8_t)(uid & 0xFFu);
+}
+
+static bool authenticate_handle(const uint8_t *payload, uint16_t payload_len,
+                                uint8_t *rsp, uint16_t *rsp_len)
+{
+  uint8_t device_id[OD_SESSION_DEVICE_ID_LEN];
+  struct od_session_report report;
+  enum od_session_auth r;
+
+  od_device_id(device_id);
+  r = od_session_authenticate(&s_session, od_get_parsed_security(), device_id,
+                              od_span_make(payload, payload_len), od_now_ms(),
+                              rsp, OD_SESSION_REPLY_MAX, rsp_len, &report);
+  switch (r) {
+  case OD_SESSION_AUTH_CHALLENGE:
+    od_log_info("auth: challenge sent");
+    break;
+  case OD_SESSION_AUTH_ESTABLISHED:
+    od_log_info("auth: session established");
+    break;
+  case OD_SESSION_AUTH_RATE_LIMITED:
+    od_log_warn("auth: rate limited (%u attempts in window)", (unsigned)report.attempts);
+    break;
+  case OD_SESSION_AUTH_CRYPTO_ERROR:
+    od_log_error("auth: crypto engine failure (status %d)", (int)report.crypto_status);
+    break;
+  default:
+    od_log_warn("auth: refused (rc=%d, status 0x%02X)", (int)r, (unsigned)report.status_byte);
+    break;
+  }
+  return r == OD_SESSION_AUTH_ESTABLISHED;
+}
 static uint8_t s_long_write_buf[OD_PIPE_MAX_PAYLOAD];
 static uint16_t s_long_write_len;
 static uint8_t s_long_write_conn = 0xFFu;
-static bool s_crypto_ready;
 static uint8_t s_plain_buf[512];
-static uint8_t s_crypto_payload_buf[513];
 static uint8_t s_pipe_enc_buf[544];
 static uint8_t s_nfc_rsp_buf[OD_PIPE_MAX_PAYLOAD];
 typedef struct {
@@ -130,20 +222,8 @@ static uint32_t od_now_ms(void)
   return k_uptime_get_32();
 }
 
-static void crypto_init_once(void)
-{
-  if (s_crypto_ready) {
-    return;
-  }
-  if (psa_crypto_init() == PSA_SUCCESS) {
-    s_crypto_ready = true;
-  }
-}
+#define OD_CRYPTO_SESSION_SLOT ((od_hal_crypto_slot_t)0u)
 
-static void clear_session(void)
-{
-  memset(&s_session, 0, sizeof(s_session));
-}
 
 /*
  * Count a replay/decrypt failure and tear the session down after 3 strikes.
@@ -151,137 +231,14 @@ static void clear_session(void)
  * failed nonce-replay check or CCM tag verification increments the counter,
  * and reaching 3 clears the session so a forced re-auth is required.
  */
-static void register_integrity_failure(void)
-{
-  s_session.integrity_failures++;
-  if (s_session.integrity_failures >= 3u) {
-    clear_session();
-  }
-}
 
 static bool sec_enabled(void)
 {
-  const struct SecurityConfig *sec = od_get_parsed_security();
-  return (sec != NULL) && (sec->encryption_enabled != 0u);
+  return od_session_security_enabled(od_get_parsed_security());
 }
 
-static bool session_alive(void)
-{
-  const struct SecurityConfig *sec = od_get_parsed_security();
-  uint32_t now_ms;
-  uint32_t timeout_ms;
 
-  if (!s_session.authenticated) {
-    return false;
-  }
-  if (sec == NULL || sec->session_timeout_seconds == 0u) {
-    return true;
-  }
-  now_ms = od_now_ms();
-  timeout_ms = (uint32_t)sec->session_timeout_seconds * 1000u;
-  /* Absolute session lifetime measured from authentication, matching the
-   * reference checkEncryptionSessionTimeout() (encryption.cpp:205-217) which
-   * expires on age from session_start_time. Using last_activity here would
-   * let a continuously active session live forever. */
-  if ((now_ms - s_session.session_start_ms) > timeout_ms) {
-    clear_session();
-    return false;
-  }
-  return true;
-}
 
-static bool aes_cmac_16(const uint8_t key[16], const uint8_t *msg, size_t msg_len, uint8_t out[16])
-{
-  psa_key_id_t key_id = 0;
-  psa_status_t ps;
-  size_t mac_len = 0;
-  psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
-  if (!s_crypto_ready) {
-    return false;
-  }
-  psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
-  psa_set_key_bits(&attr, 128);
-  psa_set_key_algorithm(&attr, PSA_ALG_CMAC);
-  psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_SIGN_MESSAGE);
-  ps = psa_import_key(&attr, key, 16, &key_id);
-  if (ps != PSA_SUCCESS) {
-    return false;
-  }
-  ps = psa_mac_compute(key_id, PSA_ALG_CMAC, msg, msg_len, out, 16, &mac_len);
-  (void)psa_destroy_key(key_id);
-  return (ps == PSA_SUCCESS) && (mac_len == 16u);
-}
-
-static bool aes_ecb_encrypt_16(const uint8_t key[16], const uint8_t in[16], uint8_t out[16])
-{
-  psa_key_id_t key_id = 0;
-  psa_status_t ps;
-  size_t out_len = 0;
-  psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
-  if (!s_crypto_ready) {
-    return false;
-  }
-  psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
-  psa_set_key_bits(&attr, 128);
-  psa_set_key_algorithm(&attr, PSA_ALG_ECB_NO_PADDING);
-  psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_ENCRYPT);
-  ps = psa_import_key(&attr, key, 16, &key_id);
-  if (ps != PSA_SUCCESS) {
-    return false;
-  }
-  ps = psa_cipher_encrypt(key_id, PSA_ALG_ECB_NO_PADDING, in, 16, out, 16, &out_len);
-  (void)psa_destroy_key(key_id);
-  return (ps == PSA_SUCCESS) && (out_len == 16u);
-}
-
-static bool derive_session_key(const uint8_t master_key[16],
-                               const uint8_t client_nonce[16],
-                               const uint8_t server_nonce[16],
-                               const uint8_t device_id[4],
-                               uint8_t session_key[16])
-{
-  static const uint8_t label[] = "OpenDisplay session";
-  uint8_t cmac_input[64];
-  uint8_t intermediate[16];
-  uint8_t final_input[16];
-  size_t offset = 0;
-
-  memcpy(cmac_input + offset, label, sizeof(label) - 1u);
-  offset += sizeof(label) - 1u;
-  cmac_input[offset++] = 0x00u;
-  memcpy(cmac_input + offset, device_id, 4u);
-  offset += 4u;
-  memcpy(cmac_input + offset, client_nonce, 16u);
-  offset += 16u;
-  memcpy(cmac_input + offset, server_nonce, 16u);
-  offset += 16u;
-  cmac_input[offset++] = 0x00u;
-  cmac_input[offset++] = 0x80u;
-
-  if (!aes_cmac_16(master_key, cmac_input, offset, intermediate)) {
-    return false;
-  }
-  memset(final_input, 0, sizeof(final_input));
-  final_input[7] = 0x01u;
-  memcpy(final_input + 8, intermediate, 8u);
-  return aes_ecb_encrypt_16(master_key, final_input, session_key);
-}
-
-static bool derive_session_id(const uint8_t session_key[16],
-                              const uint8_t client_nonce[16],
-                              const uint8_t server_nonce[16],
-                              uint8_t session_id[8])
-{
-  uint8_t input[32];
-  uint8_t cmac_out[16];
-  memcpy(input, client_nonce, 16u);
-  memcpy(input + 16, server_nonce, 16u);
-  if (!aes_cmac_16(session_key, input, sizeof(input), cmac_out)) {
-    return false;
-  }
-  memcpy(session_id, cmac_out, 8u);
-  return true;
-}
 
 /*
  * Constant-time equality, for comparing a MAC against an attacker-supplied value.
@@ -290,23 +247,6 @@ static bool derive_session_id(const uint8_t session_key[16],
  * len bytes and folds them into a single accumulator. Matches the reference's
  * constantTimeCompare() (Firmware/src/encryption.cpp).
  */
-static bool od_ct_equal(const uint8_t *a, const uint8_t *b, size_t len)
-{
-  volatile uint8_t diff = 0u;
-
-  for (size_t i = 0; i < len; i++) {
-    diff |= (uint8_t)(a[i] ^ b[i]);
-  }
-  return diff == 0u;
-}
-
-static bool od_random(uint8_t *buf, size_t len)
-{
-  if (!s_crypto_ready) {
-    return false;
-  }
-  return psa_generate_random(buf, len) == PSA_SUCCESS;
-}
 
 static void send_auth_required_response(uint8_t connection, uint8_t resp_byte)
 {
@@ -314,250 +254,8 @@ static void send_auth_required_response(uint8_t connection, uint8_t resp_byte)
   pipe_send(connection, err, sizeof(err));
 }
 
-/*
- * Minimal AES-CCM (RFC 3610) using AES-ECB as primitive.
- * Fixed parameters: nonce=13B, tag=12B, L=2, AAD=exactly 2 bytes.
- * B_0 flags = Adata(1) | M'=(12-2)/2<<3 | L-1 = 0x40|0x28|0x01 = 0x69
- */
-static bool od_ccm_ecb(const uint8_t *in, uint8_t *out)
-{
-  return aes_ecb_encrypt_16(s_session.session_key, in, out);
-}
 
-static bool od_ccm_encrypt(const uint8_t *nonce,
-                            const uint8_t *aad,
-                            const uint8_t *plain,
-                            uint16_t plain_len,
-                            uint8_t *cipher,
-                            uint8_t *tag)
-{
-  uint8_t blk[16], mac[16], stream[16];
-  uint16_t i, full, rem;
 
-  blk[0] = 0x69u;
-  memcpy(&blk[1], nonce, 13u);
-  blk[14] = (uint8_t)((plain_len >> 8) & 0xFFu);
-  blk[15] = (uint8_t)(plain_len & 0xFFu);
-  if (!od_ccm_ecb(blk, mac)) return false;
-
-  memset(blk, 0, 16u);
-  blk[0] = 0x00u; blk[1] = 0x02u;
-  blk[2] = aad[0]; blk[3] = aad[1];
-  for (i = 0; i < 16u; i++) mac[i] ^= blk[i];
-  if (!od_ccm_ecb(mac, mac)) return false;
-
-  full = plain_len / 16u; rem = plain_len % 16u;
-  for (i = 0; i < full; i++) {
-    for (uint8_t j = 0; j < 16u; j++) mac[j] ^= plain[i * 16u + j];
-    if (!od_ccm_ecb(mac, mac)) return false;
-  }
-  if (rem > 0u) {
-    memset(blk, 0, 16u);
-    memcpy(blk, &plain[full * 16u], rem);
-    for (uint8_t j = 0; j < 16u; j++) mac[j] ^= blk[j];
-    if (!od_ccm_ecb(mac, mac)) return false;
-  }
-
-  blk[0] = 0x01u;
-  memcpy(&blk[1], nonce, 13u);
-  blk[14] = 0x00u; blk[15] = 0x00u;
-  if (!od_ccm_ecb(blk, stream)) return false;
-  for (i = 0; i < 12u; i++) tag[i] = mac[i] ^ stream[i];
-
-  for (i = 0; i < full; i++) {
-    blk[0] = 0x01u; memcpy(&blk[1], nonce, 13u);
-    blk[14] = (uint8_t)(((i + 1u) >> 8) & 0xFFu);
-    blk[15] = (uint8_t)((i + 1u) & 0xFFu);
-    if (!od_ccm_ecb(blk, stream)) return false;
-    for (uint8_t j = 0; j < 16u; j++) cipher[i * 16u + j] = plain[i * 16u + j] ^ stream[j];
-  }
-  if (rem > 0u) {
-    blk[0] = 0x01u; memcpy(&blk[1], nonce, 13u);
-    blk[14] = (uint8_t)(((full + 1u) >> 8) & 0xFFu);
-    blk[15] = (uint8_t)((full + 1u) & 0xFFu);
-    if (!od_ccm_ecb(blk, stream)) return false;
-    for (uint8_t j = 0; j < rem; j++) cipher[full * 16u + j] = plain[full * 16u + j] ^ stream[j];
-  }
-  return true;
-}
-
-static bool od_ccm_decrypt(const uint8_t *nonce,
-                            const uint8_t *aad,
-                            const uint8_t *cipher,
-                            uint16_t cipher_len,
-                            const uint8_t *tag,
-                            uint8_t *plain)
-{
-  uint8_t blk[16], mac[16], stream[16];
-  uint16_t i, full, rem;
-  uint8_t expected[12], diff;
-
-  full = cipher_len / 16u; rem = cipher_len % 16u;
-  for (i = 0; i < full; i++) {
-    blk[0] = 0x01u; memcpy(&blk[1], nonce, 13u);
-    blk[14] = (uint8_t)(((i + 1u) >> 8) & 0xFFu);
-    blk[15] = (uint8_t)((i + 1u) & 0xFFu);
-    if (!od_ccm_ecb(blk, stream)) return false;
-    for (uint8_t j = 0; j < 16u; j++) plain[i * 16u + j] = cipher[i * 16u + j] ^ stream[j];
-  }
-  if (rem > 0u) {
-    blk[0] = 0x01u; memcpy(&blk[1], nonce, 13u);
-    blk[14] = (uint8_t)(((full + 1u) >> 8) & 0xFFu);
-    blk[15] = (uint8_t)((full + 1u) & 0xFFu);
-    if (!od_ccm_ecb(blk, stream)) return false;
-    for (uint8_t j = 0; j < rem; j++) plain[full * 16u + j] = cipher[full * 16u + j] ^ stream[j];
-  }
-
-  blk[0] = 0x69u; memcpy(&blk[1], nonce, 13u);
-  blk[14] = (uint8_t)((cipher_len >> 8) & 0xFFu);
-  blk[15] = (uint8_t)(cipher_len & 0xFFu);
-  if (!od_ccm_ecb(blk, mac)) return false;
-
-  memset(blk, 0, 16u);
-  blk[0] = 0x00u; blk[1] = 0x02u;
-  blk[2] = aad[0]; blk[3] = aad[1];
-  for (i = 0; i < 16u; i++) mac[i] ^= blk[i];
-  if (!od_ccm_ecb(mac, mac)) return false;
-
-  for (i = 0; i < full; i++) {
-    for (uint8_t j = 0; j < 16u; j++) mac[j] ^= plain[i * 16u + j];
-    if (!od_ccm_ecb(mac, mac)) return false;
-  }
-  if (rem > 0u) {
-    memset(blk, 0, 16u);
-    memcpy(blk, &plain[full * 16u], rem);
-    for (uint8_t j = 0; j < 16u; j++) mac[j] ^= blk[j];
-    if (!od_ccm_ecb(mac, mac)) return false;
-  }
-
-  blk[0] = 0x01u; memcpy(&blk[1], nonce, 13u);
-  blk[14] = 0x00u; blk[15] = 0x00u;
-  if (!od_ccm_ecb(blk, stream)) return false;
-  for (i = 0; i < 12u; i++) expected[i] = mac[i] ^ stream[i];
-
-  diff = 0u;
-  for (i = 0; i < 12u; i++) diff |= (expected[i] ^ tag[i]);
-  return (diff == 0u);
-}
-
-static bool verify_nonce_replay(const uint8_t *nonce)
-{
-  uint64_t nonce_counter = 0u;
-
-  for (int i = 0; i < 8; i++) {
-    if (nonce[i] != s_session.session_id[i]) {
-      return false;
-    }
-  }
-  for (int i = 0; i < 8; i++) {
-    nonce_counter = (nonce_counter << 8) | nonce[8 + i];
-  }
-
-  const int64_t counter_diff =
-      (int64_t)nonce_counter - (int64_t)s_session.last_seen_counter;
-  if (counter_diff < -32 || counter_diff > 32) {
-    return false;
-  }
-  if (nonce_counter <= s_session.last_seen_counter && counter_diff != 0) {
-    for (int i = 0; i < 64; i++) {
-      if (s_session.replay_window[i] == nonce_counter) {
-        return false;
-      }
-    }
-  }
-  if (nonce_counter > s_session.last_seen_counter) {
-    s_session.last_seen_counter = nonce_counter;
-  }
-  s_session.replay_window[s_session.replay_idx] = nonce_counter;
-  s_session.replay_idx = (uint8_t)((s_session.replay_idx + 1u) % 64u);
-  return true;
-}
-
-static bool decrypt_encrypted_payload(uint16_t cmd,
-                                      const uint8_t *payload,
-                                      uint16_t payload_len,
-                                      uint8_t *out_plain,
-                                      uint16_t *out_plain_len)
-{
-  const uint8_t *nonce;
-  const uint8_t *cipher;
-  const uint8_t *tag;
-  uint8_t nonce_ccm[13];
-  uint8_t ad[2];
-  uint16_t cipher_len;
-
-  if (payload_len < (16u + 12u + 1u) || !session_alive()) {
-    return false;
-  }
-  nonce      = payload;
-  tag        = &payload[payload_len - 12u];
-  cipher     = &payload[16u];
-  cipher_len = (uint16_t)(payload_len - 16u - 12u);
-  memcpy(nonce_ccm, &nonce[3], sizeof(nonce_ccm));
-  ad[0] = (uint8_t)((cmd >> 8) & 0xFFu);
-  ad[1] = (uint8_t)(cmd & 0xFFu);
-
-  if (!verify_nonce_replay(nonce)) {
-    register_integrity_failure();
-    return false;
-  }
-
-  if (!od_ccm_decrypt(nonce_ccm, ad, cipher, cipher_len, tag, out_plain)) {
-    register_integrity_failure();
-    return false;
-  }
-  if (out_plain[0] > (cipher_len - 1u)) {
-    return false;
-  }
-  *out_plain_len = out_plain[0];
-  if (*out_plain_len > 0u) {
-    memmove(out_plain, &out_plain[1], *out_plain_len);
-  }
-  s_session.integrity_failures = 0u;
-  s_session.last_activity_ms = od_now_ms();
-  return true;
-}
-
-static bool encrypt_response_payload(const uint8_t *plain,
-                                     uint16_t plain_len,
-                                     uint8_t *out,
-                                     uint16_t *out_len)
-{
-  uint8_t nonce[16];
-  uint8_t nonce_ccm[13];
-  uint8_t ad[2];
-  uint8_t tag[12];
-  uint16_t payload_len;
-
-  if (!session_alive() || plain_len < 2u || plain_len > 514u) {
-    return false;
-  }
-  payload_len = (uint16_t)(plain_len - 2u);
-  memcpy(nonce, s_session.session_id, 8u);
-  for (int i = 0; i < 8; i++) {
-    nonce[8 + i] = (uint8_t)((s_session.nonce_counter >> (56 - (i * 8))) & 0xFFu);
-  }
-  s_session.nonce_counter++;
-  memcpy(nonce_ccm, &nonce[3], sizeof(nonce_ccm));
-  ad[0] = plain[0];
-  ad[1] = plain[1];
-  s_crypto_payload_buf[0] = (uint8_t)(payload_len & 0xFFu);
-  if (payload_len > 0u) {
-    memcpy(&s_crypto_payload_buf[1], &plain[2], payload_len);
-  }
-
-  memcpy(out, plain, 2u);
-  memcpy(&out[2], nonce, 16u);
-  if (!od_ccm_encrypt(nonce_ccm, ad,
-                       s_crypto_payload_buf, (uint16_t)(payload_len + 1u),
-                       &out[18], tag)) {
-    return false;
-  }
-  memcpy(&out[18 + payload_len + 1u], tag, 12u);
-  *out_len = (uint16_t)(18u + payload_len + 1u + 12u);
-  s_session.last_activity_ms = od_now_ms();
-  return true;
-}
 
 static void pipe_send_raw(uint8_t connection, const uint8_t *data, uint16_t len)
 {
@@ -602,15 +300,37 @@ static void pipe_send(uint8_t connection, const uint8_t *data, uint16_t len)
     pipe_send_raw(connection, data, len);
     return;
   }
-  status = data[0];
   cmd = data[1];
-  force_plain = (status == RESP_AUTH_REQUIRED || status == 0xFFu || cmd == RESP_AUTHENTICATE
-                 || cmd == RESP_FIRMWARE_VERSION);
+  /* THE STATUS IS BYTE 2, not byte 0. Every frame this file builds leads with 0x00 for an ACK or
+   * 0xFF for a hard error, and puts the FE/FF outcome in byte 2 -- {0x00, cmd, 0xFF} for a
+   * rejected decrypt, {0x00, cmd, 0xFE} for auth-required. Reading byte 0 meant neither test
+   * could ever fire for those two, so a rejected command was SEALED, and py-opendisplay decrypts
+   * any frame of 31 bytes or more and returns immediately (device.py:830), never reaching its
+   * raw[2] == 0xFF guard. The 2-byte echo then validates as an ACK and the host reports success
+   * for a command the device refused. Error frames are plaintext by contract
+   * (py-opendisplay protocol/responses.py) -- this is the same rule esp32-idf applies at
+   * communication.cpp:412.
+   *
+   * The 7-byte PIPE data ACK {0x00,0x81,highest_seen,mask:4} carries a rolling seq at byte 2, so
+   * a highest_seen of 0xFE/0xFF on any image of 255+ chunks must not be mistaken for a status;
+   * pipe ACKs encrypt normally. Other pipe shapes cannot collide: 0x80's byte 2 is a version,
+   * a pipe NACK's is an error code 0x01-0x04, and 0x82 acks are two bytes. */
+  {
+    const bool pipe_data_ack = (len == 7u && data[0] == 0x00u && data[1] == 0x81u);
+    status = (len >= 3u && !pipe_data_ack) ? data[2] : 0x00u;
+  }
+  force_plain = (status == RESP_AUTH_REQUIRED || status == RESP_NACK
+                 || data[0] == 0xFFu           /* 4-byte hard-error frames lead with 0xFF */
+                 || cmd == RESP_AUTHENTICATE || cmd == RESP_FIRMWARE_VERSION);
   if (force_plain || !session_alive()) {
     pipe_send_raw(connection, data, len);
     return;
   }
-  if (encrypt_response_payload(data, len, s_pipe_enc_buf, &enc_len)) {
+  /* od_session_seal takes the complete [status][cmd][payload] frame: those two leading bytes are
+   * the AAD as well as the echoed prefix, so they travel with the payload rather than separately. */
+  if (od_session_seal(&s_session, od_span_make(data, len), s_pipe_enc_buf,
+                      sizeof(s_pipe_enc_buf), &enc_len, od_now_ms(), NULL)
+      == OD_SESSION_SEAL_OK) {
     pipe_send_raw(connection, s_pipe_enc_buf, enc_len);
     return;
   }
@@ -657,112 +377,6 @@ static void reply_read_msd(uint8_t connection)
   pipe_send(connection, rsp, sizeof(rsp));
 }
 
-static bool authenticate_handle(const uint8_t *payload, uint16_t payload_len, uint8_t *rsp, uint16_t *rsp_len)
-{
-  const struct SecurityConfig *sec = od_get_parsed_security();
-  static const uint8_t zero8[8] = { 0 };
-  uint32_t now;
-  uint8_t device_id[4];
-  uint8_t expected[16];
-  uint8_t challenge_input[36];
-  uint8_t server_input[36];
-
-  *rsp_len = 3u;
-  rsp[0] = 0x00u;
-  rsp[1] = RESP_AUTHENTICATE;
-  rsp[2] = AUTH_STATUS_ERROR;
-  if (sec == NULL || sec->encryption_enabled == 0u) {
-    rsp[2] = AUTH_STATUS_NOT_CONFIG;
-    return false;
-  }
-  now = od_now_ms();
-  if (s_session.last_auth_time_ms != 0u && (now - s_session.last_auth_time_ms) < 60000u) {
-    if (s_session.auth_attempts >= 10u) {
-      rsp[2] = AUTH_STATUS_RATE_LIMIT;
-      return false;
-    }
-  } else {
-    s_session.auth_attempts = 0u;
-  }
-  s_session.auth_attempts++;
-  s_session.last_auth_time_ms = now;
-  crypto_init_once();
-  {
-    uint8_t id[8];
-    uint64_t uid = 0;
-
-    (void)hwinfo_get_device_id(id, sizeof(id));
-    for (unsigned i = 0; i < sizeof(id); i++) {
-      uid = (uid << 8) | id[i];
-    }
-    device_id[0] = (uint8_t)((uid >> 24) & 0xFFu);
-    device_id[1] = (uint8_t)((uid >> 16) & 0xFFu);
-    device_id[2] = (uint8_t)((uid >> 8) & 0xFFu);
-    device_id[3] = (uint8_t)(uid & 0xFFu);
-  }
-
-  if (payload_len == 1u && payload[0] == 0x00u) {
-    if (s_session.authenticated && session_alive()) {
-      clear_session();
-    }
-    if (!od_random(s_session.pending_server_nonce, 16u)) {
-      return false;
-    }
-    s_session.server_nonce_time_ms = now;
-    rsp[2] = AUTH_STATUS_CHALLENGE;
-    memcpy(&rsp[3], s_session.pending_server_nonce, 16u);
-    memcpy(&rsp[19], device_id, 4u);
-    *rsp_len = 23u;
-    return false;
-  }
-  if (payload_len != 32u || (now - s_session.server_nonce_time_ms) > 30000u) {
-    return false;
-  }
-  memcpy(challenge_input, s_session.pending_server_nonce, 16u);
-  memcpy(&challenge_input[16], payload, 16u);
-  memcpy(&challenge_input[32], device_id, 4u);
-  if (!aes_cmac_16(sec->encryption_key, challenge_input, sizeof(challenge_input), expected)) {
-    return false;
-  }
-  if (!od_ct_equal(expected, &payload[16], 16u)) {
-    rsp[2] = AUTH_STATUS_FAILED;
-    memset(s_session.pending_server_nonce, 0, 16u);
-    return false;
-  }
-  if (!derive_session_key(sec->encryption_key, payload, s_session.pending_server_nonce, device_id,
-                          s_session.session_key)) {
-    return false;
-  }
-  memcpy(s_session.client_nonce, payload, 16u);
-  memcpy(s_session.server_nonce, s_session.pending_server_nonce, 16u);
-  if (!derive_session_id(s_session.session_key, payload, s_session.server_nonce, s_session.session_id)) {
-    return false;
-  }
-  if (memcmp(s_session.session_id, zero8, sizeof(zero8)) == 0) {
-    return false;
-  }
-  memset(s_session.replay_window, 0, sizeof(s_session.replay_window));
-  s_session.last_seen_counter = 0u;
-  s_session.replay_idx = 0u;
-  s_session.integrity_failures = 0u;
-  s_session.authenticated = true;
-  s_session.last_activity_ms = now;
-  s_session.session_start_ms = now;
-  s_session.nonce_counter = 0u;
-  memset(s_session.pending_server_nonce, 0, 16u);
-  s_session.server_nonce_time_ms = 0u;
-  memcpy(server_input, s_session.server_nonce, 16u);
-  memcpy(&server_input[16], payload, 16u);
-  memcpy(&server_input[32], device_id, 4u);
-  if (!aes_cmac_16(s_session.session_key, server_input, sizeof(server_input), expected)) {
-    clear_session();
-    return false;
-  }
-  rsp[2] = AUTH_STATUS_SUCCESS;
-  memcpy(&rsp[3], expected, 16u);
-  *rsp_len = 19u;
-  return true;
-}
 
 static void handle_partial_write_start(uint8_t connection, const uint8_t *payload, uint16_t payload_len)
 {
@@ -1074,7 +688,12 @@ static void handle_nfc_endpoint(uint8_t connection, const uint8_t *payload, uint
   }
 
   if (payload[0] == 0x00u) {
-    uint16_t max_out = (uint16_t)(OD_PIPE_MAX_PAYLOAD - 6u);
+    /* 218, not OD_PIPE_MAX_PAYLOAD - 6 (238). The response is [status][cmd][4 B NFC metadata]
+     * [tag data], and sealing caps the whole thing at OD_SESSION_PAYLOAD_MAX (222) after the two
+     * response bytes -- so 238 bytes of tag data would seal to more than a BLE frame can carry and
+     * be refused outright. Applied in BOTH modes on purpose: one discoverable bound beats a
+     * response whose length depends on whether the session happens to be encrypted. */
+    uint16_t max_out = (uint16_t)(OD_SESSION_PAYLOAD_MAX - 4u);
     out_len = max_out;
     if (!opendisplay_ble_nfc_read(&rec_type, &s_nfc_rsp_buf[6], &out_len, max_out)) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x02u };
@@ -1412,8 +1031,36 @@ static void on_pipe_write(uint8_t connection, const uint8_t *data, uint16_t len,
         send_auth_required_response(connection, frame[1]);
         return;
       }
-      if (!decrypt_encrypted_payload(cmd, &frame[2], (uint16_t)(frame_len - 2u), s_plain_buf, &plain_len)) {
+      /* The envelope [nonce:16][ciphertext][tag:12] is contiguous behind the two command bytes,
+       * so it is one span. s_plain_buf must hold the decrypted [len:1][payload] frame -- one byte
+       * more than plain_len ends up being. */
+      struct od_session_report report;
+      enum od_session_open opened =
+        od_session_open(&s_session, cmd, od_span_make(&frame[2], (size_t)(frame_len - 2u)),
+                        s_plain_buf, sizeof(s_plain_buf), &plain_len, od_now_ms(), &report);
+      if (opened != OD_SESSION_OPEN_OK) {
         uint8_t err[] = { 0x00u, frame[1], 0xFFu };
+        /* A PIPE DATA frame refused for a NONCE reason is ordinary packet loss, and the answer
+         * is SILENCE. pipe-write-protocol.md 5.1 makes a 0x81 NACK unconditionally fatal and 5.2
+         * reserves NACKs for unrecoverable conditions, so answering here kills the upload on the
+         * first dropped frame. Saying nothing leaves the seq absent from the next SACK; the host
+         * retransmits under a fresh higher counter, which the window accepts unconditionally.
+         * This target ships PIPE_MAX_W 32, so reordering reaches the window in normal use.
+         *
+         * Deliberately narrow: a TAG failure keeps the NACK -- it is tamper evidence, not loss. */
+        const bool nonce_loss = (report.nonce_reason == (uint8_t)NONCE_OUT_OF_WINDOW ||
+                                 report.nonce_reason == (uint8_t)NONCE_REPLAY);
+        /* LOG BEFORE THE SILENT RETURN -- returning first would hide replay and out-of-window
+         * events on the one path that produces them routinely, which is the condition the
+         * throttle exists to let you observe. */
+        if (nonce_log_allowed(nonce_loss ? &s_nonce_log_window_ms : &s_nonce_log_other_ms)) {
+          od_log_warn("decrypt failed: cmd=0x%04X rc=%d nonce_reason=%u envelope=%u B",
+                      (unsigned)cmd, (int)opened, (unsigned)report.nonce_reason,
+                      (unsigned)(frame_len - 2u));
+        }
+        if (nonce_loss && cmd == CMD_PIPE_WRITE_DATA) {
+          return;   /* silence is the wire answer; the line above is the record of it */
+        }
         pipe_send(connection, err, sizeof(err));
         return;
       }

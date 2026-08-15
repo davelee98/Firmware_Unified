@@ -44,25 +44,8 @@
 
 /* ------------------------------------------------------------------- RAM-only aggregates --- */
 
-/* Live session state for an authenticated link. Also RAM-only: the replay window, the activity
- * clocks and the attempt counters are this firmware's business and never leave the device. */
-struct EncryptionSession {
-	bool authenticated;
-	uint8_t session_key[16];
-	uint8_t session_id[8];
-	uint64_t nonce_counter;
-	uint64_t last_seen_counter;
-	uint64_t replay_window[64];
-	uint8_t replay_idx;
-	uint32_t last_activity_ms;
-	uint8_t integrity_failures;
-	uint32_t session_start_ms;
-	uint8_t auth_attempts;
-	uint32_t last_auth_time_ms;
-	uint8_t client_nonce[16];
-	uint8_t server_nonce[16];
-	uint8_t pending_server_nonce[16];
-	uint32_t server_nonce_time_ms;
-};
+/* Session state lives in shared/core/od_session.h (struct od_session). The session key is not
+ * in it at all -- it lives in an od_hal_crypto slot -- so the struct stays trivially zeroable.
+ * Never memset one: od_session_clear() is the only teardown, because it also releases the slot. */
 
 #endif /* OD_RUNTIME_TYPES_H */

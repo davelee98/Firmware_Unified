@@ -53,6 +53,7 @@ list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_nvs.c
                            ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_adc.c
                            ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_panel.c
                            ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_wdt.c
+                           ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_crypto.c
                            ${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_bbep.cpp
                            ${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_fastepd.cpp
                            ${CMAKE_CURRENT_LIST_DIR}/../ble/od_ble_nimble.cpp)

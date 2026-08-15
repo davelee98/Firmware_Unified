@@ -5,6 +5,12 @@ Firmware_Unified: one repo for all OpenDisplay firmware targets, replacing four 
 same wire protocol, config parsing, transfer state machines, compression and session encryption.
 `../CLAUDE.md` covers the wider workspace.
 
+**ALL SIX SOURCE REPOS ARE CHECKED OUT AS SIBLINGS AND ARE READABLE — USE THEM.** `../Firmware`,
+`../Firmware_NRF54`, `../Firmware_Silabs`, `../Firmware_NRF`, plus `../opendisplay-protocol` (the
+canonical wire contract) and `../py-opendisplay` (the host, and the answer to "does the client
+actually do X?"). `targets/*/` here are import *snapshots* that drift; the siblings are live. Diff
+before you port — see § "Migration constraints".
+
 ## Reading budget
 
 Code first. Headers, build files and tests are ground truth; `docs/` explains *why* and is never a
@@ -23,21 +29,58 @@ looks arbitrary and is not); delete the story.
 ## Status
 
 - **Two HARDWARE-VERIFIED targets.** `targets/esp32-idf/` — 10 boards, run on an ESP32-S3. And
-  `targets/nordic-zephyr/` **as of 2026-08-14, on the `xiao_nrf52840` board only**: image upload,
-  config write + reload, and host-side MSD decode all exercised on a flashed device. Its other
+  `targets/nordic-zephyr/` **as of 2026-08-14, extended 2026-08-15, on the `xiao_nrf52840` board
+  only**: image upload, config write + reload and host-side MSD decode, then MIGRATION.md's full
+  Gate 2 including the encrypted/authenticated path, all exercised on a flashed device. Its other
   two boards (`xiao_nrf54l15`, `xiao_nrf54lm20a`) still build clean but have NOT been flashed, so
   the target is verified, the L15 is not. `efr32bg22-slc` builds headless
   (`./build-and-flash.sh --no-flash`) and has never been flashed.
+- **THERE IS NO CI. `tools/check.sh` (repo root) is every gate this repo has, and nothing runs
+  it but you.** Boundary greps, the host suite under gcc + clang, the same suite under
+  ASan/UBSan, the pre-auth fuzz targets, the py-opendisplay wire corpus, and the shim ratchet;
+  `--targets` adds both target families (ESP32 boards + sdkconfig baseline, all three Nordic
+  boards) and is required before merge. **A SKIP IS NOT A PASS** — missing
+  clang or ESP-IDF skips rather than fails, so read the summary, which reprints skips and exits
+  2 when there were any.
 - Paths in this bullet are relative to `targets/esp32-idf/`. `./build.sh` there builds every board
   fragment (it sources ESP-IDF itself; never on `PATH`). `tools/run_host_tests.sh` runs host tests
-  — or drive them directly the way CI does, `cmake -S tests/host -B <dir> && ctest --test-dir
-  <dir>`, which is the repo-root path and needs no ESP-IDF. `compat/ratchet.sh` and
+  — or drive them directly, `cmake -S tests/host -B <dir> && cmake --build <dir> && ctest
+  --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF. `compat/ratchet.sh` and
   `tools/sdkconfig_baseline.sh` are gates a change must not break.
-- **`shared/` is no longer empty** — `core/od_{adv_control,advert,config,config_asm,config_tlv,watchdog}.c`
-  plus header-only `od_span.h`, all listed in `shared/sources.cmake` (never globbed) in per-HAL
-  tiers. Consumers: host tests and `esp32-idf` take the aggregate; `nordic-zephyr` takes PURE +
+- **`shared/` is no longer empty** — `core/od_{adv_control,advert,config,config_asm,config_tlv,session,watchdog}.c`
+  listed in `shared/sources.cmake` (never globbed) in per-HAL tiers, plus the two all-inline
+  headers `od_span.h` and `od_nonce_window.h`, which correctly have no entry there. Consumers:
+  host tests and `esp32-idf` take the aggregate; `nordic-zephyr` takes PURE + HAL_CRYPTO +
   HAL_WDT; `efr32bg22-slc` takes PURE only — called on Nordic, still compiled-only on Silabs
   except `od_advert`.
+  **`od_session` is CALLED ON BOTH `esp32-idf` AND `nordic-zephyr`, AND HARDWARE-VERIFIED ON
+  `nordic-zephyr`/`xiao_nrf52840` ONLY** (C5 2026-08-15, C6 2026-08-15; Gate 2 passed on the
+  nRF52840 2026-08-15). It owns the 0x0050 handshake, the KDF, the replay window and the CCM
+  envelope in both directions; each target keeps only its clock, its device identity and its
+  logging. `esp32-idf/src/encryption.cpp` went 863 → 285 lines (the swap, plus
+  the CC310 arm and the crypto forwarders it orphaned) and `nordic-zephyr/src/opendisplay_pipe.c`
+  1320 → 1082; both `struct EncryptionSession`s are gone, and the session object went 632→112 B
+  and 640→112 B respectively.
+  **NATIVE PSA CCM IS PROVEN ON SILICON** (nRF52840, 2026-08-15) — `od_hal_crypto` (C1) replaced
+  Nordic's hand-rolled RFC 3610 with `psa_aead_*`, and the shortened-tag key policy
+  (`PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 12)`) accepts and authenticates real traffic.
+  That was the single likeliest first-flash failure and it is retired: plain `PSA_ALG_CCM` pins a
+  16-byte tag and would have failed every operation with `NOT_PERMITTED`.
+  **`esp32-idf` IS STILL UNVERIFIED** — C5's swap and C1's mbedTLS arm have never run on a board,
+  so the authority target is the one now trailing. Two things there that only hardware shows: the
+  `diff == 0` replay fix and the exact inner-length check are the two behaviour changes
+  (`DIVERGENCE_MATRIX` § 6.5-6.9) that can refuse a frame the old code accepted.
+  **The `OD-S1` PIPE silence fix is UNPROVEN on either target.** The nRF52840 pass completed an
+  encrypted upload but did not deliberately induce loss or reordering, so the path that stays
+  quiet on a nonce-rejected `0x81` frame — instead of sending the NACK that kills the upload —
+  has never been exercised. It is not host-testable; forcing reorder on a board is the only way.
+  Nordic additionally caps NFC read tag data at 218 B (was 238) so a sealed response still fits a
+  BLE frame; that cap is also unexercised.
+  docs/OD_SESSION.md is the subsystem reference — wire shapes, the four derivations, the design
+  decisions, and the verification state in one place.
+  The one flaw the promotion could NOT fix is filed: `FOLLOWUPS.md` § 5, **bidirectional nonce
+  reuse** — both directions share one `session_id` and both counters start at 0, so the same
+  CCM nonce is used under one key each way. It needs a protocol revision, not a firmware change.
   **`od_watchdog` is no longer a scaffold, and NOT YET HARDWARE-VERIFIED on either target.**
   Both `esp32-idf` (`hal/od_hal_wdt.c`, over the IDF Task Watchdog) and `nordic-zephyr`
   (`src/od_hal_wdt.c`, over the devicetree `watchdog0` + `gpregret2` nodes) implement
@@ -65,9 +108,20 @@ looks arbitrary and is not); delete the story.
   `efr32bg22-slc` still open-codes the config parse: measured 2026-08-14 as
   +1 byte of RAM **only with `OD_CONFIG_WITH_{TOUCH,BUZZER,WIFI,DATA_EXTENDED}=0`** (gated 909 B
   vs its current 844 + 64; ungated 1617 B against 484 B of static slack at 98.5% RAM). Its real
-  gate is `MAX_CONFIG_SIZE` 4096 + the NVM3 object-size check, not the aggregate. Most remaining
-  protocol logic (dispatch, transfer, session) still lives in the ESP32 target.
-- `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel}`.
+  gate is `MAX_CONFIG_SIZE` 4096 + the NVM3 object-size check, not the aggregate. The remaining
+  unpromoted protocol logic — dispatch and the transfer state machines — still lives in the
+  ESP32 target.
+- `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel,crypto}`.
+- **`shared/hal/od_hal_crypto.h` is the third shared HAL** (2026-08-15, with `od_hal_adv` and
+  `od_hal_wdt`), implemented on both `esp32-idf` (mbedTLS) and `nordic-zephyr` (native
+  `psa_aead_*`, which needed only `CONFIG_PSA_WANT_ALG_CCM=y` — the hand-rolled RFC 3610 both
+  Nordic targets carried existed because that Kconfig was never set, not because PSA lacked CCM).
+  Prepared **key slots**, not a key in the caller's struct: the targets clear a session with
+  `memset`, which would drop a live PSA handle and exhaust a finite pool. Four-valued status so a
+  tag mismatch and an engine fault stay distinguishable — the session's 3-strike policy depends on
+  it. **NOT YET HARDWARE-VERIFIED**, and that commit also deletes Nordic's soft CCM (preserved as
+  `tests/host/session_ccm_reference.inc`), so treat the CCM path as unproven until a board
+  authenticates and completes an encrypted upload.
 - **Never hardware-verified:** the WiFi/LAN transport, and the F4/F7 correctness fixes.
 - **`compat/` (Arduino shim) is at its floor of 5 files** — `TARGET_NRF` arms that leave with
   migration step 4. Do not "finish" them (`targets/esp32-idf/compat/SHIM_BUDGET`).
@@ -83,8 +137,8 @@ looks arbitrary and is not); delete the story.
 framework header** — `esp_*`, `driver/*`, `soc/*`, `hal/*`, `freertos/*`, `nrf_*`, `nrfx`, `sl_*`,
 `em_*`, `zephyr/*`, `Arduino.h`, `bluefruit.h`, `NimBLE*`, `bb_epaper`, `TFT_eSPI`. A file needing
 one belongs in `targets/<target>/`. One slip and the repo is four codebases in a directory.
-Enforced by [.github/workflows/shared-boundary.yml](.github/workflows/shared-boundary.yml) — run
-that grep before proposing anything under `shared/`; extend it as targets are imported.
+Enforced by the three `shared boundary:` checks in [tools/check.sh](tools/check.sh) — run them
+before proposing anything under `shared/`; extend the pattern as targets are imported.
 
 ## Architectural decisions
 
@@ -183,6 +237,19 @@ Rationale in [docs/MIGRATION.md](docs/MIGRATION.md) / [docs/ARCHITECTURE.md](doc
   justify itself — in a differential test, the Firmware form is the reference. `esp32-idf` is
   C++ and `shared/` is plain C, so this usually means a C port, not a file move. A default, not
   a licence to skip the write-up.
+- **THE AUTHORITY IS `../Firmware/`, THE SIBLING REPO — NOT `targets/esp32-idf/src/`.** That
+  directory is a *snapshot* taken at import, and upstream keeps moving. Before porting or
+  transcribing any algorithm, diff the two; when this repo and upstream disagree, upstream wins
+  unless the difference is a deliberate Firmware_Unified adaptation (Arduino removal, `od_hal_*`,
+  `od_log`, `struct od_config`), which the import is full of — so separate *drift* from
+  *adaptation* rather than blanket-copying either way. `../Firmware/tools/` also carries host
+  tests worth porting with the code they cover.
+  Learned the hard way on `od_session` (2026-08-15): the replay window had been extracted upstream
+  into `src/nonce_window.h` with an 816-line host test, and three rounds of design were built on
+  the stale ring instead — two of them wrong in security-relevant ways (a forward window cap that
+  strands a session, and counting nonce failures as integrity strikes so packet loss tears one
+  down). A 30-second diff would have caught all of it.
+  The same applies to the other three source repos for their targets.
 
 ## Memory sensitivity
 

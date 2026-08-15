@@ -82,6 +82,48 @@ cites *rev-4's* labels historically and is deliberately left alone.
 
 ## Findings that shaped the design
 
+### THE REFERENCE IS `../Firmware/src/`, NOT THIS REPO'S IMPORT
+
+**Read this before writing a line of C4.** `targets/esp32-idf/src/encryption.cpp` is an *older
+import*. Upstream `Firmware` — which CLAUDE.md names the authority — has moved on, and every
+mistake found in this plan so far came from treating the import as the shipped algorithm. A full
+diff of the subsystem (upstream vs the import at `80cc028`, taken 2026-08-15) found **seven items
+of genuine drift**, three of which had already been designed wrongly here:
+
+1. **`nonce_window.h` (206 lines, new).** The replay window extracted as a zero-dependency state
+   machine with an 816-line host test at `../Firmware/tools/test_nonce_window.cpp`. 512 B ring →
+   32 B bitmap. **C4 ports it as `shared/core/od_nonce_window.h` with no logic change**, and ports
+   its test as the differential oracle. Do not write a replacement — see the replay section for
+   the two ways the one designed here was worse.
+2. **`NonceResult` is four-valued:** `OK`, `REPLAY`, `OUT_OF_WINDOW`, `BAD_SESSION`. The session-id
+   mismatch became a nonce result rather than a separate branch.
+3. **Nonce failures no longer count toward `integrity_failures`.** Only the CCM tag is a tamper
+   oracle; nonce failures are evidence of a lossy link. **This plan had it backwards** — `REPLAY`
+   and `WRONG_SESSION` counted, which lets ordinary packet loss tear a live session down after
+   three frames. Same self-DoS shape this plan flags elsewhere, built straight in.
+4. **`BAD_SESSION` routes to that same non-counting path**, deliberately: a session-id mismatch is
+   what a stale client sends after the device re-authenticated.
+5. **`decryptCommand` gained a `NonceResult *reason_out`** so the caller can separate a
+   nonce-reason rejection — ordinary loss, which must **not** draw a fatal NACK on the pipe path —
+   from a tag failure. This plan collapsed both into one result and asserted the caller could not
+   act differently. It can, and must; `report->nonce_reason` carries it.
+6. **`resetNonceState()`** resets the four nonce fields together and zeroes the device's **own
+   outbound** counter on re-auth: carrying it across while the client restarts at 0 reproduces
+   keystream reuse against itself.
+7. **Nonce logging is rate-limited per site** (5 s each), because once these stop counting toward
+   the strike limit nothing else throttles a peer driving them, and out-of-window fires routinely
+   on a lossy link.
+
+**Not drift — correct adaptations, leave them:** `securityConfig` as a reference (the `od_config`
+promotion), `getChipIdHex()` in char-buffer form rather than Arduino `String`, `<Arduino.h>`
+dropped, and `session_guard.cpp` on `od_hal_time`. `session_guard.h` is byte-identical.
+
+**Unchanged upstream, so these findings stand:** the wrap-unsafe session timeout, and the
+idle-gap rate limiter.
+
+**The rule for C4:** when this plan and the import disagree, check `../Firmware/src/` before
+assuming either. The import is a snapshot; the authority is upstream.
+
 **PSA's native CCM is available and simply switched off.** `prj.conf:99-106` enables only CMAC and
 ECB; the generated `build-*/zephyr/generated/library_nrf_security_psa/nrf-psa-crypto-config.h` shows
 `/* #undef PSA_WANT_ALG_CCM */`. The symbol is live (Kconfig prints "not set" only for known
@@ -295,55 +337,48 @@ holds no key material after establish, a real reduction in what a memory dump yi
 `SecurityConfig` — safe *only because* a config save clears the session, which the header must
 state so nobody removes that call.
 
-**Bitmap.** Bit *i* = "counter `rx_last - i` accepted"; bit 0 is `rx_last`.
-```
-#define OD_REPLAY_WINDOW_HALF 32u
-OD_STATIC_ASSERT(OD_REPLAY_WINDOW_HALF < 64u, "the seen bitmap is one uint64_t");
+**THE REPLAY WINDOW IS PORTED, NOT DESIGNED. Corrected 2026-08-15.** Upstream `Firmware` — the
+authority repo — has already replaced the 64-entry ring with a bitmap: `../Firmware/src/
+nonce_window.h`, zero-dependency, with an 816-line host test at `../Firmware/tools/
+test_nonce_window.cpp`. This repo's `targets/esp32-idf/src/encryption.cpp` is an *older import*
+and does not reflect it. C4 lands that header as `shared/core/od_nonce_window.h` with the `od_`
+prefix and **no logic change**, per CLAUDE.md's "Firmware is the authority" and "import working
+drivers as-is".
 
-check(c):                                  /* PURE — never mutates */
-  reject unless authenticated
-  reject unless ct_equal(nonce[0..7], session_id, 8)
-  if c > rx_last:  reject if (c - rx_last) > 32; else accept
-  else:            d = rx_last - c; reject if d > 32; reject if (rx_seen >> d) & 1; else accept
+**Earlier revisions of this plan specified a bitmap I designed, and it was worse in two
+security-relevant ways.** Recorded because the reasoning is the point:
 
-advance(c):                                /* ONLY after ccm_decrypt returned OK */
-  if c > rx_last: shift = c - rx_last; rx_seen = (shift >= 64) ? 0 : (rx_seen << shift);
-                  rx_seen |= 1; rx_last = c;
-  else:           rx_seen |= (uint64_t)1 << (rx_last - c);
-```
-**How this closes `diff == 0`:** the old ring scan was skipped entirely when the difference was
-zero (`encryption.cpp:178`, Nordic `:461`, Silabs `:383`), so a replay at exactly `last_seen` always
-passed. Here `d == 0` is just bit 0, and advance sets bit 0 on every forward accept — no special
-case, which is why it stays fixed. Keep the `shift >= 64` guard even though `shift ≤ 32` is
-provable: a shift ≥ 64 is UB and a future window change is exactly how that lands.
+- **I bounded the forward direction at ±32. Upstream leaves it unbounded** — any counter above
+  `last_seen` is accepted, and only the *backward* window is bounded (256 bits). Upstream's
+  "Reversal of Decision A" shows no forward cap can be sized safely: once a gap exceeds it,
+  nothing commits, `last_seen` never advances, and every later frame is rejected further out than
+  the last. That strands the session rather than rejecting a frame.
+- **I used signed difference arithmetic. Upstream is plain unsigned, deliberately.** The counter
+  is parsed off the wire *before* the tag is verified, so an attacker controls both operands.
+  Signed differences mean converting a `uint64_t >= 2^63` to `int64_t` (implementation-defined
+  before C++20), signed overflow, and negating `INT64_MIN` — three routes to UB on
+  attacker-chosen input. Upstream uses only unsigned comparison and one subtraction guarded by
+  its own branch.
 
-**Accept-set delta vs the ring: TWO intended divergences, not one.**
-1. The `d == 0` replay, as above — the fix.
-2. **Counter value 0 arriving as a backfill.** All three shipped rings are zero-filled at auth
-   (`encryption.cpp:709`, `opendisplay_pipe.c:744`, `efr32bg22-slc:663`) and the scan compares raw
-   values (`encryption.cpp:180-185`), so **counter 0 is indistinguishable from an empty slot**:
-   send 1 then 0 and the shipped code rejects the 0 as a replay it never saw, until all 64 slots
-   have been overwritten. The bitmap accepts it once, which is correct. Reachable in practice —
-   under PIPE reordering frame 0 can arrive after frame 1.
+Both of my "two intended divergences" (`diff == 0`, and counter 0 as a backfill) are divergences
+from the **stale import**, not from current Firmware: upstream's `od_nonce_check` tests bit 0 like
+any other bit, and its all-zero bitmap accepts counter 0 exactly once with no sentinel. So the
+differential reference is **`tools/test_nonce_window.cpp`, ported**, not a transcription of the
+ring — which is a strictly better oracle than anything C0's capture would have given for this
+subsystem.
 
-Both must be written into the differential test's oracle, or the sweep goes red on the first
-counter-0 backfill and the likely "fix" is to corrupt the reference. **The sweep's oracle is a
-true seen-set model**; the ring transcription is compared only outside these two carve-outs.
-Otherwise the accept sets match: every counter the ring could remember but the bitmap cannot is
-one the ±32 gate already rejects.
+Sizes change with it: the backward window is **256 bits = 32 B**, not 8 B, so the saving against
+the 512 B ring is **480 B** rather than 504, and `sizeof(struct od_session)` is 112 against a
+128-byte ratchet. Its width is **not** a replay-security parameter and is deliberately not derived
+from the PIPE window — upstream says so explicitly, which retires the coupling assert below.
 
-What the check/advance split gives up: nothing. The only thing the single mutating function
-"provided" was advancing the window for frames that are later rejected — ESP32 mutates at
-`encryption.cpp:740` even for a frame it refuses at `:758`. Closing that is the point.
-
-**The PIPE-window assert, on both targets.** `SHARED_API_DESIGN.md:711` wants it in shared/, but
-the constant is target-local and spelled `PIPE_MAX_W` — there is no `OD_PIPE_MAX_W` anywhere yet,
-and no `od_pipe.h`. So: `od_session.h` carries the assert **guarded** by `#ifdef OD_PIPE_MAX_W`
-(inert today, fires the day od_pipe lands and names it), and **both** targets get an unguarded
-`OD_STATIC_ASSERT(PIPE_MAX_W <= OD_REPLAY_WINDOW_HALF, ...)` next to their own definition —
-`esp32-idf/src/structs.h:51,55` (16 or 32) and `nordic-zephyr/src/opendisplay_pipe_write.cpp:9`
-(32). **Both ship PIPE**: Nordic dispatches all three opcodes at `opendisplay_pipe.c:1372-1380`
-and carries the 33-slot reorder queue. Any plan text claiming otherwise is wrong.
+**The PIPE-window coupling assert is RETIRED.** `SHARED_API_DESIGN.md:711` wanted
+`OD_PIPE_MAX_W <= OD_REPLAY_WINDOW_HALF`, which made sense against a ±32 window. Upstream's
+`nonce_window.h` states the opposite outright: the width is only reordering tolerance, "narrowing
+or widening it cannot create a replay hole", and there is "deliberately no attempt to derive it
+from the client's pipe window". A backward rejection is self-healing, because the client
+re-encrypts every retransmission under a higher counter. Delete the assert from the design doc
+rather than carrying it into shared/.
 
 ### 4. `od_session.h` — the API
 
@@ -656,29 +691,26 @@ precedes `od_dispatch.c` with the reason, and delete the **stale duplicate `core
 
 ## Commit sequence
 
-**C0 — Capture, and it blocks C1 and C4.** Bench sessions on a flashed ESP32-S3 **and** the verified
-`xiao_nrf52840`, recorded at py-opendisplay's transport boundary: 0x0050 step 1 + step 2 (both
-directions — the 19-byte proof is the point), an authenticated config round-trip, an authenticated
-image push, and the frames needed to DERIVE a replay — the replay itself is NOT captured, see
-Testing → `tests/vectors/session.json`.
-`TEST_OWNERSHIP.md:269-275`: after the swap there is no untouched reference left.
+**C0 — Capture. SKIPPED by decision, 2026-08-15.** The hardware capture is not being taken, so
+`tests/vectors/session.json`, `tools/session_vectors_gen.py` and `session_vectors.inc` drop out of
+this plan and **C1 is no longer blocked**.
 
-**C0 BLOCKS C1, not just C5.** C1 replaces Nordic's CCM outright, so a device flashed with C1 is
-no longer the untouched reference the capture exists to preserve — "byte-identical on the wire" is
-the thing being verified, not something to assume while verifying it. Either land C0 before
-flashing C1, or capture from pinned pre-C1 release binaries and record their SHAs in the vector
-file. **C0 also blocks C4**, because Gate 1 there includes `session_vectors.inc`, which cannot be
-generated before `session.json` exists.
+*What that costs, recorded so it is a decision and not an oversight.* The differential test loses
+its third and strongest layer. Layers 1 and 2 survive — an independent transcription of ESP32's
+KDF, and the transcribed soft CCM pinning the envelope framing — and they still prove the promoted
+code agrees with the shipped algorithms. But they prove it against **a transcription of the source
+I can read**, not against bytes a real device actually emitted, so a misreading of the shipped code
+is invisible: both sides are then wrong in the same way. Capture is the only layer that could have
+caught that, and `TEST_OWNERSHIP.md:269-275` is explicit that once C5/C6 land there is no untouched
+reference left to take it from. Gate 1's "shared wire vectors passing against both the C core and
+py-opendisplay" is therefore **not met for this subsystem**.
 
-**On secrets, precisely.** A transport capture does *not* contain the session key — the key is
-derived, never transmitted; what is on the wire is the two nonces, the device_id and the MACs.
-But the C fixture **must** carry the master key to re-derive anything, so the committed artifact
-does expose a working key. So: **provision both devices with a throwaway 16-byte master key,
-commit that same key as explicit synthetic fixture state (not a secret to be hidden — a value the
-test needs and the reader should see), rotate it off the devices afterwards, and scrub BLE
-addresses.** `TEST_OWNERSHIP.md:302-305` says "captures contain session keys"; that is loose about
-the mechanism and right about the consequence. It blocks on bench time, so schedule it first —
-it cannot run in parallel with C1, which is the commit that replaces the reference.
+*Cheap partial substitutes, if wanted later.* `replay_vectors.py` already carries a 0x0050 builder
+for both h2d handshake shapes, so **authored** (not captured) h2d vectors would still exercise the
+host encoder against the C core without any bench time. And the 19-byte step-2 proof — the one
+undocumented thing on this wire — stays pinned by `OD_SESSION_STEP2_REPLY_LEN` and its
+`OD_STATIC_ASSERT` regardless. Hardware verification at C5/C6 remains the real gate and is
+unchanged.
 
 **C1 — the crypto seam, proven in isolation.** `od_hal_crypto.h` + both implementations +
 `CONFIG_PSA_WANT_ALG_CCM=y`. Repoint the *existing* target code onto it: ESP32's `aes_*` become
@@ -713,13 +745,16 @@ that does not build.)
 
 **C4 — `od_session.c`, test registered, host suite green, no target calls it.** Compiles and links
 dead on ESP32 (aggregate) and in the host build. **Gate 1 closes here — including the CI wiring,
-which is part of this commit and not a loose intention:** the `fuzz-short` job and
-`tools/session_vectors_gen.py --check` both land in `.github/workflows/host-tests.yml` here.
-Also decide `session.json`'s shape deliberately: `replay_vectors.py:216` **globs `*.json`**, so the
-new file is picked up automatically and, with the event-typed schema, contributes **zero** vectors
-in silence. **Decided: the file carries BOTH keys** — `vectors` with the h2d handshake frames the Python
-runner's existing 0x0050 builder already handles, and `events` with the ordered, result-typed
-sequence the C runner drives. One file, two consumers, neither silently empty.
+which is part of this commit and not a loose intention:** the `fuzz-short` job lands in
+`.github/workflows/host-tests.yml` here. There is no `session_vectors_gen.py --check` job and no
+`session.json` — C0 is skipped, so `replay_vectors.py` is untouched by this plan.
+
+**First move of C4: port, don't write.** `../Firmware/src/nonce_window.h` →
+`shared/core/od_nonce_window.h`, `od_` prefix and no logic change, and
+`../Firmware/tools/test_nonce_window.cpp` → the host suite as its differential oracle. That is
+~206 lines of already-tested, already-argued state machine this plan would otherwise re-derive
+worse. Everything else in `od_session.c` is written against `../Firmware/src/encryption.cpp` — the
+upstream file, not the import — with the seven drift items above applied.
 
 **C5 — ESP32 swaps** (first, per CLAUDE.md:171 — the authority target is the reference). ~350
 lines out of `encryption.cpp`; `struct EncryptionSession` deleted from `encryption_state.h`.
@@ -766,41 +801,26 @@ re-authentications**.
 
 **Differential reference, three layers:** an independent transcription of ESP32's KDF
 (`encryption.cpp:107-154`) swept over nonces; the transcribed soft CCM pinning the envelope
-framing; and the C0 hardware capture replayed — the only layer proving the shipped fleet agrees.
+framing. **The third layer — the C0 hardware capture — is skipped (see C0), so nothing here proves
+agreement with bytes a real device emitted; the two transcriptions are the whole reference.**
 
 **How the capture actually gets replayed, because "a C runner" is not a design.** There is no C
 JSON parser in this repo and there will not be one: `replay_vectors.py` is per-frame and cannot
 establish a multi-frame session, so it stays as-is for the h2d halves it already handles.
-Instead add `tools/session_vectors_gen.py`, run **manually** and its output committed (not a build
-step — the host build must not need Python): it reads `tests/vectors/session.json` and emits
-`tests/host/session_vectors.inc`. `session_test.c` `#include`s it and drives the events in order,
-so session continuity is just program order. Regenerating is a reviewable diff of C literals, and
-**`tools/session_vectors_gen.py --check` runs in CI** so `session.json` and the committed `.inc`
-cannot drift apart.
+**With C0 skipped there is no `session.json`, no generator and no C corpus runner in this plan.**
+The vector machinery described in earlier revisions (`tools/session_vectors_gen.py` emitting a
+committed `session_vectors.inc`, a scripted RNG stream carrying a captured server nonce, and the
+`AUTH_REQUEST` / `H2D_ENCRYPTED` / `D2H_PLAINTEXT` event types) all existed to replay captured
+device traffic. None of it is needed for authored tests, which drive the API directly and use the
+deterministic counter-seeded fake. If a capture is taken later, that machinery is the shape to
+build — see the git history of this file rather than re-deriving it.
 
-Two things the fixture must carry that a naive dump would miss:
-
-- **A scripted RNG stream, not counter-seeded randomness.** The capture contains a *genuinely
-  random* server nonce; a fake RNG that counts would make `od_session_authenticate` mint a
-  different challenge and the replay would diverge on the very first frame. The generator emits
-  the captured server nonce as an ordered byte stream, and the fake's `od_hal_crypto_random`
-  serves from it — so the replay reproduces the recorded handshake exactly. The counter-seeded
-  mode stays for the *authored* tests, where reproducibility is all that matters.
-- **Explicit event types with an expected RESULT, not just expected bytes** — because otherwise
-  the encrypted device→host direction is never checked, and a replay event cannot be expressed at
-  all:
-  `AUTH_REQUEST` (body → expected reply bytes + expected `enum od_session_auth`),
-  `H2D_ENCRYPTED` (envelope → expected `enum od_session_open`, plus expected plaintext when OK),
-  `D2H_PLAINTEXT` (plain_frame → expected envelope, via `od_session_seal`).
-  Plus the synthetic master key and device_id as fixture state.
-
-**The captured replay is NOT a golden event, and this is the trap.** C0 records *existing*
-firmware, which **accepts** a `diff == 0` resend; the promoted core deliberately returns `REPLAY`.
-So a captured replay replayed as an ordinary event asserts the old behaviour and fails the new
-code — inviting someone to "fix" the core. **Capture only the successful sequence.** Derive the
-negative vector from it: re-present a captured frame with `expected_result: OD_SESSION_OPEN_REPLAY`,
-and *separately* assert that the transcribed legacy oracle accepted that same frame. Those two
-assertions together are what proves the fix; either alone proves nothing.
+**The replay assertion still needs two halves, capture or not.** A replay case must assert both
+that the promoted core returns `OD_SESSION_OPEN_REPLAY` **and** that the transcribed legacy oracle
+*accepted* that same frame — the shipped code skips the seen-scan when `diff == 0`. Either
+assertion alone proves nothing: the first could pass against a core that rejects everything, the
+second is just a description of the old bug. With C0 skipped the frame is authored rather than
+captured, which does not weaken this particular pairing — both halves run against code, not bytes.
 
 **Cases that carry the weight:** `diff == 0` refused *and* asserted to disagree with the
 transcribed ring-scan (that is what makes it a fix rather than a claim); window-advance ordering
@@ -826,11 +846,8 @@ Added by review, each guarding a specific hole:
 - **Timeout boundary** — exactly `timeout_ms` expires, `timeout_ms - 1` does not.
 - **`rsp == NULL` / `rsp_cap < 3`** — `BAD_ARGUMENT` / `NO_ROOM`, no write, no crash.
 
-**Coordinate the C runner with dispatch's.** This plan's C4 lands `tools/session_vectors_gen.py`
-and a C driver for `session.json`; the dispatch plan's C5 lands a "C corpus runner" for
-`dispatch.json`. Two runners for one problem. This one arrives first, so it sets the pattern —
-generator emits committed C literals, `--check` in CI — and dispatch's should reuse it rather than
-invent a second mechanism.
+**No C corpus runner here.** With C0 skipped this plan lands none, so the dispatch plan's C12
+runner for `dispatch.json` is the first — it sets the pattern rather than reusing one.
 
 **Stand up `tests/fuzz/` now, minimally — and wire it, or it does not close Gate 1.** The
 handshake *is* the pre-auth surface and `MIGRATION.md:286` requires coverage for it.
@@ -846,7 +863,8 @@ never reached, while the fuzzer reports healthy coverage of a rejection path.
 Concretely, since "add fuzzing" is where this silently becomes a no-op:
 - `tests/fuzz/CMakeLists.txt`, clang-only, guarded by `if(CMAKE_C_COMPILER_ID MATCHES "Clang")`,
   `-fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -g`.
-- Corpus at `tests/fuzz/corpus/<target>/`, seeded from the C0 frames plus authored malformed ones;
+- Corpus at `tests/fuzz/corpus/<target>/`, seeded from authored handshake and envelope frames
+  (C0 is skipped, so there are no captured seeds) plus authored malformed ones;
   every crash reproducer checked in **and also** replayed as an ordinary case in `session_test.c`,
   so a regression fails the normal gcc+clang run and not only a fuzz run nobody triggers.
 - A `fuzz-short` job in `.github/workflows/host-tests.yml`: `-max_total_time=60 -runs=200000` per
@@ -874,9 +892,11 @@ Concretely, since "add fuzzing" is where this silently becomes a no-op:
    reader's expectation, and all three targets already rely on it. If it is quietly made pure
    during implementation, sessions become immortal. Name, doc comment, non-const argument and a
    host case all defend it.
-4. **Capture slips past the swap.** Highest-value, lowest-urgency-*feeling* item. C0 is a
-   merge-blocker on **C1** (which replaces the reference implementation) and on **C4** (whose
-   Gate 1 needs `session_vectors.inc`) — not merely on C5, and not an aspiration.
+4. **No capture means a transcription error is invisible.** C0 is skipped by decision, so the
+   differential reference is my reading of the shipped code rather than device bytes; if I
+   misread it, both sides agree and the test passes. Mitigated only by hardware verification at
+   C5/C6, which is now the sole check that the wire did not move. If anything looks wrong on a
+   board, suspect the transcription before the promoted code.
 5. **The 19-byte reply gets "corrected" to the spec's 3 bytes.** Every shipping host expects 19.
    Pinned by constant + assert + capture vector; the spec correction is filed upstream.
 6. **`AUTH_STATUS_SUCCESS == AUTH_STATUS_CHALLENGE == 0x00`** — a refactor keying on the status

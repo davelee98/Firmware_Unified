@@ -16,11 +16,11 @@
 # Paths are relative to this file's directory. Consumers prefix with ${OD_SHARED_DIR}.
 #
 # HEADER-ONLY FILES HAVE NO ENTRY HERE and that is not the omission this file exists to prevent.
-# core/od_span.h is the only one today: it is all static inline, so there is nothing to compile
-# separately and nothing to link. It still reaches every consumer, because every one of them
-# takes OD_SHARED_INCLUDE_DIRS and the sources below include it. Do not "fix" its absence by
-# inventing an od_span.c -- what the one-list rule guards against is a source no target builds,
-# and a header with no source cannot be that.
+# core/od_span.h and core/od_nonce_window.h are the two today: both are all static inline, so
+# there is nothing to compile separately and nothing to link. They still reach every consumer,
+# because every one of them takes OD_SHARED_INCLUDE_DIRS and the sources below include them. Do
+# not "fix" their absence by inventing an od_span.c -- what the one-list rule guards against is a
+# source no target builds, and a header with no source cannot be that.
 #
 # The list is no longer empty. core/od_adv_control.c is the first entry, landed with its host
 # tests (tests/host/adv_control_test.c), which were written against the header before the
@@ -60,11 +60,16 @@
 #                         three targets already broadcast, now pinned by a differential host
 #                         test instead of by a comment citing another target's line numbers.
 #                         Not a reordering of anything that parses or alters wire BEHAVIOUR.)
+#   core/od_session.c     auth, KDF, nonce/replay              (LANDED — moved AHEAD of
+#                         od_dispatch.c, deliberately. The dispatcher's own encryption gate is
+#                         written in terms of this module: it asks od_session_security_enabled()
+#                         and od_session_alive() before routing, and calls od_session_open() /
+#                         od_session_seal() around every handler. Landing dispatch first would
+#                         mean writing that gate against three targets' private session state and
+#                         then rewriting it, so the ordering is a dependency, not a preference.)
 #   core/od_dispatch.c    opcode dispatch, encryption gate
 #   core/od_xfer_direct.c 0x70/0x71/0x72
 #   core/od_xfer_partial.c 0x76
-#   core/od_session.c     auth, KDF, nonce/replay
-#   core/od_advert.c      16-byte MSD build
 #   core/od_pipe.c        0x80-0x82          (compile-gated OD_PIPE_ENABLE)
 #   compress/od_zlib_stream.c
 
@@ -77,6 +82,7 @@ get_filename_component(OD_SHARED_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
 #
 #   PURE     needs the C standard library and shared/protocol only. Any consumer can take it.
 #   HAL_ADV  needs shared/hal/od_hal_adv.h implemented (three link-time C functions).
+#   HAL_CRYPTO needs shared/hal/od_hal_crypto.h implemented (prepared AES key + primitives).
 #   HAL_WDT  needs shared/hal/od_hal_wdt.h implemented (reset reason, retained byte, arm, feed).
 #
 # WHY THE SPLIT EXISTS. A target part-way through migration can consume the sources whose HAL it
@@ -105,6 +111,10 @@ set(OD_SHARED_SOURCES_HAL_ADV
     "${CMAKE_CURRENT_LIST_DIR}/core/od_adv_control.c"
 )
 
+set(OD_SHARED_SOURCES_HAL_CRYPTO
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_session.c"
+)
+
 set(OD_SHARED_SOURCES_HAL_WDT
     "${CMAKE_CURRENT_LIST_DIR}/core/od_watchdog.c"
 )
@@ -114,6 +124,7 @@ set(OD_SHARED_SOURCES_HAL_WDT
 set(OD_SHARED_SOURCES
     ${OD_SHARED_SOURCES_PURE}
     ${OD_SHARED_SOURCES_HAL_ADV}
+    ${OD_SHARED_SOURCES_HAL_CRYPTO}
     ${OD_SHARED_SOURCES_HAL_WDT}
 )
 
