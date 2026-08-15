@@ -116,8 +116,15 @@ add_test(NAME config COMMAND od_config_test)
 # is right, or that a real backend's tag matches this one. Those need the targets and C5/C6
 # hardware. With the C0 capture skipped, the reference here is transcription plus a ported header,
 # not bytes a device emitted.
-add_executable(od_session_test session_test.c aes128.c)
-target_link_libraries(od_session_test od_shared)
+# session_fake is its own library because tests/fuzz/ links the SAME fake. A second, subtly
+# different fake would make a fuzz finding unreproducible in this suite -- which is where a
+# finding has to land to stay fixed.
+add_library(od_session_fake STATIC session_fake.c aes128.c)
+target_link_libraries(od_session_fake PUBLIC od_shared)
+target_include_directories(od_session_fake PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+
+add_executable(od_session_test session_test.c)
+target_link_libraries(od_session_test od_session_fake)
 add_test(NAME session COMMAND od_session_test)
 
 # aes128: FIPS-197 known-answer vectors for the host AES core (tests/host/aes128.c).
@@ -208,4 +215,16 @@ elseif(NOT Python3_FOUND)
                     "The corpus is unchecked in this build.")
 else()
     message(WARNING "od: ${OD_REPLAY_SCRIPT} missing — replay_vectors NOT registered.")
+endif()
+
+# --------------------------------------------------------------------------------------------
+# Fuzz targets (tests/fuzz/), Clang only -- -fsanitize=fuzzer is a Clang feature and gcc has no
+# libFuzzer. Added here rather than as a separate project so the SAME configure step CI already
+# runs builds them, and so they link od_session_fake instead of a second, divergent fake.
+if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND EXISTS ${CMAKE_CURRENT_LIST_DIR}/../fuzz/CMakeLists.txt)
+    add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../fuzz fuzz)
+    message(STATUS "od: Clang detected — tests/fuzz targets registered")
+else()
+    message(STATUS "od: fuzz targets NOT built (needs Clang); the pre-auth surface is "
+                   "UNFUZZED in this build")
 endif()

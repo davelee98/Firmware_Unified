@@ -52,6 +52,102 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   # ---------------------------------------------------------------------------------
+  # The same suite under ASan + UBSan.
+  # ---------------------------------------------------------------------------------
+  # The compile gate above proves shared/ builds warning-clean; it does not prove that a
+  # buffer bound is right. This does, for every host test at once -- including the two
+  # PRE-AUTH parsers, od_config_tlv and od_session, whose inputs an unauthenticated peer
+  # controls.
+  #
+  # halt_on_error is not decoration: UBSan's default is to print a diagnostic and CARRY ON
+  # with status 0, so without it this job goes green on a real finding.
+  sanitizers:
+    name: host tests under ASan + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S tests/host -B build-asan -G Ninja \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build
+        run: cmake --build build-asan
+
+      - name: Test
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          ASAN_OPTIONS: detect_leaks=1
+        run: ctest --test-dir build-asan --output-on-failure
+
+  # ---------------------------------------------------------------------------------
+  # Fuzzing, bounded, on every PR.
+  # ---------------------------------------------------------------------------------
+  # MIGRATION.md Gate 1 requires fuzz coverage for anything reachable pre-authentication.
+  # A minute per target is not a soak -- it is a GATE, so that a regression on the
+  # handshake or the CCM envelope fails a PR rather than waiting for someone to run a
+  # fuzzer by hand. Longer soaks stay manual.
+  #
+  # Clang only: -fsanitize=fuzzer is a Clang feature and gcc has no libFuzzer. The corpora
+  # under tests/fuzz/corpus/ are committed, so each run starts from the coverage the last
+  # one found instead of from nothing.
+  #
+  # A crash here means: commit the reproducer to the corpus AND pin it as a numbered case
+  # in tests/host/session_test.c, so the regression fails the ordinary gcc+clang run too.
+  fuzz-short:
+    name: fuzz (60s per target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+          clang --version
+
+      - name: Configure
+        run: cmake -S tests/host -B build-fuzz -G Ninja -DCMAKE_C_COMPILER=clang
+
+      - name: Build
+        run: cmake --build build-fuzz
+
+      # If tests/fuzz ever stops being registered -- a renamed guard, a moved directory --
+      # every step below would silently pass with nothing to run. Fail loudly instead.
+      - name: Assert the fuzz targets exist
+        run: |
+          for t in session_open_raw session_open_sealed session_auth; do
+            test -x "build-fuzz/fuzz/od_fuzz_$t" || {
+              echo "::error::od_fuzz_$t was not built — the pre-auth surface is unfuzzed"; exit 1; }
+          done
+
+      - name: Fuzz
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          for t in session_open_raw session_open_sealed session_auth; do
+            echo "::group::$t"
+            build-fuzz/fuzz/od_fuzz_$t -max_total_time=60 -runs=2000000 \
+              -print_final_stats=1 tests/fuzz/corpus/$t
+            echo "::endgroup::"
+          done
+
+      - name: Upload crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: crash-*
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------------
   # The corpus, against the version Home_Assistant_Integration actually pins.
   # ---------------------------------------------------------------------------------
   replay-pinned:
