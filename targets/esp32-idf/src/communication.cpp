@@ -1034,13 +1034,13 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
             OD_CALL_CONVERTED(CMD_DEEP_SLEEP, handleDeepSleepCommand(&ctx, data + 2, len - 2));
             break;
         case CMD_DIRECT_WRITE_START:  // 0x0070
-            handleDirectWriteStart(data + 2, len - 2);
+            OD_CALL_CONVERTED(CMD_DIRECT_WRITE_START, handleDirectWriteStart(&ctx, data + 2, len - 2));
             break;
         case CMD_DIRECT_WRITE_DATA:   // 0x0071
-            handleDirectWriteData(data + 2, len - 2);
+            OD_CALL_CONVERTED(CMD_DIRECT_WRITE_DATA, handleDirectWriteData(&ctx, data + 2, len - 2));
             break;
         case CMD_DIRECT_WRITE_END:    // 0x0072
-            handleDirectWriteEnd(data + 2, len - 2);
+            OD_CALL_CONVERTED(CMD_DIRECT_WRITE_END, handleDirectWriteEnd(&ctx, data + 2, len - 2));
             break;
         case CMD_LED_ACTIVATE:        // 0x0073
             OD_CALL_CONVERTED(CMD_LED_ACTIVATE, handleLedActivate(&ctx, data + 2, len - 2));
@@ -1049,23 +1049,23 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
             OD_CALL_CONVERTED(CMD_LED_STOP, handleLedStop(&ctx, data + 2, len - 2));
             break;
         case CMD_PARTIAL_WRITE_START: // 0x0076
-            handlePartialWriteStart(data + 2, len - 2);
+            OD_CALL_CONVERTED(CMD_PARTIAL_WRITE_START, handlePartialWriteStart(&ctx, data + 2, len - 2));
             break;
         case CMD_BUZZER:              // 0x0077
             OD_CALL_CONVERTED(CMD_BUZZER, handleBuzzerActivate(&ctx, data + 2, len - 2));
             break;
         case CMD_PIPE_WRITE_START:    // 0x0080
-            handlePipeWriteStart(data + 2, len - 2);
+            OD_CALL_CONVERTED(CMD_PIPE_WRITE_START, handlePipeWriteStart(&ctx, data + 2, len - 2));
             break;
         case CMD_PIPE_WRITE_DATA:     // 0x0081
             // The replay counter (verifyNonceReplay) already advanced at decrypt time,
             // above this switch, for every 0x0081 frame — including ones the handler
             // then queues or discards — so drops/dupes never desync it and the counter
             // delta stays within in-flight <= W <= 32 <= the +-32 replay window.
-            handlePipeWriteData(data + 2, len - 2);
+            OD_CALL_CONVERTED(CMD_PIPE_WRITE_DATA, handlePipeWriteData(&ctx, data + 2, len - 2));
             break;
         case CMD_PIPE_WRITE_END:      // 0x0082
-            handlePipeWriteEnd(data + 2, len - 2);
+            OD_CALL_CONVERTED(CMD_PIPE_WRITE_END, handlePipeWriteEnd(&ctx, data + 2, len - 2));
             break;
         default:
             od_log_error("ERROR: Unknown command: 0x%04X", command);

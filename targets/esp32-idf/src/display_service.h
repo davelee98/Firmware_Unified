@@ -1,6 +1,8 @@
 #ifndef DISPLAY_SERVICE_H
 #define DISPLAY_SERVICE_H
 
+#include "od_cmd.h"
+
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -45,16 +47,16 @@ void readAXP2101Data();
 void powerDownAXP2101();
 void initDisplay();
 void writeTextAndFill(const char* text);
-void handleDirectWriteStart(uint8_t* data, uint16_t len);
-void handleDirectWriteData(uint8_t* data, uint16_t len);
+od_cmd_result_t handleDirectWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
+od_cmd_result_t handleDirectWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 // Consumes one direct-write compressed payload into the panel controller. Returns
 // false on overflow/decompress failure; the CALLER owns ACK/NACK emission.
 bool handleDirectWriteCompressedData(uint8_t* data, uint16_t len);
 void cleanupDirectWriteState(bool refreshDisplay);
 // PIPE_WRITE (0x0080-0x0082) sliding-window handlers + state reset.
-void handlePipeWriteStart(uint8_t* data, uint16_t len);
-void handlePipeWriteData(uint8_t* data, uint16_t len);
-void handlePipeWriteEnd(uint8_t* data, uint16_t len);
+od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
+od_cmd_result_t handlePipeWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
+od_cmd_result_t handlePipeWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 void resetPipeWriteState(void);
 // True while a PIPE_WRITE stream is active (mid-transfer log suppression, resets).
 bool pipeWriteActive(void);
@@ -62,7 +64,7 @@ bool pipeWriteActive(void);
 // "is the device busy" gates; test an individual flag only when the logic is
 // genuinely specific to that one transfer type.
 bool transferActive(void);
-void handleDirectWriteEnd(uint8_t* data, uint16_t len);
+od_cmd_result_t handleDirectWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 // True while an image push is mid-stream and the per-frame command/ack logging
 // should be suppressed (chunk 1 still logs in full; the meter covers the rest).
 bool imageWriteLogQuietCmd(void);
@@ -76,7 +78,7 @@ extern volatile bool epdRefreshInProgress;
  * engaged client the moment loop() resumes.
  */
 void endRefresh(void);
-void handlePartialWriteStart(uint8_t* data, uint16_t len);
+od_cmd_result_t handlePartialWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 // Both transfer watchdogs, together. They live beside the state they terminate
 // rather than in loop(): pipeState is reachable from main.cpp via
 // resetPipeWriteState(), so this is cohesion rather than necessity -- but keeping
