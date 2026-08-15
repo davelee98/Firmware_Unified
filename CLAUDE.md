@@ -76,6 +76,8 @@ looks arbitrary and is not); delete the story.
   has never been exercised. It is not host-testable; forcing reorder on a board is the only way.
   Nordic additionally caps NFC read tag data at 218 B (was 238) so a sealed response still fits a
   BLE frame; that cap is also unexercised.
+  docs/OD_SESSION.md is the subsystem reference — wire shapes, the four derivations, the design
+  decisions, and the verification state in one place.
   The one flaw the promotion could NOT fix is filed: `FOLLOWUPS.md` § 5, **bidirectional nonce
   reuse** — both directions share one `session_id` and both counters start at 0, so the same
   CCM nonce is used under one key each way. It needs a protocol revision, not a firmware change.
