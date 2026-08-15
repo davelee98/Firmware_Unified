@@ -83,6 +83,15 @@ bool od_hal_radio_tag_is_live(od_origin_t origin, uint32_t tag)
     return !(g_dead_tag_set && tag == g_dead_tag);
 }
 
+/* od_txq's drop seam. Counted so a test can assert that a discarded entry was REPORTED, not just
+ * that it vanished -- the difference between a diagnosable failure and a silent one. */
+static unsigned g_dropped;
+void od_txq_app_dropped(const od_reply_t *rp, uint16_t len, od_radio_result_t why)
+{
+    (void)rp; (void)len; (void)why;
+    ++g_dropped;
+}
+
 /* --------------------------------------------------------------------------------- helpers --- */
 
 static const od_reply_t BLE1 = { OD_ORIGIN_BLE, 1u };
@@ -319,13 +328,6 @@ static void test_flush(void)
     CHECK(od_txq_flush(1000u, 1500u) == OD_TXQ_OK);
     CHECK(od_txq_depth() == 0u);
 
-    CASE("an unwritable transport times out with the queue intact");
-    fake_reset();
-    CHECK(od_txq_reserve(2u, &r) == OD_TXQ_OK);
-    CHECK(queue_one(&r, &BLE1, 0x11u) == OD_TXQ_OK);
-    g_next_result = OD_RADIO_RETRY;
-    CHECK(od_txq_flush(1000u, 1500u) == OD_TXQ_TIMEOUT);
-    CHECK(od_txq_depth() == 1u);
 
     CASE("the deadline comparison survives the uint32_t rollover");
     fake_reset();
@@ -351,9 +353,82 @@ static void test_reset(void)
     od_txq_reset();
     CHECK(od_txq_depth() == 0u);
     CHECK(od_txq_reserved() == 0u);
-    /* The stale token must not be able to queue into the reset ring on its leftover units. */
-    CHECK(queue_one(&r, &BLE1, 0x22u) == OD_TXQ_OK);   /* it can -- the token still holds units */
+    /* A TOKEN MUST NOT OUTLIVE THE RESET THAT INVALIDATED IT. This case previously asserted the
+     * opposite of the requirement stated on this very line -- it recorded the defect as intended
+     * behaviour. A stale commit decrements a reserved count reset already zeroed, wrapping it to
+     * 255, after which every reserve returns FULL until the next reset. */
+    CHECK(queue_one(&r, &BLE1, 0x22u) == OD_TXQ_INVARIANT);
+    CHECK(od_txq_depth() == 0u);
+    CHECK(od_txq_reserved() == 0u);
+
+    CASE("and releasing a stale token does not give units back to the new queue");
+    od_txq_release(&r);
+    CHECK(od_txq_reserved() == 0u);
+    {
+        od_tx_reservation_t fresh;
+        CHECK(od_txq_reserve((uint8_t)(OD_TXQ_SLOTS - 1u), &fresh) == OD_TXQ_OK);
+        od_txq_release(&fresh);
+    }
     od_txq_reset();
+}
+
+static void test_flush_busy_vs_timeout(void)
+{
+    od_tx_reservation_t r;
+
+    CASE("an unwritable transport BEFORE the deadline is BUSY, not TIMEOUT");
+    /* The two must be distinguishable. A caller reading TIMEOUT at face value gives up and starts
+     * the panel refresh; if the radio recovers a moment later the END ack lands after the refresh
+     * has begun, which is precisely what the barrier exists to prevent. */
+    fake_reset();
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    CHECK(queue_one(&r, &BLE1, 0x11u) == OD_TXQ_OK);
+    g_next_result = OD_RADIO_RETRY;
+    CHECK(od_txq_flush(1000u, 1500u) == OD_TXQ_BUSY);
+    CHECK(od_txq_depth() == 1u);
+
+    CASE("and once it recovers within the deadline the frame goes");
+    g_next_result = OD_RADIO_SENT;
+    CHECK(od_txq_flush(1010u, 1500u) == OD_TXQ_OK);
+    CHECK(od_txq_depth() == 0u);
+    CHECK(g_sent[0].first == 0x11u);
+
+    CASE("only a reached deadline is TIMEOUT");
+    fake_reset();
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    CHECK(queue_one(&r, &BLE1, 0x22u) == OD_TXQ_OK);
+    CHECK(od_txq_flush(1500u, 1500u) == OD_TXQ_TIMEOUT);
+    CHECK(od_txq_depth() == 1u);
+    CHECK(g_send_calls == 0u);
+}
+
+static void test_error_and_gone_are_reported(void)
+{
+    od_tx_reservation_t r;
+
+    CASE("a permanent refusal is reported, not silently swallowed");
+    fake_reset();
+    g_dropped = 0u;
+    CHECK(od_txq_reserve(2u, &r) == OD_TXQ_OK);
+    CHECK(queue_one(&r, &BLE1, 0x11u) == OD_TXQ_OK);
+    CHECK(queue_one(&r, &BLE1, 0x22u) == OD_TXQ_OK);
+    g_script[0] = OD_RADIO_ERROR;
+    g_script_len = 1u;
+    g_next_result = OD_RADIO_SENT;
+    CHECK(od_txq_process() == 2u);
+    CHECK(g_dropped == 1u);           /* exactly the one that could never be sent */
+
+    CASE("and so is every frame lost to a dead link");
+    fake_reset();
+    g_dropped = 0u;
+    CHECK(od_txq_reserve(3u, &r) == OD_TXQ_OK);
+    CHECK(queue_one(&r, &BLE1, 0x11u) == OD_TXQ_OK);
+    CHECK(queue_one(&r, &BLE1, 0x22u) == OD_TXQ_OK);
+    CHECK(queue_one(&r, &BLE2, 0xAAu) == OD_TXQ_OK);
+    g_dead_tag = 1u;
+    g_dead_tag_set = true;
+    CHECK(od_txq_process() == 1u);
+    CHECK(g_dropped == 2u);           /* both of tag 1's, individually */
 }
 
 /* --------------------------------------------------------------------------------- wrapping --- */
@@ -386,6 +461,8 @@ int main(void)
     test_dead_tag();
     test_flush();
     test_reset();
+    test_flush_busy_vs_timeout();
+    test_error_and_gone_are_reported();
     test_ring_wraps();
 
     printf("txq: %u checks, %u failures\n", g_checks, g_failures);

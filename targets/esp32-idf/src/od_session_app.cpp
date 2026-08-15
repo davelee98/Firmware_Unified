@@ -7,6 +7,7 @@
  */
 
 #include "od_session_app.h"
+#include "od_txq.h"   /* od_reply_t / od_radio_result_t, for the drop seam at the end */
 
 #include "encryption_state.h"
 #include "od_hal_time.h"
@@ -109,4 +110,15 @@ void od_session_app_report(enum od_session_app_op op, int result, uint16_t cmd,
     default:
         break;                        /* the liveness probe runs per frame; logging it is noise */
     }
+}
+
+/* od_txq's drop seam. A discarded response is invisible from the wire -- the host simply waits --
+ * so this is the only place a permanently refusing transport, or a link that died with frames
+ * still queued, leaves a trace. Deliberately not throttled: unlike the nonce lines above, a peer
+ * cannot drive this at will, and losing one of these hides the cause of a client-side timeout. */
+extern "C" void od_txq_app_dropped(const od_reply_t *rp, uint16_t len, od_radio_result_t why)
+{
+    od_log_warn("TX dropped: origin=%u tag=%08lX len=%u reason=%d",
+                (unsigned)(rp ? rp->origin : 0u), (unsigned long)(rp ? rp->tag : 0u),
+                (unsigned)len, (int)why);
 }

@@ -86,6 +86,15 @@ void od_session_app_report(enum od_session_app_op op, int result, uint16_t cmd,
     if (op == OD_SESSION_APP_SEAL) { g_last_seal_result = result; }
 }
 
+/* od_txq's drop seam. Counted so a test can assert that a discarded entry was REPORTED, not just
+ * that it vanished -- the difference between a diagnosable failure and a silent one. */
+static unsigned g_dropped;
+void od_txq_app_dropped(const od_reply_t *rp, uint16_t len, od_radio_result_t why)
+{
+    (void)rp; (void)len; (void)why;
+    ++g_dropped;
+}
+
 /* --------------------------------------------------------------------------------- helpers --- */
 
 static const od_reply_t BLE  = { OD_ORIGIN_BLE, 7u };

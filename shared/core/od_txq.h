@@ -48,15 +48,21 @@ typedef enum {
     OD_TXQ_OK = 0,
     OD_TXQ_FULL,        /* reserve only, and always BEFORE any handler mutation */
     OD_TXQ_GONE,        /* the tag died; nothing was queued */
-    OD_TXQ_TIMEOUT,     /* flush only: deadline passed, entries LEFT QUEUED, never dropped */
+    OD_TXQ_BUSY,        /* flush only: not drained yet, deadline NOT reached -- call again */
+    OD_TXQ_TIMEOUT,     /* flush only: deadline reached, entries LEFT QUEUED, never dropped */
     OD_TXQ_TOO_LARGE,   /* value above what the origin or the session can carry */
     OD_TXQ_SEAL_FAILED, /* sealing failed; a plaintext hard NACK is ALREADY QUEUED in its place */
     OD_TXQ_INVARIANT    /* a bug in the caller: no token, no units left, null frame */
 } od_txq_status_t;
 
 /* Capacity claimed by one dispatch, and the units it has left. Deliberately a struct rather than a
- * bare count so it cannot be confused with a slot index or silently copied around as an int. */
-typedef struct { uint8_t remaining; } od_tx_reservation_t;
+ * bare count so it cannot be confused with a slot index or silently copied around as an int.
+ *
+ * `gen` is what makes a token die with the queue it was taken from. Without it a token that
+ * survives od_txq_reset() -- a link teardown, od_core_reset() -- can still commit into the fresh
+ * ring, and each such commit decrements a reserved count that reset already zeroed, wrapping it to
+ * 255 and refusing every reserve afterwards until the next reset. Do not construct one by hand. */
+typedef struct { uint8_t remaining; uint8_t gen; } od_tx_reservation_t;
 
 /* Where a reply is going. Carried separately from the frame because the frame is bytes and this is
  * addressing -- the same bytes may be legal for one link and refused for another. */
@@ -108,6 +114,15 @@ uint16_t od_txq_process(void);
  * call is one drain attempt, and the caller re-enters with an advanced now_ms. That keeps the
  * waiting in the loop that also feeds the watchdog. */
 od_txq_status_t od_txq_flush(uint32_t now_ms, uint32_t deadline_ms);
+
+/* IMPLEMENTED BY THE TARGET. Called when the drain discards an entry that can never be sent --
+ * a permanent radio refusal, or a link that died with frames still queued. shared/ may not include
+ * a target log header (CLAUDE.md, "the one rule"), so the core reports the loss and the target
+ * decides how to say it. MUST NOT queue, block, or re-enter od_txq.
+ *
+ * A dropped response is invisible from the wire -- the host simply waits -- so without this the
+ * only symptom of a permanently refusing transport is a client timing out for no stated reason. */
+void od_txq_app_dropped(const od_reply_t *rp, uint16_t len, od_radio_result_t why);
 
 /* Observability, for tests and for a target's diagnostics. */
 uint16_t od_txq_depth(void);      /* entries currently queued */

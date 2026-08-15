@@ -8,6 +8,9 @@
 
 #include "ble_transport.h"
 #include "link_owner.h"
+#ifdef OPENDISPLAY_HAS_WIFI
+#include "wifi_service.h"
+#endif
 
 extern "C" od_radio_result_t od_hal_radio_send(od_origin_t origin, uint32_t tag,
                                                const uint8_t *frame, uint16_t len)
@@ -16,10 +19,22 @@ extern "C" od_radio_result_t od_hal_radio_send(od_origin_t origin, uint32_t tag,
         return OD_RADIO_ERROR;
     }
     if (origin != OD_ORIGIN_BLE) {
-        /* LAN frames leave through the TCP transport, which the dispatcher calls directly -- it
-         * dispatches synchronously from the loop and never shares this queue. Reaching here with a
-         * LAN origin is a routing bug, not backpressure, so it must not be retried. */
+#ifdef OPENDISPLAY_HAS_WIFI
+        /* LAN responses DO come through here: od_reply() routes a TLS-LAN frame to the queue
+         * plain (SECTION 9 rule 4 -- TLS already protects it), so the queue must be able to
+         * deliver it. Dropping it as a routing error, which an earlier version of this file did,
+         * loses every TLS client's response silently: the send succeeds from the core's point of
+         * view and nothing ever reaches the socket.
+         *
+         * opendisplay_lan_send_frame() is void and does its own buffering, so there is no
+         * backpressure to report -- SENT is the only honest answer available. */
+        opendisplay_lan_send_frame(frame, len);
+        return OD_RADIO_SENT;
+#else
+        /* No LAN transport compiled in, so a LAN-origin frame is genuinely a routing bug. Never
+         * retried: retrying a permanent error turns the drain into a spin. */
         return OD_RADIO_ERROR;
+#endif
     }
     if (!linkIsOwnerWord(tag)) {
         return OD_RADIO_GONE;
@@ -39,7 +54,15 @@ extern "C" od_radio_result_t od_hal_radio_send(od_origin_t origin, uint32_t tag,
 extern "C" bool od_hal_radio_tag_is_live(od_origin_t origin, uint32_t tag)
 {
     if (origin != OD_ORIGIN_BLE) {
+#ifdef OPENDISPLAY_HAS_WIFI
+        /* The LAN transport owns its own connection lifetime and a queued LAN frame is delivered
+         * synchronously, so there is no stale-instance window for the queue to guard against.
+         * Answering false here would make od_txq_commit() discard every TLS response as GONE. */
+        (void)tag;
+        return true;
+#else
         return false;
+#endif
     }
     /* An instance identity, not a connection handle: handles are reused, so a frame queued by a
      * dead instance must never be delivered to whoever inherited its slot. */

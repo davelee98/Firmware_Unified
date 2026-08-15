@@ -92,8 +92,10 @@ od_txq_status_t od_reply(od_tx_reservation_t *r, const od_reply_t *rp,
          * total CCM failure. Force re-authentication rather than emit it. */
         od_session_clear(s);
         return queue_hard_nack(r, rp, frame[1], OD_TXQ_SEAL_FAILED);
-
-    default:
-        return queue_hard_nack(r, rp, frame[1], OD_TXQ_SEAL_FAILED);
     }
+    /* NO DEFAULT LABEL, deliberately -- the same -Wswitch ratchet od_gate.c relies on. A default
+     * here would let a new od_session_seal result compile straight into "hard NACK" whatever its
+     * required disposition is, which is how a new failure mode silently inherits another's wire
+     * behaviour. Unreachable. */
+    return queue_hard_nack(r, rp, frame[1], OD_TXQ_SEAL_FAILED);
 }

@@ -18,6 +18,7 @@ static struct od_txq_entry s_ring[OD_TXQ_SLOTS];
 static uint16_t s_head;              /* next entry to send */
 static uint16_t s_tail;              /* next free slot */
 static uint8_t  s_reserved;          /* units claimed by live tokens, not yet spent */
+static uint8_t  s_gen;               /* bumped by reset; a token from an older one is dead */
 
 static uint16_t ring_next(uint16_t i)
 {
@@ -39,6 +40,9 @@ void od_txq_reset(void)
     s_head = 0u;
     s_tail = 0u;
     s_reserved = 0u;
+    /* Every outstanding token dies here. It cannot be reached to be cleared, so the generation is
+     * how it learns: a stale commit would otherwise decrement a count this line just zeroed. */
+    ++s_gen;
     memset(s_ring, 0, sizeof s_ring);
 }
 
@@ -60,6 +64,7 @@ od_txq_status_t od_txq_reserve(uint8_t count, od_tx_reservation_t *r)
     }
     s_reserved = (uint8_t)(s_reserved + count);
     r->remaining = count;
+    r->gen = s_gen;
     return OD_TXQ_OK;
 }
 
@@ -68,7 +73,11 @@ void od_txq_release(od_tx_reservation_t *r)
     if (r == NULL || r->remaining == 0u) {
         return;                       /* idempotent: every path calls this, including early exits */
     }
-    s_reserved = (uint8_t)(s_reserved - r->remaining);
+    if (r->gen == s_gen) {
+        s_reserved = (uint8_t)(s_reserved - r->remaining);
+    }
+    /* A stale token still zeroes itself, so a later release cannot double-count it, but it must
+     * not give units back to a queue that never issued them. */
     r->remaining = 0u;
 }
 
@@ -84,6 +93,13 @@ od_txq_status_t od_txq_commit(od_tx_reservation_t *r, const od_reply_t *rp,
         /* The handler emitted more replies than its opcode reserved. Refusing is the honest
          * outcome; borrowing would take capacity another in-flight dispatch is relying on and turn
          * a local bug into a lost ack somewhere else. */
+        return OD_TXQ_INVARIANT;
+    }
+    if (r->gen != s_gen) {
+        /* The queue was reset under this dispatch -- a link teardown, od_core_reset(). The reply
+         * is for a world that no longer exists, and spending a unit here would decrement a count
+         * the reset already zeroed. */
+        r->remaining = 0u;
         return OD_TXQ_INVARIANT;
     }
     if (len > OD_TX_FRAME_MAX) {
@@ -121,6 +137,20 @@ od_txq_status_t od_txq_commit(od_tx_reservation_t *r, const od_reply_t *rp,
     return OD_TXQ_OK;
 }
 
+/* Tell the target about every entry a tag teardown is about to discard, before they are gone. */
+static void report_dropped_tag(od_origin_t origin, uint32_t tag, od_radio_result_t why)
+{
+    uint16_t i = s_head;
+
+    while (i != s_tail) {
+        if (s_ring[i].origin == origin && s_ring[i].tag == tag) {
+            const od_reply_t rp = { origin, tag };
+            od_txq_app_dropped(&rp, s_ring[i].len, why);
+        }
+        i = ring_next(i);
+    }
+}
+
 /* Drop every queued entry belonging to `tag`, preserving the order of the rest. Called when the
  * radio reports the link is gone: the remaining entries for it are undeliverable, and leaving them
  * would block the head for a connection that no longer exists. */
@@ -150,6 +180,7 @@ uint16_t od_txq_process(void)
         od_radio_result_t rc;
 
         if (!od_hal_radio_tag_is_live(e->origin, e->tag)) {
+            report_dropped_tag(e->origin, e->tag, OD_RADIO_GONE);
             drop_tag(e->origin, e->tag);
             continue;                 /* head now names a different entry, or the queue is empty */
         }
@@ -158,8 +189,15 @@ uint16_t od_txq_process(void)
             break;                    /* keep the entry; ordering forbids skipping past it */
         }
         if (rc == OD_RADIO_GONE) {
+            report_dropped_tag(e->origin, e->tag, OD_RADIO_GONE);
             drop_tag(e->origin, e->tag);
             continue;
+        }
+        if (rc == OD_RADIO_ERROR) {
+            /* Reported, because a dropped response is invisible from the wire: the host just
+             * waits. Without this the only symptom is a client timing out for no stated reason. */
+            const od_reply_t rp = { e->origin, e->tag };
+            od_txq_app_dropped(&rp, e->len, OD_RADIO_ERROR);
         }
         /* SENT and ERROR both retire this entry: one succeeded, the other can never succeed. */
         s_head = ring_next(s_head);
@@ -182,8 +220,13 @@ od_txq_status_t od_txq_flush(uint32_t now_ms, uint32_t deadline_ms)
     (void)od_txq_process();
     /* ONE drain attempt per call, deliberately. This module owns no clock and must not block, so
      * it cannot wait out a deadline itself. The caller re-enters with an advanced now_ms, which
-     * keeps the waiting in the loop that also feeds the watchdog. */
-    return (s_head == s_tail) ? OD_TXQ_OK : OD_TXQ_TIMEOUT;
+     * keeps the waiting in the loop that also feeds the watchdog.
+     *
+     * BUSY, NOT TIMEOUT: the deadline has not been reached, so the transport may still recover and
+     * the caller must come back. Returning TIMEOUT here would tell a caller reading the status at
+     * face value to give up and start the refresh, and the END ack it was waiting for would land
+     * after the panel had already begun -- the exact thing the barrier exists to prevent. */
+    return (s_head == s_tail) ? OD_TXQ_OK : OD_TXQ_BUSY;
 }
 
 uint16_t od_txq_depth(void)
