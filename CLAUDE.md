@@ -34,10 +34,16 @@ looks arbitrary and is not); delete the story.
   two boards (`xiao_nrf54l15`, `xiao_nrf54lm20a`) still build clean but have NOT been flashed, so
   the target is verified, the L15 is not. `efr32bg22-slc` builds headless
   (`./build-and-flash.sh --no-flash`) and has never been flashed.
+- **THERE IS NO CI. `tools/check.sh` (repo root) is every gate this repo has, and nothing runs
+  it but you.** Boundary greps, the host suite under gcc + clang, the same suite under
+  ASan/UBSan, the pre-auth fuzz targets, the py-opendisplay wire corpus, and the shim ratchet;
+  `--esp32` adds the board builds and the sdkconfig baseline. **A SKIP IS NOT A PASS** — missing
+  clang or ESP-IDF skips rather than fails, so read the summary, which reprints skips and exits
+  2 when there were any.
 - Paths in this bullet are relative to `targets/esp32-idf/`. `./build.sh` there builds every board
   fragment (it sources ESP-IDF itself; never on `PATH`). `tools/run_host_tests.sh` runs host tests
-  — or drive them directly the way CI does, `cmake -S tests/host -B <dir> && ctest --test-dir
-  <dir>`, which is the repo-root path and needs no ESP-IDF. `compat/ratchet.sh` and
+  — or drive them directly, `cmake -S tests/host -B <dir> && cmake --build <dir> && ctest
+  --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF. `compat/ratchet.sh` and
   `tools/sdkconfig_baseline.sh` are gates a change must not break.
 - **`shared/` is no longer empty** — `core/od_{adv_control,advert,config,config_asm,config_tlv,watchdog}.c`
   plus header-only `od_span.h`, all listed in `shared/sources.cmake` (never globbed) in per-HAL
@@ -99,8 +105,8 @@ looks arbitrary and is not); delete the story.
 framework header** — `esp_*`, `driver/*`, `soc/*`, `hal/*`, `freertos/*`, `nrf_*`, `nrfx`, `sl_*`,
 `em_*`, `zephyr/*`, `Arduino.h`, `bluefruit.h`, `NimBLE*`, `bb_epaper`, `TFT_eSPI`. A file needing
 one belongs in `targets/<target>/`. One slip and the repo is four codebases in a directory.
-Enforced by [.github/workflows/shared-boundary.yml](.github/workflows/shared-boundary.yml) — run
-that grep before proposing anything under `shared/`; extend it as targets are imported.
+Enforced by the three `shared boundary:` checks in [tools/check.sh](tools/check.sh) — run them
+before proposing anything under `shared/`; extend the pattern as targets are imported.
 
 ## Architectural decisions
 

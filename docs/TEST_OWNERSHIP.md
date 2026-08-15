@@ -371,8 +371,13 @@ subsequent import into a test-first change.
    to argue with, and it makes every vector added later half-verified on arrival.
 3. **`shared/sources.cmake` (empty list) + `tests/host/CMakeLists.txt`** compiling `shared/` with
    gcc and clang at `-std=c99 -Wall -Wextra -Werror`, wired to CTest.
-4. **`.github/workflows/host-tests.yml`** running 2 and 3 on every push, plus the nightly
-   latest-`py-opendisplay` job.
+4. ~~**`.github/workflows/host-tests.yml`** running 2 and 3 on every push, plus the nightly
+   latest-`py-opendisplay` job.~~ **SUPERSEDED 2026-08-15: this repo has no CI.** All four
+   workflows were deleted and their checks moved to `tools/check.sh`, run by hand. Two
+   consequences the rest of this document still assumes away: nothing is enforced on push, and
+   the nightly latest-`py-opendisplay` job — the mechanism this document relies on to catch
+   upstream wire drift within 24 h — is now `tools/check.sh --latest`, which only runs when
+   someone asks. Run it before a release; drift is otherwise found whenever it is next run.
 5. **`CODEOWNERS`** covering `shared/**` and `tests/**`.
 
 Step 3 is the item DESIGN_REVIEW § "Improvements to make before the first import" #2 costs at "an
