@@ -125,7 +125,8 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
      * unidentifiable. DISCOVERY rather than ACCEPTED, so a version poll cannot stamp activity and
      * hold the exclusive link indefinitely. */
     if (cmd == CMD_FIRMWARE_VERSION) {
-        const od_cmd_result_t rc = od_cmd_dispatch(rp, &r, cmd, body);
+        const od_cmd_ctx_t ctx = { *rp, &r };
+        const od_cmd_result_t rc = od_cmd_dispatch(&ctx, cmd, body);
         od_txq_release(&r);
         return (rc == OD_CMD_OK) ? OD_FRAME_DISCOVERY : OD_FRAME_HANDLER_NACK;
     }
@@ -141,12 +142,17 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
 
     /* ---- handler ---- */
     {
-        const od_cmd_result_t rc = od_cmd_dispatch(rp, &r, cmd, body);
+        const od_cmd_ctx_t ctx = { *rp, &r };
+        const od_cmd_result_t rc = od_cmd_dispatch(&ctx, cmd, body);
         od_txq_release(&r);
         switch (rc) {
         case OD_CMD_OK:            return OD_FRAME_ACCEPTED;
         case OD_CMD_NACK:          return OD_FRAME_HANDLER_NACK;
         case OD_CMD_AUTH_REJECTED: return OD_FRAME_AUTH_REQUIRED;
+        /* NOT folded into NACK: an unrecognised opcode must not stamp activity, or unknown-command
+         * traffic keeps the exclusive link alive. od_frame_policy() gives UNKNOWN_OPCODE no
+         * activity and no abuse movement. */
+        case OD_CMD_UNKNOWN:       return OD_FRAME_UNKNOWN_OPCODE;
         }
     }
     /* No default above, so -Wswitch fails the build on a new od_cmd_result_t. Unreachable. */

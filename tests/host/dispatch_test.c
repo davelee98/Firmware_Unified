@@ -101,9 +101,10 @@ static uint16_t        g_handler_body_len;
 static od_cmd_result_t g_handler_result;
 static uint8_t         g_handler_replies;   /* how many frames the fake handler emits */
 
-od_cmd_result_t od_cmd_dispatch(const od_reply_t *rp, od_tx_reservation_t *r,
-                                uint16_t cmd, od_span_t body)
+od_cmd_result_t od_cmd_dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, od_span_t body)
 {
+    const od_reply_t *rp = &ctx->rp;
+    od_tx_reservation_t *r = ctx->r;
     uint8_t k;
 
     ++g_handler_calls;
@@ -409,6 +410,21 @@ static void test_handler_results_map(void)
     setup(false, false);
     g_handler_result = OD_CMD_NACK;
     CHECK(od_dispatch_frame(&BLE, od_span_make(frame, sizeof frame)) == OD_FRAME_HANDLER_NACK);
+
+    CASE("an unknown opcode is UNKNOWN_OPCODE, and therefore NOT activity");
+    /* Folded into NACK it would stamp the owner clock, and unknown-command traffic could hold the
+     * exclusive link indefinitely. The policy table gives UNKNOWN_OPCODE no stamp and no abuse
+     * movement, so the two halves have to agree. */
+    setup(false, false);
+    g_handler_result = OD_CMD_UNKNOWN;
+    CHECK(od_dispatch_frame(&BLE, od_span_make(frame, sizeof frame)) == OD_FRAME_UNKNOWN_OPCODE);
+    {
+        const od_frame_policy_t p = od_frame_policy(OD_FRAME_UNKNOWN_OPCODE);
+        CHECK(!p.stamp_activity);
+        CHECK(!p.reset_abuse);
+        CHECK(!p.increment_abuse);
+        CHECK(p.consume_rx);
+    }
 
     CASE("a handler auth rejection is AUTH_REQUIRED, not a NACK");
     /* Without the distinction a TLS client's refused CONFIG_WRITE stamps activity and holds the

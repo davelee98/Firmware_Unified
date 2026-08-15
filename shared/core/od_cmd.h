@@ -18,13 +18,19 @@
 extern "C" {
 #endif
 
-/* What a handler concluded. Three, not two: a handler can refuse a frame for want of
- * authentication itself, and that is not the same as a NACK. Without the third value a TLS
- * client's refused CONFIG_WRITE stamps activity and holds the exclusive link forever. */
+/* What a handler concluded. FOUR, and each distinction earns its place:
+ *
+ *  - AUTH_REJECTED is separate from NACK because a handler can refuse for want of authentication
+ *    itself; without it a TLS client's refused CONFIG_WRITE stamps activity and holds the
+ *    exclusive link forever.
+ *  - UNKNOWN is separate from NACK because an unrecognised opcode must not be ACTIVITY. Folded
+ *    into either of the others, unknown-command traffic would refresh the owner's idle clock and
+ *    keep the exclusive link alive indefinitely. */
 typedef enum {
     OD_CMD_OK,
     OD_CMD_NACK,
-    OD_CMD_AUTH_REJECTED
+    OD_CMD_AUTH_REJECTED,
+    OD_CMD_UNKNOWN          /* the target has no handler for this opcode */
 } od_cmd_result_t;
 
 /* What the dispatcher concluded about one inbound frame. The target turns this into policy in
@@ -54,6 +60,18 @@ typedef enum {
     OD_FRAME_STALE_TAG,
     OD_FRAME_DEFERRED           /* the ONLY outcome that does not consume the RX entry */
 } od_frame_outcome_t;
+
+/* Everything a handler needs to answer: WHERE the reply goes and WHAT capacity it may spend.
+ *
+ * One struct rather than two parameters because the rewrite touches 78 call sites and a
+ * transposed pair of pointers is not something the compiler can catch. `rp` is a COPY -- the reply
+ * context is immutable for the dispatch -- while `r` is a pointer because units are spent as
+ * replies are made. Making both pointers would invite a handler to keep `ctx` past its dispatch,
+ * which is exactly what od_txq's token generation exists to catch. */
+typedef struct {
+    od_reply_t           rp;
+    od_tx_reservation_t *r;
+} od_cmd_ctx_t;
 
 /* What one outcome MEANS, as data rather than as a switch in each target. The two targets got this
  * wrong in different ways before it was written down, and the failure is quiet: an outcome that

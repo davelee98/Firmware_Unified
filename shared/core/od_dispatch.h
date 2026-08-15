@@ -54,8 +54,7 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame);
  *
  * The handler must complete: dispatch has already resolved capacity and producer conflicts, so
  * there is nothing left for a handler to defer on. It spends units from `r` via od_reply(). */
-od_cmd_result_t od_cmd_dispatch(const od_reply_t *rp, od_tx_reservation_t *r,
-                                uint16_t cmd, od_span_t body);
+od_cmd_result_t od_cmd_dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, od_span_t body);
 
 /* IMPLEMENTED BY THE TARGET. True when this opcode would MUTATE stored configuration -- the set a
  * live CONFIG_READ must exclude, because the producer reads the same scratch that a write
