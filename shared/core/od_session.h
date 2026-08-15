@@ -123,9 +123,11 @@ OD_STATIC_ASSERT(OD_SESSION_ENVELOPE_MIN < OD_SESSION_ENVELOPE_MAX, "envelope bo
  *     overflow, and negating INT64_MIN -- three ways to be undefined on attacker-chosen input.
  *     Only unsigned comparison and one subtraction guarded by its own branch are used.
  *
- * Both of this module's replay-related results map onto that header's three-valued NonceResult:
- * NONCE_REPLAY and NONCE_OUT_OF_WINDOW both surface as OD_SESSION_OPEN_REPLAY, because a caller
- * cannot act differently on them -- but the report carries which it was.
+ * NonceResult is FOUR-valued upstream: NONCE_OK, NONCE_REPLAY, NONCE_OUT_OF_WINDOW and
+ * NONCE_BAD_SESSION -- the session-id mismatch is a nonce result there, not a separate branch.
+ * The caller DOES act differently on them, so the reason reaches it: a nonce-reason rejection is
+ * ordinary packet loss on a lossy link and must not be answered with a fatal NACK on the pipe
+ * path, while a tag failure is tamper evidence. report->nonce_reason carries which.
  *
  * ORDERING: od_nonce_check() decides, CCM verifies, and only then does od_nonce_commit() run.
  * That is RFC 4303 Appendix A2's "if the MAC is valid, the window is updated", and it is what
@@ -190,6 +192,9 @@ struct od_session_report {
     int32_t  rx_diff;             /* saturated counter - rx_last, for the out-of-window log */
     uint32_t age_ms;              /* session age at the timeout check */
     enum od_hal_crypto_status crypto_status;  /* why CRYPTO_ERROR, when one occurred */
+    /* Which nonce rule rejected the frame, so the caller can tell ordinary packet loss from
+     * tamper evidence. Mirrors upstream's NonceResult; 0 means "not a nonce rejection". */
+    uint8_t  nonce_reason;
 };
 
 /* ----------------------------------------------------------------------------- the state --- */
@@ -200,7 +205,11 @@ struct od_session {
     od_hal_crypto_slot_t slot;    /* CONFIGURATION, not session state: survives a clear */
     bool     key_loaded;          /* the slot currently holds this session's key */
 
-    uint64_t tx_counter;          /* device->host, monotonic */
+    /* device->host, monotonic. MUST be zeroed on every re-authentication, not carried across:
+     * a device that kept its outbound counter while the client restarts at 0 reproduces keystream
+     * reuse against itself under the new session key. Upstream resets it with the other three
+     * nonce fields in one place for exactly this reason. */
+    uint64_t tx_counter;
     uint64_t rx_last;             /* highest ACCEPTED inbound counter */
     uint64_t rx_seen[OD_NONCE_BITMAP_WORDS];  /* bit i == counter (rx_last - i) consumed; bit 0 is
                                                * rx_last. 256 bits of reordering tolerance; the
@@ -302,9 +311,17 @@ enum od_session_auth od_session_authenticate(struct od_session *s,
  *
  * ON ANY NON-OK RETURN out IS UNDEFINED AND MUST NOT BE READ -- CCM is decrypt-then-verify.
  *
- * STRIKES: REPLAY, WRONG_SESSION and BAD_TAG each count toward the 3-strike teardown.
- * CRYPTO_ERROR does not -- an engine fault is not an attack, and counting it would turn a
- * transient allocation failure into a forced re-authentication. */
+ * STRIKES: ONLY BAD_TAG counts toward the 3-strike teardown. Corrected against upstream
+ * Firmware, which made this change deliberately: nonce failures are evidence of a LOSSY LINK, not
+ * of tampering, so REPLAY, OUT_OF_WINDOW and WRONG_SESSION must NOT count -- a session-id mismatch
+ * is exactly what a stale client sends after the device re-authenticated. Counting them lets
+ * ordinary packet loss tear down a live session, which is the same self-DoS shape as answering a
+ * retransmission with a strike. Only the CCM tag is a tamper oracle. CRYPTO_ERROR does not count
+ * either: an engine fault is not an attack.
+ *
+ * A target that logs these must rate-limit per site (upstream uses a 5 s budget for each), because
+ * once they stop counting toward the strike limit nothing else throttles a peer driving them, and
+ * out-of-window fires routinely on a lossy link. */
 enum od_session_open od_session_open(struct od_session *s, uint16_t cmd, od_span_t envelope,
         uint8_t *out, size_t out_cap, uint16_t *out_len,
         uint32_t now_ms, struct od_session_report *report);
