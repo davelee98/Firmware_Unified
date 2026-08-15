@@ -146,6 +146,50 @@ enum od_hal_crypto_status od_hal_crypto_ccm_decrypt(od_hal_crypto_slot_t slot,
     return OD_HAL_CRYPTO_OK;
 }
 
+/* ------------------------------------------------------------ orphaned one-shot key ids --- */
+
+/* psa_destroy_key() failing is a should-never-happen, but "should never" is how a finite pool
+ * drains: the one-shot CMAC and ECB paths import a volatile key per call, and a failed destroy
+ * used to lose the only handle to it. Detecting the failure stops the misleading success; it does
+ * not give the slot back. So a failed id is PARKED here and retried at the top of every entry
+ * point, which bounds the damage to at most OD_ORPHAN_MAX live strays and gives a transient
+ * fault (a busy driver, a momentary storage error) the chance to clear on the next call.
+ *
+ * Four is not a tuned number -- it is "more than any plausible transient burst, small enough to
+ * be free". If it ever fills, the log line is the finding: destruction is failing persistently
+ * and the pool is genuinely leaking. */
+#define OD_ORPHAN_MAX 4u
+static psa_key_id_t s_orphans[OD_ORPHAN_MAX];
+static uint8_t s_orphan_count;
+
+static void orphan_park(psa_key_id_t id)
+{
+    if (s_orphan_count < OD_ORPHAN_MAX) {
+        s_orphans[s_orphan_count++] = id;
+        od_log_error("crypto: parked undestroyable key id %lu (%u held)",
+                     (unsigned long)id, (unsigned)s_orphan_count);
+    } else {
+        od_log_error("crypto: orphan list FULL - key id %lu leaked permanently; "
+                     "PSA key destruction is failing persistently",
+                     (unsigned long)id);
+    }
+}
+
+/* Retry every parked id, compacting the ones that are now gone. Cheap: the list is empty on every
+ * healthy system, so this is a single compare. */
+static void orphan_drain(void)
+{
+    uint8_t i = 0;
+
+    while (i < s_orphan_count) {
+        if (psa_destroy_key(s_orphans[i]) == PSA_SUCCESS) {
+            s_orphans[i] = s_orphans[--s_orphan_count];
+        } else {
+            ++i;
+        }
+    }
+}
+
 enum od_hal_crypto_status od_hal_crypto_cmac(const uint8_t key[16], const uint8_t *msg,
                                              uint32_t msg_len, uint8_t out[16])
 {
@@ -159,6 +203,7 @@ enum od_hal_crypto_status od_hal_crypto_cmac(const uint8_t key[16], const uint8_
         (msg == NULL && msg_len != 0u) || out == NULL) {
         return OD_HAL_CRYPTO_ERROR;
     }
+    orphan_drain();
     psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
     psa_set_key_bits(&attr, 128);
     psa_set_key_algorithm(&attr, PSA_ALG_CMAC);
@@ -174,12 +219,17 @@ enum od_hal_crypto_status od_hal_crypto_cmac(const uint8_t key[16], const uint8_
          * status wins so a real crypto failure is never masked by cleanup. */
         destroy_status = psa_destroy_key(key_id);
     }
+    /* Both are reported: a cleanup failure that only ever appears when the operation SUCCEEDED
+     * is invisible in exactly the case worth investigating. */
+    if (destroy_status != PSA_SUCCESS) {
+        od_log_error("crypto: PSA key destroy after CMAC failed: %ld", (long)destroy_status);
+        orphan_park(key_id);
+    }
     if (status != PSA_SUCCESS || mac_len != 16u) {
         od_log_error("crypto: PSA CMAC failed: %ld", (long)status);
         return OD_HAL_CRYPTO_ERROR;
     }
     if (destroy_status != PSA_SUCCESS) {
-        od_log_error("crypto: PSA key destroy after CMAC failed: %ld", (long)destroy_status);
         return OD_HAL_CRYPTO_ERROR;
     }
     return OD_HAL_CRYPTO_OK;
@@ -197,6 +247,7 @@ enum od_hal_crypto_status od_hal_crypto_aes_ecb(const uint8_t key[16], const uin
     if (crypto_init_once() != OD_HAL_CRYPTO_OK || key == NULL || in == NULL || out == NULL) {
         return OD_HAL_CRYPTO_ERROR;
     }
+    orphan_drain();
     psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
     psa_set_key_bits(&attr, 128);
     psa_set_key_algorithm(&attr, PSA_ALG_ECB_NO_PADDING);
@@ -207,12 +258,15 @@ enum od_hal_crypto_status od_hal_crypto_aes_ecb(const uint8_t key[16], const uin
         status = psa_cipher_encrypt(key_id, PSA_ALG_ECB_NO_PADDING, in, 16, out, 16, &out_len);
         destroy_status = psa_destroy_key(key_id);   /* see the note in od_hal_crypto_cmac */
     }
+    if (destroy_status != PSA_SUCCESS) {
+        od_log_error("crypto: PSA key destroy after AES-ECB failed: %ld", (long)destroy_status);
+        orphan_park(key_id);
+    }
     if (status != PSA_SUCCESS || out_len != 16u) {
         od_log_error("crypto: PSA AES-ECB failed: %ld", (long)status);
         return OD_HAL_CRYPTO_ERROR;
     }
     if (destroy_status != PSA_SUCCESS) {
-        od_log_error("crypto: PSA key destroy after AES-ECB failed: %ld", (long)destroy_status);
         return OD_HAL_CRYPTO_ERROR;
     }
     return OD_HAL_CRYPTO_OK;

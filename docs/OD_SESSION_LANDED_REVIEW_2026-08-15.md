@@ -34,6 +34,31 @@ Three things this resolution does NOT cover, and they are the honest remainder:
 3. **§ 7.3 and § 7.4 stand as written.** CI is gone by decision, and the C0 capture was skipped,
    so the crypto oracle still agrees with a transcription rather than with captured device bytes.
 
+### Re-evaluation round 2 (2026-08-15)
+
+A follow-up pass on the fixes raised four more, all verified and all real:
+
+- **PIPE nonce-loss telemetry was skipped.** Both adapters returned silently BEFORE the throttled
+  log, so replay and out-of-window events went unrecorded on the one path that produces them
+  routinely. This was a faithfulness gap introduced by the port: upstream logs the rejection
+  inside `decryptCommand` (`../Firmware/src/encryption.cpp:745`), so ITS early return costs no
+  telemetry. Log now precedes the return on both targets.
+- **`--targets` built 4 of 10 ESP32 fragments.** The hand-maintained `SDKCONFIG_BOARDS` list
+  silently narrowed coverage to a sample, leaving the c3/c6/classic parts — which differ in
+  PSRAM, LAN and panel backends — covered by nothing. Now `build.sh` with no arguments (all ten)
+  followed by `sdkconfig_baseline.sh` with no arguments (every board that has a build), so the
+  two cannot drift apart again.
+- **`out_cap` was still narrowed unsafely.** OD-S5 fixed the INPUT length but both functions still
+  cast the caller's `out_cap` to `uint16_t` on the way to the HAL — `open()` directly, `seal()` as
+  `out_cap - 18` — so a large valid buffer could wrap to a tiny capacity and manufacture a crypto
+  error, burning a tx counter on the seal side. Both now pass the already-bounded REQUIRED
+  capacity. The regression test's first draft used 65540 and 70000, which do not wrap and passed
+  against the unfixed code; 65536 and 65554 do.
+- **A failed `psa_destroy_key()` still lost its handle.** Detecting the failure stopped the
+  misleading success but did not return the slot. Failed ids are now parked in a bounded list and
+  retried at the top of every entry point, and a cleanup failure is logged even when the operation
+  also failed.
+
 § 8 (bidirectional nonce reuse) is unchanged and remains a protocol-revision item, filed as
 `FOLLOWUPS.md` § 5.
 

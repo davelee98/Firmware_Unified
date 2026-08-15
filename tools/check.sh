@@ -241,20 +241,22 @@ fi
 # Pure grep, so it always runs: the number of files including arduino_compat.h may only decrease.
 check "esp32: arduino shim ratchet" ./targets/esp32-idf/compat/ratchet.sh
 
-# The baseline needs a real build, so it is opt-in -- several minutes and an ESP-IDF that is
-# never on PATH (build.sh sources it itself).
-SDKCONFIG_BOARDS=(s3-n16r8 c3-n4 c6-n4 esp32-n4)
-esp32_baseline() {
-    local b
-    for b in "${SDKCONFIG_BOARDS[@]}"; do
-        ( cd targets/esp32-idf && ./build.sh "$b" ) || return 1
-        targets/esp32-idf/tools/sdkconfig_baseline.sh "$b" || return 1
-    done
+# ALL TEN FRAGMENTS, not a sampled four. The plan's verification list says ten, and a subset
+# leaves six board configurations covered by nothing -- the c3/c6/classic parts differ in PSRAM,
+# LAN and panel backends, which is precisely where a shared-core change breaks one target and not
+# the others. `build.sh` with no arguments builds every fragment; `sdkconfig_baseline.sh` with no
+# arguments then checks every board that has a build, so the two stay in step automatically
+# instead of through a hand-maintained list that silently narrows coverage.
+#
+# Opt-in only because it needs ESP-IDF (never on PATH; build.sh sources it) and several minutes.
+esp32_all_and_baseline() {
+    ( cd targets/esp32-idf && ./build.sh ) || return 1
+    targets/esp32-idf/tools/sdkconfig_baseline.sh
 }
 if [ "$DO_ESP32" = 1 ]; then
-    check "esp32: sdkconfig baseline (${SDKCONFIG_BOARDS[*]})" esp32_baseline
+    check "esp32: all fragments + sdkconfig baseline" esp32_all_and_baseline
 else
-    skip "esp32: sdkconfig baseline" "needs --esp32/--targets (builds ${#SDKCONFIG_BOARDS[@]} boards)"
+    skip "esp32: all fragments + sdkconfig baseline" "needs --esp32/--targets (builds 10 fragments)"
 fi
 
 # ====================================================================================== nordic ==

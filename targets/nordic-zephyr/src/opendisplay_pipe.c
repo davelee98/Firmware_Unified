@@ -1032,13 +1032,16 @@ static void on_pipe_write(uint8_t connection, const uint8_t *data, uint16_t len,
          * Deliberately narrow: a TAG failure keeps the NACK -- it is tamper evidence, not loss. */
         const bool nonce_loss = (report.nonce_reason == (uint8_t)NONCE_OUT_OF_WINDOW ||
                                  report.nonce_reason == (uint8_t)NONCE_REPLAY);
-        if (nonce_loss && cmd == CMD_PIPE_WRITE_DATA) {
-          return;
-        }
+        /* LOG BEFORE THE SILENT RETURN -- returning first would hide replay and out-of-window
+         * events on the one path that produces them routinely, which is the condition the
+         * throttle exists to let you observe. */
         if (nonce_log_allowed(nonce_loss ? &s_nonce_log_window_ms : &s_nonce_log_other_ms)) {
           od_log_warn("decrypt failed: cmd=0x%04X rc=%d nonce_reason=%u envelope=%u B",
                       (unsigned)cmd, (int)opened, (unsigned)report.nonce_reason,
                       (unsigned)(frame_len - 2u));
+        }
+        if (nonce_loss && cmd == CMD_PIPE_WRITE_DATA) {
+          return;   /* silence is the wire answer; the line above is the record of it */
         }
         pipe_send(connection, err, sizeof(err));
         return;

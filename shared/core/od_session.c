@@ -579,7 +579,11 @@ enum od_session_open od_session_open(struct od_session *s, uint16_t cmd, od_span
     aad[1] = (uint8_t)(cmd & 0xFFu);
     cs = od_hal_crypto_ccm_decrypt(s->slot, nonce + 3, OD_SESSION_CCM_NONCE_LEN, aad, 2u,
                                    envelope.p + OD_SESSION_NONCE_LEN, ct_len,
-                                   out, (uint16_t)out_cap, &plain_len);
+                                   /* The BOUNDED requirement, not the caller's out_cap: casting
+                                    * an arbitrary size_t can wrap a large-but-valid buffer down
+                                    * to a small capacity and manufacture a crypto error. The
+                                    * check above already proved out_cap covers this much. */
+                                   out, (uint16_t)(ct_len - OD_HAL_CRYPTO_TAG_LEN), &plain_len);
     if (cs == OD_HAL_CRYPTO_AUTH_FAILED) {
         strike(s, report);               /* the tag IS the tamper oracle */
         return OD_SESSION_OPEN_BAD_TAG;
@@ -673,7 +677,9 @@ enum od_session_seal od_session_seal(struct od_session *s, od_span_t plain_frame
     cs = od_hal_crypto_ccm_encrypt(s->slot, nonce + 3, OD_SESSION_CCM_NONCE_LEN, aad, 2u,
                                    inner, (uint16_t)(payload_len + 1u),
                                    out + 2 + OD_SESSION_NONCE_LEN,
-                                   (uint16_t)(out_cap - 2u - OD_SESSION_NONCE_LEN), &ct_len);
+                                   /* Bounded requirement again -- and here a wrapped capacity
+                                    * would burn a tx counter on a spurious failure. */
+                                   (uint16_t)(sealed_len - 2u - OD_SESSION_NONCE_LEN), &ct_len);
     if (cs != OD_HAL_CRYPTO_OK) {
         if (report != NULL) {
             report->crypto_status = cs;

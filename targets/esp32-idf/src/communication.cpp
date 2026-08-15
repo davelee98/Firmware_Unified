@@ -873,9 +873,11 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
             // and has not been analysed. Not an oversight.
             const bool nonce_loss = (report.nonce_reason == (uint8_t)NONCE_OUT_OF_WINDOW ||
                                      report.nonce_reason == (uint8_t)NONCE_REPLAY);
-            if (nonce_loss && command == CMD_PIPE_WRITE_DATA) {
-                return;
-            }
+            // LOG BEFORE THE SILENT RETURN. Upstream logs the rejection inside decryptCommand
+            // (encryption.cpp:745), so its PIPE early-return never costs telemetry; this port
+            // moved logging to the call site, where returning first would make the replay and
+            // out-of-window events -- the exact condition the throttle exists to let you watch
+            // -- invisible on the one path that produces them routinely.
             if (nonceLogAllowed(nonce_loss ? &s_nonceLogWindowMs : &s_nonceLogOtherMs)) {
                 // 16 bytes render as 47 chars + NUL, an exact fit in 48; sized past that
                 // so a future ENCRYPTION_NONCE_SIZE bump truncates nothing.
@@ -885,6 +887,9 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
                              "%u B envelope, nonce %s)",
                              (unsigned)command, (int)opened, (unsigned)report.nonce_reason,
                              (unsigned)envelope_len, nonceHex);
+            }
+            if (nonce_loss && command == CMD_PIPE_WRITE_DATA) {
+                return;      // silence is the wire answer; the line above is the record of it
             }
             uint8_t response[] = {RESP_ACK, (uint8_t)(command & 0xFF), RESP_NACK};
             sendResponseUnencrypted(response, sizeof(response));

@@ -389,6 +389,49 @@ static void test_seal_rejects_wrapping_lengths(void)
     }
 }
 
+/* A large but valid out_cap used to be cast straight to uint16_t on the way to the HAL, so a
+ * buffer whose capacity ARITHMETIC wrapped produced a spurious crypto error -- and on the seal
+ * side burned a tx counter doing it. The two constants below are chosen so the wrap actually
+ * happens: open casts out_cap directly, so 65536 -> 0; seal casts out_cap - 18, so 65554 -> 0.
+ * Sizes that merely look huge (65540, 70000) do NOT wrap and prove nothing -- the first draft of
+ * this case used them and passed against the unfixed code. */
+#define OD_WRAP_CAP_OPEN 65536u
+#define OD_WRAP_CAP_SEAL 65554u
+
+static void test_huge_out_cap_is_not_narrowed(void)
+{
+    struct od_session s;
+    uint8_t server_nonce[16];
+    /* Real storage behind each advertised cap. Sharing one buffer and offsetting into it would
+     * advertise a capacity the tail does not have -- safe only because seal writes 7 bytes, which
+     * is exactly the kind of luck a test should not depend on. */
+    static uint8_t sealed[OD_WRAP_CAP_SEAL + 16u];
+    static uint8_t opened[OD_WRAP_CAP_OPEN + 16u];
+    uint8_t frame[8];
+    uint16_t sealed_len, out_len;
+    uint64_t tx_before;
+
+    fake_reset(); sec_init(0);
+    od_session_init(&s, 0);
+    CHECK(handshake(&s, 1000u, server_nonce, false) == OD_SESSION_AUTH_ESTABLISHED);
+    memcpy(frame, "\x00\x71\x01\x02\x03\x04\x05\x06", 8u);
+
+    CASE("seal with an out_cap whose capacity arithmetic wraps still succeeds");
+    tx_before = s.tx_counter;
+    CHECK(od_session_seal(&s, od_span_make(frame, sizeof frame),
+                          sealed, OD_WRAP_CAP_SEAL, &sealed_len, 2000u, NULL)
+          == OD_SESSION_SEAL_OK);
+    CHECK(sealed_len == sizeof frame + 29u);
+    CHECK(s.tx_counter == tx_before + 1u);   /* one counter spent, not one wasted on a fake error */
+
+    CASE("open with an out_cap that narrows to zero still decrypts");
+    CHECK(od_session_open(&s, 0x0071u, od_span_make(sealed + 2, (size_t)(sealed_len - 2u)),
+                          opened, OD_WRAP_CAP_OPEN, &out_len, 2000u, NULL)
+          == OD_SESSION_OPEN_OK);
+    CHECK(out_len == sizeof frame - 2u);
+    CHECK(memcmp(opened, frame + 2, out_len) == 0);
+}
+
 static void test_clock_starting_at_zero(void)
 {
     struct od_session s;
@@ -876,6 +919,7 @@ int main(void)
     test_no_room_mutates_nothing();
     test_challenge_is_consumed_on_every_failure();
     test_seal_rejects_wrapping_lengths();
+    test_huge_out_cap_is_not_narrowed();
 
     test_replay_bitmap_sweep();
     test_replay_exact_counter();
