@@ -5,6 +5,12 @@ Firmware_Unified: one repo for all OpenDisplay firmware targets, replacing four 
 same wire protocol, config parsing, transfer state machines, compression and session encryption.
 `../CLAUDE.md` covers the wider workspace.
 
+**ALL SIX SOURCE REPOS ARE CHECKED OUT AS SIBLINGS AND ARE READABLE — USE THEM.** `../Firmware`,
+`../Firmware_NRF54`, `../Firmware_Silabs`, `../Firmware_NRF`, plus `../opendisplay-protocol` (the
+canonical wire contract) and `../py-opendisplay` (the host, and the answer to "does the client
+actually do X?"). `targets/*/` here are import *snapshots* that drift; the siblings are live. Diff
+before you port — see § "Migration constraints".
+
 ## Reading budget
 
 Code first. Headers, build files and tests are ground truth; `docs/` explains *why* and is never a
@@ -193,6 +199,19 @@ Rationale in [docs/MIGRATION.md](docs/MIGRATION.md) / [docs/ARCHITECTURE.md](doc
   justify itself — in a differential test, the Firmware form is the reference. `esp32-idf` is
   C++ and `shared/` is plain C, so this usually means a C port, not a file move. A default, not
   a licence to skip the write-up.
+- **THE AUTHORITY IS `../Firmware/`, THE SIBLING REPO — NOT `targets/esp32-idf/src/`.** That
+  directory is a *snapshot* taken at import, and upstream keeps moving. Before porting or
+  transcribing any algorithm, diff the two; when this repo and upstream disagree, upstream wins
+  unless the difference is a deliberate Firmware_Unified adaptation (Arduino removal, `od_hal_*`,
+  `od_log`, `struct od_config`), which the import is full of — so separate *drift* from
+  *adaptation* rather than blanket-copying either way. `../Firmware/tools/` also carries host
+  tests worth porting with the code they cover.
+  Learned the hard way on `od_session` (2026-08-15): the replay window had been extracted upstream
+  into `src/nonce_window.h` with an 816-line host test, and three rounds of design were built on
+  the stale ring instead — two of them wrong in security-relevant ways (a forward window cap that
+  strands a session, and counting nonce failures as integrity strikes so packet loss tears one
+  down). A 30-second diff would have caught all of it.
+  The same applies to the other three source repos for their targets.
 
 ## Memory sensitivity
 
