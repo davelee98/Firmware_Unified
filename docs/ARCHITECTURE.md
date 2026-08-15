@@ -501,6 +501,13 @@ not aspirational:
 | Own tasks | none — no kernel component in the `.slcp` | **none** — no `xTaskCreate` anywhere in `Firmware/src/` | a display workqueue thread (8 KB stack) for refresh, plus adv/DFU work items |
 | Synchronisation | none needed | one mutex, and it is only for the log TX buffer | the msgq itself; dispatch is single-flow on the main thread |
 
+**The "Arrival" row is the BLE path, and only the BLE path.** LAN frames do not use the ring at
+all: `wifi_service.cpp:1624` calls `imageDataWritten()` straight from `tcpReceiveBuffer`, with no
+`bleRxQueuePush()`. That is why the ring is sized from `PIPE_MAX_W` and `OD_BLE_MAX_FRAME` and why
+LAN frame sizes never constrained it — sizing an RX ring to `OD_LAN_MAX_FRAME` (4096) would be
+sizing a BLE structure to a transport that never touches it. Both transports converge at the
+dispatcher, which is where origin starts to matter.
+
 The ESP32 firmware is a single-flow queue-drain loop that happens to run inside Arduino's
 `loopTask`. It is already a bare-metal architecture wearing an RTOS hat. Adopting the
 bare-metal contract costs the ESP32 target nothing it is not already doing — it only stops it
@@ -524,12 +531,37 @@ behaves, and each difference is a way for stack context to stop being enqueue-on
    `static_assert` tying the two together. A hardcoded depth silently stops matching the window
    the moment either moves — `command_queue.h` records that this already happened once, and also
    why 33 is the *reorder* number and not the queue number.
-3. **Slot width should be the frame bound, not the ATT MTU.** Nordic sizes each slot
-   `OD_PIPE_MSG_DATA_MAX` (509, i.e. ATT MTU − 3); ESP32 uses `OD_BLE_MAX_FRAME` (256). At depth
-   40 that is **20,560 B** of `__noinit` ring against ESP32's 8,976 B —
-   the single largest pipe buffer on the target, and larger than the 8,316 B reorder queue it
-   feeds. Long writes are reassembled in the transport before dispatch, so the wire frame bound
-   is the honest slot size.
+3. **Slot width is `OD_BLE_MAX_FRAME` (256) — the protocol constant, not a locally derived MTU.**
+   That is the wire contract: 256 bytes is the whole BLE frame, **wrapper included** — cmd, nonce,
+   length byte, payload and tag. `opendisplay_protocol.h:225-227` does the arithmetic itself for
+   the encrypted budget ("packet = cmd2 + nonce16 + len1 + 154 + tag12 = 185"), and the ESP32 GATT
+   layer enforces it (`ble/od_ble_nimble.cpp:249`, `s_chr_value[OD_BLE_MAX_FRAME]`). ESP32's ring
+   already uses it: `MAX_COMMAND_SIZE = OD_BLE_MAX_FRAME` (`command_queue.h:66`).
+   Nordic instead defines its own `OD_PIPE_MSG_DATA_MAX` = 509 (`opendisplay_pipe.c:94`, commented
+   "ATT MTU 512 − 3") — sized to an MTU the contract does not permit. The cost is the largest
+   buffer on the target:
+
+   | | slot | depth | ring |
+   |---|---:|---:|---:|
+   | Nordic today | 514 B | 40 | **20,560 B** |
+   | Nordic at `OD_BLE_MAX_FRAME` | 260 B | 40 | 10,400 B |
+   | + depth derived (`PIPE_MAX_W + 2`) | 260 B | 34 | **8,840 B** |
+   | ESP32 today | 264 B | 34 | 8,976 B |
+
+   So fixing slot width alone returns ~10.2 KB, and with item 2 ~11.7 KB — on the single largest
+   pipe buffer, larger even than the 8,316 B reorder queue it feeds. Long writes are reassembled
+   in the transport before dispatch, so the frame bound is the honest slot size.
+
+   **256 is the ADMISSION bound; 253 is the generation bound — they are different questions and
+   both are right.** `OD_BLE_MAX_FRAME` is the ATT MTU with opcode(1) + handle(2) inside it, so a
+   single write carries 253 usable bytes (`opendisplay_protocol.h:886`). An RX slot is sized to
+   what the GATT layer will *accept* (256, `ble/od_ble_nimble.cpp:249`); what this firmware
+   *emits* is capped at 253, which is what `plans/PLAN_OD_DISPATCH_2026-08-14.md:32,76` and
+   `plans/OD_SESSION_PLAN_2026-08-15.md` both use (sealed ≤ 253 → payload ≤ 222). Keep the slot at
+   256 and the emitted frame at 253; do not collapse the two into one number.
+
+   The header comment makes 256 read as both, and that should be reworded upstream in
+   `opendisplay-protocol` to name 253 as the application frame. Do not hand-edit the vendored copy.
 
 What must NOT be done instead: moving the panel write onto the existing display workqueue. That
 relocates the block rather than removing it, and splits transfer state across two threads —
@@ -589,6 +621,13 @@ Target-agnostic logic that today exists in near-duplicate across the four repos:
   target-specific.
 - **Session auth / AES-CCM** — nonce handling, replay window, session timeout. The AES
   primitive comes from the HAL (each SDK has its own accelerated implementation).
+  **This is a BLE mechanism.** Encrypted LAN is TLS-PSK: the TLS handshake *is* the
+  authentication, so those frames carry no device nonce and bypass the app-layer envelope, the
+  replay window and the counter space entirely (SECTION 9 rule 4;
+  `targets/esp32-idf/src/communication.cpp:806` gates on `origin != ORIGIN_LAN_TLS`). The bypass
+  is a **dispatcher** decision about whether to call the session at all — which is why origin is
+  an explicit argument at the dispatcher and never a parameter of the session itself. It also
+  bounds every session buffer at `OD_BLE_MAX_FRAME` rather than `OD_LAN_MAX_FRAME`.
 - **Advertisement payload assembly** — the manufacturer-specific data layout.
 
 ## What belongs in `shared/hal`

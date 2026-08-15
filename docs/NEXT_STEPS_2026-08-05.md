@@ -552,9 +552,10 @@ order in `MIGRATION.md`.
    (`od_gatt_write()` → `k_msgq_put`, drained by `opendisplay_pipe_process()`), so this is the
    queue's *behaviour*, not its existence: make the put non-blocking (it is `K_MSEC(100)` today,
    which parks the BT RX thread on a full queue), derive the depth from `PIPE_MAX_W + 2` instead
-   of the hardcoded 40, and size slots by `OD_BLE_MAX_FRAME` rather than the ATT MTU — the ring
-   is 20,560 B against ESP32's 8,976 B. See ARCHITECTURE.md § "Target state for
-   Nordic".
+   of the hardcoded 40, and size slots by **`OD_BLE_MAX_FRAME` (256, the protocol constant —
+   the whole BLE frame including the cmd/nonce/tag wrapper)** rather than Nordic's locally derived
+   `OD_PIPE_MSG_DATA_MAX` 509. The ring is 20,560 B today against ESP32's 8,976 B; slot width alone
+   returns ~10.2 KB and both together ~11.7 KB. See ARCHITECTURE.md § "Target state for Nordic".
 
 Do not use Zephyr `k_work` as a new owner of product policy. It may bridge an API context, while
 the application pump remains the owner of advertising, transfers, and teardown ordering. Item 8 is
