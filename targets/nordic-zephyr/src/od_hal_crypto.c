@@ -108,6 +108,26 @@ static bool orphans_full(void)
     return false;
 }
 
+/* Is retrying this failure worth a tracking slot? Taken from psa_destroy_key's documented
+ * returns, because "retry forever" and "give up" are both wrong for the whole set:
+ *
+ *   COMMUNICATION_FAILURE  the key MAY STILL BE PRESENT in the cryptoprocessor -- the one case
+ *                          the orphan list exists for. Retry.
+ *   BAD_STATE              the library was not initialised. A later call may find it is. Retry.
+ *   NOT_PERMITTED          read-only or physically restricted: no caller can ever destroy it.
+ *   CORRUPTION_DETECTED    the cryptoprocessor may be compromised.
+ *   STORAGE_FAILURE /
+ *   DATA_INVALID           storage-backend faults, not reachable for a volatile key at all.
+ *
+ * The last four will not resolve, so holding their ids buys nothing and costs a slot each --
+ * four of them would wedge the gate permanently, which is the same failure INVALID_HANDLE used
+ * to cause. Drop them loudly instead: the key is unreclaimable either way, and the log is the
+ * finding. */
+static bool orphan_retryable(psa_status_t status)
+{
+    return status == PSA_ERROR_COMMUNICATION_FAILURE || status == PSA_ERROR_BAD_STATE;
+}
+
 /* Retry every parked id, compacting the ones that are now gone. Cheap: the list is empty on every
  * healthy system, so this is a single compare. */
 static void orphan_drain(void)
@@ -115,7 +135,15 @@ static void orphan_drain(void)
     uint8_t i = 0;
 
     while (i < s_orphan_count) {
-        if (psa_destroy_key(s_orphans[i]) == PSA_SUCCESS) {
+        psa_status_t status = psa_destroy_key(s_orphans[i]);
+
+        /* INVALID_HANDLE means the key is already gone -- the id names nothing, so there is
+         * nothing left to free and the entry must not occupy a slot. */
+        if (status == PSA_SUCCESS || status == PSA_ERROR_INVALID_HANDLE) {
+            s_orphans[i] = s_orphans[--s_orphan_count];
+        } else if (!orphan_retryable(status)) {
+            od_log_error("crypto: key id %lu is permanently undestroyable (%ld) - dropping",
+                         (unsigned long)s_orphans[i], (long)status);
             s_orphans[i] = s_orphans[--s_orphan_count];
         } else {
             ++i;

@@ -86,6 +86,23 @@ including the per-frame CCM paths, so a transient fault clears on the next frame
 next handshake. On an empty list it is a single compare. A reboot also clears it and loses
 nothing, because volatile PSA keys die with the crypto core.
 
+**Round 4 — the drain classifies failures.** A follow-up change (Codex) made
+`PSA_ERROR_INVALID_HANDLE` drop the entry instead of retrying it forever: the id names nothing, so
+holding it consumed a tracking slot for zero actual leak, and four such events would wedge the
+gate permanently. Correct, and checking it against `psa_destroy_key`'s documented returns showed
+it fixed one instance of a class. `NOT_PERMITTED`, `CORRUPTION_DETECTED`, `STORAGE_FAILURE` and
+`DATA_INVALID` are equally unresolvable — the first two by definition, the last two unreachable
+for a volatile key — so retrying them wedges the gate the same way. The drain now retries only
+`COMMUNICATION_FAILURE` (the case the spec says may leave key material present, i.e. the one the
+list exists for) and `BAD_STATE`, and drops the rest loudly.
+
+**Residual risk, stated rather than closed: a parked id may be reallocated.** If a destroy fails
+but the slot was in fact freed, PSA may reissue that id to a new key, and a later retry would
+destroy something else's. The window is narrow — the drain runs at the top of every entry point,
+so a retry almost always precedes any import this file makes — but another PSA client (the BT
+stack) could import in between. Shrinking that window is why the drain moved out of the two
+producer functions. It is accepted, not eliminated.
+
 **Not covered by any test.** `od_hal_crypto.c` is target code with no host harness, and PSA
 destroy failure is not injectable from a board. This is reasoned code, verified only by review and
 by compiling — the same standing as the rest of that file.
