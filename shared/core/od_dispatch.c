@@ -35,7 +35,12 @@ static uint8_t budget_for(uint16_t cmd)
     case CMD_PIPE_WRITE_DATA:      return 3u;
     case CMD_DIRECT_WRITE_DATA:    return 2u;
     case CMD_DIRECT_WRITE_END:     return 2u;
-    case CMD_PIPE_WRITE_END:       return 2u;
+    /* THREE, not two. An explicit PIPE END emits the tail SACK (sendPipeAck), then the END ACK,
+     * then the refresh status -- verified on both its partial and full branches
+     * (display_service.cpp:2865, :2886, :2897/:2901 and :2327, :2373/:2377). At two the third
+     * reply is dropped AFTER the panel has already refreshed, so the host loses the completion
+     * signal for work the device actually did. The parent plan's table said two and was wrong. */
+    case CMD_PIPE_WRITE_END:       return 3u;
     default:                       return 1u;
     }
 }

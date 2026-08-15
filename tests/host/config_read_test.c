@@ -219,6 +219,24 @@ static void test_load_failure(void)
     CHECK(g_sent[0].len == 4u);
     CHECK(g_sent[0].data[0] == RESP_NACK);
     CHECK(g_sent[0].data[1] == RESP_CONFIG_READ);
+
+    CASE("and it stays PLAINTEXT with a live session -- a hard NACK must remain readable");
+    /* Sealed, a client whose session had just died could not read why its read failed. Section 3.6
+     * puts every hard NACK on the explicit plaintext path; this one was on od_reply until an
+     * independent review caught it. */
+    setup(true);
+    {
+        uint8_t server_nonce[16];
+        od_tx_reservation_t r2;
+        CHECK(handshake(&g_app_session, g_now_ms, server_nonce, false)
+              == OD_SESSION_AUTH_ESTABLISHED);
+        CHECK(od_txq_reserve(1u, &r2) == OD_TXQ_OK);
+        CHECK(od_config_read_start(&BLE, &r2, NULL, 0u) == OD_TXQ_OK);
+        (void)od_txq_process();
+        CHECK(g_sent_n == 1u);
+        CHECK(g_sent[0].len == 4u);                  /* NOT 33 */
+        CHECK(g_sent[0].data[0] == RESP_NACK);
+    }
 }
 
 static void test_second_read_is_refused(void)

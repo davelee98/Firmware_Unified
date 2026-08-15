@@ -85,7 +85,11 @@ od_txq_status_t od_config_read_start(const od_reply_t *rp, od_tx_reservation_t *
         err[1] = RESP_CONFIG_READ;
         err[2] = 0x00u;
         err[3] = 0x00u;
-        return od_reply(r, rp, err, sizeof err);
+        /* od_reply_PLAIN: this is a hard NACK, and section 3.6 puts every one of those on the
+         * explicit plaintext path. Sealing it would make a read failure unreadable to a client
+         * whose session had just died -- the same class as the Nordic regression that sealed its
+         * own rejection frames. */
+        return od_reply_plain(r, rp, err, sizeof err);
     }
 
     s.blob = blob;

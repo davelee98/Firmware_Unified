@@ -294,6 +294,34 @@ static void test_budget_covers_the_worst_case(void)
     CHECK(od_dispatch_frame(&BLE, od_span_make(other, sizeof other)) == OD_FRAME_ACCEPTED);
     (void)od_txq_process();
     CHECK(g_sent_n == 1u);                 /* the overrun did not steal another dispatch's unit */
+
+    CASE("EVERY multi-reply opcode is pinned, not just 0x81");
+    /* The earlier version of this case tested 0x81 and one ordinary opcode and the plan claimed
+     * the table was "already asserted per opcode". It was not -- and 0x82 was wrong: an explicit
+     * PIPE END emits the tail SACK, the END ACK and the refresh status, which is three. At two the
+     * last one was dropped after the panel had already refreshed. */
+    {
+        static const struct { uint16_t cmd; uint8_t replies; } BUDGETS[] = {
+            { CMD_PIPE_WRITE_DATA,   3u },
+            { CMD_PIPE_WRITE_END,    3u },
+            { CMD_DIRECT_WRITE_DATA, 2u },
+            { CMD_DIRECT_WRITE_END,  2u },
+            { CMD_BUZZER,            1u }
+        };
+        unsigned i;
+        for (i = 0; i < sizeof BUDGETS / sizeof BUDGETS[0]; ++i) {
+            uint8_t f[4];
+            f[0] = (uint8_t)((BUDGETS[i].cmd >> 8) & 0xFFu);
+            f[1] = (uint8_t)(BUDGETS[i].cmd & 0xFFu);
+            f[2] = 1u;
+            f[3] = 2u;
+            setup(false, false);
+            g_handler_replies = BUDGETS[i].replies;      /* exactly its worst case */
+            CHECK(od_dispatch_frame(&BLE, od_span_make(f, sizeof f)) == OD_FRAME_ACCEPTED);
+            (void)od_txq_process();
+            CHECK(g_sent_n == BUDGETS[i].replies);       /* every one of them reached the radio */
+        }
+    }
 }
 
 static void test_producer_conflict_defers_before_decrypt(void)
