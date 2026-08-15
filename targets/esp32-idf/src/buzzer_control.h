@@ -1,6 +1,8 @@
 #ifndef BUZZER_CONTROL_H
 #define BUZZER_CONTROL_H
 
+#include "od_cmd.h"
+
 #include <stdint.h>
 
 // Human-readable note names for authoring melodies. Values are the protocol
@@ -92,7 +94,11 @@ enum BuzzerNote : uint8_t {
 };
 
 void initPassiveBuzzers(void);
-void handleBuzzerActivate(uint8_t* data, uint16_t len);
+/* Takes the reply context explicitly and reports its verdict -- the shape every handler moves to
+ * (plans/PLAN_HANDLER_REWRITE_2026-08-15.md). A NACK for a malformed request is still OD_CMD_NACK
+ * rather than a failure: the client is talking correctly and got a real answer, which is why
+ * section 5 counts it as activity. */
+od_cmd_result_t handleBuzzerActivate(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 void passiveBuzzerPowerOffAlert(void);
 void buzzerService(void);   // non-blocking playback tick, called from loop()
 /**

@@ -29,7 +29,7 @@ static uint8_t s_plain[OD_SESSION_PLAIN_MAX];
  * in one call. 0x71 is 2 because it emits the data ack OR calls END, never both. The END opcodes
  * are 2: their own ack, then the post-refresh status -- and that reservation is HELD ACROSS THE
  * REFRESH, which is free here because capacity is a counter rather than a parked slot. */
-static uint8_t budget_for(uint16_t cmd)
+uint8_t od_dispatch_budget(uint16_t cmd)
 {
     switch (cmd) {
     case CMD_PIPE_WRITE_DATA:      return 3u;
@@ -105,7 +105,7 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
     }
 
     /* ---- budget and reserve ---- */
-    if (od_txq_reserve(budget_for(cmd), &r) != OD_TXQ_OK) {
+    if (od_txq_reserve(od_dispatch_budget(cmd), &r) != OD_TXQ_OK) {
         /* No capacity to answer, so the handler must not run: it would mutate state and then be
          * unable to say so. Deferred rather than refused -- the frame is still good. */
         return OD_FRAME_DEFERRED;

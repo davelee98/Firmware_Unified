@@ -13,8 +13,10 @@
 #define OD_CMD_REPLY_SHARED 0
 #endif
 
-extern "C" void sendResponse(uint8_t* response, uint16_t len);
-extern "C" void sendResponseUnencrypted(uint8_t* response, uint16_t len);
+/* C++ linkage, matching their definitions in communication.cpp -- these are the shipped senders,
+ * not part of any C ABI. Only the adapter itself is extern "C", because shared/ calls it. */
+void sendResponse(uint8_t* response, uint16_t len);
+void sendResponseUnencrypted(uint8_t* response, uint16_t len);
 
 extern "C" od_txq_status_t od_cmd_reply(const od_cmd_ctx_t *ctx, const uint8_t *frame, uint16_t len)
 {
@@ -41,7 +43,14 @@ extern "C" od_txq_status_t od_cmd_reply_plain(const od_cmd_ctx_t *ctx,
 #if OD_CMD_REPLY_SHARED
     return od_reply_plain(ctx->r, &ctx->rp, frame, len);
 #else
-    sendResponseUnencrypted(const_cast<uint8_t *>(frame), len);
+    /* ALSO sendResponse(), NOT sendResponseUnencrypted(). In legacy mode both adapters must be
+     * observably identical to what shipped, and the shipped sender's own inference already routes
+     * the control frames plain. Calling sendResponseUnencrypted here would take effect IMMEDIATELY
+     * rather than at the cutover -- and it would change the wire for every site that is currently
+     * sealed by inference but classified plain, such as buzzer_control's 4-byte NACKs, whose
+     * byte 2 is an error code rather than 0xFF. The classification is recorded at the call site
+     * and takes effect when OD_CMD_REPLY_SHARED flips, not before. */
+    sendResponse(const_cast<uint8_t *>(frame), len);
     return OD_TXQ_OK;
 #endif
 }

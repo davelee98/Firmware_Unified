@@ -23,6 +23,7 @@
 
 /* Chunked CONFIG_WRITE reassembly, promoted to shared/core (F3). */
 #include "od_config_asm.h"
+#include "od_dispatch.h"   /* od_dispatch_budget, for the migration's legacy reservations */
 
 /* The CCM envelope, both directions. g_session is this target's one session (encryption_state.h). */
 #include "od_session.h"
@@ -1002,7 +1003,19 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
             handlePartialWriteStart(data + 2, len - 2);
             break;
         case CMD_BUZZER:              // 0x0077
-            handleBuzzerActivate(data + 2, len - 2);
+            /* FIRST CONVERTED HANDLER (handler-rewrite step 2). The reservation is taken from the
+             * shared budget table so the legacy caller and the dispatcher cannot drift, and it is
+             * released immediately below -- in legacy mode nothing is committed against it, so
+             * this is pure accounting that exercises the path the cutover will rely on. */
+            {
+                od_tx_reservation_t r;
+                if (od_txq_reserve(od_dispatch_budget(CMD_BUZZER), &r) == OD_TXQ_OK) {
+                    const od_cmd_ctx_t ctx = { { (od_origin_t)g_commandOrigin, g_commandInstance },
+                                               &r };
+                    (void)handleBuzzerActivate(&ctx, data + 2, len - 2);
+                    od_txq_release(&r);
+                }
+            }
             break;
         case CMD_PIPE_WRITE_START:    // 0x0080
             handlePipeWriteStart(data + 2, len - 2);

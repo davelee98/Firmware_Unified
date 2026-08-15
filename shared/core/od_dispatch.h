@@ -44,6 +44,11 @@ extern "C" {
  * is the only outcome for which that is true. */
 od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame);
 
+/* How many response slots this opcode may need, worst case. Exposed because the migration's
+ * legacy caller reserves from the same table the dispatcher will -- duplicating it there would let
+ * the two drift, and the one that matters is whichever is live. */
+uint8_t od_dispatch_budget(uint16_t cmd);
+
 /* IMPLEMENTED BY THE TARGET. Runs one command that has passed the gate; `body` is plaintext.
  *
  * C8 SCOPE NOTE: the plan names one seam per opcode (od_cmd_led_activate, od_cmd_config_read, ...)

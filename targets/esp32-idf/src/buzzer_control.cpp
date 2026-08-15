@@ -6,7 +6,8 @@
 #include <string.h>
 
 extern struct od_config globalConfig;
-void sendResponse(uint8_t* response, uint16_t len);
+#include "od_cmd_reply.h"
+
 
 static_assert(sizeof(BuzzerConfig) == 32, "BuzzerConfig must be 32 bytes");
 
@@ -278,23 +279,29 @@ void initPassiveBuzzers(void) {
     }
 }
 
-void handleBuzzerActivate(uint8_t* data, uint16_t len) {
+/* Every error arm here is a HARD NACK -- byte 0 is RESP_NACK and byte 2 is an error code -- so
+ * each takes the explicit plaintext path. Note that the shipped byte-2 inference SEALS these
+ * today, because byte 2 is 0x01..0x06 rather than 0xFE/0xFF; the classification below is the
+ * deliberate correction, and it takes effect at the cutover rather than here.
+ *
+ * The single success arm is an application reply and stays protected. */
+od_cmd_result_t handleBuzzerActivate(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
     if (len < 3) {
         uint8_t err[] = {RESP_NACK, RESP_BUZZER_ACK, 0x01, 0x00};
-        sendResponse(err, sizeof(err));
-        return;
+        (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+        return OD_CMD_NACK;
     }
     uint8_t inst = data[0];
     if (inst >= globalConfig.passive_buzzer_count) {
         uint8_t err[] = {RESP_NACK, RESP_BUZZER_ACK, 0x02, 0x00};
-        sendResponse(err, sizeof(err));
-        return;
+        (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+        return OD_CMD_NACK;
     }
     BuzzerConfig* b = &globalConfig.passive_buzzers[inst];
     if (b->drive_pin == 0xFF) {
         uint8_t err[] = {RESP_NACK, RESP_BUZZER_ACK, 0x03, 0x00};
-        sendResponse(err, sizeof(err));
-        return;
+        (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+        return OD_CMD_NACK;
     }
 
     uint8_t outer = data[1];
@@ -304,35 +311,35 @@ void handleBuzzerActivate(uint8_t* data, uint16_t len) {
     uint8_t pattern_count = data[2];
     if (pattern_count == 0) {
         uint8_t err[] = {RESP_NACK, RESP_BUZZER_ACK, 0x04, 0x00};
-        sendResponse(err, sizeof(err));
-        return;
+        (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+        return OD_CMD_NACK;
     }
 
     uint16_t scan = 3;
     for (uint8_t pi = 0; pi < pattern_count; pi++) {
         if (scan >= len) {
             uint8_t err[] = {RESP_NACK, RESP_BUZZER_ACK, 0x05, 0x00};
-            sendResponse(err, sizeof(err));
-            return;
+            (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+            return OD_CMD_NACK;
         }
         uint8_t nsteps = data[scan++];
         uint32_t need = (uint32_t)nsteps * 2u;
         if (scan + need > len) {
             uint8_t err[] = {RESP_NACK, RESP_BUZZER_ACK, 0x05, 0x00};
-            sendResponse(err, sizeof(err));
-            return;
+            (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+            return OD_CMD_NACK;
         }
         scan = (uint16_t)(scan + need);
     }
     if (scan != len) {
         uint8_t err[] = {RESP_NACK, RESP_BUZZER_ACK, 0x06, 0x00};
-        sendResponse(err, sizeof(err));
-        return;
+        (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+        return OD_CMD_NACK;
     }
     if (len > sizeof(s_buzzer.melody)) {
         uint8_t err[] = {RESP_NACK, RESP_BUZZER_ACK, 0x05, 0x00};
-        sendResponse(err, sizeof(err));
-        return;
+        (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+        return OD_CMD_NACK;
     }
 
     // Preempt any melody already playing, then take our own copy of the payload
@@ -357,7 +364,8 @@ void handleBuzzerActivate(uint8_t* data, uint16_t len) {
     buzzer_run();
 
     uint8_t ok[] = {RESP_ACK, RESP_BUZZER_ACK, 0x00, 0x00};
-    sendResponse(ok, sizeof(ok));
+    (void)od_cmd_reply(ctx, ok, sizeof(ok));
+    return OD_CMD_OK;
 }
 
 void passiveBuzzerPowerOffAlert(void) {
