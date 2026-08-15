@@ -130,6 +130,7 @@ set(OD_SHARED_SOURCES_HAL_RADIO
 # a driver, which is why it is named for the seam rather than for a HAL.
 set(OD_SHARED_SOURCES_APP_SESSION
     "${CMAKE_CURRENT_LIST_DIR}/core/od_reply.c"
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_gate.c"
 )
 
 set(OD_SHARED_SOURCES_HAL_WDT

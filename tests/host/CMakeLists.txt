@@ -129,6 +129,17 @@ add_executable(od_reply_test reply_test.c)
 target_link_libraries(od_reply_test od_session_fake)
 add_test(NAME reply COMMAND od_reply_test)
 
+# gate: one case per od_session result, checking the WIRE BYTES and the outcome.
+#
+# The compiler already proves the switches are exhaustive (od_gate.h explains the -Wswitch ratchet,
+# verified by deleting a case and watching the build fail). What it cannot prove is that each
+# member maps to the right action, which is where the consequences are: 0xFE advances the link's
+# auth-abuse run and 0xFF does not, and a replayed PIPE frame must draw SILENCE because the 0x81
+# NACK is fatal to the client's upload loop.
+add_executable(od_gate_test gate_test.c)
+target_link_libraries(od_gate_test od_session_fake)
+add_test(NAME gate COMMAND od_gate_test)
+
 # session: the handshake, KDF, replay window and CCM envelope against a fake crypto HAL built on
 # the host AES core. DIFFERENTIAL where it matters -- the replay window is upstream Firmware's
 # own nonce_window.h, ported verbatim, so this suite exercises the shipped state machine rather
