@@ -656,29 +656,26 @@ precedes `od_dispatch.c` with the reason, and delete the **stale duplicate `core
 
 ## Commit sequence
 
-**C0 — Capture, and it blocks C1 and C4.** Bench sessions on a flashed ESP32-S3 **and** the verified
-`xiao_nrf52840`, recorded at py-opendisplay's transport boundary: 0x0050 step 1 + step 2 (both
-directions — the 19-byte proof is the point), an authenticated config round-trip, an authenticated
-image push, and the frames needed to DERIVE a replay — the replay itself is NOT captured, see
-Testing → `tests/vectors/session.json`.
-`TEST_OWNERSHIP.md:269-275`: after the swap there is no untouched reference left.
+**C0 — Capture. SKIPPED by decision, 2026-08-15.** The hardware capture is not being taken, so
+`tests/vectors/session.json`, `tools/session_vectors_gen.py` and `session_vectors.inc` drop out of
+this plan and **C1 is no longer blocked**.
 
-**C0 BLOCKS C1, not just C5.** C1 replaces Nordic's CCM outright, so a device flashed with C1 is
-no longer the untouched reference the capture exists to preserve — "byte-identical on the wire" is
-the thing being verified, not something to assume while verifying it. Either land C0 before
-flashing C1, or capture from pinned pre-C1 release binaries and record their SHAs in the vector
-file. **C0 also blocks C4**, because Gate 1 there includes `session_vectors.inc`, which cannot be
-generated before `session.json` exists.
+*What that costs, recorded so it is a decision and not an oversight.* The differential test loses
+its third and strongest layer. Layers 1 and 2 survive — an independent transcription of ESP32's
+KDF, and the transcribed soft CCM pinning the envelope framing — and they still prove the promoted
+code agrees with the shipped algorithms. But they prove it against **a transcription of the source
+I can read**, not against bytes a real device actually emitted, so a misreading of the shipped code
+is invisible: both sides are then wrong in the same way. Capture is the only layer that could have
+caught that, and `TEST_OWNERSHIP.md:269-275` is explicit that once C5/C6 land there is no untouched
+reference left to take it from. Gate 1's "shared wire vectors passing against both the C core and
+py-opendisplay" is therefore **not met for this subsystem**.
 
-**On secrets, precisely.** A transport capture does *not* contain the session key — the key is
-derived, never transmitted; what is on the wire is the two nonces, the device_id and the MACs.
-But the C fixture **must** carry the master key to re-derive anything, so the committed artifact
-does expose a working key. So: **provision both devices with a throwaway 16-byte master key,
-commit that same key as explicit synthetic fixture state (not a secret to be hidden — a value the
-test needs and the reader should see), rotate it off the devices afterwards, and scrub BLE
-addresses.** `TEST_OWNERSHIP.md:302-305` says "captures contain session keys"; that is loose about
-the mechanism and right about the consequence. It blocks on bench time, so schedule it first —
-it cannot run in parallel with C1, which is the commit that replaces the reference.
+*Cheap partial substitutes, if wanted later.* `replay_vectors.py` already carries a 0x0050 builder
+for both h2d handshake shapes, so **authored** (not captured) h2d vectors would still exercise the
+host encoder against the C core without any bench time. And the 19-byte step-2 proof — the one
+undocumented thing on this wire — stays pinned by `OD_SESSION_STEP2_REPLY_LEN` and its
+`OD_STATIC_ASSERT` regardless. Hardware verification at C5/C6 remains the real gate and is
+unchanged.
 
 **C1 — the crypto seam, proven in isolation.** `od_hal_crypto.h` + both implementations +
 `CONFIG_PSA_WANT_ALG_CCM=y`. Repoint the *existing* target code onto it: ESP32's `aes_*` become
@@ -713,13 +710,9 @@ that does not build.)
 
 **C4 — `od_session.c`, test registered, host suite green, no target calls it.** Compiles and links
 dead on ESP32 (aggregate) and in the host build. **Gate 1 closes here — including the CI wiring,
-which is part of this commit and not a loose intention:** the `fuzz-short` job and
-`tools/session_vectors_gen.py --check` both land in `.github/workflows/host-tests.yml` here.
-Also decide `session.json`'s shape deliberately: `replay_vectors.py:216` **globs `*.json`**, so the
-new file is picked up automatically and, with the event-typed schema, contributes **zero** vectors
-in silence. **Decided: the file carries BOTH keys** — `vectors` with the h2d handshake frames the Python
-runner's existing 0x0050 builder already handles, and `events` with the ordered, result-typed
-sequence the C runner drives. One file, two consumers, neither silently empty.
+which is part of this commit and not a loose intention:** the `fuzz-short` job lands in
+`.github/workflows/host-tests.yml` here. There is no `session_vectors_gen.py --check` job and no
+`session.json` — C0 is skipped, so `replay_vectors.py` is untouched by this plan.
 
 **C5 — ESP32 swaps** (first, per CLAUDE.md:171 — the authority target is the reference). ~350
 lines out of `encryption.cpp`; `struct EncryptionSession` deleted from `encryption_state.h`.
@@ -766,41 +759,26 @@ re-authentications**.
 
 **Differential reference, three layers:** an independent transcription of ESP32's KDF
 (`encryption.cpp:107-154`) swept over nonces; the transcribed soft CCM pinning the envelope
-framing; and the C0 hardware capture replayed — the only layer proving the shipped fleet agrees.
+framing. **The third layer — the C0 hardware capture — is skipped (see C0), so nothing here proves
+agreement with bytes a real device emitted; the two transcriptions are the whole reference.**
 
 **How the capture actually gets replayed, because "a C runner" is not a design.** There is no C
 JSON parser in this repo and there will not be one: `replay_vectors.py` is per-frame and cannot
 establish a multi-frame session, so it stays as-is for the h2d halves it already handles.
-Instead add `tools/session_vectors_gen.py`, run **manually** and its output committed (not a build
-step — the host build must not need Python): it reads `tests/vectors/session.json` and emits
-`tests/host/session_vectors.inc`. `session_test.c` `#include`s it and drives the events in order,
-so session continuity is just program order. Regenerating is a reviewable diff of C literals, and
-**`tools/session_vectors_gen.py --check` runs in CI** so `session.json` and the committed `.inc`
-cannot drift apart.
+**With C0 skipped there is no `session.json`, no generator and no C corpus runner in this plan.**
+The vector machinery described in earlier revisions (`tools/session_vectors_gen.py` emitting a
+committed `session_vectors.inc`, a scripted RNG stream carrying a captured server nonce, and the
+`AUTH_REQUEST` / `H2D_ENCRYPTED` / `D2H_PLAINTEXT` event types) all existed to replay captured
+device traffic. None of it is needed for authored tests, which drive the API directly and use the
+deterministic counter-seeded fake. If a capture is taken later, that machinery is the shape to
+build — see the git history of this file rather than re-deriving it.
 
-Two things the fixture must carry that a naive dump would miss:
-
-- **A scripted RNG stream, not counter-seeded randomness.** The capture contains a *genuinely
-  random* server nonce; a fake RNG that counts would make `od_session_authenticate` mint a
-  different challenge and the replay would diverge on the very first frame. The generator emits
-  the captured server nonce as an ordered byte stream, and the fake's `od_hal_crypto_random`
-  serves from it — so the replay reproduces the recorded handshake exactly. The counter-seeded
-  mode stays for the *authored* tests, where reproducibility is all that matters.
-- **Explicit event types with an expected RESULT, not just expected bytes** — because otherwise
-  the encrypted device→host direction is never checked, and a replay event cannot be expressed at
-  all:
-  `AUTH_REQUEST` (body → expected reply bytes + expected `enum od_session_auth`),
-  `H2D_ENCRYPTED` (envelope → expected `enum od_session_open`, plus expected plaintext when OK),
-  `D2H_PLAINTEXT` (plain_frame → expected envelope, via `od_session_seal`).
-  Plus the synthetic master key and device_id as fixture state.
-
-**The captured replay is NOT a golden event, and this is the trap.** C0 records *existing*
-firmware, which **accepts** a `diff == 0` resend; the promoted core deliberately returns `REPLAY`.
-So a captured replay replayed as an ordinary event asserts the old behaviour and fails the new
-code — inviting someone to "fix" the core. **Capture only the successful sequence.** Derive the
-negative vector from it: re-present a captured frame with `expected_result: OD_SESSION_OPEN_REPLAY`,
-and *separately* assert that the transcribed legacy oracle accepted that same frame. Those two
-assertions together are what proves the fix; either alone proves nothing.
+**The replay assertion still needs two halves, capture or not.** A replay case must assert both
+that the promoted core returns `OD_SESSION_OPEN_REPLAY` **and** that the transcribed legacy oracle
+*accepted* that same frame — the shipped code skips the seen-scan when `diff == 0`. Either
+assertion alone proves nothing: the first could pass against a core that rejects everything, the
+second is just a description of the old bug. With C0 skipped the frame is authored rather than
+captured, which does not weaken this particular pairing — both halves run against code, not bytes.
 
 **Cases that carry the weight:** `diff == 0` refused *and* asserted to disagree with the
 transcribed ring-scan (that is what makes it a fix rather than a claim); window-advance ordering
@@ -826,11 +804,8 @@ Added by review, each guarding a specific hole:
 - **Timeout boundary** — exactly `timeout_ms` expires, `timeout_ms - 1` does not.
 - **`rsp == NULL` / `rsp_cap < 3`** — `BAD_ARGUMENT` / `NO_ROOM`, no write, no crash.
 
-**Coordinate the C runner with dispatch's.** This plan's C4 lands `tools/session_vectors_gen.py`
-and a C driver for `session.json`; the dispatch plan's C5 lands a "C corpus runner" for
-`dispatch.json`. Two runners for one problem. This one arrives first, so it sets the pattern —
-generator emits committed C literals, `--check` in CI — and dispatch's should reuse it rather than
-invent a second mechanism.
+**No C corpus runner here.** With C0 skipped this plan lands none, so the dispatch plan's C12
+runner for `dispatch.json` is the first — it sets the pattern rather than reusing one.
 
 **Stand up `tests/fuzz/` now, minimally — and wire it, or it does not close Gate 1.** The
 handshake *is* the pre-auth surface and `MIGRATION.md:286` requires coverage for it.
@@ -846,7 +821,8 @@ never reached, while the fuzzer reports healthy coverage of a rejection path.
 Concretely, since "add fuzzing" is where this silently becomes a no-op:
 - `tests/fuzz/CMakeLists.txt`, clang-only, guarded by `if(CMAKE_C_COMPILER_ID MATCHES "Clang")`,
   `-fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -g`.
-- Corpus at `tests/fuzz/corpus/<target>/`, seeded from the C0 frames plus authored malformed ones;
+- Corpus at `tests/fuzz/corpus/<target>/`, seeded from authored handshake and envelope frames
+  (C0 is skipped, so there are no captured seeds) plus authored malformed ones;
   every crash reproducer checked in **and also** replayed as an ordinary case in `session_test.c`,
   so a regression fails the normal gcc+clang run and not only a fuzz run nobody triggers.
 - A `fuzz-short` job in `.github/workflows/host-tests.yml`: `-max_total_time=60 -runs=200000` per
@@ -874,9 +850,11 @@ Concretely, since "add fuzzing" is where this silently becomes a no-op:
    reader's expectation, and all three targets already rely on it. If it is quietly made pure
    during implementation, sessions become immortal. Name, doc comment, non-const argument and a
    host case all defend it.
-4. **Capture slips past the swap.** Highest-value, lowest-urgency-*feeling* item. C0 is a
-   merge-blocker on **C1** (which replaces the reference implementation) and on **C4** (whose
-   Gate 1 needs `session_vectors.inc`) — not merely on C5, and not an aspiration.
+4. **No capture means a transcription error is invisible.** C0 is skipped by decision, so the
+   differential reference is my reading of the shipped code rather than device bytes; if I
+   misread it, both sides agree and the test passes. Mitigated only by hardware verification at
+   C5/C6, which is now the sole check that the wire did not move. If anything looks wrong on a
+   board, suspect the transcription before the promoted code.
 5. **The 19-byte reply gets "corrected" to the spec's 3 bytes.** Every shipping host expects 19.
    Pinned by constant + assert + capture vector; the spec correction is filed upstream.
 6. **`AUTH_STATUS_SUCCESS == AUTH_STATUS_CHALLENGE == 0x00`** — a refactor keying on the status
