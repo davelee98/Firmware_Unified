@@ -42,7 +42,7 @@ void updatemsdata();
 void cleanupDirectWriteState(bool refreshDisplay);
 void cleanupPartialWriteOnDisconnect(void);
 void resetPipeWriteState(void);
-void sendResponse(uint8_t* response, uint16_t len);
+#include "od_cmd_reply.h"
 
 extern ButtonState buttonStates[MAX_BUTTONS];
 
@@ -563,17 +563,17 @@ void processLedFlash() {
     led_run_step();
 }
 
-void handleLedActivate(uint8_t* data, uint16_t len) {
+od_cmd_result_t handleLedActivate(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
     if (len < 1) {
         uint8_t errorResponse[] = {RESP_NACK, RESP_LED_ACTIVATE_ACK, 0x01, 0x00};
-        sendResponse(errorResponse, sizeof(errorResponse));
-        return;
+        (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
+        return OD_CMD_NACK;
     }
     uint8_t ledInstance = data[0];
     if (ledInstance >= globalConfig.led_count) {
         uint8_t errorResponse[] = {RESP_NACK, RESP_LED_ACTIVATE_ACK, 0x02, 0x00};
-        sendResponse(errorResponse, sizeof(errorResponse));
-        return;
+        (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
+        return OD_CMD_NACK;
     }
     struct LedConfig* led = &globalConfig.leds[ledInstance];
     // Payload is [led_instance:1][LedFlashPattern:12]; stash the pattern in reserved[].
@@ -584,8 +584,8 @@ void handleLedActivate(uint8_t* data, uint16_t len) {
     if (mode != 1) {
         led_stop_internal(true);
         uint8_t successResponse[] = {RESP_ACK, RESP_LED_ACTIVATE_ACK, 0x00, 0x00};
-        sendResponse(successResponse, sizeof(successResponse));
-        return;
+        (void)od_cmd_reply(ctx, successResponse, sizeof(successResponse));
+        return OD_CMD_OK;
     }
 
     led_stop_internal(false);
@@ -598,7 +598,8 @@ void handleLedActivate(uint8_t* data, uint16_t len) {
     led_run_step();
 
     uint8_t successResponse[] = {RESP_ACK, RESP_LED_ACTIVATE_ACK, 0x00, 0x00};
-    sendResponse(successResponse, sizeof(successResponse));
+    (void)od_cmd_reply(ctx, successResponse, sizeof(successResponse));
+    return OD_CMD_OK;
 }
 
 void ledStopForSleep(void) {
@@ -608,15 +609,16 @@ void ledStopForSleep(void) {
     led_stop_internal(true);
 }
 
-void handleLedStop(uint8_t* data, uint16_t len) {
+od_cmd_result_t handleLedStop(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
     if (s_led.active && len >= 1 && data[0] != s_led.instance) {
         uint8_t errorResponse[] = {RESP_NACK, RESP_LED_STOP_ACK, 0x02, 0x00};
-        sendResponse(errorResponse, sizeof(errorResponse));
-        return;
+        (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
+        return OD_CMD_NACK;
     }
     led_stop_internal(true);
     uint8_t successResponse[] = {RESP_ACK, RESP_LED_STOP_ACK, 0x00, 0x00};
-    sendResponse(successResponse, sizeof(successResponse));
+    (void)od_cmd_reply(ctx, successResponse, sizeof(successResponse));
+    return OD_CMD_OK;
 }
 
 void processButtonEvents() {
@@ -922,7 +924,7 @@ void enterDFUMode() {
 #endif
 }
 
-void handleDeepSleepCommand(const uint8_t* payload, uint16_t payloadLen) {
+od_cmd_result_t handleDeepSleepCommand(const od_cmd_ctx_t *ctx, const uint8_t* payload, uint16_t payloadLen) {
     // Banner logged by the dispatcher (commandName() in communication.cpp).
 #ifdef TARGET_ESP32
     // Optional 2-byte big-endian seconds payload overrides the configured
@@ -946,28 +948,32 @@ void handleDeepSleepCommand(const uint8_t* payload, uint16_t payloadLen) {
     if (globalConfig.power_option.power_mode != 1) {
         od_log_warn("Device not battery powered - 0x%04X rejected", CMD_DEEP_SLEEP);
         uint8_t errorResponse[] = {RESP_NACK, RESP_DEEP_SLEEP, OD_ERR_DEEP_SLEEP_NOT_BATTERY, 0x00};
-        sendResponse(errorResponse, sizeof(errorResponse));
-        return;
+        (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
+        return OD_CMD_NACK;
     }
     if (globalConfig.power_option.deep_sleep_time_seconds == 0) {
         od_log_warn("Deep sleep disabled in config - 0x%04X rejected", CMD_DEEP_SLEEP);
         uint8_t errorResponse[] = {RESP_NACK, RESP_DEEP_SLEEP, OD_ERR_DEEP_SLEEP_DISABLED, 0x00};
-        sendResponse(errorResponse, sizeof(errorResponse));
-        return;
+        (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
+        return OD_CMD_NACK;
     }
-    // Explicit host request: sleep even though the requesting client is connected.
+    /* No reply on success, deliberately: the device enters deep sleep and the link drops. The
+     * reservation goes unused and the caller releases it. */
     enterDeepSleep(true, overrideSeconds);
+    return OD_CMD_OK;
 #else
     // Non-ESP32 (nRF etc.) have no timer deep sleep. The protocol permits a NACK here
     // ([0xFF][0x53][OD_ERR_DEEP_SLEEP_UNSUPPORTED][0x00]), but we intentionally stay
     // silent to preserve existing behavior — leave as-is unless a caller needs the NACK.
+    (void)ctx;
     (void)payload;
     (void)payloadLen;
     od_log_warn("Deep sleep command not supported on this target");
+    return OD_CMD_NACK;
 #endif
 }
 
-void handlePowerOffCommand(const uint8_t* payload, uint16_t payloadLen) {
+od_cmd_result_t handlePowerOffCommand(const od_cmd_ctx_t *ctx, const uint8_t* payload, uint16_t payloadLen) {
     // Banner logged by the dispatcher (commandName() in communication.cpp).
     // CMD_POWER_OFF request is bare [0x00][0x52]; any trailing payload is RESERVED
     // and ignored (unlike CMD_DEEP_SLEEP 0x0053, this has no duration payload).
@@ -979,11 +985,18 @@ void handlePowerOffCommand(const uint8_t* payload, uint16_t payloadLen) {
     if (powerLatchDffConfigured()) {
         // Fire-and-forget hard rail-cut: queue the ACK, then release the D-FF latch.
         // On latch HW the rail usually drops before the ACK is actually transmitted.
+        /* BEST-EFFORT BY CONSTRUCTION. This queues the ACK and then cuts the rail; on latch
+         * hardware the supply usually drops before anything drains the queue, so the client
+         * commonly sees the link go away instead of an ack. That is the shipped behaviour and is
+         * not changed here -- but note it does NOT improve at the cutover either: od_txq is
+         * drained from the loop, and the loop does not run again. If the ack is ever required to
+         * reach air, the fix is a bounded flush before powerLatchPowerOff(), not a different
+         * reply call. */
         uint8_t ok[] = {RESP_ACK, RESP_POWER_OFF, 0x00, 0x00};
-        sendResponse(ok, sizeof(ok));
+        (void)od_cmd_reply(ctx, ok, sizeof(ok));
         od_hal_delay_ms(100);
         powerLatchPowerOff();
-        return;
+        return OD_CMD_OK;
     }
     // ANCHOR(power-off-no-latch-fallback): FUTURE WORK for a later agent/implementer.
     // On non-latch BATTERY targets, implement "enter deep sleep with NO wake timer"
@@ -1001,5 +1014,6 @@ void handlePowerOffCommand(const uint8_t* payload, uint16_t payloadLen) {
     // conflate with 0x53 deep sleep (a device that refuses 0x52 may still accept 0x53).
     od_log_warn("No power latch on this target - 0x%04X rejected", CMD_POWER_OFF);
     uint8_t errorResponse[] = {RESP_NACK, RESP_POWER_OFF, OD_ERR_POWER_OFF_UNSUPPORTED, 0x00};
-    sendResponse(errorResponse, sizeof(errorResponse));
+    (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
+    return OD_CMD_NACK;
 }

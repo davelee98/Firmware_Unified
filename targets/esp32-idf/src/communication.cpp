@@ -25,6 +25,22 @@
 #include "od_config_asm.h"
 #include "od_dispatch.h"   /* od_dispatch_budget, for the migration's legacy reservations */
 
+/* Calls a handler that has been converted to the od_cmd_ctx_t shape, with a reservation taken
+ * from the SHARED budget table -- so the migration's legacy caller and od_dispatch cannot drift on
+ * the one table where drift is expensive (0x82 was already wrong once). In legacy mode nothing is
+ * committed against the reservation, so this is accounting that exercises the path the cutover
+ * will depend on. Disappears with the switch itself at step 8. */
+#define OD_CALL_CONVERTED(cmd_, call_)                                                        \
+    do {                                                                                      \
+        od_tx_reservation_t r_;                                                               \
+        if (od_txq_reserve(od_dispatch_budget(cmd_), &r_) == OD_TXQ_OK) {                      \
+            const od_cmd_ctx_t ctx = { { (od_origin_t)g_commandOrigin, g_commandInstance },   \
+                                       &r_ };                                                 \
+            (void)(call_);                                                                    \
+            od_txq_release(&r_);                                                              \
+        }                                                                                     \
+    } while (0)
+
 /* The CCM envelope, both directions. g_session is this target's one session (encryption_state.h). */
 #include "od_session.h"
 #include "od_span.h"
@@ -979,10 +995,10 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
             enterDFUMode();
             break;
         case CMD_POWER_OFF:           // 0x0052
-            handlePowerOffCommand(data + 2, len - 2);
+            OD_CALL_CONVERTED(CMD_POWER_OFF, handlePowerOffCommand(&ctx, data + 2, len - 2));
             break;
         case CMD_DEEP_SLEEP:          // 0x0053
-            handleDeepSleepCommand(data + 2, len - 2);
+            OD_CALL_CONVERTED(CMD_DEEP_SLEEP, handleDeepSleepCommand(&ctx, data + 2, len - 2));
             break;
         case CMD_DIRECT_WRITE_START:  // 0x0070
             handleDirectWriteStart(data + 2, len - 2);
@@ -994,28 +1010,16 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
             handleDirectWriteEnd(data + 2, len - 2);
             break;
         case CMD_LED_ACTIVATE:        // 0x0073
-            handleLedActivate(data + 2, len - 2);
+            OD_CALL_CONVERTED(CMD_LED_ACTIVATE, handleLedActivate(&ctx, data + 2, len - 2));
             break;
         case CMD_LED_STOP:            // 0x0075
-            handleLedStop(data + 2, len - 2);
+            OD_CALL_CONVERTED(CMD_LED_STOP, handleLedStop(&ctx, data + 2, len - 2));
             break;
         case CMD_PARTIAL_WRITE_START: // 0x0076
             handlePartialWriteStart(data + 2, len - 2);
             break;
         case CMD_BUZZER:              // 0x0077
-            /* FIRST CONVERTED HANDLER (handler-rewrite step 2). The reservation is taken from the
-             * shared budget table so the legacy caller and the dispatcher cannot drift, and it is
-             * released immediately below -- in legacy mode nothing is committed against it, so
-             * this is pure accounting that exercises the path the cutover will rely on. */
-            {
-                od_tx_reservation_t r;
-                if (od_txq_reserve(od_dispatch_budget(CMD_BUZZER), &r) == OD_TXQ_OK) {
-                    const od_cmd_ctx_t ctx = { { (od_origin_t)g_commandOrigin, g_commandInstance },
-                                               &r };
-                    (void)handleBuzzerActivate(&ctx, data + 2, len - 2);
-                    od_txq_release(&r);
-                }
-            }
+            OD_CALL_CONVERTED(CMD_BUZZER, handleBuzzerActivate(&ctx, data + 2, len - 2));
             break;
         case CMD_PIPE_WRITE_START:    // 0x0080
             handlePipeWriteStart(data + 2, len - 2);
