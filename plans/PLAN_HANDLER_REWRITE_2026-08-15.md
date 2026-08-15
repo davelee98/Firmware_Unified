@@ -219,7 +219,13 @@ plan changes:
    target switch — meaning an unknown opcode would STAMP ACTIVITY and reset the abuse run,
    contrary to § 5. `OD_CMD_UNKNOWN` must be added and mapped to `OD_FRAME_UNKNOWN_OPCODE` before
    step 6, with both the silence and the no-activity policy pinned.
-5. **`od_reply()`'s non-OK results must be handled, not ignored.** It can substitute a plaintext
+5. **STILL OPEN after step 5: `od_reply()`'s non-OK results are ignored at every converted site.**
+   Every call is `(void)od_cmd_reply...`, which is harmless while the adapter routes to the shipped
+   sender and cannot fail, and becomes a defect at the cutover. The multi-reply refresh paths are
+   the sharp ones: if sealing the END ACK fails, od_reply queues a plaintext hard NACK, and the
+   handler then refreshes the panel and queues a contradictory success behind it. Step 8 must make
+   these paths stop emitting after a substitution -- while deciding separately whether committed
+   panel work should still proceed, which is a different question from what to put on the wire. It can substitute a plaintext
    hard NACK and return `TOO_LARGE`/`SEAL_FAILED`, after which the caller must not reply again. A
    straight replacement of `void sendResponse()` calls would drop that on the floor, and a
    multi-reply path could then queue a contradictory success after a substituted NACK. The
