@@ -77,6 +77,7 @@ get_filename_component(OD_SHARED_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
 #
 #   PURE     needs the C standard library and shared/protocol only. Any consumer can take it.
 #   HAL_ADV  needs shared/hal/od_hal_adv.h implemented (three link-time C functions).
+#   HAL_CRYPTO needs shared/hal/od_hal_crypto.h implemented (prepared AES key + primitives).
 #   HAL_WDT  needs shared/hal/od_hal_wdt.h implemented (reset reason, retained byte, arm, feed).
 #
 # WHY THE SPLIT EXISTS. A target part-way through migration can consume the sources whose HAL it
@@ -105,6 +106,9 @@ set(OD_SHARED_SOURCES_HAL_ADV
     "${CMAKE_CURRENT_LIST_DIR}/core/od_adv_control.c"
 )
 
+set(OD_SHARED_SOURCES_HAL_CRYPTO
+)
+
 set(OD_SHARED_SOURCES_HAL_WDT
     "${CMAKE_CURRENT_LIST_DIR}/core/od_watchdog.c"
 )
@@ -114,6 +118,7 @@ set(OD_SHARED_SOURCES_HAL_WDT
 set(OD_SHARED_SOURCES
     ${OD_SHARED_SOURCES_PURE}
     ${OD_SHARED_SOURCES_HAL_ADV}
+    ${OD_SHARED_SOURCES_HAL_CRYPTO}
     ${OD_SHARED_SOURCES_HAL_WDT}
 )
 

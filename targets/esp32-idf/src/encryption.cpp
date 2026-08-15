@@ -12,12 +12,9 @@
 #endif
 #ifdef TARGET_ESP32
 #include "esp_mac.h"       // esp_efuse_mac_get_default -- was ESP.getEfuseMac() via the shim
+#include "od_hal_crypto.h"
 #include "od_hal_gpio.h"
 #include "od_hal_time.h"
-#include "mbedtls/aes.h"
-#include "mbedtls/ccm.h"
-#include "mbedtls/cmac.h"
-#include "esp_random.h"
 #endif
 #include <stdio.h>
 #include <string.h>
@@ -289,152 +286,76 @@ bool constantTimeCompare(const uint8_t* a, const uint8_t* b, size_t len) {
 
 #ifdef TARGET_ESP32
 
+#define OD_CRYPTO_SESSION_SLOT ((od_hal_crypto_slot_t)0u)
+
 static void ccm_session_init(EncryptionSession& session) {
-    if (session.is_ccm_ready) {
-        mbedtls_ccm_free(&session.ccm_ctx);
-    }
-    mbedtls_ccm_init(&session.ccm_ctx);
-    if (mbedtls_ccm_setkey(&session.ccm_ctx, MBEDTLS_CIPHER_ID_AES, session.session_key, 128) == 0) {
-        session.is_ccm_ready = true;
-    } else {
-        mbedtls_ccm_free(&session.ccm_ctx);
-        session.is_ccm_ready = false;
-        od_log_error("ERROR: Failed to initialize CCM session context");
+    if (od_hal_crypto_key_set(OD_CRYPTO_SESSION_SLOT, session.session_key) != OD_HAL_CRYPTO_OK) {
+        od_log_error("ERROR: Failed to prepare CCM session key");
     }
 }
 
 static void ccm_session_free(EncryptionSession& session) {
-    if (session.is_ccm_ready) {
-        mbedtls_ccm_free(&session.ccm_ctx);
-        session.is_ccm_ready = false;
-    }
+    (void)session;
+    od_hal_crypto_key_clear(OD_CRYPTO_SESSION_SLOT);
 }
 
 bool aes_cmac(const uint8_t* key, const uint8_t* message, size_t message_len, uint8_t* mac) {
-    mbedtls_cipher_context_t ctx;
-    const mbedtls_cipher_info_t* cipher_info = mbedtls_cipher_info_from_type(MBEDTLS_CIPHER_AES_128_ECB);
-    if (cipher_info == NULL) {
-        od_log_error("ERROR: Failed to get cipher info for AES-128-ECB");
+    if (message_len > UINT32_MAX) {
         return false;
     }
-    mbedtls_cipher_init(&ctx);
-    if (mbedtls_cipher_setup(&ctx, cipher_info) != 0) {
-        od_log_error("ERROR: Failed to setup cipher");
-        mbedtls_cipher_free(&ctx);
-        return false;
-    }
-    if (mbedtls_cipher_cmac_starts(&ctx, key, 128) != 0) {
-        od_log_error("ERROR: Failed to start CMAC");
-        mbedtls_cipher_free(&ctx);
-        return false;
-    }
-    if (mbedtls_cipher_cmac_update(&ctx, message, message_len) != 0) {
-        od_log_error("ERROR: Failed to update CMAC");
-        mbedtls_cipher_free(&ctx);
-        return false;
-    }
-    if (mbedtls_cipher_cmac_finish(&ctx, mac) != 0) {
-        od_log_error("ERROR: Failed to finish CMAC");
-        mbedtls_cipher_free(&ctx);
-        return false;
-    }
-    mbedtls_cipher_free(&ctx);
-    return true;
+    return od_hal_crypto_cmac(key, message, (uint32_t)message_len, mac) == OD_HAL_CRYPTO_OK;
 }
 
 bool aes_ecb_encrypt(const uint8_t* key, const uint8_t* input, uint8_t* output) {
-    mbedtls_aes_context aes;
-    mbedtls_aes_init(&aes);
-    if (mbedtls_aes_setkey_enc(&aes, key, 128) != 0) {
-        od_log_error("ERROR: Failed to set AES key");
-        mbedtls_aes_free(&aes);
-        return false;
-    }
-    if (mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_ENCRYPT, input, output) != 0) {
-        od_log_error("ERROR: Failed to encrypt with AES-ECB");
-        mbedtls_aes_free(&aes);
-        return false;
-    }
-    mbedtls_aes_free(&aes);
-    return true;
+    return od_hal_crypto_aes_ecb(key, input, output) == OD_HAL_CRYPTO_OK;
 }
 
 bool aes_ccm_encrypt(const uint8_t* key, const uint8_t* nonce, size_t nonce_len,
                      const uint8_t* ad, size_t ad_len,
                      const uint8_t* plaintext, size_t plaintext_len,
                      uint8_t* ciphertext, uint8_t* tag, size_t tag_len) {
-    mbedtls_ccm_context *ctx = NULL;
-    mbedtls_ccm_context local_ctx = {0};
-    if (encryptionSession.is_ccm_ready) {
-        ctx = &encryptionSession.ccm_ctx;
-    } else {
-        mbedtls_ccm_init(&local_ctx);
-        if (mbedtls_ccm_setkey(&local_ctx, MBEDTLS_CIPHER_ID_AES, key, 128) != 0) {
-            od_log_error("ERROR: Failed to set CCM key");
-            mbedtls_ccm_free(&local_ctx);
-            return false;
-        }
-        ctx = &local_ctx;
-    }
-    int ret = mbedtls_ccm_encrypt_and_tag(ctx, plaintext_len, nonce, nonce_len,
-                                          ad, ad_len, plaintext, ciphertext, tag, tag_len);
-    if (ctx == &local_ctx) {
-        mbedtls_ccm_free(&local_ctx);
-    }
-    if (ret != 0) {
-        od_log_error("ERROR: CCM encrypt failed: %d", ret);
+    uint16_t combined_len = 0;
+
+    (void)key;
+    if (nonce_len > UINT8_MAX || ad_len > UINT8_MAX || plaintext_len > UINT16_MAX ||
+        tag_len != OD_HAL_CRYPTO_TAG_LEN || ciphertext == nullptr ||
+        tag != ciphertext + plaintext_len ||
+        plaintext_len > UINT16_MAX - OD_HAL_CRYPTO_TAG_LEN) {
         return false;
     }
-    return true;
+    return od_hal_crypto_ccm_encrypt(OD_CRYPTO_SESSION_SLOT,
+            nonce, (uint8_t)nonce_len, ad, (uint8_t)ad_len,
+            plaintext, (uint16_t)plaintext_len,
+            ciphertext, (uint16_t)(plaintext_len + OD_HAL_CRYPTO_TAG_LEN),
+            &combined_len) == OD_HAL_CRYPTO_OK &&
+           combined_len == plaintext_len + OD_HAL_CRYPTO_TAG_LEN;
 }
 
 bool aes_ccm_decrypt(const uint8_t* key, const uint8_t* nonce, size_t nonce_len,
                      const uint8_t* ad, size_t ad_len,
                      const uint8_t* ciphertext, size_t ciphertext_len,
                      uint8_t* plaintext, const uint8_t* tag, size_t tag_len) {
-    if (nonce_len < 7 || nonce_len > 13) {
-        od_log_error("ERROR: Invalid CCM nonce length (must be 7-13 bytes)");
+    uint16_t plain_len = 0;
+
+    (void)key;
+    if (nonce_len > UINT8_MAX || ad_len > UINT8_MAX || ciphertext_len > UINT16_MAX ||
+        tag_len != OD_HAL_CRYPTO_TAG_LEN || ciphertext == nullptr ||
+        tag != ciphertext + ciphertext_len ||
+        ciphertext_len > UINT16_MAX - OD_HAL_CRYPTO_TAG_LEN) {
         return false;
     }
-    if (tag_len != 4 && tag_len != 6 && tag_len != 8 && tag_len != 10 && tag_len != 12 && tag_len != 14 && tag_len != 16) {
-        od_log_error("ERROR: Invalid CCM tag length (must be 4, 6, 8, 10, 12, 14, or 16 bytes)");
-        return false;
-    }
-    if (ciphertext_len == 0) {
-        od_log_error("ERROR: CCM ciphertext length is 0 (must be at least 1 byte)");
-        return false;
-    }
-    mbedtls_ccm_context *ctx = NULL;
-    mbedtls_ccm_context local_ctx = {0};
-    if (encryptionSession.is_ccm_ready) {
-        ctx = &encryptionSession.ccm_ctx;
-    } else {
-        mbedtls_ccm_init(&local_ctx);
-        if (mbedtls_ccm_setkey(&local_ctx, MBEDTLS_CIPHER_ID_AES, key, 128) != 0) {
-            od_log_error("ERROR: Failed to set CCM key");
-            mbedtls_ccm_free(&local_ctx);
-            return false;
-        }
-        ctx = &local_ctx;
-    }
-    int ret = mbedtls_ccm_auth_decrypt(ctx, ciphertext_len, nonce, nonce_len,
-                                       ad, ad_len, ciphertext, plaintext, tag, tag_len);
-    if (ctx == &local_ctx) {
-        mbedtls_ccm_free(&local_ctx);
-    }
-    if (ret != 0) {
-        od_log_error("ERROR: CCM decrypt failed: %d (ciphertext_len=%zu, nonce_len=%zu, tag_len=%zu)",
-                     ret, ciphertext_len, nonce_len, tag_len);
-        if (ret == -15) {
-            od_log_error("ERROR: MBEDTLS_ERR_CCM_BAD_INPUT - invalid input parameters");
-        }
-        return false;
-    }
-    return true;
+    return od_hal_crypto_ccm_decrypt(OD_CRYPTO_SESSION_SLOT,
+            nonce, (uint8_t)nonce_len, ad, (uint8_t)ad_len,
+            ciphertext, (uint16_t)(ciphertext_len + OD_HAL_CRYPTO_TAG_LEN),
+            plaintext, (uint16_t)ciphertext_len, &plain_len) == OD_HAL_CRYPTO_OK &&
+           plain_len == ciphertext_len;
 }
 
 void secure_random(uint8_t* output, size_t len) {
-    esp_fill_random(output, len);
+    if (len > UINT16_MAX ||
+        od_hal_crypto_random(output, (uint16_t)len) != OD_HAL_CRYPTO_OK) {
+        od_log_error("ERROR: Secure random generation failed");
+    }
 }
 #else
 static bool cc310_initialized = false;
@@ -805,14 +726,16 @@ bool encryptResponse(uint8_t* plaintext, uint16_t plaintext_len, uint8_t* cipher
     payload_with_length[0] = payload_len & 0xFF;
     if (payload_len > 0) memcpy(payload_with_length + 1, plaintext + 2, payload_len);
     uint16_t total_payload_len = 1 + payload_len;
+    uint8_t* combined = ciphertext + BLE_CMD_HEADER_SIZE + ENCRYPTION_NONCE_SIZE;
+    uint8_t* combined_tag = combined + total_payload_len;
     bool success = aes_ccm_encrypt(encryptionSession.session_key, nonce_ccm, 13,
                                    ad, 2, payload_with_length, total_payload_len,
-                                   ciphertext + BLE_CMD_HEADER_SIZE + ENCRYPTION_NONCE_SIZE, auth_tag, ENCRYPTION_TAG_SIZE);
+                                   combined, combined_tag, ENCRYPTION_TAG_SIZE);
     if (!success) return false;
     ciphertext[0] = plaintext[0];
     ciphertext[1] = plaintext[1];
     memcpy(ciphertext + BLE_CMD_HEADER_SIZE, nonce, ENCRYPTION_NONCE_SIZE);
-    memcpy(ciphertext + BLE_CMD_HEADER_SIZE + ENCRYPTION_NONCE_SIZE + total_payload_len, auth_tag, ENCRYPTION_TAG_SIZE);
+    memcpy(auth_tag, combined_tag, ENCRYPTION_TAG_SIZE);
     *ciphertext_len = BLE_CMD_HEADER_SIZE + ENCRYPTION_NONCE_SIZE + total_payload_len + ENCRYPTION_TAG_SIZE;
     updateEncryptionSessionActivity();
     return true;

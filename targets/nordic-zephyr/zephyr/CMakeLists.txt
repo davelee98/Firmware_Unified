@@ -212,6 +212,7 @@ target_sources(app PRIVATE
   ${SRC_DIR}/newlib_stubs.c
   ${SRC_DIR}/od_log.c
   ${SRC_DIR}/od_hal_wdt.c
+  ${SRC_DIR}/od_hal_crypto.c
   ${SRC_DIR}/od_watchdog_app.c
   ${SRC_DIR}/opendisplay_ble.c
   ${SRC_DIR}/opendisplay_battery.c
@@ -250,7 +251,8 @@ target_sources(app PRIVATE
 # HAL_ADV is still NOT here -- this target does not implement shared/hal/od_hal_adv.h, and taking
 # a source whose HAL is missing buys an unreferenced object that links only because nothing calls
 # it. Add each tier when its HAL lands, not before.
-target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE} ${OD_SHARED_SOURCES_HAL_WDT})
+target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE} ${OD_SHARED_SOURCES_HAL_CRYPTO}
+                           ${OD_SHARED_SOURCES_HAL_WDT})
 
 # The per-source INCLUDE_DIRECTORIES property that used to sit here is GONE, and its removal is
 # the point of the header adoption: it existed only to pin these two shared TUs to the canonical

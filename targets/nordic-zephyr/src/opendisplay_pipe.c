@@ -10,11 +10,11 @@
 #include "opendisplay_config_parser.h"
 #include "od_runtime_types.h"
 #include "opendisplay_pipe_write.h"
+#include "od_hal_crypto.h"
 #include <stdio.h>
 #include <string.h>
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/kernel.h>
-#include <psa/crypto.h>
 
 #ifndef SHA
 #define SHA ""
@@ -70,7 +70,6 @@ static struct EncryptionSession s_session;
 static uint8_t s_long_write_buf[OD_PIPE_MAX_PAYLOAD];
 static uint16_t s_long_write_len;
 static uint8_t s_long_write_conn = 0xFFu;
-static bool s_crypto_ready;
 static uint8_t s_plain_buf[512];
 static uint8_t s_crypto_payload_buf[513];
 static uint8_t s_pipe_enc_buf[544];
@@ -130,18 +129,11 @@ static uint32_t od_now_ms(void)
   return k_uptime_get_32();
 }
 
-static void crypto_init_once(void)
-{
-  if (s_crypto_ready) {
-    return;
-  }
-  if (psa_crypto_init() == PSA_SUCCESS) {
-    s_crypto_ready = true;
-  }
-}
+#define OD_CRYPTO_SESSION_SLOT ((od_hal_crypto_slot_t)0u)
 
 static void clear_session(void)
 {
+  od_hal_crypto_key_clear(OD_CRYPTO_SESSION_SLOT);
   memset(&s_session, 0, sizeof(s_session));
 }
 
@@ -190,50 +182,6 @@ static bool session_alive(void)
   return true;
 }
 
-static bool aes_cmac_16(const uint8_t key[16], const uint8_t *msg, size_t msg_len, uint8_t out[16])
-{
-  psa_key_id_t key_id = 0;
-  psa_status_t ps;
-  size_t mac_len = 0;
-  psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
-  if (!s_crypto_ready) {
-    return false;
-  }
-  psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
-  psa_set_key_bits(&attr, 128);
-  psa_set_key_algorithm(&attr, PSA_ALG_CMAC);
-  psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_SIGN_MESSAGE);
-  ps = psa_import_key(&attr, key, 16, &key_id);
-  if (ps != PSA_SUCCESS) {
-    return false;
-  }
-  ps = psa_mac_compute(key_id, PSA_ALG_CMAC, msg, msg_len, out, 16, &mac_len);
-  (void)psa_destroy_key(key_id);
-  return (ps == PSA_SUCCESS) && (mac_len == 16u);
-}
-
-static bool aes_ecb_encrypt_16(const uint8_t key[16], const uint8_t in[16], uint8_t out[16])
-{
-  psa_key_id_t key_id = 0;
-  psa_status_t ps;
-  size_t out_len = 0;
-  psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
-  if (!s_crypto_ready) {
-    return false;
-  }
-  psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
-  psa_set_key_bits(&attr, 128);
-  psa_set_key_algorithm(&attr, PSA_ALG_ECB_NO_PADDING);
-  psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_ENCRYPT);
-  ps = psa_import_key(&attr, key, 16, &key_id);
-  if (ps != PSA_SUCCESS) {
-    return false;
-  }
-  ps = psa_cipher_encrypt(key_id, PSA_ALG_ECB_NO_PADDING, in, 16, out, 16, &out_len);
-  (void)psa_destroy_key(key_id);
-  return (ps == PSA_SUCCESS) && (out_len == 16u);
-}
-
 static bool derive_session_key(const uint8_t master_key[16],
                                const uint8_t client_nonce[16],
                                const uint8_t server_nonce[16],
@@ -258,13 +206,14 @@ static bool derive_session_key(const uint8_t master_key[16],
   cmac_input[offset++] = 0x00u;
   cmac_input[offset++] = 0x80u;
 
-  if (!aes_cmac_16(master_key, cmac_input, offset, intermediate)) {
+  if (od_hal_crypto_cmac(master_key, cmac_input, (uint32_t)offset, intermediate) !=
+      OD_HAL_CRYPTO_OK) {
     return false;
   }
   memset(final_input, 0, sizeof(final_input));
   final_input[7] = 0x01u;
   memcpy(final_input + 8, intermediate, 8u);
-  return aes_ecb_encrypt_16(master_key, final_input, session_key);
+  return od_hal_crypto_aes_ecb(master_key, final_input, session_key) == OD_HAL_CRYPTO_OK;
 }
 
 static bool derive_session_id(const uint8_t session_key[16],
@@ -276,7 +225,7 @@ static bool derive_session_id(const uint8_t session_key[16],
   uint8_t cmac_out[16];
   memcpy(input, client_nonce, 16u);
   memcpy(input + 16, server_nonce, 16u);
-  if (!aes_cmac_16(session_key, input, sizeof(input), cmac_out)) {
+  if (od_hal_crypto_cmac(session_key, input, sizeof(input), cmac_out) != OD_HAL_CRYPTO_OK) {
     return false;
   }
   memcpy(session_id, cmac_out, 8u);
@@ -300,144 +249,10 @@ static bool od_ct_equal(const uint8_t *a, const uint8_t *b, size_t len)
   return diff == 0u;
 }
 
-static bool od_random(uint8_t *buf, size_t len)
-{
-  if (!s_crypto_ready) {
-    return false;
-  }
-  return psa_generate_random(buf, len) == PSA_SUCCESS;
-}
-
 static void send_auth_required_response(uint8_t connection, uint8_t resp_byte)
 {
   uint8_t err[] = { 0x00u, resp_byte, RESP_AUTH_REQUIRED };
   pipe_send(connection, err, sizeof(err));
-}
-
-/*
- * Minimal AES-CCM (RFC 3610) using AES-ECB as primitive.
- * Fixed parameters: nonce=13B, tag=12B, L=2, AAD=exactly 2 bytes.
- * B_0 flags = Adata(1) | M'=(12-2)/2<<3 | L-1 = 0x40|0x28|0x01 = 0x69
- */
-static bool od_ccm_ecb(const uint8_t *in, uint8_t *out)
-{
-  return aes_ecb_encrypt_16(s_session.session_key, in, out);
-}
-
-static bool od_ccm_encrypt(const uint8_t *nonce,
-                            const uint8_t *aad,
-                            const uint8_t *plain,
-                            uint16_t plain_len,
-                            uint8_t *cipher,
-                            uint8_t *tag)
-{
-  uint8_t blk[16], mac[16], stream[16];
-  uint16_t i, full, rem;
-
-  blk[0] = 0x69u;
-  memcpy(&blk[1], nonce, 13u);
-  blk[14] = (uint8_t)((plain_len >> 8) & 0xFFu);
-  blk[15] = (uint8_t)(plain_len & 0xFFu);
-  if (!od_ccm_ecb(blk, mac)) return false;
-
-  memset(blk, 0, 16u);
-  blk[0] = 0x00u; blk[1] = 0x02u;
-  blk[2] = aad[0]; blk[3] = aad[1];
-  for (i = 0; i < 16u; i++) mac[i] ^= blk[i];
-  if (!od_ccm_ecb(mac, mac)) return false;
-
-  full = plain_len / 16u; rem = plain_len % 16u;
-  for (i = 0; i < full; i++) {
-    for (uint8_t j = 0; j < 16u; j++) mac[j] ^= plain[i * 16u + j];
-    if (!od_ccm_ecb(mac, mac)) return false;
-  }
-  if (rem > 0u) {
-    memset(blk, 0, 16u);
-    memcpy(blk, &plain[full * 16u], rem);
-    for (uint8_t j = 0; j < 16u; j++) mac[j] ^= blk[j];
-    if (!od_ccm_ecb(mac, mac)) return false;
-  }
-
-  blk[0] = 0x01u;
-  memcpy(&blk[1], nonce, 13u);
-  blk[14] = 0x00u; blk[15] = 0x00u;
-  if (!od_ccm_ecb(blk, stream)) return false;
-  for (i = 0; i < 12u; i++) tag[i] = mac[i] ^ stream[i];
-
-  for (i = 0; i < full; i++) {
-    blk[0] = 0x01u; memcpy(&blk[1], nonce, 13u);
-    blk[14] = (uint8_t)(((i + 1u) >> 8) & 0xFFu);
-    blk[15] = (uint8_t)((i + 1u) & 0xFFu);
-    if (!od_ccm_ecb(blk, stream)) return false;
-    for (uint8_t j = 0; j < 16u; j++) cipher[i * 16u + j] = plain[i * 16u + j] ^ stream[j];
-  }
-  if (rem > 0u) {
-    blk[0] = 0x01u; memcpy(&blk[1], nonce, 13u);
-    blk[14] = (uint8_t)(((full + 1u) >> 8) & 0xFFu);
-    blk[15] = (uint8_t)((full + 1u) & 0xFFu);
-    if (!od_ccm_ecb(blk, stream)) return false;
-    for (uint8_t j = 0; j < rem; j++) cipher[full * 16u + j] = plain[full * 16u + j] ^ stream[j];
-  }
-  return true;
-}
-
-static bool od_ccm_decrypt(const uint8_t *nonce,
-                            const uint8_t *aad,
-                            const uint8_t *cipher,
-                            uint16_t cipher_len,
-                            const uint8_t *tag,
-                            uint8_t *plain)
-{
-  uint8_t blk[16], mac[16], stream[16];
-  uint16_t i, full, rem;
-  uint8_t expected[12], diff;
-
-  full = cipher_len / 16u; rem = cipher_len % 16u;
-  for (i = 0; i < full; i++) {
-    blk[0] = 0x01u; memcpy(&blk[1], nonce, 13u);
-    blk[14] = (uint8_t)(((i + 1u) >> 8) & 0xFFu);
-    blk[15] = (uint8_t)((i + 1u) & 0xFFu);
-    if (!od_ccm_ecb(blk, stream)) return false;
-    for (uint8_t j = 0; j < 16u; j++) plain[i * 16u + j] = cipher[i * 16u + j] ^ stream[j];
-  }
-  if (rem > 0u) {
-    blk[0] = 0x01u; memcpy(&blk[1], nonce, 13u);
-    blk[14] = (uint8_t)(((full + 1u) >> 8) & 0xFFu);
-    blk[15] = (uint8_t)((full + 1u) & 0xFFu);
-    if (!od_ccm_ecb(blk, stream)) return false;
-    for (uint8_t j = 0; j < rem; j++) plain[full * 16u + j] = cipher[full * 16u + j] ^ stream[j];
-  }
-
-  blk[0] = 0x69u; memcpy(&blk[1], nonce, 13u);
-  blk[14] = (uint8_t)((cipher_len >> 8) & 0xFFu);
-  blk[15] = (uint8_t)(cipher_len & 0xFFu);
-  if (!od_ccm_ecb(blk, mac)) return false;
-
-  memset(blk, 0, 16u);
-  blk[0] = 0x00u; blk[1] = 0x02u;
-  blk[2] = aad[0]; blk[3] = aad[1];
-  for (i = 0; i < 16u; i++) mac[i] ^= blk[i];
-  if (!od_ccm_ecb(mac, mac)) return false;
-
-  for (i = 0; i < full; i++) {
-    for (uint8_t j = 0; j < 16u; j++) mac[j] ^= plain[i * 16u + j];
-    if (!od_ccm_ecb(mac, mac)) return false;
-  }
-  if (rem > 0u) {
-    memset(blk, 0, 16u);
-    memcpy(blk, &plain[full * 16u], rem);
-    for (uint8_t j = 0; j < 16u; j++) mac[j] ^= blk[j];
-    if (!od_ccm_ecb(mac, mac)) return false;
-  }
-
-  blk[0] = 0x01u; memcpy(&blk[1], nonce, 13u);
-  blk[14] = 0x00u; blk[15] = 0x00u;
-  if (!od_ccm_ecb(blk, stream)) return false;
-  for (i = 0; i < 12u; i++) expected[i] = mac[i] ^ stream[i];
-
-  diff = 0u;
-  for (i = 0; i < 12u; i++) diff |= (expected[i] ^ tag[i]);
-  return (diff == 0u);
 }
 
 static bool verify_nonce_replay(const uint8_t *nonce)
@@ -481,18 +296,19 @@ static bool decrypt_encrypted_payload(uint16_t cmd,
 {
   const uint8_t *nonce;
   const uint8_t *cipher;
-  const uint8_t *tag;
   uint8_t nonce_ccm[13];
   uint8_t ad[2];
+  uint16_t ct_len;
   uint16_t cipher_len;
+  enum od_hal_crypto_status crypto_status;
 
-  if (payload_len < (16u + 12u + 1u) || !session_alive()) {
+  if (payload_len < (16u + OD_HAL_CRYPTO_TAG_LEN + 1u) || !session_alive()) {
     return false;
   }
   nonce      = payload;
-  tag        = &payload[payload_len - 12u];
   cipher     = &payload[16u];
-  cipher_len = (uint16_t)(payload_len - 16u - 12u);
+  ct_len     = (uint16_t)(payload_len - 16u);
+  cipher_len = (uint16_t)(ct_len - OD_HAL_CRYPTO_TAG_LEN);
   memcpy(nonce_ccm, &nonce[3], sizeof(nonce_ccm));
   ad[0] = (uint8_t)((cmd >> 8) & 0xFFu);
   ad[1] = (uint8_t)(cmd & 0xFFu);
@@ -502,8 +318,13 @@ static bool decrypt_encrypted_payload(uint16_t cmd,
     return false;
   }
 
-  if (!od_ccm_decrypt(nonce_ccm, ad, cipher, cipher_len, tag, out_plain)) {
-    register_integrity_failure();
+  crypto_status = od_hal_crypto_ccm_decrypt(OD_CRYPTO_SESSION_SLOT,
+      nonce_ccm, sizeof(nonce_ccm), ad, sizeof(ad), cipher, ct_len,
+      out_plain, cipher_len, &cipher_len);
+  if (crypto_status != OD_HAL_CRYPTO_OK) {
+    if (crypto_status == OD_HAL_CRYPTO_AUTH_FAILED) {
+      register_integrity_failure();
+    }
     return false;
   }
   if (out_plain[0] > (cipher_len - 1u)) {
@@ -526,7 +347,7 @@ static bool encrypt_response_payload(const uint8_t *plain,
   uint8_t nonce[16];
   uint8_t nonce_ccm[13];
   uint8_t ad[2];
-  uint8_t tag[12];
+  uint16_t combined_len;
   uint16_t payload_len;
 
   if (!session_alive() || plain_len < 2u || plain_len > 514u) {
@@ -548,13 +369,14 @@ static bool encrypt_response_payload(const uint8_t *plain,
 
   memcpy(out, plain, 2u);
   memcpy(&out[2], nonce, 16u);
-  if (!od_ccm_encrypt(nonce_ccm, ad,
-                       s_crypto_payload_buf, (uint16_t)(payload_len + 1u),
-                       &out[18], tag)) {
+  if (od_hal_crypto_ccm_encrypt(OD_CRYPTO_SESSION_SLOT,
+      nonce_ccm, sizeof(nonce_ccm), ad, sizeof(ad),
+      s_crypto_payload_buf, (uint16_t)(payload_len + 1u),
+      &out[18], (uint16_t)(payload_len + 1u + OD_HAL_CRYPTO_TAG_LEN),
+      &combined_len) != OD_HAL_CRYPTO_OK) {
     return false;
   }
-  memcpy(&out[18 + payload_len + 1u], tag, 12u);
-  *out_len = (uint16_t)(18u + payload_len + 1u + 12u);
+  *out_len = (uint16_t)(18u + combined_len);
   s_session.last_activity_ms = od_now_ms();
   return true;
 }
@@ -686,7 +508,6 @@ static bool authenticate_handle(const uint8_t *payload, uint16_t payload_len, ui
   }
   s_session.auth_attempts++;
   s_session.last_auth_time_ms = now;
-  crypto_init_once();
   {
     uint8_t id[8];
     uint64_t uid = 0;
@@ -705,7 +526,7 @@ static bool authenticate_handle(const uint8_t *payload, uint16_t payload_len, ui
     if (s_session.authenticated && session_alive()) {
       clear_session();
     }
-    if (!od_random(s_session.pending_server_nonce, 16u)) {
+    if (od_hal_crypto_random(s_session.pending_server_nonce, 16u) != OD_HAL_CRYPTO_OK) {
       return false;
     }
     s_session.server_nonce_time_ms = now;
@@ -721,7 +542,8 @@ static bool authenticate_handle(const uint8_t *payload, uint16_t payload_len, ui
   memcpy(challenge_input, s_session.pending_server_nonce, 16u);
   memcpy(&challenge_input[16], payload, 16u);
   memcpy(&challenge_input[32], device_id, 4u);
-  if (!aes_cmac_16(sec->encryption_key, challenge_input, sizeof(challenge_input), expected)) {
+  if (od_hal_crypto_cmac(sec->encryption_key, challenge_input, sizeof(challenge_input),
+                         expected) != OD_HAL_CRYPTO_OK) {
     return false;
   }
   if (!od_ct_equal(expected, &payload[16], 16u)) {
@@ -754,7 +576,12 @@ static bool authenticate_handle(const uint8_t *payload, uint16_t payload_len, ui
   memcpy(server_input, s_session.server_nonce, 16u);
   memcpy(&server_input[16], payload, 16u);
   memcpy(&server_input[32], device_id, 4u);
-  if (!aes_cmac_16(s_session.session_key, server_input, sizeof(server_input), expected)) {
+  if (od_hal_crypto_cmac(s_session.session_key, server_input, sizeof(server_input), expected) !=
+      OD_HAL_CRYPTO_OK) {
+    clear_session();
+    return false;
+  }
+  if (od_hal_crypto_key_set(OD_CRYPTO_SESSION_SLOT, s_session.session_key) != OD_HAL_CRYPTO_OK) {
     clear_session();
     return false;
   }

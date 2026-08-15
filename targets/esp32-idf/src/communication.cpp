@@ -821,13 +821,11 @@ void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uin
         }
 
         uint8_t nonce_full[ENCRYPTION_NONCE_SIZE];
-        uint8_t auth_tag[ENCRYPTION_TAG_SIZE];
+        uint8_t* auth_tag = data + len - ENCRYPTION_TAG_SIZE;
         static uint8_t plaintext[512];
         uint16_t plaintext_len = 0;
 
         memcpy(nonce_full, data + BLE_CMD_HEADER_SIZE, ENCRYPTION_NONCE_SIZE);
-        memcpy(auth_tag, data + len - ENCRYPTION_TAG_SIZE, ENCRYPTION_TAG_SIZE);
-
         uint16_t encrypted_data_len = len - BLE_CMD_HEADER_SIZE - ENCRYPTION_NONCE_SIZE - ENCRYPTION_TAG_SIZE;
 
         // The nonce is no longer dumped per frame: the banner above already reports
