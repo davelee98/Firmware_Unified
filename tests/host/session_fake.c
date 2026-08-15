@@ -224,21 +224,22 @@ bool handshake_step1(struct od_session *s, uint32_t now_ms, uint8_t server_nonce
 
 /* Drive a full handshake. Returns the od_session_auth of step 2 and, on success, leaves the
  * session open. server_nonce_out receives the challenge so tests can recompute proofs. */
-enum od_session_auth handshake(struct od_session *s, uint32_t now_ms,
-                                      uint8_t server_nonce_out[16], bool corrupt_proof)
+const uint8_t CLIENT_NONCE[16] = {
+    0xa0,0xa1,0xa2,0xa3,0xa4,0xa5,0xa6,0xa7,0xa8,0xa9,0xaa,0xab,0xac,0xad,0xae,0xaf
+};
+
+/* The shared body of both handshake entry points. */
+static enum od_session_auth handshake_impl(struct od_session *s, uint32_t now_ms,
+                                           uint8_t server_nonce_out[16], bool corrupt_proof,
+                                           uint8_t *rsp, uint16_t *rsp_len)
 {
-    uint8_t rsp[OD_SESSION_REPLY_MAX];
-    uint16_t rsp_len = 0;
     uint8_t body1[1] = { 0x00 };
     uint8_t body2[32];
-    static const uint8_t CLIENT_NONCE[16] = {
-        0xa0,0xa1,0xa2,0xa3,0xa4,0xa5,0xa6,0xa7,0xa8,0xa9,0xaa,0xab,0xac,0xad,0xae,0xaf
-    };
     uint8_t proof_in[36], proof[16];
     enum od_session_auth r;
 
     r = od_session_authenticate(s, &g_sec, DEVICE_ID, od_span_make(body1, 1), now_ms,
-                                rsp, sizeof rsp, &rsp_len, NULL);
+                                rsp, OD_SESSION_REPLY_MAX, rsp_len, NULL);
     if (r != OD_SESSION_AUTH_CHALLENGE) { return r; }
     memcpy(server_nonce_out, rsp + 3, 16u);
 
@@ -251,5 +252,21 @@ enum od_session_auth handshake(struct od_session *s, uint32_t now_ms,
     memcpy(body2, CLIENT_NONCE, 16u);
     memcpy(body2 + 16, proof, 16u);
     return od_session_authenticate(s, &g_sec, DEVICE_ID, od_span_make(body2, 32), now_ms,
-                                   rsp, sizeof rsp, &rsp_len, NULL);
+                                   rsp, OD_SESSION_REPLY_MAX, rsp_len, NULL);
+}
+
+enum od_session_auth handshake_capture(struct od_session *s, uint32_t now_ms,
+                                       uint8_t server_nonce_out[16],
+                                       uint8_t *rsp, uint16_t *rsp_len)
+{
+    return handshake_impl(s, now_ms, server_nonce_out, false, rsp, rsp_len);
+}
+
+enum od_session_auth handshake(struct od_session *s, uint32_t now_ms,
+                                      uint8_t server_nonce_out[16], bool corrupt_proof)
+{
+    uint8_t rsp[OD_SESSION_REPLY_MAX];
+    uint16_t rsp_len = 0;
+
+    return handshake_impl(s, now_ms, server_nonce_out, corrupt_proof, rsp, &rsp_len);
 }

@@ -432,6 +432,179 @@ static void test_huge_out_cap_is_not_narrowed(void)
     CHECK(memcmp(opened, frame + 2, out_len) == 0);
 }
 
+/* THE STEP-2 REPLY BYTES. Until this case existed, nothing in the suite looked at the 16-byte
+ * mutual-auth proof the device returns, nor at any status or opcode byte in any reply. That let
+ * two mutations pass a full green run: keying the server proof with the MASTER key instead of the
+ * session key, and swapping its nonce order. Either ships a device no shipping host can
+ * authenticate, and both are wire-visible, so no host update could rescue it. */
+static void test_step2_reply_bytes(void)
+{
+    struct od_session s;
+    uint8_t server_nonce[16];
+    uint8_t rsp[OD_SESSION_REPLY_MAX];
+    uint16_t rl = 0;
+    uint8_t proof_in[36], expect[16];
+
+    fake_reset(); sec_init(0);
+    od_session_init(&s, 0);
+
+    CASE("step 1 reply: [ACK][0x50][CHALLENGE][server_nonce:16][device_id:4]");
+    CHECK(handshake_step1(&s, 1000u, server_nonce, rsp, &rl));
+    CHECK(rl == OD_SESSION_STEP1_REPLY_LEN);
+    CHECK(rsp[0] == RESP_ACK);
+    CHECK(rsp[1] == RESP_AUTHENTICATE);
+    CHECK(rsp[2] == AUTH_STATUS_CHALLENGE);
+    CHECK(memcmp(rsp + 3, server_nonce, 16u) == 0);
+    CHECK(memcmp(rsp + 19, DEVICE_ID, OD_SESSION_DEVICE_ID_LEN) == 0);
+
+    CASE("step 2 reply: [ACK][0x50][SUCCESS][server_proof:16], proof keyed with the SESSION key");
+    fake_reset(); sec_init(0);
+    od_session_init(&s, 0);
+    CHECK(handshake_capture(&s, 1000u, server_nonce, rsp, &rl) == OD_SESSION_AUTH_ESTABLISHED);
+    CHECK(rl == OD_SESSION_STEP2_REPLY_LEN);
+    CHECK(rsp[0] == RESP_ACK);
+    CHECK(rsp[1] == RESP_AUTHENTICATE);
+    CHECK(rsp[2] == AUTH_STATUS_SUCCESS);
+
+    /* Recomputed independently, from the slot the fake captured -- CMAC(session_key,
+     * server_nonce || client_nonce || device_id). BOTH proofs are server-nonce-first; only the
+     * key differs. Pinned against Firmware/src/encryption.cpp:703-705 and py-opendisplay
+     * compute_server_proof(). */
+    memcpy(proof_in, server_nonce, 16u);
+    memcpy(proof_in + 16, CLIENT_NONCE, 16u);
+    memcpy(proof_in + 32, DEVICE_ID, OD_SESSION_DEVICE_ID_LEN);
+    host_cmac(g_slot_key[0], proof_in, 36u, expect);
+    CHECK(memcmp(rsp + 3, expect, 16u) == 0);
+
+    CASE("failure replies carry the right opcode and status");
+    fake_reset(); sec_init(0);
+    od_session_init(&s, 0);
+    CHECK(handshake(&s, 1000u, server_nonce, true) == OD_SESSION_AUTH_REJECTED);
+    fake_reset(); sec_init(0);
+    od_session_init(&s, 0);
+    {
+        uint8_t junk[7] = { 0x11,0x22,0x33,0x44,0x55,0x66,0x77 };
+        CHECK(od_session_authenticate(&s, &g_sec, DEVICE_ID, od_span_make(junk, sizeof junk),
+                                      1000u, rsp, sizeof rsp, &rl, NULL)
+              == OD_SESSION_AUTH_MALFORMED);
+        CHECK(rl == 3u);
+        CHECK(rsp[0] == RESP_ACK);
+        CHECK(rsp[1] == RESP_AUTHENTICATE);
+        CHECK(rsp[2] == AUTH_STATUS_ERROR);
+    }
+}
+
+/* The timeout is ABSOLUTE from session_start_ms. Nothing used to open or seal on an EXPIRED
+ * session, so re-stamping session_start_ms on every accepted frame -- turning it into an idle
+ * timeout that never fires on a busy session -- was invisible to the whole suite. */
+static void test_expired_session_refuses_open_and_seal(void)
+{
+    struct od_session s;
+    uint8_t server_nonce[16];
+    uint8_t sealed[OD_SESSION_SEALED_MAX];
+    uint8_t plain[OD_SESSION_PLAIN_MAX];
+    uint8_t frame[8] = { 0x00,0x71,1,2,3,4,5,6 };
+    uint16_t sealed_len = 0, out_len = 0;
+    uint32_t t = 1000u;
+
+    fake_reset(); sec_init(10);            /* 10 s */
+    od_session_init(&s, 0);
+    CHECK(handshake(&s, t, server_nonce, false) == OD_SESSION_AUTH_ESTABLISHED);
+
+    CASE("traffic does NOT extend an absolute timeout");
+    /* Nine seconds of steady accepted traffic, one frame per second. */
+    {
+        unsigned k;
+        for (k = 1; k <= 9u; ++k) {
+            CHECK(od_session_seal(&s, od_span_make(frame, sizeof frame), sealed, sizeof sealed,
+                                  &sealed_len, t + k * 1000u, NULL) == OD_SESSION_SEAL_OK);
+            CHECK(od_session_open(&s, 0x0071u,
+                                  od_span_make(sealed + 2, (size_t)(sealed_len - 2u)),
+                                  plain, sizeof plain, &out_len, t + k * 1000u, NULL)
+                  == OD_SESSION_OPEN_OK);
+        }
+    }
+    /* At exactly the timeout the session is gone, however busy it has been. */
+    CHECK(od_session_seal(&s, od_span_make(frame, sizeof frame), sealed, sizeof sealed,
+                          &sealed_len, t + 10000u, NULL) == OD_SESSION_SEAL_NO_SESSION);
+    CHECK(!od_session_authenticated(&s));
+
+    CASE("open on an expired session is NO_SESSION, not a decrypt attempt");
+    fake_reset(); sec_init(10);
+    od_session_init(&s, 0);
+    CHECK(handshake(&s, t, server_nonce, false) == OD_SESSION_AUTH_ESTABLISHED);
+    CHECK(od_session_seal(&s, od_span_make(frame, sizeof frame), sealed, sizeof sealed,
+                          &sealed_len, t, NULL) == OD_SESSION_SEAL_OK);
+    CHECK(od_session_open(&s, 0x0071u, od_span_make(sealed + 2, (size_t)(sealed_len - 2u)),
+                          plain, sizeof plain, &out_len, t + 10000u, NULL)
+          == OD_SESSION_OPEN_NO_SESSION);
+}
+
+/* encryption_enabled is read as != 0, deliberately overriding the authority target's == 1: on a
+ * security gate a corrupted byte must fail CLOSED. DIVERGENCE_MATRIX 6.9 records that as the one
+ * place this promotion overrode Firmware, and nothing tested it -- sec_init only ever set 1. */
+static void test_security_enabled_is_fail_safe(void)
+{
+    struct SecurityConfig sec;
+    unsigned v;
+
+    CASE("any non-zero encryption_enabled enables security");
+    for (v = 1u; v <= 255u; ++v) {
+        sec_init(0);
+        sec = g_sec;
+        sec.encryption_enabled = (uint8_t)v;
+        CHECK(od_session_security_enabled(&sec));
+    }
+
+    CASE("zero disables it, and so does an all-zero key whatever the flag says");
+    sec_init(0);
+    sec = g_sec;
+    sec.encryption_enabled = 0u;
+    CHECK(!od_session_security_enabled(&sec));
+    sec_init(0);
+    sec = g_sec;
+    memset(sec.encryption_key, 0, sizeof sec.encryption_key);
+    CHECK(!od_session_security_enabled(&sec));
+    CHECK(!od_session_security_enabled(NULL));
+}
+
+/* RFC 4493 known-answer vectors for host_cmac().
+ *
+ * WHY THIS IS NOT REDUNDANT WITH aes128_test.c. That suite pins the AES-128 BLOCK CIPHER against
+ * FIPS-197, which is real and necessary -- but every session expectation is computed through the
+ * CMAC construction layered on top, and CMAC was pinned by nothing. Breaking RFC 4493's Rb
+ * constant (0x87) in session_fake.c left the entire suite green, including the KDF differential,
+ * because the expected value and the actual value both flowed through the same broken primitive.
+ * A differential is only a differential if the two sides share no code. */
+static void test_host_cmac_rfc4493(void)
+{
+    static const uint8_t K[16] = {
+        0x2b,0x7e,0x15,0x16,0x28,0xae,0xd2,0xa6,0xab,0xf7,0x15,0x88,0x09,0xcf,0x4f,0x3c
+    };
+    static const uint8_t M[64] = {
+        0x6b,0xc1,0xbe,0xe2,0x2e,0x40,0x9f,0x96,0xe9,0x3d,0x7e,0x11,0x73,0x93,0x17,0x2a,
+        0xae,0x2d,0x8a,0x57,0x1e,0x03,0xac,0x9c,0x9e,0xb7,0x6f,0xac,0x45,0xaf,0x8e,0x51,
+        0x30,0xc8,0x1c,0x46,0xa3,0x5c,0xe4,0x11,0xe5,0xfb,0xc1,0x19,0x1a,0x0a,0x52,0xef,
+        0xf6,0x9f,0x24,0x45,0xdf,0x4f,0x9b,0x17,0xad,0x2b,0x41,0x7b,0xe6,0x6c,0x37,0x10
+    };
+    /* The four vectors of RFC 4493 section 4: len 0, 16, 40, 64. */
+    static const struct { uint32_t len; uint8_t mac[16]; } V[] = {
+        { 0u,  { 0xbb,0x1d,0x69,0x29,0xe9,0x59,0x37,0x28,0x7f,0xa3,0x7d,0x12,0x9b,0x75,0x67,0x46 } },
+        { 16u, { 0x07,0x0a,0x16,0xb4,0x6b,0x4d,0x41,0x44,0xf7,0x9b,0xdd,0x9d,0xd0,0x4a,0x28,0x7c } },
+        { 40u, { 0xdf,0xa6,0x67,0x47,0xde,0x9a,0xe6,0x30,0x30,0xca,0x32,0x61,0x14,0x97,0xc8,0x27 } },
+        { 64u, { 0x51,0xf0,0xbe,0xbf,0x7e,0x3b,0x9d,0x92,0xfc,0x49,0x74,0x17,0x79,0x36,0x3c,0xfe } }
+    };
+    uint8_t mac[16];
+    unsigned i;
+
+    CASE("host_cmac matches all four RFC 4493 vectors");
+    for (i = 0; i < sizeof V / sizeof V[0]; ++i) {
+        memset(mac, 0, sizeof mac);
+        host_cmac(K, M, V[i].len, mac);
+        CHECK(memcmp(mac, V[i].mac, 16u) == 0);
+    }
+}
+
 static void test_clock_starting_at_zero(void)
 {
     struct od_session s;
@@ -916,6 +1089,10 @@ int main(void)
     test_step1_over_live_session();
     test_capacity_is_transactional();
     test_clock_starting_at_zero();
+    test_host_cmac_rfc4493();
+    test_step2_reply_bytes();
+    test_expired_session_refuses_open_and_seal();
+    test_security_enabled_is_fail_safe();
     test_no_room_mutates_nothing();
     test_challenge_is_consumed_on_every_failure();
     test_seal_rejects_wrapping_lengths();

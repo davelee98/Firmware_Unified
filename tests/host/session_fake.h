@@ -49,6 +49,16 @@ void sec_init(uint16_t timeout_s);
 enum od_session_auth handshake(struct od_session *s, uint32_t now_ms,
                                uint8_t server_nonce_out[16], bool corrupt_proof);
 
+/* The client nonce handshake() uses. Exposed so a caller can recompute the device's own
+ * mutual-auth proof and check the 16 bytes it returns -- nothing did, which left the one
+ * wire-visible derivation in the handshake with no coverage at all. */
+extern const uint8_t CLIENT_NONCE[16];
+
+/* As handshake(), but the step-2 reply is handed back rather than discarded. */
+enum od_session_auth handshake_capture(struct od_session *s, uint32_t now_ms,
+                                       uint8_t server_nonce_out[16],
+                                       uint8_t *rsp, uint16_t *rsp_len);
+
 /* Step 1 ONLY: mint a challenge and stop, for cases about what happens to a PENDING challenge.
  * Returns true when the challenge was issued; server_nonce_out and rsp receive the reply. */
 bool handshake_step1(struct od_session *s, uint32_t now_ms, uint8_t server_nonce_out[16],

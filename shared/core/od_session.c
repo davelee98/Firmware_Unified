@@ -324,8 +324,13 @@ enum od_session_auth od_session_authenticate(struct od_session *s,
     }
 
     /* RATE LIMIT next, before the request shape is ACTED ON -- the shipped order. The window
-     * resets on a 60 s IDLE GAP, not 60 s from the first attempt: last_auth_ms is rewritten by
-     * every attempt, so a peer pacing one attempt per 59 s stays throttled forever after ten.
+     * resets on a 60 s idle gap rather than 60 s from the first attempt, because last_auth_ms is
+     * rewritten by every ACCEPTED attempt. A THROTTLED one returns below without updating it, so
+     * the window does drain while a peer keeps knocking: at 59 s pacing the 11th attempt is
+     * refused and the 12th is accepted again. That matches upstream (encryption.cpp:602-615,
+     * which also returns before its update) and is the behaviour to keep -- making the refusal
+     * extend the window would let any unauthenticated peer send one 1-byte 0x0050 per 59 s and
+     * lock the legitimate client out of re-authentication for good.
      * auth_attempts == 0 means "no window open", which is why there is no separate flag. */
     if (s->auth_attempts != 0u && (now_ms - s->last_auth_ms) < OD_SESSION_RATE_WINDOW_MS) {
         if (s->auth_attempts >= OD_SESSION_RATE_MAX_ATTEMPTS) {
@@ -431,8 +436,11 @@ enum od_session_auth od_session_authenticate(struct od_session *s,
             goto step2_cleanup;
         }
 
-        /* The server proof is keyed with the SESSION key and takes the nonces in the opposite
-         * order to the client's -- server first. */
+        /* BOTH proofs take the nonces server-first; the ONLY difference is the key -- master for
+         * the client's, session for the device's. Verified against Firmware/src/encryption.cpp
+         * :647-649 and :703-705 and against py-opendisplay compute_server_proof(). Do not "fix"
+         * this to mirror the argument order: swapping it makes every deployed host fail
+         * AuthenticationError, and it is wire-visible, so no host update can rescue it. */
         cs = derive_proof(session_key, s->pending_server_nonce, client_nonce, device_id, proof);
         if (cs != OD_HAL_CRYPTO_OK) {
             od_session_clear(s);

@@ -34,6 +34,54 @@ Three things this resolution does NOT cover, and they are the honest remainder:
 3. **§ 7.3 and § 7.4 stand as written.** CI is gone by decision, and the C0 capture was skipped,
    so the crypto oracle still agrees with a transcription rather than with captured device bytes.
 
+### Independent three-lens review (2026-08-15)
+
+Three reviewers, none told what earlier rounds had found: shared core, target integration, and
+test adequacy. The core review found **no P1, no memory-safety error, and no wire divergence**
+from the authority or from `py-opendisplay` — the KDF chain, both proofs, the envelope in both
+directions, the nonce window port, the strike policy, and every narrowing cast were checked
+against concrete inputs and confirmed correct. What the other two found was worse than a bug in
+the code, and of a kind the earlier rounds structurally could not surface.
+
+**P1, fixed in `e09a520`: Nordic sealed its own rejection frames.** `pipe_send()` read the status
+from byte 0, but every frame it builds leads with `0x00` and puts the FE/FF outcome in byte 2. So
+`{0x00, cmd, 0xFF}` (rejected decrypt) and `{0x00, cmd, 0xFE}` (auth required) were encrypted
+whenever a session was live — and `py-opendisplay` decrypts any 31+ byte response and returns
+immediately (`device.py:830`), never reaching its `raw[2]` guards. The host then validated the
+3-byte frame as an ACK and reported success for a command the device refused. Intermittent by
+construction: the third consecutive bad tag clears the session, after which the identical frame
+goes out plaintext and raises `IntegrityCheckError` correctly. Pre-existing (`31d405a` has the
+same line), but C6 rewrote that function without catching it.
+
+**The dangerous class: comments that are wrong about correct code.** The server-proof comment
+claimed the device's proof takes the nonces "in the opposite order to the client's". Both are
+server-nonce-first; only the key differs (verified against `encryption.cpp:647-649` and `:703-705`
+and `crypto.py:92`). Independently, the test audit showed that keying that proof with the master
+key, or swapping its nonce order, **passed the entire suite**. A maintainer reconciling the code
+to its own comment would have broken every deployed device with a green run. The rate-limiter
+comment had the same shape — it described a window that a throttled attempt extends, which the
+code deliberately does not do, and "fixing" the code to match would hand any unauthenticated peer
+a permanent lockout of the legitimate client. Both comments corrected; the server proof is now
+pinned byte-for-byte.
+
+**Mutation testing is the reason those were found.** The test audit ran ~40 deliberate mutations
+with controls, and the controls all failed as expected, so a survivor was a real hole rather than
+a broken experiment. Six survivors are now caught, verified by re-running each mutation:
+RFC 4493 `Rb` corruption, master-keyed server proof, swapped proof nonces, a sliding
+(idle-not-absolute) timeout, and `encryption_enabled == 1`. Added: RFC 4493 known-answer vectors
+for `host_cmac` (it had none, so the KDF differential was self-referential at the primitive
+level), full step-1 and step-2 reply-byte assertions, absolute-timeout-under-load cases, and a
+fail-safe sweep of all 255 non-zero `encryption_enabled` values.
+
+**One mutation still survives and always will: `od_ct_equal` → `memcmp`.** No host test can
+measure constant-time behaviour, and this is precisely the regression
+`AUDIT_NORDIC_ZEPHYR_2026-08-14.md:259` records shipping unnoticed on another target. Enforced
+structurally instead — `tools/check.sh` now fails if `memcmp` appears in `od_session.c` at all.
+
+**`tools/check.sh` could report PASS having run nothing.** `ctest` exits 0 with zero registered
+tests, and `tests/host/CMakeLists.txt` is deliberately green against an empty `shared/`, so losing
+an `add_test()` line was a silent pass. `--no-tests=error` on both invocations.
+
 ### Re-evaluation round 2 (2026-08-15)
 
 A follow-up pass on the fixes raised four more, all verified and all real:

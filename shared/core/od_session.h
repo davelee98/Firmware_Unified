@@ -194,7 +194,10 @@ enum od_session_seal {
 struct od_session_report {
     uint8_t  status_byte;         /* the AUTH_STATUS_* actually placed in the reply */
     uint8_t  attempts;            /* auth attempts inside the current rate window */
-    uint8_t  integrity_failures;  /* AFTER this call */
+    uint8_t  integrity_failures;  /* after this call -- EXCEPT on teardown, where it is the
+                                   * count that triggered it (3); the session's own field is
+                                   * zeroed by the clear that follows. The reported value is
+                                   * the useful one. */
     bool     torn_down;           /* this call cleared the session */
     uint64_t rx_counter;          /* counter parsed from the inbound nonce */
     uint64_t rx_last;             /* rx_last BEFORE this call */
@@ -293,8 +296,12 @@ void od_session_touch(struct od_session *s, uint32_t now_ms);
  * and consumes it on every outcome that reaches the proof check -- success, wrong proof, expiry,
  * malformed body, crypto failure -- so one challenge answers one step 2 and an attacker cannot
  * grind proofs against a fixed server nonce. RATE_LIMITED, BAD_ARGUMENT and NO_ROOM do NOT consume
- * it, and none of the three mutates any session state, so a throttled client can still answer the
- * challenge it holds once the window clears. NO_ROOM does READ the body far enough to know which
+ * it, and none of the three mutates any session state. The stated reason for RATE_LIMITED
+ * preserving it -- "so a throttled client can answer the challenge it already holds" -- is not
+ * actually reachable: the challenge window is 30 s and the rate window 60 s, so any preserved
+ * challenge has expired before the peer is unthrottled. Preserving it is still right (a refusal
+ * that never examined the request should not consume state), but do not defend it with that
+ * scenario. NO_ROOM does READ the body far enough to know which
  * reply size is required -- that is what makes the capacity preflight step-specific, and it must
  * stay ahead of the rate limiter, which is the first thing that mutates.
  *
@@ -314,7 +321,9 @@ enum od_session_auth od_session_authenticate(struct od_session *s,
  *
  * ORDERING IS THE SECURITY PROPERTY: the replay window is CHECKED before the tag and ADVANCED only
  * after it verifies, so a forged frame cannot move rx_last and lock out legitimate lower-counter
- * frames. Both shipped targets advance early; only Silabs splits it correctly.
+ * frames. This port is NOT the first to get that right -- upstream Firmware already made
+ * nonceCommit() the first statement of the success arm (encryption.cpp:790). The targets that
+ * advanced before decrypting were the two Nordic/Silabs ports.
  *
  * out_cap must cover the DECRYPTED FRAME (>= ct_len - tag), one byte more than *out_len will be:
  * CCM emits [len:1][payload] and the length byte is plaintext the cipher writes. The payload is

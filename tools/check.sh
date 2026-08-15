@@ -134,6 +134,25 @@ check "shared boundary: no vendor includes"   boundary_includes
 check "shared boundary: C only, no String"    boundary_c_only
 check "shared boundary: protocol headers"     boundary_protocol
 
+# od_session.c compares attacker-supplied bytes -- an auth proof and a session id -- and must do
+# it in od_ct_equal, whose fixed-iteration volatile loop is the whole defence. A HOST TEST CANNOT
+# CATCH THIS: replacing od_ct_equal with memcmp passes the entire suite, verified by mutation.
+# It is exactly the regression AUDIT_NORDIC_ZEPHYR_2026-08-14.md:259 records shipping unnoticed on
+# another target, so the enforcement has to be structural.
+session_constant_time() {
+    local hits
+    hits=$(grep -nE '\bmemcmp[[:space:]]*\(' shared/core/od_session.c || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo
+        echo "memcmp in od_session.c: comparisons of attacker-supplied bytes belong in"
+        echo "od_ct_equal(), which is fixed-iteration with a volatile accumulator. If this is a"
+        echo "comparison of non-secret data, move it behind a helper with a name that says so."
+        return 1
+    fi
+}
+check "shared boundary: od_session uses no memcmp"  session_constant_time
+
 # ================================================================================== host suites ==
 # The real boundary enforcement: shared/ compiled for the host at -std=c99 -Wall -Wextra -Werror
 # under BOTH compilers. A GNU-ism gcc accepts is a failure discovered later on a target instead.
@@ -142,7 +161,7 @@ host_suite() {
     command -v "$cc" >/dev/null 2>&1 || return 127
     cmake -S tests/host -B "$dir" -DCMAKE_C_COMPILER="$cc" >/dev/null \
         && cmake --build "$dir" -j"$(nproc)" \
-        && ctest --test-dir "$dir" --output-on-failure
+        && ctest --test-dir "$dir" --output-on-failure --no-tests=error
 }
 
 for cc in gcc clang; do
@@ -163,7 +182,7 @@ host_sanitizers() {
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" >/dev/null \
         && cmake --build "$dir" -j"$(nproc)" \
         && UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ASAN_OPTIONS=detect_leaks=1 \
-           ctest --test-dir "$dir" --output-on-failure
+           ctest --test-dir "$dir" --output-on-failure --no-tests=error
 }
 check "host suite (ASan + UBSan)" host_sanitizers
 
@@ -216,6 +235,8 @@ replay_pinned() {
     fi
 }
 if command -v uv >/dev/null 2>&1 || python3 -c 'import opendisplay' 2>/dev/null; then
+    # Guarded above rather than relying on the 127 return, which check() would report as a FAIL:
+    # a missing toolchain is a skip everywhere else in this file and must be here too.
     check "wire corpus vs py-opendisplay 7.14.0 (pinned)" replay_pinned
 else
     skip "wire corpus vs py-opendisplay 7.14.0 (pinned)" "needs uv, or py-opendisplay importable"
