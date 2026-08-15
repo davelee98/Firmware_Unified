@@ -38,6 +38,48 @@ Its one substantive decision carries into this one: **the handshake returns its 
 rather than sending them** (Nordic's shape), because a handler that sends behind the dispatcher's
 back can't be routed by origin or counted for auth abuse.
 
+### The interlock — what both plans must keep saying the same thing about
+
+**Agreed and verified (do not change one without the other):**
+
+| | Value | Where |
+|---|---:|---|
+| Response/session payload | **222** | dispatch §2 table; `OD_SESSION_PAYLOAD_MAX` |
+| Complete plain frame `[cmd:2][payload]` | **224** | dispatch §2; `od_session_seal` input |
+| CCM plaintext `[len:1][payload]` | **223** | dispatch D-C; `OD_SESSION_PLAIN_MAX` |
+| Envelope after the cmd bytes | **251** | dispatch D-C; `OD_SESSION_ENVELOPE_MAX` |
+| Sealed application value | **253** | dispatch §2 / D-C2; `OD_SESSION_SEALED_MAX` |
+| RX slot width / admission | **256** | dispatch D-F; ARCHITECTURE.md § target state |
+
+Dispatch's §8 already tests these by name — "225 is rejected as `OD_SESSION_SEAL_TOO_LONG` before
+sealing (so no nonce is burned)" and "a 252-byte envelope is rejected before the cipher is
+touched" — which is exactly this plan's preflight and reject-before-CCM rules.
+
+**`OD_TX_FRAME_MAX` (256) and `OD_SESSION_SEALED_MAX` (253) are deliberately different numbers.**
+The first is the TX *slot*, sized to what the radio will take; the second is the largest thing this
+module may *emit* into it. Do not unify them — that is the admission-vs-generation distinction, and
+collapsing it is how a 253-byte cap silently becomes 256.
+
+**The API surface dispatch depends on**, so both docs use one spelling: the gate calls
+`od_session_security_enabled()` and `od_session_alive()`; the `0x50` handler calls
+`od_session_authenticate()` and sends the bytes it returns; the decrypt path calls
+`od_session_open()`; the seal predicate calls `od_session_seal()`; every teardown route calls
+`od_session_clear()`. **Dispatch's "activity stamp" IS `od_session_touch()`** — one mechanism, with
+the origin scoping (stamp has no origin test, the abuse counter is BLE-only, dispatch §5) staying
+on the dispatcher side.
+
+**Scratch ownership changes hands mid-stream, and that is fine if it is stated.** D-C makes
+dispatch the owner of the shared 223-byte decrypt / 253-byte encrypt scratch — but the session
+swaps here land *before* dispatch's C1–C4, so in the interim each target passes its own buffers to
+`od_session_open`/`seal`. The function signatures do not change at that handover; only who owns the
+memory does.
+
+**Numbering is one continuous sequence across both plans:** this plan is **C0–C7**, the dispatch
+plan continues at **C8–C12** (renumbered 2026-08-15 from its original C1–C5, which collided with
+these). A bare commit label therefore means exactly one thing in either document. The one
+exception is the "Corrections to earlier drafts" table in the dispatch plan, whose left column
+cites *rev-4's* labels historically and is deliberately left alone.
+
 ## Findings that shaped the design
 
 **PSA's native CCM is available and simply switched off.** `prj.conf:99-106` enables only CMAC and
@@ -783,6 +825,12 @@ Added by review, each guarding a specific hole:
   second returns `COUNTER_EXHAUSTED` and that no subsequent call ever emits nonce counter 0.
 - **Timeout boundary** — exactly `timeout_ms` expires, `timeout_ms - 1` does not.
 - **`rsp == NULL` / `rsp_cap < 3`** — `BAD_ARGUMENT` / `NO_ROOM`, no write, no crash.
+
+**Coordinate the C runner with dispatch's.** This plan's C4 lands `tools/session_vectors_gen.py`
+and a C driver for `session.json`; the dispatch plan's C5 lands a "C corpus runner" for
+`dispatch.json`. Two runners for one problem. This one arrives first, so it sets the pattern —
+generator emits committed C literals, `--check` in CI — and dispatch's should reuse it rather than
+invent a second mechanism.
 
 **Stand up `tests/fuzz/` now, minimally — and wire it, or it does not close Gate 1.** The
 handshake *is* the pre-auth surface and `MIGRATION.md:286` requires coverage for it.

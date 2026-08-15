@@ -173,7 +173,7 @@ The END reservation is **held across the refresh** — free under § 3.2, and wh
 
 ### 3.4 `CONFIG_READ`
 
-**From C3 it is a resumable producer** holding `{od_reply_t copied by value, next_chunk}`, and it
+**From C10 it is a resumable producer** holding `{od_reply_t copied by value, next_chunk}`, and it
 **owns `getConfigScratch()` until it completes**. The current safety argument is pure synchronicity
 (`communication.cpp:529-532`); resumption breaks it, because `CONFIG_WRITE` →
 `reloadConfigAfterSave()` → `loadGlobalConfig()` overwrites the same buffer (`:634-640`,
@@ -181,7 +181,7 @@ The END reservation is **held across the refresh** — free under § 3.2, and wh
 config-mutating command cancels an active read**; also cancel on `od_core_reset()` or tag death; a
 second read replaces the first.
 
-**Until C3** (see § 7) it stays synchronous, calls `od_txq_flush()` between chunks — bounded, which
+**Until C10** (see § 7) it stays synchronous, calls `od_txq_flush()` between chunks — bounded, which
 preserves Nordic's current behaviour and gives ESP32 the deadline it lacks — and **checks
 `od_reply()`'s status**: on `FULL` after a flush it aborts the read with a NACK rather than
 truncating silently. No stage of this plan ever loses config bytes without telling the host.
@@ -210,7 +210,7 @@ Nordic keys on `data[0]` (`opendisplay_pipe.c:600-607`). They disagree on the wi
 `{0xFF,0x72}` is **sealed on ESP32** (len < 3 → status 0x00 → encrypts) and **plaintext on Nordic**.
 
 **Decision:** dispatcher owns the predicate at seal time, ESP32's form is authoritative (CLAUDE.md),
-Nordic's delta recorded in `DIVERGENCE_MATRIX.md` § 1.5b as part of C1.
+Nordic's delta recorded in `DIVERGENCE_MATRIX.md` § 1.5b as part of C8.
 
 ---
 
@@ -308,23 +308,25 @@ no vtable (decision 2).
 
 ## 7. Sequence
 
-**C0 — `od_session` lands first.** ESP32 first within each step. Every commit adds its sources to
+**Prerequisite — `od_session` lands first**, the whole of `plans/OD_SESSION_PLAN_2026-08-15.md`
+(its C0–C7). This plan's commits continue that sequence as **C8–C12**, so a commit label means one
+thing across both documents. ESP32 first within each step. Every commit adds its sources to
 `shared/sources.cmake`, **and its host tests, in the same commit** — C-side coverage is not deferred
-to C5.
+to C12.
 
 | Commit | Content |
 |---|---|
-| **C1** | `od_hal_radio`, TX ring (`{origin,tag}`, `OD_TX_FRAME_MAX`, typed results, counter reserve/release), § 3.5 barrier, § 3.6 seal predicate. Nordic's blanket inline retry retires — **but `CONFIG_READ` stays synchronous and uses the bounded `od_txq_flush()` between chunks, aborting with a NACK on `FULL`** (§ 3.4). That preserves Nordic's behaviour, gives ESP32 a deadline it never had, and needs no `od_core_process()`. |
-| **C2** | Shared BLE RX ring; Nordic admission narrowed to 256. Each target keeps its existing pump and dispatcher, called from the new drain. LAN untouched. |
-| **C3** | `od_dispatch.c` — validation, reservation, gate, opcode switch, `od_core_process()` — **together**, one target at a time. Resumable `CONFIG_READ` lands here, where its driver exists. |
-| **C4** | Delete `communication.cpp`'s dispatch half and `command_queue.cpp`; shrink `opendisplay_pipe.c`. Update matrix § 1.5b / § 1.7, `SHARED_API_DESIGN.md:680`, `CLAUDE.md`. |
-| **C5** | C corpus runner + hardware passes. |
+| **C8** | `od_hal_radio`, TX ring (`{origin,tag}`, `OD_TX_FRAME_MAX`, typed results, counter reserve/release), § 3.5 barrier, § 3.6 seal predicate. Nordic's blanket inline retry retires — **but `CONFIG_READ` stays synchronous and uses the bounded `od_txq_flush()` between chunks, aborting with a NACK on `FULL`** (§ 3.4). That preserves Nordic's behaviour, gives ESP32 a deadline it never had, and needs no `od_core_process()`. |
+| **C9** | Shared BLE RX ring; Nordic admission narrowed to 256. Each target keeps its existing pump and dispatcher, called from the new drain. LAN untouched. |
+| **C10** | `od_dispatch.c` — validation, reservation, gate, opcode switch, `od_core_process()` — **together**, one target at a time. Resumable `CONFIG_READ` lands here, where its driver exists. |
+| **C11** | Delete `communication.cpp`'s dispatch half and `command_queue.cpp`; shrink `opendisplay_pipe.c`. Update matrix § 1.5b / § 1.7, `SHARED_API_DESIGN.md:680`, `CLAUDE.md`. |
+| **C12** | C corpus runner + hardware passes. |
 
 ---
 
 ## 8. Tests
 
-Landing with the commit that introduces the code, not at C5.
+Landing with the commit that introduces the code, not at C12.
 
 - **Gate matrix** — {security off/on} × {no session, live} × {AUTHENTICATE, FIRMWARE_VERSION, short
   plaintext, sealed, corrupt sealed} × {BLE, LAN plain, LAN TLS} → handler call, reply bytes,
@@ -347,18 +349,18 @@ Landing with the commit that introduces the code, not at C5.
 - **Egress** — sustained `RETRY` (order preserved, nonce not advanced); `GONE` drops one tag only;
   `ERROR` drops one entry and continues; `TOO_LARGE` vs `FULL`; deadline expiry leaves frames
   queued.
-- **`CONFIG_READ`** — C1: aborts with a NACK, never truncates, when the ring stays full through the
-  flush deadline. C3: completes across a multi-pass stall; cancelled by an interleaved
+- **`CONFIG_READ`** — C8: aborts with a NACK, never truncates, when the ring stays full through the
+  flush deadline. C10: completes across a multi-pass stall; cancelled by an interleaved
   `CONFIG_WRITE`; cancelled on tag death; second read replaces the first.
 - **Ring** — wrap, full, empty, stale-tag discard, and the legal reset-racing-a-producer case.
   *Not* "reset from the wrong thread": a `void` API cannot identify its caller. Cover the contract
   instead by asserting Nordic still defers disconnect cleanup through `s_close_pending`.
-- **C corpus runner (C5)** — drives `od_dispatch_frame()` against `dispatch.json`, checking the
+- **C corpus runner (C12)** — drives `od_dispatch_frame()` against `dispatch.json`, checking the
   `expect.reply` half `replay_vectors.py:18` cannot.
 
 ## 9. Hardware acceptance
 
-Per target at C1, C2, C3: encrypted upload; config write → chunk → read-back → reboot → re-parse;
+Per target at C8, C9, C10: encrypted upload; config write → chunk → read-back → reboot → re-parse;
 LED/buzzer/`READ_MSD`/`FIRMWARE_VERSION`; auth failure `{0x00,cmd,0xFE}` and ten rejections still
 dropping the ESP32 link; unknown opcode silent; 245-byte BLE frame NACKed; **END ACK on air before
 physical refresh, given a writable transport within the deadline** (§ 3.5). Nordic also: encrypted
