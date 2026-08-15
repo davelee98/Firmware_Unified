@@ -107,6 +107,18 @@ add_executable(od_config_test config_test.c)
 target_link_libraries(od_config_test od_shared)
 add_test(NAME config COMMAND od_config_test)
 
+# aes128: FIPS-197 known-answer vectors for the host AES core (tests/host/aes128.c).
+#
+# TEST SUPPORT, not a shared/ module -- but it is registered, and deliberately, because it is the
+# foundation every session expectation is computed on: the KDF, the session id, the auth proof and
+# every CCM tag come out of od_test_aes128_encrypt(). If it were wrong the session suite would
+# still agree with itself and prove nothing, so its vectors are the standard's own rather than
+# values this implementation produced.
+#
+# Never linked into firmware: the targets use mbedTLS and PSA. It is not constant time.
+add_executable(od_aes128_test aes128_test.c aes128.c)
+add_test(NAME aes128 COMMAND od_aes128_test)
+
 # advert: the 16-byte MSD encoder. DIFFERENTIAL -- the test carries an independent
 # transcription of the shipped Zephyr/Silabs byte assembly and sweeps both encoders over the
 # input space, because this is a promotion of bytes three targets already broadcast. A vector
