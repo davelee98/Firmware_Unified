@@ -118,6 +118,17 @@ add_executable(od_txq_test txq_test.c)
 target_link_libraries(od_txq_test od_shared)
 add_test(NAME txq COMMAND od_txq_test)
 
+# reply: the seal-or-plain decision, against a fake radio AND a fake od_session_app seam.
+#
+# The property is not "does it encrypt" but "is confidentiality chosen by the CALL". Both targets
+# used to infer it from the response bytes, and Nordic sealed its own rejection frames -- which the
+# host then decrypted and validated as an ACK for a command the device refused. The load-bearing
+# cases are the ones where the bytes would mislead: a {0x00,cmd,0xFF} rejection, a TLS-LAN frame
+# that must not be double-wrapped, and a live session with no security configured.
+add_executable(od_reply_test reply_test.c)
+target_link_libraries(od_reply_test od_session_fake)
+add_test(NAME reply COMMAND od_reply_test)
+
 # session: the handshake, KDF, replay window and CCM envelope against a fake crypto HAL built on
 # the host AES core. DIFFERENTIAL where it matters -- the replay window is upstream Firmware's
 # own nonce_window.h, ported verbatim, so this suite exercises the shipped state machine rather

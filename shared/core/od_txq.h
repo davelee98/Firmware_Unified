@@ -49,7 +49,8 @@ typedef enum {
     OD_TXQ_FULL,        /* reserve only, and always BEFORE any handler mutation */
     OD_TXQ_GONE,        /* the tag died; nothing was queued */
     OD_TXQ_TIMEOUT,     /* flush only: deadline passed, entries LEFT QUEUED, never dropped */
-    OD_TXQ_TOO_LARGE,   /* value above what the origin can carry */
+    OD_TXQ_TOO_LARGE,   /* value above what the origin or the session can carry */
+    OD_TXQ_SEAL_FAILED, /* sealing failed; a plaintext hard NACK is ALREADY QUEUED in its place */
     OD_TXQ_INVARIANT    /* a bug in the caller: no token, no units left, null frame */
 } od_txq_status_t;
 

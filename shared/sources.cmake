@@ -124,6 +124,14 @@ set(OD_SHARED_SOURCES_HAL_RADIO
     "${CMAKE_CURRENT_LIST_DIR}/core/od_txq.c"
 )
 
+# APP_SESSION needs MORE than a HAL: the target must also supply the od_session_app seam
+# (shared/core/od_session_app.h) -- which session object, which security config, which clock,
+# which device id, and where reports go. It is the first tier that is not purely about linkage to
+# a driver, which is why it is named for the seam rather than for a HAL.
+set(OD_SHARED_SOURCES_APP_SESSION
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_reply.c"
+)
+
 set(OD_SHARED_SOURCES_HAL_WDT
     "${CMAKE_CURRENT_LIST_DIR}/core/od_watchdog.c"
 )
@@ -135,6 +143,7 @@ set(OD_SHARED_SOURCES
     ${OD_SHARED_SOURCES_HAL_ADV}
     ${OD_SHARED_SOURCES_HAL_CRYPTO}
     ${OD_SHARED_SOURCES_HAL_RADIO}
+    ${OD_SHARED_SOURCES_APP_SESSION}
     ${OD_SHARED_SOURCES_HAL_WDT}
 )
 
