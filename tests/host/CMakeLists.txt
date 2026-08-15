@@ -107,6 +107,17 @@ add_executable(od_config_test config_test.c)
 target_link_libraries(od_config_test od_shared)
 add_test(NAME config COMMAND od_config_test)
 
+# txq: the response queue, its capacity reservation and the drain, against a scripted radio.
+#
+# The cases that carry the weight are the ordering ones: RETRY must STOP a pass rather than skip
+# past the entry (skipping reorders the wire), GONE must drop a whole tag while preserving the
+# order of the survivors, and ERROR must retire exactly one entry -- retrying a permanent refusal
+# is how a drain becomes a spin. Plus the reservation property the token exists for: one dispatch
+# cannot spend another dispatch's capacity.
+add_executable(od_txq_test txq_test.c)
+target_link_libraries(od_txq_test od_shared)
+add_test(NAME txq COMMAND od_txq_test)
+
 # session: the handshake, KDF, replay window and CCM envelope against a fake crypto HAL built on
 # the host AES core. DIFFERENTIAL where it matters -- the replay window is upstream Firmware's
 # own nonce_window.h, ported verbatim, so this suite exercises the shipped state machine rather

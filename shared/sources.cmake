@@ -67,6 +67,10 @@
 #                         od_session_seal() around every handler. Landing dispatch first would
 #                         mean writing that gate against three targets' private session state and
 #                         then rewriting it, so the ordering is a dependency, not a preference.)
+#   core/od_txq.c         response queue, reservation, drain   (LANDED — egress before dispatch,
+#                         because the dispatcher reserves capacity BEFORE it calls a handler and
+#                         cannot be written against a queue that does not exist yet. No wire
+#                         surface of its own: it moves finished frames, it does not build them.)
 #   core/od_dispatch.c    opcode dispatch, encryption gate
 #   core/od_xfer_direct.c 0x70/0x71/0x72
 #   core/od_xfer_partial.c 0x76
@@ -84,6 +88,7 @@ get_filename_component(OD_SHARED_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
 #   HAL_ADV  needs shared/hal/od_hal_adv.h implemented (three link-time C functions).
 #   HAL_CRYPTO needs shared/hal/od_hal_crypto.h implemented (prepared AES key + primitives).
 #   HAL_WDT  needs shared/hal/od_hal_wdt.h implemented (reset reason, retained byte, arm, feed).
+#   HAL_RADIO needs shared/hal/od_hal_radio.h implemented (send one frame, is this tag live).
 #
 # WHY THE SPLIT EXISTS. A target part-way through migration can consume the sources whose HAL it
 # has and add the rest as each HAL lands, instead of waiting to take all of shared/ at once. That
@@ -115,6 +120,10 @@ set(OD_SHARED_SOURCES_HAL_CRYPTO
     "${CMAKE_CURRENT_LIST_DIR}/core/od_session.c"
 )
 
+set(OD_SHARED_SOURCES_HAL_RADIO
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_txq.c"
+)
+
 set(OD_SHARED_SOURCES_HAL_WDT
     "${CMAKE_CURRENT_LIST_DIR}/core/od_watchdog.c"
 )
@@ -125,6 +134,7 @@ set(OD_SHARED_SOURCES
     ${OD_SHARED_SOURCES_PURE}
     ${OD_SHARED_SOURCES_HAL_ADV}
     ${OD_SHARED_SOURCES_HAL_CRYPTO}
+    ${OD_SHARED_SOURCES_HAL_RADIO}
     ${OD_SHARED_SOURCES_HAL_WDT}
 )
 
