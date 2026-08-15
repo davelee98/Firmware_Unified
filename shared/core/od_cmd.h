@@ -11,6 +11,7 @@
 
 #include "od_txq.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -54,10 +55,23 @@ typedef enum {
     OD_FRAME_DEFERRED           /* the ONLY outcome that does not consume the RX entry */
 } od_frame_outcome_t;
 
-/* Implemented by the target. Applies the activity stamp and the auth-abuse policy, both gated on
- * this tag still owning the link. The two have DIFFERENT origin scopes -- the stamp applies to
- * every origin, the abuse run is BLE-only -- and getting the first wrong stops an active LAN
- * client's idle clock and disconnects it mid-session. */
+/* What one outcome MEANS, as data rather than as a switch in each target. The two targets got this
+ * wrong in different ways before it was written down, and the failure is quiet: an outcome that
+ * wrongly stamps activity lets a discovery poll hold the exclusive link forever, and one that
+ * wrongly does not stops an active client's idle clock and disconnects it mid-session. */
+typedef struct {
+    bool stamp_activity;   /* refresh the owner idle clock -- EVERY origin */
+    bool reset_abuse;      /* clear the consecutive-auth-refusal run -- BLE only */
+    bool increment_abuse;  /* advance that run -- BLE only */
+    bool consume_rx;       /* false ONLY for DEFERRED: the frame must be re-offered unchanged */
+} od_frame_policy_t;
+
+/* Total over od_frame_outcome_t. The caller still owns the ORIGIN SCOPING, which is not in this
+ * struct because it is not a property of the outcome: the stamp applies to every origin, the abuse
+ * run is BLE-only, and both additionally require the tag to still own the link. */
+od_frame_policy_t od_frame_policy(od_frame_outcome_t outcome);
+
+/* Implemented by the target. Applies od_frame_policy() with that scoping. */
 void od_core_frame_done(const od_reply_t *rp, od_frame_outcome_t outcome);
 
 #ifdef __cplusplus

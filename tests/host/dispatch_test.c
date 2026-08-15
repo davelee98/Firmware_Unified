@@ -390,6 +390,67 @@ static void test_handler_results_map(void)
     CHECK(od_dispatch_frame(&BLE, od_span_make(frame, sizeof frame)) == OD_FRAME_AUTH_REQUIRED);
 }
 
+/* The section 5 policy table, row by row. Each row is a decision with a named consequence, and the
+ * two targets got different rows wrong before it was written down -- so asserting the table is
+ * asserting the decisions, not restating the code. */
+static void test_outcome_policy_table(void)
+{
+    od_frame_policy_t p;
+
+    CASE("ACCEPTED and HANDLER_NACK both stamp activity and clear the refusal run");
+    /* A NACK is still a client talking correctly and getting a real answer. Not stamping would age
+     * out a peer that works fine but happens to send commands this device rejects. */
+    p = od_frame_policy(OD_FRAME_ACCEPTED);
+    CHECK(p.stamp_activity && p.reset_abuse && !p.increment_abuse && p.consume_rx);
+    p = od_frame_policy(OD_FRAME_HANDLER_NACK);
+    CHECK(p.stamp_activity && p.reset_abuse && !p.increment_abuse && p.consume_rx);
+
+    CASE("AUTH_ESTABLISHED clears the run but does NOT stamp");
+    p = od_frame_policy(OD_FRAME_AUTH_ESTABLISHED);
+    CHECK(!p.stamp_activity);
+    CHECK(p.reset_abuse);
+    CHECK(p.consume_rx);
+
+    CASE("AUTH_CONTROL and DISCOVERY touch nothing -- a poll cannot hold the link");
+    p = od_frame_policy(OD_FRAME_AUTH_CONTROL);
+    CHECK(!p.stamp_activity && !p.reset_abuse && !p.increment_abuse && p.consume_rx);
+    p = od_frame_policy(OD_FRAME_DISCOVERY);
+    CHECK(!p.stamp_activity && !p.reset_abuse && !p.increment_abuse && p.consume_rx);
+
+    CASE("AUTH_REQUIRED is the ONLY outcome that advances the run");
+    p = od_frame_policy(OD_FRAME_AUTH_REQUIRED);
+    CHECK(p.increment_abuse);
+    CHECK(!p.stamp_activity && !p.reset_abuse);
+    {
+        /* Enumerated rather than asserted in prose: exactly one row may increment. */
+        const od_frame_outcome_t ALL[] = {
+            OD_FRAME_ACCEPTED, OD_FRAME_HANDLER_NACK, OD_FRAME_AUTH_CONTROL,
+            OD_FRAME_AUTH_ESTABLISHED, OD_FRAME_DISCOVERY, OD_FRAME_AUTH_REQUIRED,
+            OD_FRAME_CRYPTO_FAILED, OD_FRAME_CRYPTO_DROPPED, OD_FRAME_REJECTED_FRAME,
+            OD_FRAME_UNKNOWN_OPCODE, OD_FRAME_STALE_TAG, OD_FRAME_DEFERRED
+        };
+        unsigned i, inc = 0u, no_consume = 0u;
+        for (i = 0; i < sizeof ALL / sizeof ALL[0]; ++i) {
+            const od_frame_policy_t q = od_frame_policy(ALL[i]);
+            if (q.increment_abuse) { ++inc; }
+            if (!q.consume_rx) { ++no_consume; }
+        }
+        CHECK(inc == 1u);
+        CHECK(no_consume == 1u);
+    }
+
+    CASE("neither crypto outcome touches the run -- od_session already applied its own strike");
+    p = od_frame_policy(OD_FRAME_CRYPTO_FAILED);
+    CHECK(!p.increment_abuse && !p.reset_abuse && !p.stamp_activity);
+    p = od_frame_policy(OD_FRAME_CRYPTO_DROPPED);
+    CHECK(!p.increment_abuse && !p.reset_abuse && !p.stamp_activity);
+
+    CASE("DEFERRED is the one outcome that does not consume the frame");
+    p = od_frame_policy(OD_FRAME_DEFERRED);
+    CHECK(!p.consume_rx);
+    CHECK(!p.stamp_activity && !p.reset_abuse && !p.increment_abuse);
+}
+
 int main(void)
 {
     test_plaintext_path();
@@ -400,6 +461,7 @@ int main(void)
     test_producer_conflict_defers_before_decrypt();
     test_control_opcodes();
     test_handler_results_map();
+    test_outcome_policy_table();
 
     printf("dispatch: %u checks, %u failures\n", g_checks, g_failures);
     return g_failures == 0u ? 0 : 1;
