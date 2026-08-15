@@ -121,11 +121,27 @@ buffer with the CCM plaintext buffer, and shrink the replay window (below).
    `wait_refresh(timeout)` — the Silabs 60 s in-callback block already drops the BLE link
    mid-refresh, and a shared core must not standardize that.
 
-6. **The replay window is 8× oversized.** `replay_window[64]` of `uint64_t` = 512 B, linearly
-   scanned, for a ±32 accept window. A 64-bit bitmap tracking the ±32/64 window is ~8-16 bytes.
-   On a 32 KB chip this is free RAM worth reclaiming — but the change is security-sensitive
-   (the exact-counter `diff==0` replay hole must be closed at the same time), so make it
-   deliberately in `od_session.c`, not as an incidental optimization.
+6. ~~**The replay window is 8× oversized.**~~ **CLOSED 2026-08-15 on `esp32-idf` and
+   `nordic-zephyr`** by the `od_session` promotion; still open on `efr32bg22-slc`, which has not
+   swapped. Measured, not estimated — the whole session object, since more than the window
+   shrank:
+
+   | Target | before | after | returned |
+   |---|---:|---:|---:|
+   | `esp32-idf` (`s3-n8r8`) | 632 B (`0x278`) | 112 B (`0x70`) | **520 B** |
+   | `nordic-zephyr` (`xiao_nrf52840`) | 640 B (`0x280`) | 112 B (`0x70`) | **528 B** |
+
+   The window itself is a **32-byte** bitmap, not the 8-16 B guessed here: upstream `Firmware`
+   had already replaced the 512 B ring with a 256-bit backward bitmap (`src/nonce_window.h`,
+   ported verbatim to `shared/core/od_nonce_window.h`), and a wider backward window than the
+   ±32 assumed above is worth the extra 24 B under PIPE reordering. The rest of the saving is
+   not the window at all: `session_key[16]` moved into an `od_hal_crypto` slot, and
+   `client_nonce`/`server_nonce` became handshake-locals. Holding no key material in the struct
+   is a security property as much as a RAM one — a memory dump of a live session now yields none.
+
+   The security-sensitivity warning was right and was honoured: the `diff == 0` replay hole
+   closed in the same change (`DIVERGENCE_MATRIX` § 6.6), along with the window-advance ordering
+   (§ 6.7). **None of it is hardware-verified yet.**
 
 ### RAM sizing rules for `shared/core`
 

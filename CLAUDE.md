@@ -45,11 +45,31 @@ looks arbitrary and is not); delete the story.
   — or drive them directly, `cmake -S tests/host -B <dir> && cmake --build <dir> && ctest
   --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF. `compat/ratchet.sh` and
   `tools/sdkconfig_baseline.sh` are gates a change must not break.
-- **`shared/` is no longer empty** — `core/od_{adv_control,advert,config,config_asm,config_tlv,watchdog}.c`
-  plus header-only `od_span.h`, all listed in `shared/sources.cmake` (never globbed) in per-HAL
-  tiers. Consumers: host tests and `esp32-idf` take the aggregate; `nordic-zephyr` takes PURE +
+- **`shared/` is no longer empty** — `core/od_{adv_control,advert,config,config_asm,config_tlv,session,watchdog}.c`
+  listed in `shared/sources.cmake` (never globbed) in per-HAL tiers, plus the two all-inline
+  headers `od_span.h` and `od_nonce_window.h`, which correctly have no entry there. Consumers:
+  host tests and `esp32-idf` take the aggregate; `nordic-zephyr` takes PURE + HAL_CRYPTO +
   HAL_WDT; `efr32bg22-slc` takes PURE only — called on Nordic, still compiled-only on Silabs
   except `od_advert`.
+  **`od_session` is CALLED ON BOTH `esp32-idf` AND `nordic-zephyr` AND HARDWARE-VERIFIED ON
+  NEITHER** (C5 2026-08-15, C6 2026-08-15). It owns the 0x0050 handshake, the KDF, the replay
+  window and the CCM envelope in both directions; each target keeps only its clock, its device
+  identity and its logging. `esp32-idf/src/encryption.cpp` went 863 → 285 lines (the swap, plus
+  the CC310 arm and the crypto forwarders it orphaned) and `nordic-zephyr/src/opendisplay_pipe.c`
+  1320 → 1082; both `struct EncryptionSession`s are gone, and the session object went 632→112 B
+  and 640→112 B respectively.
+  **Two unverified swaps are stacked on a CCM path no board has ever executed** — `od_hal_crypto`
+  (C1) replaced Nordic's hand-rolled RFC 3610 with `psa_aead_*` and repointed ESP32 onto prepared
+  mbedTLS slots, and that is unproven too. The likeliest first-flash failure is Nordic's PSA key
+  policy: importing with plain `PSA_ALG_CCM` pins a 16-byte tag and fails every operation with
+  `NOT_PERMITTED`, which presents as "PSA CCM doesn't work". The promotion also carries five
+  deliberate behaviour changes — `DIVERGENCE_MATRIX` § 6.5-6.9 — of which the `diff == 0` replay
+  fix and the exact inner-length check are the two that could refuse a frame the old code
+  accepted. Nordic additionally caps NFC read tag data at 218 B (was 238) so a sealed response
+  still fits a BLE frame.
+  The one flaw the promotion could NOT fix is filed: `FOLLOWUPS.md` § 5, **bidirectional nonce
+  reuse** — both directions share one `session_id` and both counters start at 0, so the same
+  CCM nonce is used under one key each way. It needs a protocol revision, not a firmware change.
   **`od_watchdog` is no longer a scaffold, and NOT YET HARDWARE-VERIFIED on either target.**
   Both `esp32-idf` (`hal/od_hal_wdt.c`, over the IDF Task Watchdog) and `nordic-zephyr`
   (`src/od_hal_wdt.c`, over the devicetree `watchdog0` + `gpregret2` nodes) implement
@@ -77,8 +97,9 @@ looks arbitrary and is not); delete the story.
   `efr32bg22-slc` still open-codes the config parse: measured 2026-08-14 as
   +1 byte of RAM **only with `OD_CONFIG_WITH_{TOUCH,BUZZER,WIFI,DATA_EXTENDED}=0`** (gated 909 B
   vs its current 844 + 64; ungated 1617 B against 484 B of static slack at 98.5% RAM). Its real
-  gate is `MAX_CONFIG_SIZE` 4096 + the NVM3 object-size check, not the aggregate. Most remaining
-  protocol logic (dispatch, transfer, session) still lives in the ESP32 target.
+  gate is `MAX_CONFIG_SIZE` 4096 + the NVM3 object-size check, not the aggregate. The remaining
+  unpromoted protocol logic — dispatch and the transfer state machines — still lives in the
+  ESP32 target.
 - `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel,crypto}`.
 - **`shared/hal/od_hal_crypto.h` is the third shared HAL** (2026-08-15, with `od_hal_adv` and
   `od_hal_wdt`), implemented on both `esp32-idf` (mbedTLS) and `nordic-zephyr` (native

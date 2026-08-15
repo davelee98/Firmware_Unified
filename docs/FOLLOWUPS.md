@@ -354,3 +354,79 @@ it. (3) needs a reproduction before it is chaseable.
 **Not fixed by the commit that found it**, because the useful part is the wire-contract question
 in (4), and because the symptom was encountered while chasing an unrelated BLE connect defect.
 
+
+---
+
+## 5. `opendisplay-protocol` — one CCM nonce is used in BOTH directions under one key
+
+**Status:** open, **needs a protocol revision — no firmware change can fix it.**
+**Evidence:** `verified` — read from all four firmware repos and from the promoted
+`shared/core/od_session.c`, which reproduces it deliberately. **Severity:** high, and unusually
+easy to overlook because every implementation agrees, so nothing looks wrong anywhere.
+
+Filed 2026-08-15 with the `od_session` promotion (plan C7). It is recorded here rather than left
+in an API comment because a note beside the code that causes it reads as an explanation; the next
+reader has to see it as a defect with an owner.
+
+### The defect
+
+A session has ONE `session_id` and TWO counters — `tx_counter` for device→host and `rx_last` for
+host→device — and **both start at 0**. The CCM nonce is `session_id ‖ BE64(counter)`, taken from
+the same 16-byte envelope nonce in both directions. So the device's first sealed response and the
+host's first sealed command are encrypted under the **same key with the same nonce**.
+
+That is the one thing CCM must never do. Nonce reuse in a counter-mode AEAD leaks the XOR of the
+two plaintexts directly, and — worse for an authenticated mode — it exposes the authentication
+subkey structure, which can permit forgery rather than merely disclosure. This is not a
+theoretical sharp edge; it is the classic catastrophic failure of CTR-based AEAD.
+
+### Why it has not bitten yet
+
+The two directions are decrypted by different code holding different expectations, and
+`py-opendisplay` never attempts to decrypt a device→host frame with the host→device counter
+space. The exposure is real but currently unexercised: it needs an attacker who captures both
+directions of one session, which BLE sniffing makes entirely practical.
+
+### Why `od_session` did not fix it
+
+Fixing it changes the wire. Any of the three fixes below makes new firmware and old hosts
+mutually undecipherable, so it belongs to a protocol revision with a version negotiation, not to
+a refactor whose whole contract was "byte-identical on the wire". `shared/core/od_session.h`
+states the flaw at `od_session_seal()` and is explicit that TX-side non-reuse is all it
+guarantees.
+
+### Options, cheapest first
+
+1. **A nonce-domain bit.** Reserve one bit of the counter (or one byte of the 16-byte envelope
+   nonce) as a direction flag: 0 for host→device, 1 for device→host. One-line change on both
+   sides, costs one bit of counter space, and no extra key material or handshake round.
+2. **Directional key separation.** Derive `k_h2d` and `k_d2h` from the session key with two
+   distinct CMAC labels. Cleanest cryptographically, and it also stops a captured frame being
+   replayed back at the sender. Costs one extra HAL key slot per session — the slot API added in
+   C1 already supports this, `OD_HAL_CRYPTO_KEY_SLOTS` just needs to be 2.
+3. **Split the counter space** — device seals from `1 << 63`, host from 0. Zero protocol
+   ceremony, but it halves the usable counter space and is the easiest of the three to get
+   silently wrong in a third implementation.
+
+**Recommendation: (2)**, with (1) as the fallback if a key slot is unaffordable on EFR32BG22.
+Whichever is chosen, it must be settled in `opendisplay-protocol` first — four firmware repos and
+`py-opendisplay` all encode this nonce, and a unilateral change in any one of them is a silent
+interop break rather than a fixable bug.
+
+### Carry-forward for `efr32bg22-slc`
+
+The Silabs target still open-codes the whole session and is unaffected by the `od_session`
+promotion, so when it swaps it inherits every row of `DIVERGENCE_MATRIX` § 6.5–6.9 at once. Two
+of those are behaviour changes on that target specifically, not merely code motion:
+
+- **§ 6.2, timeout basis.** Silabs expires on *idle*, so a continuously active session there
+  never expires at all. Adopting `od_session`'s absolute basis will start expiring sessions that
+  currently live forever — visible to any host that holds a long-running connection.
+- **§ 6.3, hand-rolled CCM.** It still carries the RFC 3610 implementation over PSA ECB, with a
+  `psa_import_key`/`psa_destroy_key` **per 16-byte block**. Its PSA has CCM too, so the same
+  `CONFIG_PSA_WANT_ALG_CCM`-equivalent fix applies — but measure the flash delta against a
+  32 KB part before assuming it lands.
+
+Also still live on Silabs and closed everywhere else: the constant-time auth-proof compare
+downgraded to `memcmp` (`targets/efr32bg22-slc/opendisplay_pipe.c:646`), first recorded in
+`AUDIT_NORDIC_ZEPHYR_2026-08-14.md:259` as an NRF54 defect and fixed there, never fixed here.
