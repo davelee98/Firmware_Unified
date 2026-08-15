@@ -150,6 +150,17 @@ add_executable(od_config_read_test config_read_test.c)
 target_link_libraries(od_config_read_test od_session_fake)
 add_test(NAME config_read COMMAND od_config_read_test)
 
+# dispatch: the ordering in od_dispatch.h, which IS the specification.
+#
+# Every bug these guard against is an ordering bug with a specific consequence: reserve after the
+# gate loses the gate's own FE/FF answer; reserve after the handler lets a handler mutate state it
+# cannot then report; defer after decrypt advances the replay window so the re-dispatched frame is
+# refused the second time; and a late producer-conflict check splices two configs into one
+# CRC-valid read-back.
+add_executable(od_dispatch_test dispatch_test.c)
+target_link_libraries(od_dispatch_test od_session_fake)
+add_test(NAME dispatch COMMAND od_dispatch_test)
+
 # session: the handshake, KDF, replay window and CCM envelope against a fake crypto HAL built on
 # the host AES core. DIFFERENTIAL where it matters -- the replay window is upstream Firmware's
 # own nonce_window.h, ported verbatim, so this suite exercises the shipped state machine rather
