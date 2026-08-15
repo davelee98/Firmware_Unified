@@ -985,13 +985,17 @@ od_cmd_result_t handlePowerOffCommand(const od_cmd_ctx_t *ctx, const uint8_t* pa
     if (powerLatchDffConfigured()) {
         // Fire-and-forget hard rail-cut: queue the ACK, then release the D-FF latch.
         // On latch HW the rail usually drops before the ACK is actually transmitted.
-        /* BEST-EFFORT BY CONSTRUCTION. This queues the ACK and then cuts the rail; on latch
-         * hardware the supply usually drops before anything drains the queue, so the client
-         * commonly sees the link go away instead of an ack. That is the shipped behaviour and is
-         * not changed here -- but note it does NOT improve at the cutover either: od_txq is
-         * drained from the loop, and the loop does not run again. If the ack is ever required to
-         * reach air, the fix is a bounded flush before powerLatchPowerOff(), not a different
-         * reply call. */
+        /* BEST-EFFORT ON BLE, SYNCHRONOUS ON LAN -- and the difference matters at the cutover.
+         * The shipped sender queues a BLE reply (so on latch hardware the rail usually drops
+         * before anything drains it) but writes a LAN reply straight to the socket
+         * (communication.cpp:397, bypassing the ring entirely). So a LAN client sending 0x0052
+         * gets its ack submitted TODAY, before the 100 ms delay.
+         *
+         * At the cutover both go into od_txq, which is drained from the loop -- and the loop does
+         * not run again after powerLatchPowerOff(). That REGRESSES the LAN case from "delivered"
+         * to "never sent". Step 8 must therefore add a bounded od_txq_flush() here before cutting
+         * the rail; it is recorded in the handler-rewrite plan rather than left to be rediscovered
+         * from a silent symptom. */
         uint8_t ok[] = {RESP_ACK, RESP_POWER_OFF, 0x00, 0x00};
         (void)od_cmd_reply(ctx, ok, sizeof(ok));
         od_hal_delay_ms(100);

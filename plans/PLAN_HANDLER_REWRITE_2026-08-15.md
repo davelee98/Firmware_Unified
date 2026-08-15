@@ -160,6 +160,11 @@ omission below is silent rather than loud:
 - **Teardown cancels the producer and resets egress.** A client that disconnects mid-read
   otherwise leaves the producer active forever, deferring every subsequent config write.
 - **LAN-origin responses need draining too**, not only a drain after BLE RX.
+- **`handlePowerOffCommand` needs a bounded flush before `powerLatchPowerOff()`.** The shipped
+  sender writes a LAN reply straight to the socket (`communication.cpp:397`), so a LAN client's
+  `0x0052` ack is delivered today. After the cutover it sits in `od_txq`, and the loop that would
+  drain it never runs again — a regression from "delivered" to "never sent". BLE is unaffected
+  because that ack was already best-effort.
 
 ## Tests
 
