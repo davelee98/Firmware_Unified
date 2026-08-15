@@ -77,6 +77,15 @@ Refusing our own authentication, loudly and with a cause in the log, contains th
 subsystem that caused it. Reaching the state at all requires `psa_destroy_key()` to fail four
 times with no successful drain between, i.e. persistently rather than transiently.
 
+**Recovery, since a gate that cannot reopen is a brick.** The list was never a latch —
+`orphan_drain()` retries every parked id and clears the ones that succeed — but it was originally
+called only from the two functions that CREATE orphans, and both are handshake-only. That made
+recovery circular: a device gated mid-session could not clear the gate without re-authenticating,
+which is the operation the gate blocks. The drain now runs at the top of every entry point,
+including the per-frame CCM paths, so a transient fault clears on the next frame rather than the
+next handshake. On an empty list it is a single compare. A reboot also clears it and loses
+nothing, because volatile PSA keys die with the crypto core.
+
 **Not covered by any test.** `od_hal_crypto.c` is target code with no host harness, and PSA
 destroy failure is not injectable from a board. This is reasoned code, verified only by review and
 by compiling — the same standing as the rest of that file.
