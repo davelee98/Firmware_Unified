@@ -86,7 +86,26 @@ including the per-frame CCM paths, so a transient fault clears on the next frame
 next handshake. On an empty list it is a single compare. A reboot also clears it and loses
 nothing, because volatile PSA keys die with the crypto core.
 
-**Round 4 — the drain classifies failures.** A follow-up change (Codex) made
+**Round 5 — the orphan list is REMOVED, and rounds 2-4 with it.** Net −71 lines. What remains is
+what round 1 landed: check `psa_destroy_key()`'s return, log the failure naming the status, and
+accept that an undestroyable key leaks its slot.
+
+The mechanism stopped paying for itself. It defended a path that requires destroying a volatile
+key imported seconds earlier to fail — on a local software/CRACEN driver, essentially
+can't-happen — and each successive round found a defect in the GUARD rather than in the thing
+guarded: a leak still unbounded once the list filled (round 2), no recovery from a mid-session
+gate (round 3), five statuses that wedged it permanently (round 4). It also carried a hazard the
+simple version does not: a parked id may be reissued by PSA to another key, which a retry would
+then destroy. Four could-happen failure modes bought to defend one can't-happen one is a bad
+trade, and removing it closes the reallocation hazard for free.
+
+What is NOT lost: the original OD-S8 defect stays fixed. `(void)psa_destroy_key(...)` returning
+success while losing a live handle was the real bug; that is still detected, still reported, and
+still fails the operation. Only the attempted *repair* is gone. Repeated occurrences in a log are
+the finding — if destruction is genuinely failing, the pool is draining and no holding pen was
+going to save it.
+
+**Round 4 (superseded by round 5, kept for the reasoning) — the drain classified failures.** A follow-up change (Codex) made
 `PSA_ERROR_INVALID_HANDLE` drop the entry instead of retrying it forever: the id names nothing, so
 holding it consumed a tracking slot for zero actual leak, and four such events would wedge the
 gate permanently. Correct, and checking it against `psa_destroy_key`'s documented returns showed

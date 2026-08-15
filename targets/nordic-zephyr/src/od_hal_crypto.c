@@ -49,108 +49,6 @@ static enum od_hal_crypto_status slot_release(od_hal_crypto_slot_t slot)
     return OD_HAL_CRYPTO_OK;
 }
 
-/* ------------------------------------------------------------ orphaned one-shot key ids --- */
-
-/* psa_destroy_key() failing is a should-never-happen, but "should never" is how a finite pool
- * drains: the one-shot CMAC and ECB paths import a volatile key per call, and a failed destroy
- * used to lose the only handle to it. Detecting the failure stops the misleading success; it does
- * not give the slot back. So a failed id is PARKED here and retried at the top of every entry
- * point, which bounds the damage to at most OD_ORPHAN_MAX live strays and gives a transient
- * fault (a busy driver, a momentary storage error) the chance to clear on the next call.
- *
- * The list is a HARD GATE, not just a record: orphans_full() below refuses to import while it is
- * full, so every id this file creates is either destroyed or tracked. Without that the bound is
- * only on the LIST -- the leak itself stays unbounded, one slot per call, forever.
- *
- * IT IS NOT A LATCH. orphan_drain() retries every parked id and runs at the top of EVERY entry
- * point, not just the two that can create an orphan: draining only from cmac/aes_ecb would make
- * recovery circular, because those are handshake-only, so a device gated mid-session could not
- * clear the gate without doing the very thing the gate blocks. The CCM paths run per frame, which
- * makes recovery from a transient fault prompt. On an empty list the drain is a single compare.
- * A reboot also clears it, and loses nothing: volatile PSA keys die with the crypto core.
- *
- * Four is not a tuned number -- it is "more than any plausible transient burst, small enough to
- * be free". If it ever fills, the log line is the finding: destruction is failing persistently
- * and the pool is genuinely leaking. */
-#define OD_ORPHAN_MAX 4u
-static psa_key_id_t s_orphans[OD_ORPHAN_MAX];
-static uint8_t s_orphan_count;
-
-static void orphan_park(psa_key_id_t id)
-{
-    if (s_orphan_count < OD_ORPHAN_MAX) {
-        s_orphans[s_orphan_count++] = id;
-        od_log_error("crypto: parked undestroyable key id %lu (%u held)",
-                     (unsigned long)id, (unsigned)s_orphan_count);
-    } else {
-        /* UNREACHABLE while orphans_full() gates every import: nothing may create a key it
-         * cannot track. Kept as the detector for that invariant being broken later, because the
-         * alternative -- discarding the id -- is a permanent leak of a pool other subsystems
-         * share. */
-        od_log_error("crypto: BUG - orphan list full at park time, key id %lu leaked",
-                     (unsigned long)id);
-    }
-}
-
-/* Refuse to import while every tracking slot is taken. Bounded-then-unbounded is strictly worse
- * than fail-closed here, and the reason is the shared pool: PSA key slots on this SoC are not
- * ours alone, so leaking one per operation eventually takes BLE pairing down with it. Failing our
- * own authentication, loudly and with a cause in the log, contains the damage to this subsystem.
- * Reaching this state at all requires psa_destroy_key() to fail four times with no successful
- * drain between, which means destruction is persistently broken, not transiently. */
-static bool orphans_full(void)
-{
-    if (s_orphan_count >= OD_ORPHAN_MAX) {
-        od_log_error("crypto: %u undestroyable PSA keys held - refusing to import another",
-                     (unsigned)s_orphan_count);
-        return true;
-    }
-    return false;
-}
-
-/* Is retrying this failure worth a tracking slot? Taken from psa_destroy_key's documented
- * returns, because "retry forever" and "give up" are both wrong for the whole set:
- *
- *   COMMUNICATION_FAILURE  the key MAY STILL BE PRESENT in the cryptoprocessor -- the one case
- *                          the orphan list exists for. Retry.
- *   BAD_STATE              the library was not initialised. A later call may find it is. Retry.
- *   NOT_PERMITTED          read-only or physically restricted: no caller can ever destroy it.
- *   CORRUPTION_DETECTED    the cryptoprocessor may be compromised.
- *   STORAGE_FAILURE /
- *   DATA_INVALID           storage-backend faults, not reachable for a volatile key at all.
- *
- * The last four will not resolve, so holding their ids buys nothing and costs a slot each --
- * four of them would wedge the gate permanently, which is the same failure INVALID_HANDLE used
- * to cause. Drop them loudly instead: the key is unreclaimable either way, and the log is the
- * finding. */
-static bool orphan_retryable(psa_status_t status)
-{
-    return status == PSA_ERROR_COMMUNICATION_FAILURE || status == PSA_ERROR_BAD_STATE;
-}
-
-/* Retry every parked id, compacting the ones that are now gone. Cheap: the list is empty on every
- * healthy system, so this is a single compare. */
-static void orphan_drain(void)
-{
-    uint8_t i = 0;
-
-    while (i < s_orphan_count) {
-        psa_status_t status = psa_destroy_key(s_orphans[i]);
-
-        /* INVALID_HANDLE means the key is already gone -- the id names nothing, so there is
-         * nothing left to free and the entry must not occupy a slot. */
-        if (status == PSA_SUCCESS || status == PSA_ERROR_INVALID_HANDLE) {
-            s_orphans[i] = s_orphans[--s_orphan_count];
-        } else if (!orphan_retryable(status)) {
-            od_log_error("crypto: key id %lu is permanently undestroyable (%ld) - dropping",
-                         (unsigned long)s_orphans[i], (long)status);
-            s_orphans[i] = s_orphans[--s_orphan_count];
-        } else {
-            ++i;
-        }
-    }
-}
-
 enum od_hal_crypto_status od_hal_crypto_key_set(od_hal_crypto_slot_t slot,
                                                 const uint8_t key[16])
 {
@@ -160,7 +58,6 @@ enum od_hal_crypto_status od_hal_crypto_key_set(od_hal_crypto_slot_t slot,
     if (crypto_init_once() != OD_HAL_CRYPTO_OK || !slot_valid(slot) || key == NULL) {
         return OD_HAL_CRYPTO_ERROR;
     }
-    orphan_drain();
     if (slot_release(slot) != OD_HAL_CRYPTO_OK) {
         return OD_HAL_CRYPTO_ERROR;
     }
@@ -204,7 +101,6 @@ enum od_hal_crypto_status od_hal_crypto_ccm_encrypt(od_hal_crypto_slot_t slot,
         ct == NULL || ct_len == NULL || required > ct_cap) {
         return OD_HAL_CRYPTO_ERROR;
     }
-    orphan_drain();
 
     status = psa_aead_encrypt(s_slots[slot], OD_PSA_CCM_ALG, nonce, nonce_len,
                               aad, aad_len, plain, plain_len, ct, ct_cap, &output_len);
@@ -232,7 +128,6 @@ enum od_hal_crypto_status od_hal_crypto_ccm_decrypt(od_hal_crypto_slot_t slot,
         ct_len <= OD_HAL_CRYPTO_TAG_LEN || plain == NULL || plain_len == NULL) {
         return OD_HAL_CRYPTO_ERROR;
     }
-    orphan_drain();
     expected_len = (uint16_t)(ct_len - OD_HAL_CRYPTO_TAG_LEN);
     if (plain_cap < expected_len) {
         return OD_HAL_CRYPTO_ERROR;
@@ -264,10 +159,6 @@ enum od_hal_crypto_status od_hal_crypto_cmac(const uint8_t key[16], const uint8_
         (msg == NULL && msg_len != 0u) || out == NULL) {
         return OD_HAL_CRYPTO_ERROR;
     }
-    orphan_drain();
-    if (orphans_full()) {
-        return OD_HAL_CRYPTO_ERROR;
-    }
     psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
     psa_set_key_bits(&attr, 128);
     psa_set_key_algorithm(&attr, PSA_ALG_CMAC);
@@ -276,18 +167,15 @@ enum od_hal_crypto_status od_hal_crypto_cmac(const uint8_t key[16], const uint8_
     psa_reset_key_attributes(&attr);
     if (status == PSA_SUCCESS) {
         status = psa_mac_compute(key_id, PSA_ALG_CMAC, msg, msg_len, out, 16, &mac_len);
-        /* Tracked separately, not discarded: a failed destroy loses the only handle to a live
-         * key, and PSA slots are a finite pool. Reporting success there would leak one slot per
-         * call and present months later as "authentication stops working after a while" -- the
-         * slow exhaustion the prepared-slot API exists to prevent for the CCM key. The operation
-         * status wins so a real crypto failure is never masked by cleanup. */
-        destroy_status = psa_destroy_key(key_id);
+        destroy_status = psa_destroy_key(key_id);   /* kept: see the report below */
     }
-    /* Both are reported: a cleanup failure that only ever appears when the operation SUCCEEDED
-     * is invisible in exactly the case worth investigating. */
+    /* A failed destroy leaks this PSA slot: the id was a local and goes with it. Accepted, not
+     * repaired -- retrying needs the id held somewhere, and PSA may reissue a held id to another
+     * key that the retry would then destroy. Checked before the operation status so a cleanup
+     * failure is still visible when the operation ALSO failed, which is the case worth reading. */
     if (destroy_status != PSA_SUCCESS) {
-        od_log_error("crypto: PSA key destroy after CMAC failed: %ld", (long)destroy_status);
-        orphan_park(key_id);
+        od_log_error("crypto: PSA key destroy after CMAC failed: %ld - slot leaked",
+                     (long)destroy_status);
     }
     if (status != PSA_SUCCESS || mac_len != 16u) {
         od_log_error("crypto: PSA CMAC failed: %ld", (long)status);
@@ -311,10 +199,6 @@ enum od_hal_crypto_status od_hal_crypto_aes_ecb(const uint8_t key[16], const uin
     if (crypto_init_once() != OD_HAL_CRYPTO_OK || key == NULL || in == NULL || out == NULL) {
         return OD_HAL_CRYPTO_ERROR;
     }
-    orphan_drain();
-    if (orphans_full()) {
-        return OD_HAL_CRYPTO_ERROR;
-    }
     psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
     psa_set_key_bits(&attr, 128);
     psa_set_key_algorithm(&attr, PSA_ALG_ECB_NO_PADDING);
@@ -323,11 +207,18 @@ enum od_hal_crypto_status od_hal_crypto_aes_ecb(const uint8_t key[16], const uin
     psa_reset_key_attributes(&attr);
     if (status == PSA_SUCCESS) {
         status = psa_cipher_encrypt(key_id, PSA_ALG_ECB_NO_PADDING, in, 16, out, 16, &out_len);
-        destroy_status = psa_destroy_key(key_id);   /* see the note in od_hal_crypto_cmac */
+        destroy_status = psa_destroy_key(key_id);   /* kept: see the report below */
     }
     if (destroy_status != PSA_SUCCESS) {
-        od_log_error("crypto: PSA key destroy after AES-ECB failed: %ld", (long)destroy_status);
-        orphan_park(key_id);
+        /* The key id was a local and is gone with it, so this slot is leaked. That is
+         * deliberate: retrying a destroy needs the id kept somewhere, and a holding pen
+         * for it costs more than it saves -- it can wedge the driver shut on statuses
+         * that never resolve, and a parked id may be reissued by PSA to another key,
+         * which a retry would then destroy. Report it and move on. Repeated occurrences
+         * in a log ARE the finding: destroying a volatile key we imported seconds ago
+         * should not fail, and if it does the pool is draining. */
+        od_log_error("crypto: PSA key destroy after AES-ECB failed: %ld - slot leaked",
+                     (long)destroy_status);
     }
     if (status != PSA_SUCCESS || out_len != 16u) {
         od_log_error("crypto: PSA AES-ECB failed: %ld", (long)status);
@@ -346,7 +237,6 @@ enum od_hal_crypto_status od_hal_crypto_random(uint8_t *buf, uint16_t len)
     if (crypto_init_once() != OD_HAL_CRYPTO_OK || (buf == NULL && len != 0u)) {
         return OD_HAL_CRYPTO_ERROR;
     }
-    orphan_drain();
     status = psa_generate_random(buf, len);
     if (status != PSA_SUCCESS) {
         od_log_error("crypto: PSA random failed: %ld", (long)status);
