@@ -67,7 +67,17 @@ looks arbitrary and is not); delete the story.
   vs its current 844 + 64; ungated 1617 B against 484 B of static slack at 98.5% RAM). Its real
   gate is `MAX_CONFIG_SIZE` 4096 + the NVM3 object-size check, not the aggregate. Most remaining
   protocol logic (dispatch, transfer, session) still lives in the ESP32 target.
-- `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel}`.
+- `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel,crypto}`.
+- **`shared/hal/od_hal_crypto.h` is the third shared HAL** (2026-08-15, with `od_hal_adv` and
+  `od_hal_wdt`), implemented on both `esp32-idf` (mbedTLS) and `nordic-zephyr` (native
+  `psa_aead_*`, which needed only `CONFIG_PSA_WANT_ALG_CCM=y` — the hand-rolled RFC 3610 both
+  Nordic targets carried existed because that Kconfig was never set, not because PSA lacked CCM).
+  Prepared **key slots**, not a key in the caller's struct: the targets clear a session with
+  `memset`, which would drop a live PSA handle and exhaust a finite pool. Four-valued status so a
+  tag mismatch and an engine fault stay distinguishable — the session's 3-strike policy depends on
+  it. **NOT YET HARDWARE-VERIFIED**, and that commit also deletes Nordic's soft CCM (preserved as
+  `tests/host/session_ccm_reference.inc`), so treat the CCM path as unproven until a board
+  authenticates and completes an encrypted upload.
 - **Never hardware-verified:** the WiFi/LAN transport, and the F4/F7 correctness fixes.
 - **`compat/` (Arduino shim) is at its floor of 5 files** — `TARGET_NRF` arms that leave with
   migration step 4. Do not "finish" them (`targets/esp32-idf/compat/SHIM_BUDGET`).
