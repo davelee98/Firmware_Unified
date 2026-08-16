@@ -135,6 +135,11 @@ bool od_cmd_mutates_config(uint16_t cmd)
 /* --------------------------------------------------------------------------------- helpers --- */
 
 static const od_reply_t BLE = { OD_ORIGIN_BLE, 9u };
+/* SECTION 9 rule 4: TLS-PSK LAN is authenticated and encrypted by the transport, so its frames
+ * carry no CCM envelope and must not meet the session gate. Tag 0 is what wifi_service publishes
+ * when the link owner is not OWNER_LAN, and od_hal_radio_tag_is_live treats it as live. */
+static const od_reply_t LAN_TLS = { OD_ORIGIN_LAN_TLS, 0u };
+static const od_reply_t LAN_PLAIN = { OD_ORIGIN_LAN_PLAIN, 0u };
 static uint8_t g_blob[1024];
 
 static void setup(bool security_on, bool open_session)
@@ -220,6 +225,30 @@ static void test_encrypted_path(void)
         memset(junk, 0xAAu, sizeof junk);
         junk[0] = 0x00u; junk[1] = 0x77u;
         CHECK(od_dispatch_frame(&BLE, od_span_make(junk, sizeof junk)) == OD_FRAME_AUTH_REQUIRED);
+        CHECK(g_handler_calls == 0u);
+    }
+
+    /* THE TLS BYPASS, pinned in both directions. Losing it is silent in exactly the wrong way:
+     * the device still answers, so it looks alive, and every ordinary command inside an
+     * authenticated TLS session comes back AUTH_REQUIRED with no way for the host to tell that
+     * from a genuine session problem. It also makes the TLS branch of the target's config-write
+     * authorization unreachable. */
+    CASE("TLS-LAN bypasses the session gate: PLAINTEXT reaches the handler with security on");
+    setup(true, false);
+    {
+        uint8_t plain[6] = { 0x00u, 0x77u, 1u, 2u, 3u, 4u };
+        CHECK(od_dispatch_frame(&LAN_TLS, od_span_make(plain, sizeof plain)) == OD_FRAME_ACCEPTED);
+        CHECK(g_handler_calls == 1u);
+        CHECK(g_handler_body_len == 4u);
+        CHECK(memcmp(g_handler_body, plain + 2, 4u) == 0);
+    }
+
+    CASE("and the bypass is TLS-ONLY: plaintext LAN still meets the gate");
+    setup(true, false);
+    {
+        uint8_t plain[6] = { 0x00u, 0x77u, 1u, 2u, 3u, 4u };
+        CHECK(od_dispatch_frame(&LAN_PLAIN, od_span_make(plain, sizeof plain)) ==
+              OD_FRAME_AUTH_REQUIRED);
         CHECK(g_handler_calls == 0u);
     }
 }

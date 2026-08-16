@@ -315,43 +315,50 @@ static void test_chunks_are_sealed_when_a_session_is_live(void)
  * this case, advancing the offset on a failed reply is invisible: the read simply completes with a
  * hole in it, and the host reassembles a config that passes CRC and is wrong.
  */
-static void test_a_failed_chunk_is_not_skipped(void)
+static void test_a_terminal_failure_ends_the_read(void)
 {
     od_tx_reservation_t r;
     const uint32_t len = 900u;
-    unsigned passes = 0u;
 
-    CASE("a chunk that fails to queue is RETRIED, not skipped");
+    /* THE RETRYABLE CASE IS FULL, AND ONLY FULL -- test_backpressure_never_truncates covers it:
+     * the producer stays pending, loses nothing, and resumes at the same chunk.
+     *
+     * Everything else is terminal, and an earlier version of this case asserted the opposite: it
+     * killed the tag, checked the read was still active, then "revived" the same tag and watched
+     * the read finish. That scenario is not reachable. An owner word is an INSTANCE identity, so a
+     * peer that comes back comes back as a different word; the one this read is bound to is gone
+     * for good. Pinning the resume made the wedge look like correct behaviour.
+     *
+     * What the wedge costs: the producer stays active forever, so od_dispatch DEFERS every later
+     * config read and write for the life of the boot -- and on a seal failure it also queues a
+     * fresh NACK every single pass. */
+    CASE("a read whose tag dies is OVER, not pending");
     setup(false);
     CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
     CHECK(od_config_read_start(&BLE, &r, g_blob, len) == OD_TXQ_OK);
     (void)od_txq_process();
     CHECK(g_sent_n == 1u);                       /* chunk 0 is out */
 
-    /* The link dies. The next pump builds chunk 1 and od_reply refuses it. */
     g_tag_dead = true;
     CHECK(od_config_read_pump() != OD_TXQ_OK);
-    CHECK(od_config_read_active());              /* still pending on chunk 1 */
+    CHECK(!od_config_read_active());             /* terminal: the producer released itself */
 
-    /* The link comes back. Chunk 1 must be the NEXT thing emitted -- not chunk 2. */
+    CASE("and it leaves nothing reserved, so the next command is not starved");
+    CHECK(od_txq_reserved() == 0u);
+
+    CASE("a later read is accepted normally rather than deferred behind the dead one");
     g_tag_dead = false;
-    while (od_config_read_active() && passes < 200u) {
-        (void)od_txq_process();
-        (void)od_config_read_pump();
-        ++passes;
-    }
-    (void)od_txq_process();
-    CHECK(!od_config_read_active());
-    /* Reassembly is the assertion that matters: a skipped chunk shows up as a short, wrong blob
-     * rather than as a missing frame. */
-    check_reassembly(len);
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    CHECK(od_config_read_start(&BLE, &r, g_blob, len) == OD_TXQ_OK);
+    CHECK(od_config_read_active());
+    od_config_read_cancel();
 }
 
 int main(void)
 {
     test_full_read_unimpeded();
     test_backpressure_never_truncates();
-    test_a_failed_chunk_is_not_skipped();
+    test_a_terminal_failure_ends_the_read();
     test_load_failure();
     test_second_read_is_refused();
     test_cancel_releases_capacity();

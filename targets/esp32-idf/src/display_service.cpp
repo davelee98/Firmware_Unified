@@ -2516,12 +2516,18 @@ static void pipeBuildAckPayload(uint8_t* out) {
 
 // {0x00,0x81, highest_seen, ack_mask LE(4)} via sendResponse (auto-encrypts when
 // authenticated). Resets both cadence counters.
-static void sendPipeAck(const od_cmd_ctx_t *ctx) {
+/* RETURNS ITS RESULT, and callers that go on to emit more must honour it. od_reply can substitute
+ * a plaintext hard NACK for an ACK it could not seal, and 5.1 makes every 0x81 NACK fatal -- so
+ * anything queued behind one contradicts a frame the host has already treated as the end of the
+ * transfer. The cadence counters still reset either way: they describe what this device decided to
+ * send, not what the transport managed to do with it. */
+static od_txq_status_t sendPipeAck(const od_cmd_ctx_t *ctx) {
     uint8_t r[7] = {RESP_ACK, 0x81, 0, 0, 0, 0, 0};
     pipeBuildAckPayload(r + 2);
-    (void)od_cmd_reply(ctx, r, sizeof(r));      /* {RESP_ACK,0x81,..} -- an application ACK */
+    const od_txq_status_t rc = od_cmd_reply(ctx, r, sizeof(r));  /* an application ACK */
     pipeState.frames_since_ack = 0;
     pipeState.ooo_acks_since_gap = 0;
+    return rc;
 }
 
 // {0xFF,0x81, err, highest_seen, ack_mask LE(4)}. All 0x81 NACKs are FATAL: the
@@ -2818,13 +2824,22 @@ od_cmd_result_t handlePipeWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint
         // touches directWrite* (both are 0), so 0>=0 would false-fire a FULL refresh on the very
         // first frame — partial transfers complete only on the explicit 0x0082 END (plan 1.5).
         if (!pipeState.partial && !pipeState.compressed && directWriteBytesWritten >= directWriteTotalBytes) {
-            sendPipeAck(ctx);                                   // final tail flush ({0x00,0x81})
+            /* A tail flush that could not be sealed has already put a FATAL 0x81 NACK on the
+             * wire (5.1), so the transfer is over from the host's point of view. Emitting the END
+             * ack and refreshing behind it would contradict that -- and would show the image the
+             * host has just been told did not land. */
+            if (sendPipeAck(ctx) != OD_TXQ_OK) {   // final tail flush ({0x00,0x81})
+                resetPipeWriteState();
+                return OD_CMD_NACK;
+            }
             const od_cmd_result_t fin =
                 directWriteFinishAndRefresh(ctx, nullptr, 0, 0x82);   // {0x00,0x82} + FULL refresh
             resetPipeWriteState();
             return fin;
         }
-        if (pipeState.frames_since_ack >= pipeState.ack_every) sendPipeAck(ctx);
+        /* Nothing follows a cadence ACK inside this call, so there is no later reply to suppress
+         * and the result is genuinely spare -- unlike the tail flush above. */
+        if (pipeState.frames_since_ack >= pipeState.ack_every) (void)sendPipeAck(ctx);
         return OD_CMD_OK;
     }
 
@@ -2848,9 +2863,9 @@ od_cmd_result_t handlePipeWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint
         // rate-limited to one per ack_every subsequent out-of-order arrivals.
         if (!pipeState.gap_open) {
             pipeState.gap_open = true;
-            sendPipeAck(ctx);                                   // resets ooo_acks_since_gap to 0
+            (void)sendPipeAck(ctx);                                   // resets ooo_acks_since_gap to 0
         } else if (++pipeState.ooo_acks_since_gap >= pipeState.ack_every) {
-            sendPipeAck(ctx);
+            (void)sendPipeAck(ctx);
         }
         return OD_CMD_OK;
     }
@@ -2861,9 +2876,9 @@ od_cmd_result_t handlePipeWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint
         // Duplicate/below-expected -> discard, ACK so the sender learns our position
         // (rate-limited the same way as out-of-order arrivals).
         if (!pipeState.gap_open) {
-            sendPipeAck(ctx);
+            (void)sendPipeAck(ctx);
         } else if (++pipeState.ooo_acks_since_gap >= pipeState.ack_every) {
-            sendPipeAck(ctx);
+            (void)sendPipeAck(ctx);
         }
         return OD_CMD_OK;
     }
@@ -2890,8 +2905,13 @@ od_cmd_result_t handlePipeWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uint1
         resetPipeWriteState();
         return OD_CMD_NACK;
     }
-    // Tail-flush ACK precedes the END result (plan 1.3c / 1.5).
-    sendPipeAck(ctx);
+    // Tail-flush ACK precedes the END result (plan 1.3c / 1.5) -- and gates it: a substituted
+    // 0x81 NACK is fatal, so nothing may follow it.
+    if (sendPipeAck(ctx) != OD_TXQ_OK) {
+        cleanup_partial_write_state();
+        resetPipeWriteState();
+        return OD_CMD_NACK;
+    }
 
     // Partial transfers never auto-complete (plan 1.5): the 0x0082 END alone carries the
     // refresh mode + new_etag. Completeness mirrors the 0x76 partial branch.

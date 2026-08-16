@@ -1671,11 +1671,26 @@ void handleWiFiServer() {
             // site below, which is reached only by a framed, recognised command.
             drainedBytes += (uint32_t)got;
         } else if (drainedBytes == 0) {
-            // Nothing to read this tick. The idle DROP is not decided here any
-            // more: serviceIdleTimeout() owns it for both transports, and it must
-            // run after inbound traffic has been parsed (7d step 4) or a LAN client
-            // is dropped with its command already sitting in the buffer.
-            return;
+            // Nothing NEW to read this tick -- but a complete frame may already be buffered,
+            // and if it is, this must fall through to the parser rather than return.
+            //
+            // A DEFERRED frame is left in this buffer deliberately, to be re-offered unchanged.
+            // The client that sent it is now waiting for its response and will send nothing more,
+            // so "no new bytes" is the steady state, not a reason to stop: returning here would
+            // strand that command until the connection died. The reason it was deferred -- TX
+            // capacity, or a live CONFIG_READ -- clears from the loop, so re-parsing the same
+            // bytes on a later pass is exactly what makes progress.
+            const bool frameBuffered =
+                tcpReceiveBufferPos >= 2u &&
+                tcpReceiveBufferPos >= 2u + (uint32_t)(tcpReceiveBuffer[0] |
+                                                       (tcpReceiveBuffer[1] << 8));
+            if (!frameBuffered) {
+                // The idle DROP is not decided here any more: serviceIdleTimeout() owns it for
+                // both transports, and it must run after inbound traffic has been parsed (7d
+                // step 4) or a LAN client is dropped with its command already sitting in the
+                // buffer.
+                return;
+            }
         }
 
         while (tcpReceiveBufferPos >= 2) {

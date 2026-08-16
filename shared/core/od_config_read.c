@@ -126,6 +126,21 @@ od_txq_status_t od_config_read_pump(void)
     }
     rc = emit_chunk(&r);
     od_txq_release(&r);              /* returns the unit if emit_chunk did not spend it */
+
+    /* ONLY FULL IS RETRYABLE, and treating everything else as retryable is how a read becomes
+     * permanent. A session that expires mid-read makes od_reply() substitute a plaintext NACK and
+     * report SEAL_FAILED; leaving the producer active then re-emits the same chunk every pass,
+     * queues another NACK every pass, and -- because od_dispatch DEFERS while a read is active --
+     * refuses every later config read and write for the life of the boot.
+     *
+     * The read is over either way. GONE means the peer is gone, SEAL_FAILED and TOO_LARGE will
+     * fail identically on the next attempt, and INVARIANT is a bug. The host has already been
+     * answered: od_reply substituted a NACK on the failures that produce one, and on the rest it
+     * simply never receives the remaining chunks and times out -- which is the honest outcome for
+     * a transfer that cannot continue. */
+    if (rc != OD_TXQ_OK && rc != OD_TXQ_FULL) {
+        od_config_read_cancel();
+    }
     return rc;
 }
 

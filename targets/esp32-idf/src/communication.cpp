@@ -493,14 +493,18 @@ od_cmd_result_t handleWriteConfig(const od_cmd_ctx_t *ctx, uint8_t* data, uint16
     switch (od_config_asm_start(&g_configAsm, od_span_make(data, len))) {
     case OD_CONFIG_ASM_SINGLE: {
         const bool ok = saveConfig(data, len);
-        if (ok) {
-            reloadConfigAfterSave();
-        }
         /* SPLIT, not a ternary: the ACK is an application reply and the NACK is a hard NACK, so
          * the two branches take different paths. A ternary chose one path for both. */
         if (ok) {
-            (void)od_cmd_reply(ctx, responseOk, sizeof(responseOk));
-            return OD_CMD_OK;
+        /* THE ACK IS SEALED AND QUEUED BEFORE THE RELOAD, and the order is load-bearing.
+         * reloadConfigAfterSave() clears the session -- the new config may carry a new key -- so a
+         * reply attempted after it finds no live session, and od_reply substitutes a plaintext hard
+         * NACK: the host is told a write FAILED that has already been persisted, and cannot tell
+         * that from a real failure. od_reply seals at commit, so queueing first makes the bytes
+         * final while the session that sent the write is still the one answering it. */
+            const od_txq_status_t rc = od_cmd_reply(ctx, responseOk, sizeof(responseOk));
+            reloadConfigAfterSave();
+            return (rc == OD_TXQ_OK) ? OD_CMD_OK : OD_CMD_NACK;
         }
         (void)od_cmd_reply_plain(ctx, responseErr, sizeof(responseErr));
         return OD_CMD_NACK;
@@ -513,13 +517,17 @@ od_cmd_result_t handleWriteConfig(const od_cmd_ctx_t *ctx, uint8_t* data, uint16
          * handled rather than assumed, so a future single-frame-with-prefix shape cannot fall
          * through to the NACK below and look like a malformed write. */
         const bool ok = saveConfig(g_configAsm.buffer, (uint16_t)g_configAsm.total_size);
-        if (ok) {
-            reloadConfigAfterSave();
-        }
         od_config_asm_reset(&g_configAsm);
         if (ok) {
-            (void)od_cmd_reply(ctx, responseOk, sizeof(responseOk));
-            return OD_CMD_OK;
+        /* THE ACK IS SEALED AND QUEUED BEFORE THE RELOAD, and the order is load-bearing.
+         * reloadConfigAfterSave() clears the session -- the new config may carry a new key -- so a
+         * reply attempted after it finds no live session, and od_reply substitutes a plaintext hard
+         * NACK: the host is told a write FAILED that has already been persisted, and cannot tell
+         * that from a real failure. od_reply seals at commit, so queueing first makes the bytes
+         * final while the session that sent the write is still the one answering it. */
+            const od_txq_status_t rc = od_cmd_reply(ctx, responseOk, sizeof(responseOk));
+            reloadConfigAfterSave();
+            return (rc == OD_TXQ_OK) ? OD_CMD_OK : OD_CMD_NACK;
         }
         (void)od_cmd_reply_plain(ctx, responseErr, sizeof(responseErr));
         return OD_CMD_NACK;
@@ -576,13 +584,17 @@ od_cmd_result_t handleWriteConfigChunk(const od_cmd_ctx_t *ctx, uint8_t* data, u
     case OD_CONFIG_ASM_COMPLETE: {
         /* Committed on an EXACT byte count, never a chunk count -- the F3 fix. */
         const bool saved = saveConfig(g_configAsm.buffer, (uint16_t)g_configAsm.total_size);
-        if (saved) {
-            reloadConfigAfterSave();
-        }
         od_config_asm_reset(&g_configAsm);
         if (saved) {
-            (void)od_cmd_reply(ctx, ok_resp, sizeof(ok_resp));
-            return OD_CMD_OK;
+        /* THE ACK IS SEALED AND QUEUED BEFORE THE RELOAD, and the order is load-bearing.
+         * reloadConfigAfterSave() clears the session -- the new config may carry a new key -- so a
+         * reply attempted after it finds no live session, and od_reply substitutes a plaintext hard
+         * NACK: the host is told a write FAILED that has already been persisted, and cannot tell
+         * that from a real failure. od_reply seals at commit, so queueing first makes the bytes
+         * final while the session that sent the write is still the one answering it. */
+            const od_txq_status_t rc = od_cmd_reply(ctx, ok_resp, sizeof(ok_resp));
+            reloadConfigAfterSave();
+            return (rc == OD_TXQ_OK) ? OD_CMD_OK : OD_CMD_NACK;
         }
         (void)od_cmd_reply_plain(ctx, err_resp, sizeof(err_resp));
         return OD_CMD_NACK;
@@ -652,6 +664,11 @@ extern "C" void od_core_frame_done(const od_reply_t *rp, od_frame_outcome_t outc
     }
     if (p.stamp_activity) {
         linkStampOwnerCommand();
+        /* BOTH clocks, and the session one is not redundant. od_session_open() touches it on the
+         * encrypted BLE path, but an accepted TLS-LAN command never reaches od_session_open at all
+         * (SECTION 9 rule 4 gates it out), so without this the session's activity clock would stop
+         * for exactly the traffic that is keeping the link busy. */
+        od_session_touch(&g_session, od_hal_uptime_ms());
     }
     /* BLE ONLY, and the origin gate is not decoration: the same auth gate is reachable from
      * plaintext LAN, and counting those would let LAN traffic drop a BLE client. */

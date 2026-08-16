@@ -131,7 +131,16 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
         return (rc == OD_CMD_OK) ? OD_FRAME_DISCOVERY : OD_FRAME_HANDLER_NACK;
     }
 
-    if (od_session_security_enabled(od_session_app_security())) {
+    /* ORIGIN-GATED DECRYPT, SECTION 9 rule 4. A frame on the TLS-PSK LAN channel is already
+     * confidential and authenticated by TLS and carries NO CCM envelope, so it must not meet this
+     * gate: od_session_open() would read its plaintext as a nonce and refuse it, and every ordinary
+     * command inside an authenticated TLS session would answer AUTH_REQUIRED.
+     *
+     * The decision belongs here and cannot be pushed into od_session, which deliberately takes no
+     * origin -- see od_session.h. Applying the session to a TLS frame would also advance the replay
+     * counter on traffic the window never authenticated. */
+    if (rp->origin != OD_ORIGIN_LAN_TLS &&
+        od_session_security_enabled(od_session_app_security())) {
         const od_gate_result_t g = od_gate_open(&r, rp, cmd, body, s_plain, sizeof s_plain);
         if (g.outcome != OD_FRAME_ACCEPTED) {
             od_txq_release(&r);
