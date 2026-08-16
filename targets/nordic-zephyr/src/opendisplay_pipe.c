@@ -235,7 +235,6 @@ static atomic_t s_close_pending;
 #define OD_ALLOW_PLAINTEXT_WITH_SECURITY 0
 #endif
 
-static void pipe_send(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len);
 
 static void cfg_chunk_reset(void)
 {
