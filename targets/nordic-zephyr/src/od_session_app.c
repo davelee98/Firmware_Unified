@@ -13,7 +13,7 @@
 
 #include "od_session_app.h"
 
-#include "od_config.h"
+#include "opendisplay_config_parser.h"
 #include "od_log.h"
 #include "opendisplay_pipe_internal.h"
 

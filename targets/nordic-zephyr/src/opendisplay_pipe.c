@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "od_cmd_reply.h"
+#include "od_dispatch.h"
 #include "od_rxq.h"
 #include "opendisplay_pipe_internal.h"
 #include <zephyr/drivers/hwinfo.h>
@@ -372,7 +373,7 @@ static void pipe_send(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len
   pipe_send_raw(ctx, err, sizeof(err));
 }
 
-static void reply_firmware_version(const od_cmd_ctx_t *ctx)
+static od_cmd_result_t reply_firmware_version(const od_cmd_ctx_t *ctx)
 {
   /* [ACK][0x43][major][minor][shaLen][sha…][patch] — patch trails so old
    * hosts that stop after SHA keep working. */
@@ -397,9 +398,10 @@ static void reply_firmware_version(const od_cmd_ctx_t *ctx)
   o += sha_len;
   rsp[o++] = patch;
   (void)od_cmd_reply_plain(ctx, rsp, o);
+  return OD_CMD_OK;
 }
 
-static void reply_read_msd(const od_cmd_ctx_t *ctx)
+static od_cmd_result_t reply_read_msd(const od_cmd_ctx_t *ctx)
 {
   uint8_t rsp[2 + 16];
 
@@ -407,10 +409,11 @@ static void reply_read_msd(const od_cmd_ctx_t *ctx)
   rsp[1] = RESP_MSD_READ;
   opendisplay_ble_copy_msd_bytes(&rsp[2]);
   (void)od_cmd_reply(ctx, rsp, sizeof(rsp));
+  return OD_CMD_OK;
 }
 
 
-static void handle_partial_write_start(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len)
+static od_cmd_result_t handle_partial_write_start(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len)
 {
   uint8_t ok[] = { 0x00u, 0x76u };
   uint8_t err[] = { 0xFFu, 0x76u, OD_ERR_PARTIAL_STREAM, 0x00u };
@@ -423,9 +426,10 @@ static void handle_partial_write_start(const od_cmd_ctx_t *ctx, const uint8_t *p
     err[2] = err_code;
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
   }
+  return OD_CMD_OK;
 }
 
-static void handle_direct_write_start(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len)
+static od_cmd_result_t handle_direct_write_start(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len)
 {
   uint8_t ok[] = { 0x00u, 0x70u };
   uint8_t err[] = { 0xFFu, 0x70u };
@@ -436,9 +440,10 @@ static void handle_direct_write_start(const od_cmd_ctx_t *ctx, const uint8_t *pa
   } else {
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
   }
+  return OD_CMD_OK;
 }
 
-static void handle_direct_write_data(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len)
+static od_cmd_result_t handle_direct_write_data(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len)
 {
   uint8_t ack_data[] = { 0x00u, 0x71u };
   uint8_t err[] = { 0xFFu, 0x71u };
@@ -448,18 +453,19 @@ static void handle_direct_write_data(const od_cmd_ctx_t *ctx, const uint8_t *pay
   rc = opendisplay_display_direct_write_data(payload, payload_len);
   if (rc == -4) {
     (void)od_cmd_reply_plain(ctx, partial_err, sizeof(partial_err));
-    return;
+    return OD_CMD_NACK;
   }
   if (rc != 0) {
     opendisplay_display_abort();
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-    return;
+    return OD_CMD_NACK;
   }
 
   (void)od_cmd_reply(ctx, ack_data, sizeof(ack_data));
+  return OD_CMD_OK;
 }
 
-static void handle_direct_write_end(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len)
+static od_cmd_result_t handle_direct_write_end(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len)
 {
   bool refresh_ok = false;
   uint8_t ack_end[] = { 0x00u, 0x72u };
@@ -472,14 +478,14 @@ static void handle_direct_write_end(const od_cmd_ctx_t *ctx, const uint8_t *payl
   rc = opendisplay_display_direct_write_end_prepare(payload, payload_len);
   if (rc == -4) {
     (void)od_cmd_reply_plain(ctx, partial_err, sizeof(partial_err));
-    return;
+    return OD_CMD_NACK;
   }
   if (rc != 0) {
     if (rc != -4) {
       opendisplay_display_abort();
     }
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-    return;
+    return OD_CMD_NACK;
   }
   /* Ack 0x72 before the blocking refresh, then report 0x73/0x74 afterwards
    * (same ordering as the nRF52840 Firmware). */
@@ -488,26 +494,28 @@ static void handle_direct_write_end(const od_cmd_ctx_t *ctx, const uint8_t *payl
   if (opendisplay_display_direct_write_end_refresh(payload, payload_len, &refresh_ok) != 0) {
     opendisplay_display_abort();
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-    return;
+    return OD_CMD_NACK;
   }
   (void)od_cmd_reply(ctx, refresh_ok ? ack_refresh_ok : ack_refresh_timeout,
             refresh_ok ? sizeof(ack_refresh_ok) : sizeof(ack_refresh_timeout));
+  return OD_CMD_OK;
 }
 
-static void handle_config_clear(const od_cmd_ctx_t *ctx)
+static od_cmd_result_t handle_config_clear(const od_cmd_ctx_t *ctx)
 {
   uint8_t ok[] = { 0x00u, RESP_CONFIG_CLEAR, 0x00u, 0x00u };
   uint8_t err[] = { 0xFFu, RESP_CONFIG_CLEAR, 0x00u, 0x00u };
 
   if (!clearStoredConfig()) {
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-    return;
+    return OD_CMD_NACK;
   }
   opendisplay_ble_reload_config_from_nvm();
   (void)od_cmd_reply(ctx, ok, sizeof(ok));
+  return OD_CMD_OK;
 }
 
-static void handle_config_read(const od_cmd_ctx_t *ctx)
+static od_cmd_result_t handle_config_read(const od_cmd_ctx_t *ctx)
 {
   static uint8_t config_data[MAX_CONFIG_SIZE];
   uint32_t config_len = MAX_CONFIG_SIZE;
@@ -522,7 +530,7 @@ static void handle_config_read(const od_cmd_ctx_t *ctx)
   if (!initConfigStorage()) {
     uint8_t err[] = { 0xFFu, RESP_CONFIG_READ, 0x00u, 0x00u };
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-    return;
+    return OD_CMD_NACK;
   }
 
   if (!loadConfig(config_data, &config_len)) {
@@ -530,7 +538,7 @@ static void handle_config_read(const od_cmd_ctx_t *ctx)
       0x00u, RESP_CONFIG_READ, 0x00u, 0x00u, 0x00u, 0x00u,
     };
     (void)od_cmd_reply(ctx, empty, sizeof(empty));
-    return;
+    return OD_CMD_OK;
   }
 
   uint32_t remaining = config_len;
@@ -572,15 +580,20 @@ static void handle_config_read(const od_cmd_ctx_t *ctx)
     remaining -= chunk_size;
     chunk_number++;
   }
+  return OD_CMD_OK;
 }
 
-static void handle_config_write(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len)
+static od_cmd_result_t handle_config_write(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len)
 {
+  od_cmd_result_t rc = OD_CMD_NACK;
   uint8_t ack[] = { 0x00u, RESP_CONFIG_WRITE, 0x00u, 0x00u };
   uint8_t err[] = { 0xFFu, RESP_CONFIG_WRITE, 0x00u, 0x00u };
 
   if (len == 0u) {
-    return;
+    /* Answers NOTHING, which is the shipped behaviour and is preserved here. It is still a
+     * REFUSAL: the frame was malformed and no config was written, so it must not be reported as
+     * an accepted command. */
+    return OD_CMD_NACK;
   }
 
   if (len > CONFIG_CHUNK_SIZE) {
@@ -594,7 +607,7 @@ static void handle_config_write(const od_cmd_ctx_t *ctx, const uint8_t *data, ui
       if (s_cfg_chunk.total_size > MAX_CONFIG_SIZE || s_cfg_chunk.total_size == 0u) {
         cfg_chunk_reset();
         (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-        return;
+        return OD_CMD_NACK;
       }
       {
         uint16_t chunk_data_size = (uint16_t)(len - 2u);
@@ -612,7 +625,7 @@ static void handle_config_write(const od_cmd_ctx_t *ctx, const uint8_t *data, ui
       if (s_cfg_chunk.total_size > MAX_CONFIG_SIZE) {
         cfg_chunk_reset();
         (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-        return;
+        return OD_CMD_NACK;
       }
       {
         uint16_t chunk_size = (len < CONFIG_CHUNK_SIZE) ? len : CONFIG_CHUNK_SIZE;
@@ -632,11 +645,16 @@ static void handle_config_write(const od_cmd_ctx_t *ctx, const uint8_t *data, ui
         (void)od_cmd_reply(ctx, ack, sizeof(ack));
         opendisplay_ble_reload_config_from_nvm();
         clear_session();
+        rc = OD_CMD_OK;
       } else {
         (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+        rc = OD_CMD_NACK;
       }
       cfg_chunk_reset();
-      return;
+      /* The verdict is CARRIED, not re-derived: both branches answer, and which one ran is the
+       * only thing that distinguishes an accepted write from a refused one by the time control
+       * reaches here. */
+      return rc;
     }
 
     {
@@ -646,7 +664,7 @@ static void handle_config_write(const od_cmd_ctx_t *ctx, const uint8_t *data, ui
     }
 
     (void)od_cmd_reply(ctx, ack, sizeof(ack));
-    return;
+    return OD_CMD_OK;
   }
 
   if (saveConfig((uint8_t *)(void *)data, len)) {
@@ -662,39 +680,42 @@ static void handle_config_write(const od_cmd_ctx_t *ctx, const uint8_t *data, ui
   } else {
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
   }
+  return OD_CMD_OK;
 }
 
-static void handle_config_chunk(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len)
+static od_cmd_result_t handle_config_chunk(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len)
 {
+  od_cmd_result_t rc = OD_CMD_NACK;
   uint8_t ack[] = { 0x00u, RESP_CONFIG_CHUNK, 0x00u, 0x00u };
   uint8_t err[] = { 0xFFu, RESP_CONFIG_CHUNK, 0x00u, 0x00u };
 
   if (!s_cfg_chunk.active || s_cfg_chunk.connection != 0u) {
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-    return;
+    return OD_CMD_NACK;
   }
   if (len == 0u) {
-    return;
+    /* Silent, as shipped -- but a refusal, not an acceptance. */
+    return OD_CMD_NACK;
   }
   if (len > CONFIG_CHUNK_SIZE) {
     cfg_chunk_reset();
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-    return;
+    return OD_CMD_NACK;
   }
   if (s_cfg_chunk.received_size + len > s_cfg_chunk.total_size) {
     cfg_chunk_reset();
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-    return;
+    return OD_CMD_NACK;
   }
   if (s_cfg_chunk.received_size + len > MAX_CONFIG_SIZE) {
     cfg_chunk_reset();
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-    return;
+    return OD_CMD_NACK;
   }
   if (s_cfg_chunk.received_chunks >= MAX_CONFIG_CHUNKS) {
     cfg_chunk_reset();
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-    return;
+    return OD_CMD_NACK;
   }
 
   memcpy(s_cfg_chunk.buffer + s_cfg_chunk.received_size, data, len);
@@ -705,7 +726,7 @@ static void handle_config_chunk(const od_cmd_ctx_t *ctx, const uint8_t *data, ui
     if (s_cfg_chunk.received_size != s_cfg_chunk.total_size) {
       cfg_chunk_reset();
       (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-      return;
+      return OD_CMD_NACK;
     }
     if (saveConfig(s_cfg_chunk.buffer, s_cfg_chunk.received_size)) {
         /* THE ACK IS SEALED AND QUEUED BEFORE THE RELOAD, and the order is load-bearing.
@@ -717,16 +738,19 @@ static void handle_config_chunk(const od_cmd_ctx_t *ctx, const uint8_t *data, ui
       (void)od_cmd_reply(ctx, ack, sizeof(ack));
       opendisplay_ble_reload_config_from_nvm();
       clear_session();
+      rc = OD_CMD_OK;
     } else {
       (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+      rc = OD_CMD_NACK;
     }
     cfg_chunk_reset();
   } else {
     (void)od_cmd_reply(ctx, ack, sizeof(ack));
   }
+  return OD_CMD_OK;
 }
 
-static void handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len)
+static od_cmd_result_t handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len)
 {
   uint16_t out_len;
   uint8_t rec_type;
@@ -734,7 +758,7 @@ static void handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_t *payload,
   if (payload == NULL || payload_len < 1u) {
     uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x01u };
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-    return;
+    return OD_CMD_NACK;
   }
 
   if (payload[0] == 0x00u) {
@@ -748,7 +772,7 @@ static void handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_t *payload,
     if (!opendisplay_ble_nfc_read(&rec_type, &s_nfc_rsp_buf[6], &out_len, max_out)) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x02u };
       (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-      return;
+      return OD_CMD_NACK;
     }
     s_nfc_rsp_buf[0] = 0x00u;
     s_nfc_rsp_buf[1] = RESP_NFC_ENDPOINT;
@@ -757,7 +781,7 @@ static void handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_t *payload,
     s_nfc_rsp_buf[4] = (uint8_t)((out_len >> 8) & 0xFFu);
     s_nfc_rsp_buf[5] = (uint8_t)(out_len & 0xFFu);
     (void)od_cmd_reply(ctx, s_nfc_rsp_buf, (uint16_t)(6u + out_len));
-    return;
+    return OD_CMD_OK;
   }
 
   if (payload[0] == 0x01u) {
@@ -765,30 +789,30 @@ static void handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_t *payload,
     if (payload_len < 4u) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x01u };
       (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-      return;
+      return OD_CMD_NACK;
     }
     rec_type = payload[1];
     text_len = (uint16_t)(((uint16_t)payload[2] << 8) | payload[3]);
     if ((uint16_t)(4u + text_len) > payload_len) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x01u };
       (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-      return;
+      return OD_CMD_NACK;
     }
     if (!nfc_rec_type_valid(rec_type)) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x05u };
       (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-      return;
+      return OD_CMD_NACK;
     }
     if (!opendisplay_ble_nfc_write(rec_type, &payload[4], text_len)) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x03u };
       (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-      return;
+      return OD_CMD_NACK;
     }
     {
       uint8_t ok[] = { 0x00u, RESP_NFC_ENDPOINT, 0x81u };
       (void)od_cmd_reply(ctx, ok, sizeof(ok));
     }
-    return;
+    return OD_CMD_OK;
   }
 
   if (payload[0] == 0x10u) {
@@ -796,19 +820,19 @@ static void handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_t *payload,
     if (payload_len < 4u) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x01u };
       (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-      return;
+      return OD_CMD_NACK;
     }
     rec_type = payload[1];
     total_len = (uint16_t)(((uint16_t)payload[2] << 8) | payload[3]);
     if (!nfc_rec_type_valid(rec_type)) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x05u };
       (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-      return;
+      return OD_CMD_NACK;
     }
     if (total_len == 0u || total_len > sizeof(s_nfc_write_chunk.data)) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x06u };
       (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-      return;
+      return OD_CMD_NACK;
     }
     nfc_write_chunk_reset();
     s_nfc_write_chunk.active = true;
@@ -819,7 +843,7 @@ static void handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_t *payload,
       uint8_t ok[] = { 0x00u, RESP_NFC_ENDPOINT, 0x82u };
       (void)od_cmd_reply(ctx, ok, sizeof(ok));
     }
-    return;
+    return OD_CMD_OK;
   }
 
   if (payload[0] == 0x11u) {
@@ -827,12 +851,12 @@ static void handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_t *payload,
     if (!s_nfc_write_chunk.active || s_nfc_write_chunk.connection != 0u) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x07u };
       (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-      return;
+      return OD_CMD_NACK;
     }
     if (payload_len < 2u) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x01u };
       (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-      return;
+      return OD_CMD_NACK;
     }
     chunk_len = (uint16_t)(payload_len - 1u);
     if ((uint16_t)(s_nfc_write_chunk.received_len + chunk_len) > s_nfc_write_chunk.total_len) {
@@ -841,7 +865,7 @@ static void handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_t *payload,
         uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x08u };
         (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       }
-      return;
+      return OD_CMD_NACK;
     }
     memcpy(&s_nfc_write_chunk.data[s_nfc_write_chunk.received_len], &payload[1], chunk_len);
     s_nfc_write_chunk.received_len = (uint16_t)(s_nfc_write_chunk.received_len + chunk_len);
@@ -849,19 +873,19 @@ static void handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_t *payload,
       uint8_t ok[] = { 0x00u, RESP_NFC_ENDPOINT, 0x82u };
       (void)od_cmd_reply(ctx, ok, sizeof(ok));
     }
-    return;
+    return OD_CMD_OK;
   }
 
   if (payload[0] == 0x12u) {
     if (!s_nfc_write_chunk.active || s_nfc_write_chunk.connection != 0u) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x07u };
       (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-      return;
+      return OD_CMD_NACK;
     }
     if (s_nfc_write_chunk.received_len != s_nfc_write_chunk.total_len) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x09u };
       (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-      return;
+      return OD_CMD_NACK;
     }
     if (!opendisplay_ble_nfc_write(s_nfc_write_chunk.rec_type, s_nfc_write_chunk.data,
                                    s_nfc_write_chunk.total_len)) {
@@ -870,30 +894,35 @@ static void handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_t *payload,
         uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x03u };
         (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       }
-      return;
+      return OD_CMD_NACK;
     }
     nfc_write_chunk_reset();
     {
       uint8_t ok[] = { 0x00u, RESP_NFC_ENDPOINT, 0x81u };
       (void)od_cmd_reply(ctx, ok, sizeof(ok));
     }
-    return;
+    return OD_CMD_OK;
   }
 
   {
     uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x04u };
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
   }
+  return OD_CMD_OK;
 }
 
-static void dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, const uint8_t *payload, uint16_t payload_len)
+static od_cmd_result_t dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd,
+                                const uint8_t *payload, uint16_t payload_len)
 {
   uint8_t auth_rsp[32];
   uint16_t auth_rsp_len = 0;
   if (cmd == CMD_AUTHENTICATE) {
     (void)authenticate_handle(payload, payload_len, auth_rsp, &auth_rsp_len);
     (void)od_cmd_reply_plain(ctx, auth_rsp, auth_rsp_len);
-    return;
+    /* The handshake is answered, whatever its outcome -- the reply carries the status byte. At the
+     * cutover od_gate_authenticate() owns this and reports AUTH_CONTROL vs AUTH_ESTABLISHED, which
+     * the abuse policy needs and this gate cannot express. */
+    return OD_CMD_OK;
   }
   if (sec_enabled() && !session_alive()) {
 #if !OD_ALLOW_PLAINTEXT_WITH_SECURITY
@@ -907,7 +936,7 @@ static void dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, const uint8_t *paylo
                           && (cmd == CMD_CONFIG_WRITE || cmd == CMD_CONFIG_CHUNK);
     if (cmd != CMD_FIRMWARE_VERSION && !config_rewrite) {
       send_auth_required_response(ctx, (uint8_t)(cmd & 0xFFu));
-      return;
+      return OD_CMD_AUTH_REJECTED;
     }
     /* Erase the stored config (and thus the old key) before accepting an
      * unauthenticated rewrite, on BOTH the single-shot and chunked paths.
@@ -924,38 +953,46 @@ static void dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, const uint8_t *paylo
     }
 #endif
   }
+  return od_cmd_dispatch(ctx, cmd, od_span_make(payload, payload_len));
+}
+
+/* IMPLEMENTED FOR shared/core/od_dispatch.h. One seam rather than one function per opcode: the
+ * dispatch plan names a per-opcode split as C11's shrink, and doing it here would rewrite every
+ * handler signature at the same moment the ordering changes underneath them.
+ *
+ * The opcode-to-handler mapping and its comments are the shipped ones. What changes is that the
+ * caller now asks for a VERDICT instead of inferring acceptance from a flag set behind it. */
+od_cmd_result_t od_cmd_dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, od_span_t body)
+{
+  const uint8_t *payload = body.p;
+  const uint16_t payload_len = (uint16_t)body.n;
+
   switch (cmd) {
     case CMD_FIRMWARE_VERSION:
-      reply_firmware_version(ctx);
-      break;
+      return reply_firmware_version(ctx);
     case CMD_READ_MSD:
-      reply_read_msd(ctx);
-      break;
+      return reply_read_msd(ctx);
     case CMD_CONFIG_READ:
-      handle_config_read(ctx);
-      break;
+      return handle_config_read(ctx);
     case CMD_CONFIG_CLEAR:
-      handle_config_clear(ctx);
-      break;
+      return handle_config_clear(ctx);
     case CMD_CONFIG_WRITE:
-      handle_config_write(ctx, payload, payload_len);
-      break;
+      return handle_config_write(ctx, payload, payload_len);
     case CMD_CONFIG_CHUNK:
-      handle_config_chunk(ctx, payload, payload_len);
-      break;
+      return handle_config_chunk(ctx, payload, payload_len);
     case CMD_REBOOT:
       od_log_info("reboot");
       for (volatile uint32_t i = 0; i < 800000u; i++) {
       }
       NVIC_SystemReset();
-      break;
+      return OD_CMD_OK;                 /* not reached: the reset does not return */
     case CMD_ENTER_DFU:
       {
         uint8_t ok[] = { 0x00u, RESP_ENTER_DFU };
         (void)od_cmd_reply(ctx, ok, sizeof(ok));
       }
       opendisplay_ble_schedule_dfu();
-      break;
+      return OD_CMD_OK;
     case CMD_DEEP_SLEEP:
       /* Match the reference nRF52840 build (device_control.cpp:691-705): the
        * command is recognized and logged but NO response is sent, so clients do
@@ -976,7 +1013,7 @@ static void dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, const uint8_t *paylo
        * MUST be fixed before anything implements CMD_POWER_OFF on 0x0052 here --
        * at that point an un-updated host asking for deep sleep would cut the rail. */
       opendisplay_ble_schedule_deep_sleep();
-      break;
+      return OD_CMD_OK;
     case CMD_LED_ACTIVATE: {
       uint8_t ok[] = { 0x00u, RESP_LED_ACTIVATE_ACK, 0x00u, 0x00u };
       uint8_t e1[] = { 0xFFu, RESP_LED_ACTIVATE_ACK, 0x01u, 0x00u };
@@ -984,15 +1021,15 @@ static void dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, const uint8_t *paylo
 
       if (payload_len < 1u) {
         (void)od_cmd_reply_plain(ctx, e1, sizeof(e1));
-        break;
+        return OD_CMD_NACK;
       }
       if (opendisplay_led_activate(payload[0], payload + 1u,
                                   (uint16_t)(payload_len - 1u)) != 0) {
         (void)od_cmd_reply_plain(ctx, e2, sizeof(e2));
-        break;
+        return OD_CMD_NACK;
       }
       (void)od_cmd_reply(ctx, ok, sizeof(ok));
-      break;
+      return OD_CMD_OK;
     }
     case CMD_LED_STOP: {
       uint8_t ok[] = { 0x00u, RESP_LED_STOP_ACK, 0x00u, 0x00u };
@@ -1006,10 +1043,10 @@ static void dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, const uint8_t *paylo
       }
       if (rc != 0) {
         (void)od_cmd_reply_plain(ctx, e2, sizeof(e2));
-        break;
+        return OD_CMD_NACK;
       }
       (void)od_cmd_reply(ctx, ok, sizeof(ok));
-      break;
+      return OD_CMD_OK;
     }
     case CMD_BUZZER: {
       int rc = opendisplay_buzzer_activate(payload, payload_len);
@@ -1017,39 +1054,45 @@ static void dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, const uint8_t *paylo
       if (rc == 0) {
         uint8_t ok[] = { 0x00u, RESP_BUZZER_ACK, 0x00u, 0x00u };
         (void)od_cmd_reply(ctx, ok, sizeof(ok));
-      } else {
+        return OD_CMD_OK;
+      }
+      {
         uint8_t err[] = { 0xFFu, RESP_BUZZER_ACK, (uint8_t)rc, 0x00u };
         (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       }
-      break;
+      return OD_CMD_NACK;
     }
     case CMD_NFC_ENDPOINT:
-      handle_nfc_endpoint(ctx, payload, payload_len);
-      break;
+      return handle_nfc_endpoint(ctx, payload, payload_len);
     case CMD_DIRECT_WRITE_START:
-      handle_direct_write_start(ctx, payload, payload_len);
-      break;
+      return handle_direct_write_start(ctx, payload, payload_len);
     case CMD_DIRECT_WRITE_DATA:
-      handle_direct_write_data(ctx, payload, payload_len);
-      break;
+      return handle_direct_write_data(ctx, payload, payload_len);
     case CMD_DIRECT_WRITE_END:
-      handle_direct_write_end(ctx, payload, payload_len);
-      break;
+      return handle_direct_write_end(ctx, payload, payload_len);
     case CMD_PARTIAL_WRITE_START:
-      handle_partial_write_start(ctx, payload, payload_len);
-      break;
+      return handle_partial_write_start(ctx, payload, payload_len);
     case CMD_PIPE_WRITE_START:
       opendisplay_pipe_write_start(ctx, payload, payload_len, pipe_send);
-      break;
+      /* The PIPE-write module answers for itself and does not yet
+       * report a verdict; C11 gives it one with its own header. */
+      return OD_CMD_OK;
     case CMD_PIPE_WRITE_DATA:
       opendisplay_pipe_write_data(ctx, payload, payload_len, pipe_send);
-      break;
+      /* The PIPE-write module answers for itself and does not yet
+       * report a verdict; C11 gives it one with its own header. */
+      return OD_CMD_OK;
     case CMD_PIPE_WRITE_END:
       opendisplay_pipe_write_end(ctx, payload, payload_len, pipe_send);
-      break;
+      /* The PIPE-write module answers for itself and does not yet
+       * report a verdict; C11 gives it one with its own header. */
+      return OD_CMD_OK;
     default:
+      /* NOT a NACK. An unrecognised opcode must not stamp activity or reset the abuse run, or
+       * unknown-command traffic keeps the exclusive link alive -- od_frame_policy gives
+       * UNKNOWN_OPCODE neither. The log line is the whole of the response, as shipped. */
       od_log_info("unknown cmd 0x%04X", (unsigned)cmd);
-      break;
+      return OD_CMD_UNKNOWN;
   }
 }
 
@@ -1208,5 +1251,25 @@ void opendisplay_pipe_process(void)
     /* Stale frames were consumed above rather than retried. Peek/consume avoids a copying get, so
      * the dispatcher decrypts in the slot instead of on a 256-byte stack frame in main. */
     od_rxq_consume();
+  }
+}
+
+/* IMPLEMENTED FOR shared/core/od_dispatch.h. The opcodes a live CONFIG_READ must exclude, because
+ * the producer reads the same stored blob a write reloads through: letting one land between two
+ * chunks splices two configs into one CRC-valid read-back.
+ *
+ * Target-side because the set is a statement about THIS firmware's handlers, not about the wire --
+ * Nordic has NFC, Silabs has no PIPE. CONFIG_READ itself is absent deliberately: the dispatcher
+ * tests for it separately, since a second read is excluded for a different reason (it would
+ * restart a producer that has already promised the host a chunk count). */
+bool od_cmd_mutates_config(uint16_t cmd)
+{
+  switch (cmd) {
+  case CMD_CONFIG_WRITE:   /* saveConfig + reload */
+  case CMD_CONFIG_CHUNK:   /* same, on completion */
+  case CMD_CONFIG_CLEAR:   /* clearStoredConfig */
+    return true;
+  default:
+    return false;
   }
 }
