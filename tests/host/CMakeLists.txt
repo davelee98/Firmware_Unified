@@ -166,6 +166,17 @@ add_executable(od_dispatch_test dispatch_test.c)
 target_link_libraries(od_dispatch_test od_session_fake)
 add_test(NAME dispatch COMMAND od_dispatch_test)
 
+# dispatch_route: the opcode map, one case per canonical opcode.
+#
+# Separate from od_dispatch_test because it asks a different question. That suite drives ONE opcode
+# through the ordering; this one drives EVERY opcode through the map and records which hook ran.
+# The map used to be a switch inside each target, where an opcode could be routed on one target and
+# unknown on the other with nothing to say so -- and "unknown" is wire-visible, since it carries no
+# activity stamp. A new opcode must fail here until its route and capability behaviour are chosen.
+add_executable(od_dispatch_route_test dispatch_route_test.c)
+target_link_libraries(od_dispatch_route_test od_session_fake)
+add_test(NAME dispatch_route COMMAND od_dispatch_route_test)
+
 # session: the handshake, KDF, replay window and CCM envelope against a fake crypto HAL built on
 # the host AES core. DIFFERENTIAL where it matters -- the replay window is upstream Firmware's
 # own nonce_window.h, ported verbatim, so this suite exercises the shipped state machine rather
@@ -219,6 +230,38 @@ add_test(NAME advert COMMAND od_advert_test)
 add_executable(od_watchdog_test watchdog_test.c)
 target_link_libraries(od_watchdog_test od_shared)
 add_test(NAME watchdog COMMAND od_watchdog_test)
+
+# --------------------------------------------------------------------------------------------
+# TARGET HAL suites. These compile PRODUCTION target sources against fake vendor APIs, which is
+# the point: the defects they cover are lifecycle defects -- which key id is destroyed, whether a
+# failure propagates -- and a test that re-implements the logic proves only that the copy agrees
+# with itself. fake_psa/ is on the include path of these binaries ONLY; it is not visible to
+# shared/ or to any target build.
+add_library(od_fake_psa STATIC fake_psa/fake_psa.c)
+target_include_directories(od_fake_psa PUBLIC ${CMAKE_CURRENT_LIST_DIR}/fake_psa)
+
+# nordic_crypto_slot: the prepared-key slot lifecycle in the Nordic PSA HAL. The case that matters
+# is the injected destroy failure -- not reproducible on a board, and the one that used to latch
+# the slot ready-but-unusable until reboot, leaving the device unable to re-authenticate.
+add_executable(od_nordic_crypto_slot_test
+    nordic_crypto_slot_test.c
+    ../../targets/nordic-zephyr/src/od_hal_crypto.c)
+target_include_directories(od_nordic_crypto_slot_test PRIVATE
+    ../../targets/nordic-zephyr/src)
+target_link_libraries(od_nordic_crypto_slot_test od_shared od_fake_psa)
+add_test(NAME nordic_crypto_slot COMMAND od_nordic_crypto_slot_test)
+
+# esp_crypto_random: the ESP32 RNG arm, which feeds the AUTHENTICATE challenge. od_session's rule
+# is that a device never offers a challenge it cannot honour, and that rule is unenforceable while
+# the backend cannot report failure.
+add_executable(od_esp_crypto_random_test
+    esp_crypto_random_test.c
+    ../../targets/esp32-idf/hal/od_hal_crypto_random.c
+    fake_esp/fake_esp_random.c)
+target_include_directories(od_esp_crypto_random_test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/fake_esp)
+target_link_libraries(od_esp_crypto_random_test od_shared od_fake_psa)
+add_test(NAME esp_crypto_random COMMAND od_esp_crypto_random_test)
 
 # Nordic config pin bytes are a wire contract and deliberately differ by
 # platform: nRF52840 uses absolute port*32+pin values, while nRF54 uses the

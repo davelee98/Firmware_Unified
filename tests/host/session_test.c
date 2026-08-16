@@ -1014,6 +1014,85 @@ static void test_tx_counter_exhaustion(void)
           == OD_SESSION_SEAL_COUNTER_EXHAUSTED);
 }
 
+/* A SEALED RESPONSE IS OUTBOUND ACTIVITY, and every way of failing to produce one is not.
+ *
+ * The distinction is not bookkeeping. last_activity_ms is what the targets' idle policy reads, so
+ * stamping it on a refusal keeps a link alive on traffic the device declined to answer; not
+ * stamping it on a success stops an active client's clock and disconnects it mid-transfer. The
+ * cipher-error case is the one worth stating: it may have SPENT a counter, but it produced no
+ * outbound bytes, so it is not activity. */
+static void test_seal_activity_success_only(void)
+{
+    struct od_session s;
+    uint8_t sn[16], plain[16], out[300];
+    uint16_t out_len = 0;
+
+    fake_reset(); sec_init(0);
+    od_session_init(&s, 0);
+    CHECK(handshake(&s, 1000u, sn, false) == OD_SESSION_AUTH_ESTABLISHED);
+    plain[0] = 0x00u; plain[1] = 0x70u;
+
+    CASE("a successful seal stamps exactly now_ms");
+    s.last_activity_ms = 0u;
+    CHECK(od_session_seal(&s, od_span_make(plain, 10), out, sizeof out, &out_len, 7777u, NULL)
+          == OD_SESSION_SEAL_OK);
+    CHECK(s.last_activity_ms == 7777u);
+
+    CASE("TOO_SHORT does not stamp");
+    s.last_activity_ms = 0u;
+    CHECK(od_session_seal(&s, od_span_make(plain, 1), out, sizeof out, &out_len, 8888u, NULL)
+          == OD_SESSION_SEAL_TOO_SHORT);
+    CHECK(s.last_activity_ms == 0u);
+
+    CASE("TOO_LONG does not stamp");
+    {
+        uint8_t big[OD_SESSION_PAYLOAD_MAX + 3u];
+        memset(big, 0, sizeof big);
+        s.last_activity_ms = 0u;
+        CHECK(od_session_seal(&s, od_span_make(big, sizeof big), out, sizeof out, &out_len,
+                              8888u, NULL) == OD_SESSION_SEAL_TOO_LONG);
+        CHECK(s.last_activity_ms == 0u);
+    }
+
+    CASE("NO_ROOM does not stamp");
+    s.last_activity_ms = 0u;
+    CHECK(od_session_seal(&s, od_span_make(plain, 10), out, 8u, &out_len, 8888u, NULL)
+          == OD_SESSION_SEAL_NO_ROOM);
+    CHECK(s.last_activity_ms == 0u);
+
+    CASE("a cipher failure does not stamp, even though it spent a counter");
+    {
+        const uint64_t before = s.tx_counter;
+        s.last_activity_ms = 0u;
+        g_force_status = OD_HAL_CRYPTO_ERROR;
+        g_force_after = 0;
+        CHECK(od_session_seal(&s, od_span_make(plain, 10), out, sizeof out, &out_len, 8888u, NULL)
+              == OD_SESSION_SEAL_CRYPTO_ERROR);
+        CHECK(s.tx_counter == before + 1u);
+        CHECK(s.last_activity_ms == 0u);
+        g_force_status = OD_HAL_CRYPTO_OK;
+        g_force_after = -1;
+    }
+
+    CASE("COUNTER_EXHAUSTED does not stamp");
+    s.tx_counter = UINT64_MAX;
+    s.last_activity_ms = 0u;
+    CHECK(od_session_seal(&s, od_span_make(plain, 10), out, sizeof out, &out_len, 8888u, NULL)
+          == OD_SESSION_SEAL_COUNTER_EXHAUSTED);
+    CHECK(s.last_activity_ms == 0u);
+
+    CASE("NO_SESSION does not stamp");
+    od_session_clear(&s);
+    s.last_activity_ms = 0u;
+    CHECK(od_session_seal(&s, od_span_make(plain, 10), out, sizeof out, &out_len, 8888u, NULL)
+          == OD_SESSION_SEAL_NO_SESSION);
+    CHECK(s.last_activity_ms == 0u);
+
+    CASE("od_session_touch() still stamps unconditionally");
+    od_session_touch(&s, 4242u);
+    CHECK(s.last_activity_ms == 4242u);
+}
+
 /* ------------------------------------------------------------------------------- lifecycle --- */
 
 static void test_timeout_absolute_and_wrap_safe(void)
@@ -1224,6 +1303,7 @@ int main(void)
     test_seal_needs_cmd_bytes();
     test_seal_no_room_burns_nothing();
     test_tx_counter_exhaustion();
+    test_seal_activity_success_only();
 
     test_timeout_absolute_and_wrap_safe();
     test_timeout_boundary();
