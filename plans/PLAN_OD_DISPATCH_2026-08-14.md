@@ -1,8 +1,10 @@
 # Plan: `od_dispatch` — one command path for BLE ingress, dispatch and writeback
 
-**Status:** revision 7, 2026-08-15. Not started. `od_session` prerequisite landed in `66ef1cb`.
-**Execution gate:** close the ESP32-S3 `od_session` hardware pass before C8; the Nordic
-`xiao_nrf52840` pass is complete, but the ESP32 mbedTLS arm has never run on silicon.
+**Status:** revision 8, 2026-08-16. C8-C10 are landed through `a37c04b`; C11 is planned in
+[`PLAN_OD_DISPATCH_C11_2026-08-16.md`](PLAN_OD_DISPATCH_C11_2026-08-16.md).
+**Execution gate:** C9/C10 have not run on Nordic hardware, and the ESP32 C1/C5/C8 stack remains
+unverified on silicon. Run the C10 Nordic matrix and ESP32-S3 smoke gate before C11 when boards are
+available; otherwise preserve the result as ACCEPTED-UNRUN rather than hardware-verified.
 **Prior art:** [DIVERGENCE_MATRIX.md](../docs/DIVERGENCE_MATRIX.md) § 1,
 [SHARED_API_DESIGN.md](../docs/SHARED_API_DESIGN.md) § "Layering", `tests/vectors/dispatch.json`.
 
@@ -446,7 +448,7 @@ commit is accepted. C12 adds the cross-corpus runner, not the first C-side cover
 | **C8** | Shared foundation plus an **ESP32 vertical adoption**: `od_session_app` seam; `od_hal_radio`; TX ring and reservation tokens; explicit plain/protected replies; exhaustive authenticate/open/seal mapping; typed outcomes; § 3.5 barrier; resumable `CONFIG_READ`; and `od_dispatch.c`. The existing ESP RX pump calls shared dispatch and `od_txq_process()`. Nordic remains on its landed dispatcher/inline notify in this commit, so no half-migrated reservation has to hide in a current-origin global. |
 | **C9** | Shared BLE RX ring on both targets; delete ESP32 `command_queue.cpp`; narrow Nordic to ATT MTU 256 / value admission 253 and matching ACL buffers. Nordic's existing main-thread pump calls its existing dispatcher from the new ring for this one commit; LAN remains direct. |
 | **C10** | **Nordic vertical adoption** of the C8 egress, resumable config producer, session seam and shared dispatcher; compose RX, TX and producer work in `od_core_process()`. Retire Nordic's blanket inline retry only here. Preserve log-before-silence and the control-frame activity policy. |
-| **C11** | Remove dead dispatch/egress helpers from `communication.cpp`; finish shrinking `opendisplay_pipe.c`; shrink both target session adapters to the § 3.7 seam. **Also fix the three landed crypto-HAL defects below**, which live in exactly the code this commit rewrites. Update matrix § 1.5b / § 1.7, `SHARED_API_DESIGN.md:680`, `CLAUDE.md`, and `docs/OD_SESSION.md` verification status. |
+| **C11** | Retire the remaining dispatch scaffolding, make the shared dispatcher own the opcode map, split Nordic command policy out of `opendisplay_pipe.c`, remove ESP32 implicit frame-context globals, close the session/reset seams, and fix the three landed crypto/HAL defects below. See the [detailed C11 execution plan](PLAN_OD_DISPATCH_C11_2026-08-16.md). |
 | **C12** | C corpus runner + hardware passes. |
 
 ### 7.1 Landed crypto-HAL defects folded into C11
