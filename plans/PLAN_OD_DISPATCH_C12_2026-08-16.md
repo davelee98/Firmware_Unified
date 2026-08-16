@@ -1,6 +1,6 @@
 # Plan: C12 — close the wire corpus and hardware evidence gaps
 
-**Status:** proposed execution plan, 2026-08-16. `main` points at C11's merge commit
+**Status:** software half LANDED 2026-08-16 (C12.0-C12.2); hardware half open and ACCEPTED-UNRUN. `main` points at C11's merge commit
 `dfde3bd`; the parent records C8-C11 as landed and C12 as the remaining unit
 (`.git/refs/heads/main:1`, `plans/PLAN_OD_DISPATCH_2026-08-14.md:3-8`).
 

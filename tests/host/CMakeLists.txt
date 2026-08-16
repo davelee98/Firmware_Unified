@@ -406,6 +406,24 @@ else()
                     "corpus reply half is UNCHECKED in this build.")
 endif()
 
+# bench_dispatch_gate: the two `dispatch-gate` helpers against a fake BLE client.
+#
+# The tool exists to produce HARDWARE EVIDENCE, and it can drive its stimulus wrongly in two ways
+# that look identical in a device log: sealing twice instead of resending retained bytes (which
+# tests PIPE duplicate handling, not the replay window), and writing after re-enabling notifications
+# instead of before (which withholds nothing). Neither is visible on a board. Both are visible here,
+# which is the point of running it before either goes near one.
+#
+# bleak is stubbed rather than required, so this never degrades to a skip on a machine without the
+# BLE stack.
+if(Python3_FOUND)
+    add_test(NAME bench_dispatch_gate
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_LIST_DIR}/bench_dispatch_gate_test.py)
+else()
+    message(WARNING "od: Python3 not found -- the dispatch-gate bench helpers are UNCHECKED.")
+endif()
+
 # Nordic config pin bytes are a wire contract and deliberately differ by
 # platform: nRF52840 uses absolute port*32+pin values, while nRF54 uses the
 # compact packed form. Keep the pure decoder checked without a Zephyr build.
