@@ -93,22 +93,6 @@ static const char* originTag(od_origin_t origin) {
 #define OD_AUTH_ABUSE_DWELL_FALLBACK_MS 50
 #endif
 
-// Budgets for the nonce-rejection logs. Once nonce failures stop counting toward
-// integrity_failures, nothing else throttles a peer that drives these lines, and
-// out-of-window fires routinely on a lossy link.
-//
-// One budget PER SITE, deliberately, not one shared: a stale client spamming session-id
-// mismatches must not be able to silence the out-of-window line, which is the one that
-// reports real transfer loss.
-static uint32_t s_nonceLogWindowMs = 0;   // replay / out-of-window
-static uint32_t s_nonceLogOtherMs  = 0;   // wrong session, bad tag, malformed, engine fault
-static bool nonceLogAllowed(uint32_t* last_ms) {
-    const uint32_t now = od_hal_uptime_ms();
-    if (*last_ms != 0 && (uint32_t)(now - *last_ms) < 5000u) return false;
-    *last_ms = now;
-    return true;
-}
-
 static uint8_t  s_authRejectRun = 0;        // consecutive RESP_AUTH_REQUIRED answers
 static bool     s_authAbuseDropPending = false;
 static uint32_t s_authAbuseDeadlineMs = 0;  // hard bound on the delivery attempt
