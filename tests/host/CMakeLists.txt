@@ -256,8 +256,7 @@ add_test(NAME nordic_crypto_slot COMMAND od_nordic_crypto_slot_test)
 # the backend cannot report failure.
 add_executable(od_esp_crypto_random_test
     esp_crypto_random_test.c
-    ../../targets/esp32-idf/hal/od_hal_crypto_random.c
-    fake_esp/fake_esp_random.c)
+    ../../targets/esp32-idf/hal/od_hal_crypto_random.c)
 target_include_directories(od_esp_crypto_random_test PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/fake_esp)
 target_link_libraries(od_esp_crypto_random_test od_shared od_fake_psa)

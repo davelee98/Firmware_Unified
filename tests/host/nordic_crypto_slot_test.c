@@ -125,7 +125,10 @@ static void test_destroy_failure_does_not_latch(void)
     /* No destroy at all: ownership of the leaked id was dropped when it failed, so there is
      * nothing left to release. A retry here would be the hazard, not the repair. */
     CHECK(fake_psa_destroy_calls == destroys_before);
-    CHECK(fake_psa_import_calls == 3u);
+    /* TWO imports, not three: the key_set that met the failed release returned ERROR without
+     * importing, which is the intended outcome -- the handshake that hit the fault fails, and the
+     * NEXT one succeeds. */
+    CHECK(fake_psa_import_calls == 2u);
 
     CASE("the leaked id is never targeted again -- PSA may have reissued that number");
     od_hal_crypto_key_clear(0);

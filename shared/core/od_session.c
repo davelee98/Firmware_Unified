@@ -696,6 +696,12 @@ enum od_session_seal od_session_seal(struct od_session *s, od_span_t plain_frame
         goto cleanup;
     }
     *out_len = (uint16_t)(2u + OD_SESSION_NONCE_LEN + ct_len);
+    /* OUTBOUND ACTIVITY, and only here: after the cipher succeeded and out_len is final. A
+     * preflight refusal produced nothing, and a cipher error may have SPENT a counter but still
+     * put no bytes on the wire. Stamping either would keep a link alive on traffic the device
+     * declined to answer -- and not stamping this would stop an active client's idle clock and
+     * disconnect it mid-transfer. */
+    s->last_activity_ms = now_ms;
     result = OD_SESSION_SEAL_OK;
 
 cleanup:
