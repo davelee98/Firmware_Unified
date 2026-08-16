@@ -1094,19 +1094,43 @@ def _pipe_start_request(total_size: int, window: int, ack_every: int, max_frame:
             + total_size.to_bytes(4, "little"))
 
 
+def _replies_matching(log: _FrameLog, since_ms: float, prefix: bytes) -> list[dict[str, Any]]:
+    want = prefix.hex()
+    return [r for r in log.since(since_ms) if r["hex"].startswith(want)]
+
+
 async def _bench_replay(ctx: _BleCtx, log: _FrameLog, args: argparse.Namespace) -> dict[str, Any]:
-    """Phase 1: OD-S1. Seal one DATA frame, send it twice, require silence for the second."""
+    """Phase 1: OD-S1.
+
+    EVERY STEP MUST BE POSITIVELY OBSERVED. Silence after a replay is not a result on its own: the
+    session gate drops a replayed nonce BEFORE PIPE state is consulted, so a transfer that never
+    opened is silent too, and a phase that checked only for silence would pass having proved
+    nothing. So the transfer is established, the first frame is confirmed accepted, the control is
+    matched byte-for-byte, and the transfer is carried through to a rendered refresh -- which is
+    the half that shows the replay left it ALIVE rather than merely quiet.
+    """
     out: dict[str, Any] = {"phase": "od-s1-replay"}
     chunk = bytes([0x41]) * args.chunk_bytes
+    frames_total = (args.total_size + args.chunk_bytes - 1) // args.chunk_bytes
 
+    # --- 1. open the transfer, and require an ACK ------------------------------------------
     _status("OD-S1: opening an encrypted PIPE transfer...")
+    t = log.now_ms()
     await ctx.send_command(0x00, 0x80,
                            _pipe_start_request(args.total_size, args.window,
                                                PIPE_ACK_EVERY, args.max_frame))
     await asyncio.sleep(args.settle)
-    out["start_replies"] = len(log.since(0.0))
+    start_ack = _replies_matching(log, t, bytes([0x00, 0x80]))
+    out["start_acked"] = len(start_ack) > 0
+    out["start_replies"] = log.since(t)
+    if not out["start_acked"]:
+        # A NACKed START leaves no transfer, and every later step would then be measuring the
+        # gate rather than PIPE. Stop rather than report a pass built on that.
+        out["pass"] = False
+        out["stopped_at"] = "start-not-acked"
+        return out
 
-    # SEALED ONCE. The counter moves here and nowhere else in this phase.
+    # --- 2. seal ONE frame, send it, and require it to be accepted ---------------------------
     counter_before = ctx.session.counter if ctx.session else -1
     wire = await ctx.seal_command(0x00, 0x81, bytes([0x00]) + chunk)
     counter_after = ctx.session.counter if ctx.session else -1
@@ -1115,31 +1139,85 @@ async def _bench_replay(ctx: _BleCtx, log: _FrameLog, args: argparse.Namespace) 
     t_first = log.now_ms()
     await ctx.send_raw(wire)
     await asyncio.sleep(args.settle)
-    out["first_send_replies"] = len(log.since(t_first))
+    first_sack = _replies_matching(log, t_first, bytes([0x00, 0x81]))
+    out["first_frame_acked"] = len(first_sack) > 0
+    if not out["first_frame_acked"]:
+        out["pass"] = False
+        out["stopped_at"] = "first-data-not-acked"
+        return out
 
+    # --- 3. the replay: identical bytes, and it must draw nothing ----------------------------
     _status("OD-S1: re-sending the IDENTICAL sealed bytes...")
     t_replay = log.now_ms()
-    await ctx.send_raw(wire)                      # byte-identical: same nonce, same counter
+    await ctx.send_raw(wire)                      # same session id, same counter, same tag
     await asyncio.sleep(args.observe)
     replay_replies = log.since(t_replay)
     out["replay_replies"] = replay_replies
     out["replay_drew_silence"] = (len(replay_replies) == 0)
 
-    # THE CONTROL. Silence only means something if a response could have been seen. A frame with a
-    # corrupted tag is refused loudly, so if THIS draws nothing the capture window is broken and
-    # the replay result above is worthless rather than positive.
-    _status("OD-S1: control -- a corrupted tag must draw a NACK...")
+    # --- 4. the control, matched exactly -----------------------------------------------------
+    # A tag failure is tamper evidence and keeps its NACK, so the gate answers [00][81][FF]
+    # (shared/core/od_gate.c queue_status). Accepting "any notification" would let a late SACK from
+    # step 2, or an unrelated frame, stand in for it -- and then the silence above is unfalsifiable.
+    _status("OD-S1: control -- a corrupted tag must draw the plaintext 0081ff...")
     bad = bytearray(await ctx.seal_command(0x00, 0x81, bytes([0x01]) + chunk))
     bad[-1] ^= 0xFF
     t_ctrl = log.now_ms()
     await ctx.send_raw(bytes(bad))
     await asyncio.sleep(args.observe)
-    ctrl = log.since(t_ctrl)
-    out["control_replies"] = ctrl
-    out["control_was_answered"] = (len(ctrl) > 0)
+    out["control_replies"] = log.since(t_ctrl)
+    out["control_answered_exactly"] = any(r["hex"] == "0081ff" for r in log.since(t_ctrl))
 
-    out["pass"] = bool(out["replay_drew_silence"] and out["control_was_answered"]
+    # --- 5. continuation: the transfer must still be alive -----------------------------------
+    # THE HALF THAT PROVES SURVIVAL. Silence is the required behaviour only if the upload then
+    # completes; a device that went quiet because the transfer died would pass steps 3 and 4.
+    _status(f"OD-S1: continuing with fresh counters ({frames_total - 1} frame(s)) through END...")
+    t_cont = log.now_ms()
+    for seq in range(1, frames_total):
+        await ctx.send_command(0x00, 0x81, bytes([seq & 0xFF]) + chunk)
+        await asyncio.sleep(args.frame_gap)
+    await ctx.send_command(0x00, 0x82)
+    await asyncio.sleep(args.refresh_wait)
+    out["end_acked"] = len(_replies_matching(log, t_cont, bytes([0x00, 0x82]))) > 0
+    # 0x73 refresh complete, 0x74 refresh timed out. Both mean the panel was driven; only their
+    # absence means the transfer did not finish.
+    out["refresh_reported"] = (len(_replies_matching(log, t_cont, bytes([0x00, 0x73]))) > 0
+                               or len(_replies_matching(log, t_cont, bytes([0x00, 0x74]))) > 0)
+    out["continuation_replies"] = log.since(t_cont)
+
+    out["pass"] = bool(out["start_acked"] and out["first_frame_acked"]
+                       and out["replay_drew_silence"] and out["control_answered_exactly"]
+                       and out["end_acked"] and out["refresh_reported"]
                        and out["counter_delta_for_one_frame"] == 1)
+    return out
+
+
+async def _read_config_bytes(ctx: _BleCtx, timeout: float) -> bytes:
+    """A plain config read, used to take the baseline the withheld read is compared against."""
+    return await _do_read_config(ctx, timeout)
+
+
+def _canary_in_device_log(path: str, canary_hex: str) -> dict[str, Any]:
+    """Scan an operator-captured device log for the unknown-opcode line.
+
+    THIS IS THE ONLY EVIDENCE THAT THE CANARY REACHED DISPATCH, and it cannot come from the wire:
+    an unknown opcode is answered with silence by design, and the host is unsubscribed anyway. RX
+    is FIFO, so the line proves the CONFIG_READ queued ahead of it had already been dispatched --
+    which is what puts the device in the RETRY arm rather than merely idle.
+
+    Without the log the phase cannot pass. A tool that inferred it from a complete config read
+    afterwards would be unable to tell "queued after dispatch" from "processed late", and those are
+    the two outcomes the row exists to separate."""
+    out: dict[str, Any] = {"log_path": path, "canary_line": None, "found": False}
+    try:
+        with open(path, "r", errors="replace") as fh:
+            for line in fh:
+                if canary_hex.lower() in line.lower() and "unknown" in line.lower():
+                    out["canary_line"] = line.strip()
+                    out["found"] = True
+                    break
+    except OSError as exc:
+        out["error"] = str(exc)
     return out
 
 
@@ -1149,6 +1227,18 @@ async def _bench_withhold(ctx: _BleCtx, log: _FrameLog, args: argparse.Namespace
     chunks: dict[int, bytes] = {}
     state: dict[str, int] = {}
     done = asyncio.Event()
+
+    # THE BASELINE, read normally first. Comparing the withheld read against known bytes is what
+    # makes "exact reassembly" an assertion; contiguous chunk indexes summing to an advertised
+    # length would also hold for a read that came back subtly wrong.
+    _status("backpressure: taking a baseline config read...")
+    try:
+        baseline = await _read_config_bytes(ctx, args.timeout)
+    except (RuntimeError, ValueError) as exc:
+        out["pass"] = False
+        out["stopped_at"] = f"baseline-read-failed: {exc}"
+        return out
+    out["baseline_len"] = len(baseline)
 
     def handle(payload: bytes) -> None:
         if len(payload) < 4 or payload[0] == 0xFF:
@@ -1168,14 +1258,15 @@ async def _bench_withhold(ctx: _BleCtx, log: _FrameLog, args: argparse.Namespace
     await ctx.set_notify(False)
     t_withheld = log.now_ms()
 
-    # Both writes happen while the device cannot send. The canary is second, and RX is FIFO, so a
-    # device log line naming 0x0060 proves the config read ahead of it had already been dispatched
-    # with the notify path unwritable.
     await ctx.send_command(0x00, 0x40)
-    await ctx.send_command(0x00, 0x60)
+    await ctx.send_command(0x00, 0x60)          # the canary, FIFO behind the read
     await asyncio.sleep(args.withhold)
-    during = log.since(t_withheld)
-    out["frames_during_withhold"] = len(during)
+    out["frames_during_withhold"] = len(log.since(t_withheld))
+
+    # The device log is captured by the operator over RTT/serial; the tool reads it rather than
+    # taking anyone's word for it.
+    out["canary"] = (_canary_in_device_log(args.device_log, "0x0060") if args.device_log
+                     else {"found": False, "error": "no --device-log supplied"})
 
     _status("backpressure: re-enabling notifications...")
     ctx.notify_handler = handle
@@ -1188,30 +1279,50 @@ async def _bench_withhold(ctx: _BleCtx, log: _FrameLog, args: argparse.Namespace
     finally:
         ctx.notify_handler = None
 
+    ordered = bytearray()
+    for i in sorted(chunks):
+        ordered += chunks[i]
+    got = bytes(ordered[: state.get("total_len", 0)])
     out["chunks"] = sorted(chunks)
     out["contiguous"] = (sorted(chunks) == list(range(len(chunks)))) if chunks else False
-    out["total_len"] = state.get("total_len")
-    # The device must have SENT NOTHING while unsubscribed and then delivered the whole read. A
-    # partial reassembly means queued frames were dropped rather than held, which is the defect
-    # this phase exists to detect.
-    out["pass"] = bool(out["frames_during_withhold"] == 0 and out["config_reassembled"]
-                       and out["contiguous"])
+    out["bytes_match_baseline"] = (got == baseline)
+    out["withheld_len"] = len(got)
+
+    out["pass"] = bool(out["frames_during_withhold"] == 0
+                       and out["canary"].get("found")
+                       and out["config_reassembled"] and out["contiguous"]
+                       and out["bytes_match_baseline"])
     return out
 
 
-def _redact(record: dict[str, Any]) -> dict[str, Any]:
-    """Keys, nonces and addresses never enter an evidence file. The corpus ownership rules forbid
-    it and a JSON pasted into a ticket is exactly how such a thing escapes."""
-    banned = ("key", "master", "nonce", "psk", "secret", "addr", "address", "mac")
-    out: dict[str, Any] = {}
-    for k, v in record.items():
-        if any(b in k.lower() for b in banned):
-            out[k] = "<redacted>"
-        elif isinstance(v, dict):
-            out[k] = _redact(v)
-        else:
-            out[k] = v
-    return out
+# Fields whose VALUE is raw wire bytes. They are kept deliberately -- the replay row's entire
+# claim is that two frames were byte-identical, and a redacted transcript cannot show that -- so
+# the limitation is named here rather than contradicted by a comment elsewhere. A sealed frame
+# carries its session id and counter in the clear by construction, so an evidence file IS
+# session-identifying and must be handled as such.
+_WIRE_FIELDS = ("hex",)
+_SECRET_HINTS = ("key", "master", "nonce", "psk", "secret", "addr", "address", "mac", "token")
+
+
+def _redact(value: Any) -> Any:
+    """Redact secret-looking fields anywhere in the record, including inside lists.
+
+    The earlier version recursed through dicts only, so `phases` and `frames` -- both lists --
+    carried their nested objects through untouched. That is the shape of a leak that survives
+    review: the top level looks scrubbed."""
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            if k in _WIRE_FIELDS:
+                out[k] = v                       # raw wire, kept on purpose; see above
+            elif any(h in k.lower() for h in _SECRET_HINTS):
+                out[k] = "<redacted>"
+            else:
+                out[k] = _redact(v)
+        return out
+    if isinstance(value, list):
+        return [_redact(v) for v in value]
+    return value
 
 
 async def _do_dispatch_gate(ctx: _BleCtx, args: argparse.Namespace) -> dict[str, Any]:
@@ -1235,6 +1346,9 @@ async def _do_dispatch_gate(ctx: _BleCtx, args: argparse.Namespace) -> dict[str,
         # is worse than leaving them blank.
         "target": args.target,
         "firmware_sha": args.firmware_sha,
+        # Stated in the artifact rather than assumed by whoever reads it: the transcript holds raw
+        # sealed frames, which carry session ids and counters in the clear.
+        "handling": "contains raw wire frames; session-identifying, treat as sensitive",
         "pass": all(p.get("pass") for p in phases) if phases else False,
     }
     return _redact(record)
@@ -1244,6 +1358,24 @@ def cmd_dispatch_gate(args: argparse.Namespace) -> int:
     key = _parse_key_arg(args.key)
     if key is None:
         _status("dispatch-gate needs --key: both phases require an authenticated session.")
+        return 2
+
+    # REFUSED BEFORE CONNECTING, because these produce a run that looks like a pass. A zero or
+    # mismatched total is rejected by production PIPE START, and the replay phase would then be
+    # measuring the session gate with no transfer open -- silent, and meaningless.
+    if args.phase in ("all", "replay"):
+        if args.total_size <= 0:
+            _status("dispatch-gate: --total-size must be the panel's expected transfer size. "
+                    "A START whose total does not match is rejected, and the replay phase would "
+                    "then prove nothing.")
+            return 2
+        if args.chunk_bytes <= 0 or args.chunk_bytes > args.max_frame:
+            _status("dispatch-gate: --chunk-bytes must be positive and within --max-frame.")
+            return 2
+    if args.phase in ("all", "withhold") and not args.device_log:
+        _status("dispatch-gate: --device-log is required for the withhold phase. An unknown opcode "
+                "is answered with silence, so only the device's own log shows the canary reached "
+                "dispatch before notifications were re-enabled.")
         return 2
 
     async def run() -> dict[str, Any]:
@@ -1540,6 +1672,15 @@ Examples:
     p_gate.add_argument("--withhold", type=float, default=2.0,
                         help="seconds to hold notifications off while commands are dispatched")
     p_gate.add_argument("--timeout", type=float, default=15.0, help="config reassembly timeout")
+    p_gate.add_argument("--frame-gap", type=float, default=0.02,
+                        help="pause between continuation DATA frames")
+    p_gate.add_argument("--refresh-wait", type=float, default=90.0,
+                        help="seconds to wait for END ack and the refresh status; a panel refresh "
+                             "can take a minute, and a short wait reads as a failed transfer")
+    p_gate.add_argument("--device-log", default=None,
+                        help="operator-captured RTT/serial log, scanned for the unknown-opcode "
+                             "canary. The withhold phase CANNOT pass without it: an unknown opcode "
+                             "is silent by design, so nothing on the wire shows it reached dispatch")
     p_gate.add_argument("--target", default=None, help="board id, recorded in the evidence file")
     p_gate.add_argument("--firmware-sha", default=None, help="firmware SHA under test, recorded")
     p_gate.add_argument("-o", "--output", help="write the JSON evidence record to a file")

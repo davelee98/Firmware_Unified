@@ -14,6 +14,12 @@ The two failure modes are specific:
 Neither is visible on a board. Both are visible here, which is why this runs before either goes
 near hardware.
 
+THESE DRIVE THE PRODUCTION WORKFLOWS. An earlier version reproduced by hand the sequence the
+workflows were supposed to perform, and so proved the helpers and nothing about `_bench_replay()`
+or `_bench_withhold()` -- a review showed that rewriting either to seal twice, or to return an
+unconditional pass, went undetected. They are now run end to end against a scripted device peer
+(fake_device.py), and every case asserts on the workflow's own PASS logic.
+
 bleak is stubbed rather than installed: nothing here touches a radio, and requiring the BLE stack
 would make the gate skip on any machine without it -- and a check that skips is a check that
 eventually means nothing.
@@ -21,10 +27,12 @@ eventually means nothing.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import importlib.util
 import pathlib
 import sys
+import tempfile
 import types
 
 # Stub bleak BEFORE importing the CLI. The module imports it at top level for BleakClient, which no
@@ -40,6 +48,13 @@ cli = importlib.util.module_from_spec(_spec)
 # module that is not there yet fails at import rather than at use.
 sys.modules["od_device_cli"] = cli
 _spec.loader.exec_module(cli)
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from fake_device import FakeDevice  # noqa: E402
+
+# The tool narrates to stderr for an operator at a bench. In a test run that is noise around the
+# assertions, so it is silenced here rather than in the tool.
+cli._status = lambda _message: None
 
 FAILURES: list[str] = []
 CHECKS = 0
@@ -79,10 +94,13 @@ class FakeClient:
         return [d for (k, d) in self.events if k == "write"]
 
 
+SESSION_KEY_FOR_ORDER = bytes(range(16))
+
+
 def make_ctx() -> tuple[cli._BleCtx, FakeClient]:
     """An authenticated context with a deterministic session, so sealed bytes are reproducible."""
     session = cli.BleSession(master_key=bytes(range(16)))
-    session.session_key = bytes(range(16))
+    session.session_key = SESSION_KEY_FOR_ORDER
     session.session_id = bytes(range(16, 24))   # 8 bytes: id + 8-byte counter = the 16-byte nonce
     session.counter = 0
     session.authenticated = True
@@ -154,8 +172,14 @@ def test_withhold_writes_precede_resubscribe() -> None:
 
     # The canary is SECOND on purpose: RX is FIFO, so a device log naming 0x0060 proves the config
     # read ahead of it had already been dispatched with the notify path unwritable.
-    check(client.writes[0][:2] == b"\x00\x40" or len(client.writes[0]) > 2,
-          "the config read is written first")
+    #
+    # ASSERTED ON THE DECRYPTED OPCODE, not the frame length. The earlier form was
+    # `writes[0][:2] == b"\x00\x40" or len(writes[0]) > 2`, and every encrypted command is longer
+    # than two bytes -- so the `or` made it unconditionally true. A test that reads as an ordering
+    # check and checks nothing is worse than no test.
+    opcodes = [cli.decrypt_response(SESSION_KEY_FOR_ORDER, w)[:2] for w in client.writes]
+    check(opcodes == [b"\x00\x40", b"\x00\x60"],
+          f"config read first, canary second -- got {[o.hex() for o in opcodes]}")
 
 
 def test_set_notify_is_idempotent() -> None:
@@ -208,6 +232,156 @@ def test_evidence_redacts_secrets() -> None:
     check(record["phases"] == "kept", "the result itself survives")
 
 
+# ------------------------------------------------------- the production workflows, end to end ---
+
+SESSION_KEY = bytes(range(16))
+
+
+def make_device_ctx() -> tuple[cli._BleCtx, FakeDevice]:
+    """A context wired to a peer that answers like the firmware, with a live session."""
+    session = cli.BleSession(master_key=bytes(range(16)))
+    session.session_key = SESSION_KEY
+    session.session_id = bytes(range(16, 24))
+    session.counter = 0
+    session.authenticated = True
+    dev = FakeDevice(cli, SESSION_KEY)
+    ctx = cli._BleCtx(dev, session)
+    ctx.notify_enabled = True
+    dev.subscribed = True
+    dev._notify = lambda b: ctx._on_notify(None, bytearray(b))
+    return ctx, dev
+
+
+def gate_args(**over: object) -> argparse.Namespace:
+    base = dict(phase="all", total_size=192, window=4, max_frame=244, chunk_bytes=64,
+                settle=0.0, observe=0.0, withhold=0.0, timeout=1.0, frame_gap=0.0,
+                refresh_wait=0.0, device_log=None, target=None, firmware_sha=None, output=None)
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def run_replay(dev_setup=None, **over) -> dict:
+    ctx, dev = make_device_ctx()
+    if dev_setup:
+        dev_setup(dev)
+    log = cli._FrameLog()
+    ctx.raw_log = log
+    return asyncio.run(cli._bench_replay(ctx, log, gate_args(**over)))
+
+
+def test_replay_workflow_passes_against_a_conforming_device() -> None:
+    out = run_replay()
+    check(out["start_acked"], "START was acked")
+    check(out["first_frame_acked"], "the first DATA frame was acked")
+    check(out["replay_drew_silence"], "the replay drew silence")
+    check(out["control_answered_exactly"], "the control drew exactly 0081ff")
+    check(out["end_acked"] and out["refresh_reported"], "the transfer completed through refresh")
+    check(out["pass"], "a conforming device passes the replay phase")
+
+
+def test_replay_fails_when_pipe_never_opened() -> None:
+    """THE FINDING THAT MOTIVATED THE REWRITE. A replayed nonce is dropped by the session gate
+    before PIPE state matters, so a transfer that never opened is silent too -- and the phase used
+    to pass on that silence alone."""
+    out = run_replay(lambda d: setattr(d, "start_nacks", True))
+    check(not out["pass"], "a NACKed START cannot pass the replay phase")
+    check(out.get("stopped_at") == "start-not-acked", "it stops at the START, and says so")
+
+
+def test_replay_fails_when_first_frame_refused() -> None:
+    out = run_replay(lambda d: setattr(d, "data_nacks", True))
+    check(not out["pass"], "a refused first DATA frame cannot pass")
+    check(out.get("stopped_at") == "first-data-not-acked", "it stops there, and says so")
+
+
+def test_replay_fails_when_the_device_answers_a_replay() -> None:
+    """The defect the row exists to catch, seen from the tool's side."""
+    out = run_replay(lambda d: setattr(d, "answer_replays", True))
+    check(not out["replay_drew_silence"], "an answered replay is observed")
+    check(not out["pass"], "and it fails the phase")
+
+
+def test_replay_fails_when_the_transfer_dies() -> None:
+    """Silence is the required behaviour only if the upload then completes. A device that went
+    quiet because the transfer died satisfies the silence and control steps."""
+    out = run_replay(lambda d: setattr(d, "refresh_status", None))
+    check(out["replay_drew_silence"], "the replay was still silent")
+    check(out["control_answered_exactly"], "the control still answered")
+    check(not out["refresh_reported"], "but no refresh was reported")
+    check(not out["pass"], "so the phase fails -- silence without survival is not a pass")
+
+
+def test_replay_control_requires_the_exact_nack() -> None:
+    """Accepting any notification would let a late SACK stand in for the control, and then the
+    silence assertion in the step before is unfalsifiable."""
+    out = run_replay()
+    hexes = [r["hex"] for r in out["control_replies"]]
+    check("0081ff" in hexes, f"the control frame is matched byte-for-byte, got {hexes}")
+
+    # A device that answers the bad tag with SOMETHING ELSE must not satisfy the control. Without
+    # this case, "any notification" and "exactly 0081ff" are indistinguishable -- the conforming
+    # peer sends only the right frame, so the weaker condition passes too.
+    wrong = run_replay(lambda d: setattr(d, "bad_tag_answer",
+                                         bytes([0x00, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00])))
+    check(len(wrong["control_replies"]) > 0, "the wrong answer did arrive")
+    check(not wrong["control_answered_exactly"], "but it does not satisfy the control")
+    check(not wrong["pass"], "so the phase fails")
+
+
+def run_withhold(dev_setup=None, **over) -> dict:
+    ctx, dev = make_device_ctx()
+    if dev_setup:
+        dev_setup(dev)
+    log = cli._FrameLog()
+    ctx.raw_log = log
+    with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as fh:
+        path = fh.name
+
+    # The device's log grows as it dispatches, exactly as an operator's RTT capture would during a
+    # run. Flushing it on every write keeps the file current when the phase reads it.
+    original = dev.write_gatt_char
+
+    async def logging_write(uuid: str, data: bytes) -> None:
+        await original(uuid, data)
+        dev.write_log(path)
+
+    dev.write_gatt_char = logging_write
+    return asyncio.run(cli._bench_withhold(ctx, log, gate_args(device_log=path, **over)))
+
+
+def test_withhold_workflow_passes_against_a_conforming_device() -> None:
+    out = run_withhold()
+    check(out.get("frames_during_withhold") == 0, "nothing arrived while unsubscribed")
+    check(out.get("canary", {}).get("found"), "the canary line was found in the device log")
+    check(out.get("bytes_match_baseline"), "the withheld read matches the baseline byte for byte")
+    check(out.get("pass"), "a conforming device passes the withhold phase")
+
+
+def test_withhold_fails_without_the_device_log() -> None:
+    """frames_during_withhold == 0 is true by construction -- an unsubscribed host cannot receive
+    anything -- so without the log the phase would pass having proved nothing."""
+    ctx, dev = make_device_ctx()
+    log = cli._FrameLog()
+    ctx.raw_log = log
+    out = asyncio.run(cli._bench_withhold(ctx, log, gate_args(device_log=None)))
+    check(not out["pass"], "no device log means no pass")
+    check(not out.get("canary", {}).get("found"), "and the canary is reported as unfound")
+
+
+def test_withhold_fails_when_the_device_defers_processing() -> None:
+    """The case the old assertion could not see: a device that accepts the writes but processes
+    nothing until re-enable never enters the RETRY arm, so nothing about backpressure was shown."""
+    out = run_withhold(lambda d: setattr(d, "dispatch_while_unsubscribed", False))
+    check(not out.get("canary", {}).get("found"),
+          "a deferred dispatch produces no canary line before re-enable")
+    check(not out.get("pass"), "so the phase fails")
+
+
+def test_withhold_fails_when_queued_frames_are_dropped() -> None:
+    out = run_withhold(lambda d: setattr(d, "drop_while_unsubscribed", True))
+    check(not out.get("pass"), "dropped frames fail the phase")
+
+
 def main() -> int:
     test_seal_once_send_twice()
     test_two_seals_would_differ()
@@ -215,6 +389,16 @@ def main() -> int:
     test_set_notify_is_idempotent()
     test_raw_log_records_before_decryption()
     test_evidence_redacts_secrets()
+    test_replay_workflow_passes_against_a_conforming_device()
+    test_replay_fails_when_pipe_never_opened()
+    test_replay_fails_when_first_frame_refused()
+    test_replay_fails_when_the_device_answers_a_replay()
+    test_replay_fails_when_the_transfer_dies()
+    test_replay_control_requires_the_exact_nack()
+    test_withhold_workflow_passes_against_a_conforming_device()
+    test_withhold_fails_without_the_device_log()
+    test_withhold_fails_when_the_device_defers_processing()
+    test_withhold_fails_when_queued_frames_are_dropped()
     print(f"bench_dispatch_gate: {CHECKS} checks, {len(FAILURES)} failures")
     return 0 if not FAILURES else 1
 

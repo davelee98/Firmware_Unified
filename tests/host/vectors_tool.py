@@ -6,8 +6,15 @@ TWO JOBS, ONE TOOL, because they must agree about the schema. A validator that a
 generator cannot emit is a gate that passes and then fails the build; keeping the field list in one
 file is what stops that.
 
-    vectors_tool.py --check  <dir>              schema gate, emits nothing
-    vectors_tool.py --emit   <dir> <out.inc>    generate the C table
+    vectors_tool.py --check  <dir>              schema gate for one directory
+    vectors_tool.py --audit  <dir>              schema gate PLUS corpus-wide integrity
+    vectors_tool.py --emit   <dir> <out.inc>    generate the C table (implies --audit)
+
+TWO LEVELS, because they answer different questions. `--check` asks whether each vector is
+well-formed, which is what a fixture directory of deliberately malformed shapes needs. `--audit`
+additionally asks whether THE corpus is intact -- the exact counts, and the pairings whose whole
+purpose is that two vectors cannot drift apart. Applying corpus invariants to a two-vector fixture
+would fail for reasons that say nothing about the fixture.
 
 WHY GENERATION RATHER THAN A PARSER IN THE RUNNER. JSON is test data, not a product input. A
 vendored C parser would add code, a licence and malformed-input behaviour to the test
@@ -56,6 +63,12 @@ PROOFS = {"shared", "target-production", "historical-fixture"}
 # never recorded, and pretending otherwise would let unattributed bytes pass as a regression
 # baseline.
 PROVENANCE = {"authored", "captured", "captured-unattributed"}
+
+# What a `captured` side must carry to count as a provenance-complete regression baseline
+# (docs/TEST_OWNERSHIP.md, "Capture plan"). Prefixed per side: frame_target, reply_target, ...
+CAPTURE_FIELDS = ("target", "firmware_sha", "protocol_version", "panel", "host_version",
+                  "transport", "date")
+PROVENANCE_KEYS = ("frame", "reply", "limitation")
 
 # Semantic knobs a vector may set before its steps run. Deliberately a closed set: an unrecognised
 # key is a vector asking for a precondition no runner establishes, which would otherwise pass while
@@ -110,6 +123,20 @@ def _replies(expect: dict, where: str) -> list[bytes] | None:
         if not isinstance(seq, list) or not seq:
             raise Bad(f"{where}: `replies` must be a non-empty array; use `reply: null` for silence")
         return [_hex(f"{where}.replies[{i}]", r) for i, r in enumerate(seq)]
+    parsed = expect.get("parsed")
+    if parsed is not None:
+        # Validated here, EXECUTED later: od_dispatch_frame() exposes an outcome and replies, not a
+        # parsed struct od_config. Checking the shape now is what stops the field rotting before an
+        # adapter exists to run it.
+        if not isinstance(parsed, dict) or not parsed:
+            raise Bad(f"{where}: `expect.parsed` must be a non-empty object")
+        for path, want in parsed.items():
+            if not isinstance(path, str) or not path:
+                raise Bad(f"{where}: `expect.parsed` key must be a dotted path")
+            if any(seg == "" for seg in path.split(".")):
+                raise Bad(f"{where}: `expect.parsed` path {path!r} has an empty segment")
+            if not isinstance(want, (str, int, float, bool)) and want is not None:
+                raise Bad(f"{where}: `expect.parsed[{path}]` must be a JSON scalar")
     if "reply" not in expect:
         raise Bad(f"{where}: no `reply` or `replies`")
     if expect["reply"] is None:
@@ -160,15 +187,33 @@ def _check_vector(raw: dict) -> dict:
     prov = raw.get("provenance", {})
     if not isinstance(prov, dict):
         raise Bad("`provenance` must be an object")
+    known = set(PROVENANCE_KEYS)
+    for side in ("frame", "reply"):
+        known |= {f"{side}_source"} | {f"{side}_{f}" for f in CAPTURE_FIELDS}
+    unknown = set(prov) - known
+    if unknown:
+        # A typo in a provenance key is a claim nobody checks. Rejecting the key set is what makes
+        # `captured` mean the same thing in every vector.
+        raise Bad(f"`provenance` has unknown field(s) {sorted(unknown)}")
     for side in ("frame", "reply"):
         kind = prov.get(side)
         if kind is None:
             continue
         if kind not in PROVENANCE:
             raise Bad(f"`provenance.{side}` must be one of {sorted(PROVENANCE)}, got {kind!r}")
-        if kind == "captured-unattributed" and not prov.get(f"{side}_source"):
+        if kind == "captured":
+            # TEST_OWNERSHIP.md's capture plan lists what a capture must carry to be a regression
+            # baseline. A `captured` label without them is an unattributed capture wearing a better
+            # name, which is precisely the confusion this field exists to remove.
+            missing = [f for f in CAPTURE_FIELDS if not prov.get(f"{side}_{f}")]
+            if missing:
+                raise Bad(f"`provenance.{side}` is captured but lacks {missing}")
+        if kind == "captured-unattributed":
             # The whole point of this kind is that it names what it cannot attribute.
-            raise Bad(f"`provenance.{side}` is captured-unattributed but has no {side}_source")
+            if not prov.get(f"{side}_source"):
+                raise Bad(f"`provenance.{side}` is captured-unattributed but has no {side}_source")
+            if not prov.get("limitation"):
+                raise Bad(f"`provenance.{side}` is captured-unattributed but has no limitation")
 
     for key in raw.get("state", {}):
         if key not in STATE_KEYS:
@@ -193,6 +238,11 @@ def _check_vector(raw: dict) -> dict:
                 raise Bad(f"{where}: an h2d frame needs at least the two opcode bytes")
         elif origin is not None and origin not in ORIGINS:
             raise Bad(f"{where}: unknown origin {origin!r}")
+        if direction == "h2d" and "expect" not in step:
+            # Silence is `expect.reply: null` and must be written down. Inferring it from an absent
+            # key turns a vector somebody forgot to finish into an assertion that the device says
+            # nothing -- which is a real, load-bearing property, and not one to acquire by accident.
+            raise Bad(f"{where}: an h2d step needs an `expect` (use `reply: null` for silence)")
         replies = _replies(step["expect"], where) if "expect" in step else None
         if direction == "d2h" and replies:
             raise Bad(f"{where}: a d2h observation cannot expect a reply")
@@ -212,6 +262,30 @@ def _check_vector(raw: dict) -> dict:
 
 def _c_bytes(b: bytes) -> str:
     return "{" + ", ".join(f"0x{x:02x}" for x in b) + "}" if b else "{0}"
+
+
+# Vectors that must carry byte-identical replies. dispatch.json states in its own note that the
+# generator asserts this; before C12.3 it did not, which made the note a promise of protection the
+# reader did not have. The two firmware-version vectors record the same answer from opposite
+# directions -- one h2d, one d2h -- and if they can drift the stale one becomes a false witness.
+PAIRED_REPLIES = (
+    ("dispatch/firmware-version-current-with-patch",
+     "dispatch/firmware-version-response-with-patch"),
+)
+
+
+def check_pairings(vectors: list[dict]) -> None:
+    by_id = {v["id"]: v for v in vectors}
+    for a, b in PAIRED_REPLIES:
+        if a not in by_id or b not in by_id:
+            raise Bad(f"paired vectors {a} / {b}: one is missing, so the pairing is unchecked")
+        # The h2d side's reply is compared with the d2h side's FRAME: a d2h vector is the
+        # observation itself, so its bytes live in `frame`.
+        ra = by_id[a]["steps"][0]["replies"]
+        rb = by_id[b]["steps"][0]["frame"]
+        if not ra or len(ra) != 1 or ra[0] != rb:
+            raise Bad(f"{a} and {b} must carry identical bytes: "
+                      f"{(ra[0].hex() if ra else None)} != {rb.hex()}")
 
 
 def emit(vectors: list[dict], out: pathlib.Path) -> None:
@@ -269,7 +343,7 @@ def emit(vectors: list[dict], out: pathlib.Path) -> None:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 3 or argv[1] not in ("--check", "--emit"):
+    if len(argv) < 3 or argv[1] not in ("--check", "--audit", "--emit"):
         print(__doc__, file=sys.stderr)
         return 64
     root = pathlib.Path(argv[2])
@@ -294,6 +368,30 @@ def main(argv: list[str]) -> int:
         return 1
 
     if argv[1] == "--check":
+        return 0
+
+    try:
+        check_pairings([v for v in every if v["id"].startswith("dispatch/")])
+    except Bad as exc:
+        print(f"pairing: {exc}", file=sys.stderr)
+        return 1
+
+    # EXACT COUNTS, not a floor. The runner already fails on zero, but zero is not the failure that
+    # happens: a vector quietly dropped by a bad glob, or added without a decision about its proof
+    # class, leaves a green run with less coverage than the last one. Update these deliberately.
+    dispatch = [v for v in every if v["id"].startswith("dispatch/")]
+    h2d = [v for v in dispatch if any(s["dir"] == "h2d" for s in v["steps"])]
+    d2h_only = [v for v in dispatch if all(s["dir"] == "d2h" for s in v["steps"])]
+    for got, want, what in ((len(every), 24, "total vectors"),
+                            (len(dispatch), 17, "dispatch vectors"),
+                            (len(h2d), 14, "h2d dispatch vectors"),
+                            (len(d2h_only), 3, "d2h-only dispatch vectors")):
+        if got != want:
+            print(f"corpus accounting: {what} is {got}, expected {want}. If this change is "
+                  f"intended, update EXPECTED_COUNTS in {__file__}.", file=sys.stderr)
+            return 1
+
+    if argv[1] == "--audit":
         return 0
     if len(argv) < 4:
         print("--emit needs an output path", file=sys.stderr)
