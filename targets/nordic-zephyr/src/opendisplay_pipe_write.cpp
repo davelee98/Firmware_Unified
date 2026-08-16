@@ -170,8 +170,8 @@ static bool pipe_consume_payload(uint8_t *data, uint16_t len)
   return opendisplay_display_direct_write_data(data, len) == 0;
 }
 
-static void finish_and_refresh(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len,
-                               uint8_t end_opcode)
+static od_cmd_result_t finish_and_refresh(const od_cmd_ctx_t *ctx, const uint8_t *payload,
+                                          uint16_t payload_len, uint8_t end_opcode)
 {
   bool refresh_ok = false;
   uint8_t ack_end[2] = { RESP_ACK, end_opcode };
@@ -201,7 +201,7 @@ static void finish_and_refresh(const od_cmd_ctx_t *ctx, const uint8_t *payload, 
     }
     opendisplay_display_abort();
     opendisplay_pipe_write_reset();
-    return;
+    return OD_CMD_NACK;
   }
 
   /* THE ACK GATES THE REFRESH -- see the same rule on the direct-write END path. A hard NACK
@@ -210,7 +210,7 @@ static void finish_and_refresh(const od_cmd_ctx_t *ctx, const uint8_t *payload, 
   if (od_cmd_reply(ctx, ack_end, sizeof(ack_end)) != OD_TXQ_OK) {
     opendisplay_display_abort();
     opendisplay_pipe_write_reset();
-    return;
+    return OD_CMD_NACK;          /* od_reply substituted a hard NACK: the wire says refused */
   }
   /* On air before blocking -- see the same barrier on the direct-write END path. */
   od_cmd_flush_before_refresh();
@@ -218,14 +218,19 @@ static void finish_and_refresh(const od_cmd_ctx_t *ctx, const uint8_t *payload, 
   if (opendisplay_display_direct_write_end_refresh(prep, prep_len, &refresh_ok) != 0) {
     (void)od_cmd_reply_plain(ctx, nack, sizeof(nack));
     opendisplay_pipe_write_reset();
-    return;
+    return OD_CMD_NACK;
   }
+  /* OK on BOTH refresh outcomes. 0x74 reports a refresh that timed out, not a refused command:
+   * the transfer completed and the panel was driven. The distinction the verdict carries is
+   * accepted-vs-refused, and this frame was accepted. */
   (void)od_cmd_reply(ctx, refresh_ok ? ack_ok : ack_to, 2u);
   opendisplay_pipe_write_reset();
+  return OD_CMD_OK;
 }
 
-extern "C" void opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx, const uint8_t *payload,
-                                             uint16_t payload_len)
+extern "C" od_cmd_result_t opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx,
+                                                       const uint8_t *payload,
+                                                       uint16_t payload_len)
 {
   struct PipeStartRequest req;
   uint8_t ver;
@@ -248,7 +253,7 @@ extern "C" void opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx, const uint
 
   if (payload == nullptr || payload_len < sizeof(req)) {
     send_pipe_start_nack(ctx, OD_ERR_PIPE_START_BAD_HEADER);
-    return;
+    return OD_CMD_NACK;
   }
   memcpy(&req, payload, sizeof(req));
   ver = req.version;
@@ -260,11 +265,11 @@ extern "C" void opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx, const uint
 
   if (ver != PIPE_VERSION) {
     send_pipe_start_nack(ctx, OD_ERR_PIPE_START_BAD_HEADER);
-    return;
+    return OD_CMD_NACK;
   }
   if ((flags & ~(PIPE_FLAG_COMPRESSED | PIPE_FLAG_PARTIAL)) != 0u) {
     send_pipe_start_nack(ctx, OD_ERR_PIPE_START_UNKNOWN_FLAG);
-    return;
+    return OD_CMD_NACK;
   }
 
   compressed = (flags & PIPE_FLAG_COMPRESSED) != 0u;
@@ -276,21 +281,21 @@ extern "C" void opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx, const uint
 
     if (payload_len < sizeof(req) + sizeof(ext)) {
       send_pipe_start_nack(ctx, OD_ERR_PIPE_START_BAD_HEADER);
-      return;
+      return OD_CMD_NACK;
     }
     memcpy(&ext, payload + sizeof(req), sizeof(ext));
     if (opendisplay_display_pipe_partial_arm(flags, ext.old_etag, ext.x, ext.y, ext.w, ext.h,
                                              total_size, &err)
         != 0) {
       send_pipe_start_nack(ctx, err);
-      return;
+      return OD_CMD_NACK;
     }
   } else {
     uint32_t expected = opendisplay_display_expected_dw_bytes();
 
     if (expected == 0u || total_size != expected) {
       send_pipe_start_nack(ctx, OD_ERR_PIPE_START_SIZE_MISMATCH);
-      return;
+      return OD_CMD_NACK;
     }
   }
 
@@ -333,26 +338,36 @@ extern "C" void opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx, const uint
   resp[5] = (uint8_t)(PIPE_MAX_FRAME & 0xFFu);
   resp[6] = (uint8_t)((PIPE_MAX_FRAME >> 8) & 0xFFu);
   resp[7] = (uint8_t)(0x01u | (partial ? PIPE_FLAG_PARTIAL : 0u));
-  (void)od_cmd_reply(ctx, resp, sizeof(resp));
+  /* The verdict follows the wire: od_reply can substitute a plaintext hard NACK for a START ack it
+   * could not seal, and the host then sees a refusal. Reading the status here changes nothing that
+   * is sent -- it only stops the caller reporting an accepted command the peer was told was
+   * refused. */
+  if (od_cmd_reply(ctx, resp, sizeof(resp)) != OD_TXQ_OK) {
+    return OD_CMD_NACK;
+  }
 
+  /* PAST THE ACK. The host has been told the transfer is open, so these are failures of the
+   * DEVICE's own setup rather than refusals of this frame: the error flag makes every later DATA
+   * frame refuse, and the host learns of it there. The frame itself was accepted and answered. */
   if (partial) {
     if (opendisplay_display_pipe_partial_prepare() != 0) {
       s_pipe.error = true;
       opendisplay_display_clear_etag();
       opendisplay_display_abort();
-      return;
     }
-    return;
+    return OD_CMD_OK;
   }
 
   if (opendisplay_display_pipe_full_start(compressed, total_size) != 0) {
     s_pipe.error = true;
     opendisplay_display_abort();
   }
+  return OD_CMD_OK;
 }
 
-extern "C" void opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx, const uint8_t *payload,
-                                            uint16_t payload_len)
+extern "C" od_cmd_result_t opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx,
+                                                      const uint8_t *payload,
+                                                      uint16_t payload_len)
 {
   uint8_t seq;
   uint8_t *data;
@@ -361,8 +376,12 @@ extern "C" void opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx, const uint8
   uint8_t back;
   const uint8_t W = s_pipe.window;
 
+  /* SILENT, AND STILL A REFUSAL. A DATA frame for a transfer that is not open -- or that has
+   * already failed -- is discarded: answering it would send a 0x81 NACK, which is fatal to a
+   * client's upload loop, for a frame that changes nothing. Nothing was accepted, so the verdict
+   * is NACK and the frame does not stamp the session's activity clock. */
   if (!s_pipe.active || s_pipe.error || payload == nullptr || payload_len < 1u) {
-    return;
+    return OD_CMD_NACK;
   }
 
   seq = payload[0];
@@ -370,7 +389,7 @@ extern "C" void opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx, const uint8
   plen = (uint16_t)(payload_len - 1u);
   if (plen > PIPE_REORDER_SLOT_SIZE) {
     send_pipe_nack(ctx, 0x03u);
-    return;
+    return OD_CMD_NACK;
   }
 
   fwd = (uint8_t)(seq - s_pipe.expected_seq);
@@ -379,7 +398,7 @@ extern "C" void opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx, const uint8
   if (fwd == 0u) {
     if (!pipe_consume_payload(data, plen)) {
       send_pipe_nack(ctx, s_pipe.compressed ? 0x02u : 0x03u);
-      return;
+      return OD_CMD_NACK;
     }
     s_pipe.expected_seq++;
     s_pipe.received_count++;
@@ -391,7 +410,7 @@ extern "C" void opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx, const uint8
       PipeReorderSlot &slot = s_reorder[pipe_slot(s_pipe.expected_seq)];
       if (!pipe_consume_payload(slot.data, slot.len)) {
         send_pipe_nack(ctx, s_pipe.compressed ? 0x02u : 0x03u);
-        return;
+        return OD_CMD_NACK;
       }
       slot.occupied = false;
       if (s_pipe.queued_count > 0u) {
@@ -411,18 +430,20 @@ extern "C" void opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx, const uint8
         && opendisplay_display_bytes_written() >= opendisplay_display_total_bytes()) {
       if (send_pipe_ack(ctx) != OD_TXQ_OK) {
         pipe_abort_no_reply();
-        return;
+        return OD_CMD_NACK;
       }
-      finish_and_refresh(ctx, nullptr, 0u, 0x82u);
-      return;
+      /* AUTO-COMPLETE: the byte count met the total, so this DATA frame carries the END. Its
+       * verdict is the END's. */
+      return finish_and_refresh(ctx, nullptr, 0u, 0x82u);
     }
     /* No later reply follows a cadence ACK -- but the TRANSFER does, which is why the result is
      * not simply discarded: a substituted NACK is fatal, so carrying on would accept DATA for a
      * transfer the host has already stopped. */
     if (s_pipe.frames_since_ack >= s_pipe.ack_every && send_pipe_ack(ctx) != OD_TXQ_OK) {
       pipe_abort_no_reply();
+      return OD_CMD_NACK;
     }
-    return;
+    return OD_CMD_OK;
   }
 
   if (fwd < W) {
@@ -441,50 +462,64 @@ extern "C" void opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx, const uint8
     }
     if (s_pipe.queued_count >= PIPE_REORDER_SLOTS) {
       send_pipe_nack(ctx, 0x03u);
-      return;
+      return OD_CMD_NACK;
     }
     pipe_update_highest_seen(seq);
+    /* A GAP SACK, not a refusal: the frame was accepted into the reorder window. The ack's status
+     * still decides the verdict, because a substituted hard NACK is what the host actually got. */
     if (!s_pipe.gap_open) {
       s_pipe.gap_open = true;
-      (void)send_pipe_ack(ctx);
+      if (send_pipe_ack(ctx) != OD_TXQ_OK) {
+        return OD_CMD_NACK;
+      }
     } else if (++s_pipe.ooo_acks_since_gap >= s_pipe.ack_every) {
-      (void)send_pipe_ack(ctx);
+      if (send_pipe_ack(ctx) != OD_TXQ_OK) {
+        return OD_CMD_NACK;
+      }
     }
-    return;
+    return OD_CMD_OK;
   }
 
+  /* A DUPLICATE inside the window: already consumed, so nothing is stored, but it is answered
+   * with the current SACK so a client that lost an ack can resynchronise. Accepted. */
   if (back <= W) {
     if (!s_pipe.gap_open) {
-      (void)send_pipe_ack(ctx);
+      if (send_pipe_ack(ctx) != OD_TXQ_OK) {
+        return OD_CMD_NACK;
+      }
     } else if (++s_pipe.ooo_acks_since_gap >= s_pipe.ack_every) {
-      (void)send_pipe_ack(ctx);
+      if (send_pipe_ack(ctx) != OD_TXQ_OK) {
+        return OD_CMD_NACK;
+      }
     }
-    return;
+    return OD_CMD_OK;
   }
 
-  send_pipe_nack(ctx, 0x04u);
+  send_pipe_nack(ctx, 0x04u);      /* outside the window in both directions: fatal */
+  return OD_CMD_NACK;
 }
 
-extern "C" void opendisplay_pipe_write_end(const od_cmd_ctx_t *ctx, const uint8_t *payload,
-                                           uint16_t payload_len)
+extern "C" od_cmd_result_t opendisplay_pipe_write_end(const od_cmd_ctx_t *ctx,
+                                                     const uint8_t *payload,
+                                                     uint16_t payload_len)
 {
   uint8_t nack[2] = { RESP_NACK, 0x82u };
   bool incomplete;
 
   if (!s_pipe.active) {
     (void)od_cmd_reply_plain(ctx, nack, sizeof(nack));
-    return;
+    return OD_CMD_NACK;
   }
   if (s_pipe.error) {
     (void)od_cmd_reply_plain(ctx, nack, sizeof(nack));
     opendisplay_display_abort();
     opendisplay_pipe_write_reset();
-    return;
+    return OD_CMD_NACK;
   }
 
   if (send_pipe_ack(ctx) != OD_TXQ_OK) {
     pipe_abort_no_reply();
-    return;
+    return OD_CMD_NACK;
   }
 
   incomplete = (s_pipe.queued_count > 0u);
@@ -505,8 +540,8 @@ extern "C" void opendisplay_pipe_write_end(const od_cmd_ctx_t *ctx, const uint8_
     }
     opendisplay_display_abort();
     opendisplay_pipe_write_reset();
-    return;
+    return OD_CMD_NACK;
   }
 
-  finish_and_refresh(ctx, payload, payload_len, 0x82u);
+  return finish_and_refresh(ctx, payload, payload_len, 0x82u);
 }

@@ -915,25 +915,22 @@ od_cmd_result_t od_cmd_app_partial_start(const od_cmd_ctx_t *ctx, od_span_t body
   return handle_partial_write_start(ctx, pl(body), pl_len(body));
 }
 
+/* THE MODULE'S VERDICT IS THE COMMAND'S. It answers the wire itself, so it is the only thing that
+ * knows whether this frame was accepted or refused; an OK tail here would report a PIPE NACK as an
+ * accepted command and stamp the session clock on traffic the device rejected. */
 od_cmd_result_t od_cmd_app_pipe_start(const od_cmd_ctx_t *ctx, od_span_t body)
 {
-  opendisplay_pipe_write_start(ctx, pl(body), pl_len(body));
-  /* The PIPE-write module answers for itself and does not yet report a verdict; C11.3 gives it
-   * one. Until then a PIPE NACK is followed by an unconditional OK here, which is wrong and is
-   * the next commit's subject. */
-  return OD_CMD_OK;
+  return opendisplay_pipe_write_start(ctx, pl(body), pl_len(body));
 }
 
 od_cmd_result_t od_cmd_app_pipe_data(const od_cmd_ctx_t *ctx, od_span_t body)
 {
-  opendisplay_pipe_write_data(ctx, pl(body), pl_len(body));
-  return OD_CMD_OK;
+  return opendisplay_pipe_write_data(ctx, pl(body), pl_len(body));
 }
 
 od_cmd_result_t od_cmd_app_pipe_end(const od_cmd_ctx_t *ctx, od_span_t body)
 {
-  opendisplay_pipe_write_end(ctx, pl(body), pl_len(body));
-  return OD_CMD_OK;
+  return opendisplay_pipe_write_end(ctx, pl(body), pl_len(body));
 }
 
 od_cmd_result_t od_cmd_app_led_activate(const od_cmd_ctx_t *ctx, od_span_t body)

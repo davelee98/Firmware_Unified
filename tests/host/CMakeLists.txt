@@ -11,7 +11,10 @@
 # Green against an empty shared/ by design (docs/TEST_OWNERSHIP.md § "First step").
 
 cmake_minimum_required(VERSION 3.16)
-project(od_host_tests C)
+# CXX is here for ONE reason: two Nordic target sources are .cpp, and the suites that cover them
+# compile the production file rather than a transcription of it. shared/ remains plain C and is
+# still built by the C compiler -- the boundary checks in tools/check.sh enforce that separately.
+project(od_host_tests C CXX)
 
 enable_testing()
 find_package(Threads REQUIRED)
@@ -261,6 +264,24 @@ target_include_directories(od_esp_crypto_random_test PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/fake_esp)
 target_link_libraries(od_esp_crypto_random_test od_shared od_fake_psa)
 add_test(NAME esp_crypto_random COMMAND od_esp_crypto_random_test)
+
+# pipe_write: the Nordic PIPE state machine's VERDICTS, against fake display/reply/kernel seams.
+#
+# A verdict is invisible in a packet capture -- both sides see the same NACK -- but it decides
+# whether the frame stamps the session's activity clock, so a wrong OK on a refused frame keeps a
+# link alive on traffic the device rejected. Each case asserts the verdict AND the frames.
+add_executable(od_pipe_write_test
+    pipe_write_test.c
+    ../../targets/nordic-zephyr/src/opendisplay_pipe_write.cpp)
+target_include_directories(od_pipe_write_test PRIVATE
+    ../../targets/nordic-zephyr/src
+    ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr)
+target_link_libraries(od_pipe_write_test od_shared)
+# The production file is C++ and the target builds it with exceptions and RTTI off; match that so
+# the host is not compiling a different language from the device.
+target_compile_options(od_pipe_write_test PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions -fno-rtti>)
+add_test(NAME pipe_write COMMAND od_pipe_write_test)
 
 # Nordic config pin bytes are a wire contract and deliberately differ by
 # platform: nRF52840 uses absolute port*32+pin values, while nRF54 uses the
