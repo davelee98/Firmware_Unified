@@ -43,7 +43,13 @@
         "note": "The three @required singletons and nothing else: 0x01 SystemConfig (22 B), 0x02 ManufacturerData (22 B), 0x04 PowerOption (30 B) - opendisplay_structs.h:418,436,484 (@required) and their OD_STATIC_ASSERT sizes at :430,:449,:507. Outer = 3 header + 24 + 24 + 32 + 2 CRC = 85 B, under CONFIG_CHUNK_SIZE (200) so it takes the single-frame CONFIG_WRITE path (opendisplay_protocol.h:316). Ack is the 4-byte config shape (DIVERGENCE 1.4). CAUTION for the Python runner: py-opendisplay 7.14.0 config_parser.py:207-219 ALSO demands a 0x20 display packet and raises ConfigParseError('Missing required packet(s): display') on this blob - the header marks 0x20 @repeatable max=4, not @required (opendisplay_structs.h:688). Host/spec divergence, recorded not resolved."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     },
     {
       "id": "config_tlv/unknown-packet-type-security-survives",
@@ -64,7 +70,13 @@
         "note": "DIVERGENCE 2.2, the highest-value vector in the corpus. Packet order is 0x01, 0x02, 0x04, then type 0xF0 (in NO size table on any target), then 0x27 SecurityConfig (64 B, opendisplay_structs.h:909-921). Firmware and Silabs force skip-to-CRC on an unrecognised id and therefore LOSE the 0x27 that follows it - the exact bug DIVERGENCE 2.1/2.2 describes, where 0x27 today survives only because it sorts ahead of 0x2A. NRF54 is the model: a size-table skip for known-but-unparsed types plus rescan_security_packet() (opendisplay_config_parser.c:42-64, 621-623) which re-finds a 0x27 after a genuinely unknown id. Assert security is loaded. The 0xF0 payload is 8 bytes of 0xA5; its length is deliberately arbitrary because an unknown type carries no length, which is why recovery needs the rescan and not arithmetic. Key 00..0f is synthetic - never a captured key. CAUTION for the Python runner: py-opendisplay 7.14.0 config_parser.py:127-130 does not skip at all on an unknown type, it BREAKS out of the walk, so it drops 0x27 exactly like the two buggy firmwares."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     },
     {
       "id": "config_tlv/bad-outer-crc-advisory",
@@ -85,7 +97,13 @@
         "note": "DIVERGENCE 2.8 - OBSERVED BEHAVIOUR, NOT A DESIRED CONTRACT. Same blob as config_tlv/minimal-required-singletons with both CRC bytes inverted. All three targets treat the toolbox-outer CRC16 as ADVISORY: the mismatch is logged and the config is applied anyway (Firmware config_parser.cpp:665-672, NRF54 opendisplay_config_parser.c:657-670 - which only printf()s 'CRC mismatch', Silabs opendisplay_config_parser.c:490-498). A second, inner CRC32 in the storage record IS enforced on load. Whether shared/core starts ENFORCING the outer CRC16 is an open decision (DIVERGENCE 2.8 resolution column); when it is made, this vector's expectation changes and gains a deprecated_after marker - it must not be read as a licence to keep ignoring the CRC."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     },
     {
       "id": "config_tlv/chunked-start-valid",
@@ -101,7 +119,13 @@
         "note": "Chunked CONFIG_WRITE START. Payload is CONFIG_CHUNK_SIZE_WITH_PREFIX = 202 = total(2 LE) + CONFIG_CHUNK_SIZE(200) (opendisplay_protocol.h:887-888, :316-321). total = 0x0190 = 400, so expected_chunks = 1 + ceil(200/200) = 2 (NRF54 handle_config_write() opendisplay_pipe.c:971-975). The first frame MUST carry a full 200 data bytes: a short first chunk makes firmware take the single-frame path and NACK the following 0x42 chunks (opendisplay_protocol.h:317-319). The 200 data bytes are zero filler - every check on this path is length-only and no TLV parsing happens until the final chunk commits. CAUTION for the Python runner: a 0x41 frame whose payload is 202 bytes is a [total][chunk] START, not a 202-byte config; py-opendisplay's build_write_config_command() takes the whole payload AS the config, so a naive builder round-trip on this vector re-chunks it and mismatches. Such vectors must be skipped host-side, not asserted."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     },
     {
       "id": "config_tlv/chunked-start-total-over-max-nack",
@@ -117,7 +141,13 @@
         "note": "DIVERGENCE 2.3 - declared total > MAX_CONFIG_SIZE is rejected AT START. total = 0x2000 = 8192 > 4096 (MAX_CONFIG_SIZE, global as of 2026-07-25, DIVERGENCE 2.7). NRF54 handle_config_write() opendisplay_pipe.c:930-935 resets the chunk context and sends the 4-byte err[] = {0xFF, RESP_CONFIG_WRITE, 0x00, 0x00}; total == 0 is rejected by the same branch. Firmware does NOT perform this check at all (communication.cpp:456-478) - NRF54 is the model to promote, so this vector is expected to FAIL against an unfixed ESP32 import and that failure is the point. Same Python-runner caveat as config_tlv/chunked-start-valid: this is a chunked START, not a 202-byte config."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     },
     {
       "id": "config_tlv/chunk-without-active-start-nack",
@@ -133,7 +163,13 @@
         "note": "DIVERGENCE 2.3 (the connection-binding tightening): a 0x42 CONFIG_CHUNK with no active chunked write - or one bound to a different connection - is NACKed with the 4-byte [0xFF][0x42][0x00][0x00]. NRF54 handle_config_chunk() opendisplay_pipe.c:995-998 (!s_cfg_chunk.active || s_cfg_chunk.connection != connection). opendisplay_protocol.h:330-331."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     },
     {
       "id": "config_tlv/chunk-end-size-mismatch-nack",
@@ -153,7 +189,13 @@
         "note": "DIVERGENCE 2.3 - END is rejected when received_size != total_size. Continues config_tlv/chunked-start-valid: 200 of 400 bytes are in, expected_chunks is 2, so this final chunk completes the COUNT (received_chunks >= expected_chunks) while leaving the BYTE total short at 300 != 400. NRF54 handle_config_chunk() opendisplay_pipe.c:1028-1033 resets and NACKs. Firmware commits on the chunk COUNT alone without comparing received_size to total_size (communication.cpp:527-537), so it would ack this and save a 300-byte truncation - the divergence this vector pins."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     }
   ]
 }

@@ -323,6 +323,89 @@ target_include_directories(od_nordic_cmd_device_test PRIVATE
 target_link_libraries(od_nordic_cmd_device_test od_shared)
 add_test(NAME nordic_cmd_device COMMAND od_nordic_cmd_device_test)
 
+# --------------------------------------------------------------------------------------------
+# dispatch_corpus: tests/vectors/dispatch.json replayed through the production od_dispatch_frame().
+#
+# This is the OTHER END of a contract that has only ever been checked from one side.
+# replay_vectors.py drives the same corpus through py-opendisplay's public API and says outright
+# that firmware replies are "never checkable here" (replay_vectors.py:18) -- so every h2d
+# expect.reply has been unchecked against firmware since the corpus was authored. Same file, same
+# vectors, the device side.
+#
+# The table is GENERATED into the build directory and never committed: a checked-in copy is the
+# second corpus TEST_OWNERSHIP.md forbids, and it permits a stale green. Regenerating depends on the
+# JSON, so editing a vector rebuilds the table.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+    set(OD_VEC_TOOL ${CMAKE_CURRENT_LIST_DIR}/vectors_tool.py)
+    set(OD_VEC_DIR  ${CMAKE_CURRENT_LIST_DIR}/../vectors)
+    set(OD_VEC_INC  ${CMAKE_CURRENT_BINARY_DIR}/generated/dispatch_vectors.inc)
+    file(GLOB OD_VEC_JSON ${OD_VEC_DIR}/*.json)
+    add_custom_command(
+        OUTPUT ${OD_VEC_INC}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/generated
+        COMMAND ${Python3_EXECUTABLE} ${OD_VEC_TOOL} --emit ${OD_VEC_DIR} ${OD_VEC_INC}
+        DEPENDS ${OD_VEC_TOOL} ${OD_VEC_JSON}
+        COMMENT "od: generating the dispatch vector table from tests/vectors/")
+    add_custom_target(od_vectors_generated DEPENDS ${OD_VEC_INC})
+
+    # The schema gate, as its own test: a malformed or under-specified vector must fail loudly
+    # rather than be silently dropped by whatever consumes it next.
+    add_test(NAME vectors_schema
+             COMMAND ${Python3_EXECUTABLE} ${OD_VEC_TOOL} --check ${OD_VEC_DIR})
+
+    # ONE runner source, TWO executables. od_cmd_app_* is static link-time composition, so two
+    # profiles cannot share a binary -- and the answer to that is emphatically not a runtime
+    # registry. Each executable resolves the seam once.
+    #
+    # Only the runner sees the generated table. A profile gets corpus_runner.h, which exposes
+    # semantic knobs and no expected bytes: a fake that could read expect.reply would make the
+    # corpus its own oracle, and every vector would pass while proving nothing.
+    add_executable(od_dispatch_corpus_portable_test
+        corpus_runner.c
+        corpus_profile_portable.c
+        ${OD_VEC_INC})
+    target_include_directories(od_dispatch_corpus_portable_test
+        PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+    target_link_libraries(od_dispatch_corpus_portable_test od_session_fake)
+    add_dependencies(od_dispatch_corpus_portable_test od_vectors_generated)
+    add_test(NAME dispatch_corpus_portable COMMAND od_dispatch_corpus_portable_test)
+
+    # The second executable, and the one whose green means "the firmware emits these bytes". It
+    # defines no hook of its own: every od_cmd_app_* comes from Nordic's production command
+    # translation units, compiled against fake drivers. That follows the rule the target lifecycle
+    # suites already set -- compile the production source, never a transcription.
+    add_executable(od_dispatch_corpus_nordic_test
+        corpus_runner.c
+        corpus_profile_nordic.c
+        fake_nordic/fake_nordic.c
+        ../../targets/nordic-zephyr/src/od_cmd_device.c
+        ../../targets/nordic-zephyr/src/od_cmd_config.c
+        ../../targets/nordic-zephyr/src/od_cmd_direct.c
+        ../../targets/nordic-zephyr/src/od_cmd_nfc.c
+        ../../targets/nordic-zephyr/src/od_cmd_reply.c
+        ../../targets/nordic-zephyr/src/opendisplay_pipe_write.cpp
+        ${OD_VEC_INC})
+    target_include_directories(od_dispatch_corpus_nordic_test PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}/generated
+        ${CMAKE_CURRENT_LIST_DIR}/fake_nordic
+        ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr
+        ../../targets/nordic-zephyr/src)
+    # The build SHA is a COMPILE-TIME macro on this target, not a runtime knob like the version and
+    # patch fields -- so the vector that pins the current 0x43 answer needs it defined here, on
+    # this executable only. Setting it globally would reach the other Nordic suites, which
+    # deliberately run against the default placeholder.
+    target_compile_definitions(od_dispatch_corpus_nordic_test PRIVATE SHA="1a2b3c4d")
+    target_compile_options(od_dispatch_corpus_nordic_test PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions -fno-rtti>)
+    target_link_libraries(od_dispatch_corpus_nordic_test od_session_fake)
+    add_dependencies(od_dispatch_corpus_nordic_test od_vectors_generated)
+    add_test(NAME dispatch_corpus_nordic COMMAND od_dispatch_corpus_nordic_test)
+else()
+    message(WARNING "od: Python3 not found -- the dispatch corpus runner is NOT built and the "
+                    "corpus reply half is UNCHECKED in this build.")
+endif()
+
 # Nordic config pin bytes are a wire contract and deliberately differ by
 # platform: nRF52840 uses absolute port*32+pin values, while nRF54 uses the
 # compact packed form. Keep the pure decoder checked without a Zephyr build.

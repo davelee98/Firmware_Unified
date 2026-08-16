@@ -358,13 +358,22 @@ static void test_structural_and_liveness(void)
     (void)od_txq_process();
     CHECK(g_sent_n == 0u);                 /* nothing to echo, so nothing is said */
 
-    CASE("a BLE frame above 244 is refused by the DISPATCHER, with a NACK the host can see");
+    /* ALL THREE BYTES, because checking only one is how the shape drifted. This case used to
+     * assert byte 2 alone and passed while the dispatcher answered [00][cmd][FF] -- the ACK-family
+     * shape, and the same three bytes a DECRYPT FAILURE produces. Both donors ship
+     * [FF][cmd_lo][FE] and the corpus records it. */
+    CASE("a BLE frame above 244 is refused by the DISPATCHER with the donors' [FF][cmd][FE]");
     setup(false, false);
     CHECK(od_dispatch_frame(&BLE, od_span_make(big, 245u)) == OD_FRAME_REJECTED_FRAME);
     CHECK(g_handler_calls == 0u);
     (void)od_txq_process();
     CHECK(g_sent_n == 1u);
-    CHECK(g_sent[0].data[2] == RESP_NACK);
+    CHECK(g_sent[0].len == 3u);
+    CHECK(g_sent[0].data[0] == RESP_NACK);
+    CHECK(g_sent[0].data[1] == 0x77u);          /* the opcode echoed, low byte */
+    CHECK(g_sent[0].data[2] == 0xFEu);
+    /* And it must NOT be the decrypt-failure frame, which is the collision this shape avoids. */
+    CHECK(!(g_sent[0].data[0] == RESP_ACK && g_sent[0].data[2] == RESP_NACK));
 
     CASE("a dead tag is STALE_TAG and answers nothing");
     setup(false, false);

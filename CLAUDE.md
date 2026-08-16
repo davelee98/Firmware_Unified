@@ -36,8 +36,9 @@ looks arbitrary and is not); delete the story.
   the target is verified, the L15 is not. `efr32bg22-slc` builds headless
   (`./build-and-flash.sh --no-flash`) and has never been flashed.
 - **THERE IS NO CI. `tools/check.sh` (repo root) is every gate this repo has, and nothing runs
-  it but you.** Boundary greps, the host suite under gcc + clang, the same suite under
-  ASan/UBSan, the pre-auth fuzz targets, the py-opendisplay wire corpus, and the shim ratchet;
+  it but you.** Boundary greps, the C11 ownership ratchets, the host suite under gcc + clang, the
+  same suite under ASan/UBSan, the pre-auth fuzz targets, the py-opendisplay wire corpus, and the
+  shim ratchet;
   `--targets` adds both target families (ESP32 boards + sdkconfig baseline, all three Nordic
   boards) and is required before merge. **A SKIP IS NOT A PASS** — missing
   clang or ESP-IDF skips rather than fails, so read the summary, which reprints skips and exits
@@ -190,7 +191,26 @@ looks arbitrary and is not); delete the story.
   FastEPD adapter (Arduino `SPI` over IDF `spi_master`). It and both vendored panel libraries sit
   off the include path, granted per-source in `main/CMakeLists.txt` — adding a consumer is an edit
   there, not an `#include`.
-- Live plan: docs/NEXT_STEPS_2026-08-05.md (docs/NEXT_STEPS.md is historical).
+- **THE WIRE CORPUS IS NOW CHECKED FROM BOTH ENDS** (C12, 2026-08-16). `tests/vectors/dispatch.json`
+  was only ever replayed through py-opendisplay's public API, and `tests/host/replay_vectors.py:18`
+  says outright that firmware replies are "never checkable here" — so every `expect.reply` had gone
+  unchecked against firmware since the corpus was authored. `tests/host/corpus_runner.c` drives the
+  same file through the production `od_dispatch_frame()`. It found a wire regression on its first
+  run: C10 had silently replaced Nordic's oversize refusal `[FF][cmd_lo][FE]` — the bytes both
+  donors ship — with `[00][cmd][FF]`, which is *also* the decrypt-failure answer, so a host could
+  not tell the two apart. Restored, and pinned.
+  **TWO EXECUTABLES, and the difference is what a pass MEANS.** `od_cmd_app_*` is static link-time
+  composition, so two hook sets cannot share a binary — and the answer to that is not a runtime
+  registry. `dispatch_corpus_portable` proves shared dispatch routed and plumbed a vector;
+  `dispatch_corpus_nordic` links Nordic's production command code and proves the firmware emits
+  those bytes. A `historical-fixture` vector is excluded from the production profile by
+  construction, and a `target-production` vector that a capability predicate excludes there is a
+  FAILURE — its claim would otherwise stand with nothing behind it.
+  No fake ever sees an expected reply: the generated table is included by the runner and nothing
+  else, and profiles get semantic knobs instead. That is what stops the corpus becoming its own
+  oracle.
+- Live plan: docs/NEXT_STEPS_2026-08-05.md (docs/NEXT_STEPS.md is historical). Dispatch: C8–C11
+  landed, C12 in progress (plans/PLAN_OD_DISPATCH_C12_2026-08-16.md); Silabs is C13.
 
 ## The one rule
 

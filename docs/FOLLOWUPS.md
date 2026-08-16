@@ -214,11 +214,18 @@ ceiling, and the whole 4096 figure is headroom rather than a live constraint.
 **Still to do:** add the `MAX_CONFIG_CHUNKS = 21` change to the queue of canonical-header edits
 that land when the freeze lifts (DIVERGENCE_MATRIX §8), sequenced with the other pending ones.
 
-### 3.2 Corpus schema gaps
+### 3.2 Corpus schema gaps — **ALL DECIDED, C12.0, 2026-08-16**
 
-Found by authoring the first 23 vectors. All three are recorded in the `_meta` of the vector
-files; they need a decision before the corpus grows much further, because retrofitting a schema
-across a large corpus is the expensive version of this.
+Found by authoring the first 23 vectors, and taken before the corpus grew: the decisions are in
+`plans/PLAN_OD_DISPATCH_C12_2026-08-16.md` § 2.3 and implemented by `tests/host/vectors_tool.py`.
+`forbids` is adopted; `expect.parsed` is blessed and validated but its EXECUTION is deferred, with
+the reason recorded, because `od_dispatch_frame()` exposes replies rather than a parsed
+`struct od_config`; ordered `expect.replies` are adopted with `expect.reply` kept as the
+zero-or-one shorthand. A fourth gap surfaced during the work and is decided with them: `origin` was
+implicit even though shared dispatch applies a 244-byte ceiling to BLE, 4094 to LAN, and exempts
+LAN-TLS from the session gate.
+
+The original text is kept below because each gap explains a field that now exists.
 
 - **`requires` is positive-only.** The "a disabled subsystem still answers" vectors need the
   opposite — *this flag must be OFF*. Worked around with `state.cap_*` booleans. A `forbids`
@@ -231,9 +238,25 @@ across a large corpus is the expensive version of this.
   §3.3 says Silabs diverges), multi-frame sequences, or the chunk-ceiling case in 3.1 above
   (which needs 21 frames).
 
-### 3.3 The corpus is authored, not captured
+### 3.3 The corpus is authored, not captured — **THE CLAIM WAS FALSE; CORRECTED C12.0**
 
-Every `expect.reply` in `tests/vectors/` is read off source and specification. **Nothing has
+**This section was wrong, and the correction matters more than the original point.** Five vectors
+do not read their bytes off source at all -- they copy real captures from
+`py-opendisplay/tests/fixtures/real_protocol_data/`, and say so in their own notes
+(`02_read_firmware_response.bin`, `03_upload_start_uncompressed_command.bin`,
+`04_data_chunk_command.bin`, `05_upload_end_command.bin`). The files exist. What does not exist,
+in either repository, is the target, firmware SHA, panel, host version or date behind them.
+
+So the corpus holds three kinds of evidence, not one, and C12.0 makes the distinction
+machine-readable rather than leaving it in prose: `authored`, `captured` (provenance-complete per
+`TEST_OWNERSHIP.md` § "Capture plan"), and `captured-unattributed` for exactly those legacy
+fixtures -- which names the source file, carries a limitation string, may not be used by a new
+vector, and never counts as a provenance-complete regression baseline.
+
+The original concern still stands for everything else, and its deadline has now passed for two
+targets. The text follows.
+
+Every OTHER `expect.reply` in `tests/vectors/` is read off source and specification. **Nothing has
 been observed on hardware.** [TEST_OWNERSHIP.md](TEST_OWNERSHIP.md) § "Capture is
 time-sensitive" is the item with a real deadline: once `shared/core` starts replacing a
 target's logic, there is no longer an untouched reference to capture from, and the corpus

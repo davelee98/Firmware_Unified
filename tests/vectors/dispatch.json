@@ -8,17 +8,20 @@
     "expect.reply": "lowercase hex of the device's reply frame, or null when the device emits NO frame at all",
     "expect.note": "provenance: a DIVERGENCE_MATRIX.md row, a shared/protocol/opendisplay_protocol.h line, or a real capture",
     "min_protocol": "OD_PROTOCOL_VERSION at which the vector became valid; canonical is 2.2",
-    "requires": "OD_*_ENABLE flags that must be ON. NOTE: it cannot express 'must be OFF', which is what the disabled-subsystem NACK vectors need; those use the cap_* state keys instead",
+    "requires": "capability predicates that must be ON",
     "state": {
       "sec_enabled": "stored SecurityConfig has encryption_enabled=1 and a non-zero key",
       "session": "null = no live session; \"live\" = an authenticated session is open",
       "xfer_active": "a direct-write (0x70) transfer session is open",
       "storage_ok": "config storage init/save succeeds",
       "fw_patch_byte": "firmware appends the optional trailing [patch] byte to its 0x43 reply",
-      "cap_partial": "0x76 partial-region support compiled in / panel is 1bpp",
-      "cap_buzzer": "0x77 buzzer support compiled in",
-      "cap_power_latch": "D-FF power-latch hardware present (0x52 POWER_OFF)"
-    }
+      "fw_sha": "the build SHA this firmware reports, as an ASCII string. A semantic input like the version fields, NOT a wire byte: the vector asserts where it lands and how shaLen describes it"
+    },
+    "forbids": "capability predicates that must be OFF -- replaces the cap_* state booleans, which could only be spelled positively",
+    "origin": "transport an h2d frame arrives on: ble | lan-plain | lan-tls. Behaviour, not provenance: BLE has a 244-byte dispatcher ceiling, LAN 4094, and lan-tls bypasses the session gate",
+    "proof": "what a passing vector may CLAIM: shared (reply comes from shared dispatch) | target-production (from a target's production command code) | historical-fixture (a shape current production does not emit; never counted as target coverage)",
+    "provenance": "per side: authored | captured | captured-unattributed. The last is for the legacy py-opendisplay fixtures whose target/SHA/panel/date were never recorded; it may not be used by a new vector",
+    "expect.replies": "ordered array, for one dispatch that emits more than one frame. expect.reply remains the zero-or-one shorthand; null still means the device emits nothing"
   },
   "vectors": [
     {
@@ -34,7 +37,13 @@
         "note": "DIVERGENCE 1.1 - [0x00][echo][0xFE]. 0xFE is carried as DATA in a 3-byte frame, not as a leading status byte. The header's [0xFE][cmd_echo] (opendisplay_protocol.h:190,222) is wrong; all three shipped implementations agree on this shape (Firmware communication.cpp:630,637; NRF54 send_auth_required_response() opendisplay_pipe.c:293-297; Silabs opendisplay_pipe.c:227)."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     },
     {
       "id": "dispatch/auth-required-reboot",
@@ -49,7 +58,13 @@
         "note": "DIVERGENCE 1.1, second opcode. The echo byte is the LOW byte of the command (0x0F), not the whole opcode. NRF54 dispatch() auth gate at opendisplay_pipe.c:1210-1224 exempts only FIRMWARE_VERSION (and a flagged config rewrite)."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     },
     {
       "id": "dispatch/firmware-version-plaintext-exempt",
@@ -58,42 +73,86 @@
       "state": {
         "sec_enabled": true,
         "session": null,
-        "fw_patch_byte": false
+        "fw_patch_byte": false,
+        "fw_sha": "e63ae32447a83f3b64f3146999060ca1e906bf15"
       },
       "expect": {
         "reply": "004300412865363361653332343437613833663362363466333134363939393036306361316539303662663135",
         "note": "DIVERGENCE 1.5 + opendisplay_protocol.h:349 (ALWAYS PLAINTEXT): 0x43 is NOT auth-gated, so it answers with a version frame rather than [00][43][FE] even with security on and no session. Reply bytes are the real capture py-opendisplay/tests/fixtures/real_protocol_data/02_read_firmware_response.bin (45 B), paired with the real request capture 02_read_firmware_command.bin."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "historical-fixture",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "captured-unattributed",
+        "reply_source": "py-opendisplay/tests/fixtures/real_protocol_data/02_read_firmware_response.bin",
+        "limitation": "bytes are a real capture; the originating target, firmware SHA, panel, host version and date were never recorded and are not recoverable from either repository"
+      }
+    },
+    {
+      "id": "dispatch/firmware-version-current-with-patch",
+      "dir": "h2d",
+      "origin": "ble",
+      "frame": "0043",
+      "state": {
+        "sec_enabled": true,
+        "session": null,
+        "fw_patch_byte": true,
+        "fw_sha": "1a2b3c4d"
+      },
+      "expect": {
+        "reply": "0043010508316132623363346403",
+        "note": "CURRENT unified firmware, produced by production command code rather than a fixture: [00][43][major=1][minor=5][shaLen=8]['1a2b3c4d'][patch=3]. Distinct from dispatch/firmware-version-plaintext-exempt, which preserves a pre-migration capture with no patch byte. Both are kept: the capture records what the fleet emitted, this records what the unified firmware emits, and neither may be edited into the other. Byte-identical to dispatch/firmware-version-response-with-patch by construction -- the generator asserts that, so a change to the reply shape fails both."
+      },
+      "proof": "target-production",
+      "min_protocol": "2.0",
+      "requires": [],
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     },
     {
       "id": "dispatch/firmware-version-response-no-patch",
       "dir": "d2h",
       "frame": "004300412865363361653332343437613833663362363466333134363939393036306361316539303662663135",
       "state": {
-        "fw_patch_byte": false
+        "fw_patch_byte": false,
+        "fw_sha": "e63ae32447a83f3b64f3146999060ca1e906bf15"
       },
       "expect": {
         "reply": null,
         "note": "REAL CAPTURE 02_read_firmware_response.bin (45 B): [00][43][major=0x00][minor=0x41][shaLen=0x28=40][sha:40 ASCII] and NO trailing patch byte. opendisplay_protocol.h:342-348 - older firmware omits [patch] and hosts MUST read the missing byte as patch 0. reply is null because this IS the device->host frame; the host answers nothing. HOST GAP: py-opendisplay 7.14.0 parse_firmware_version() (responses.py:223-271) returns only major/minor/sha - it never reads a patch byte at all, so 'missing patch => 0' is untested on the host side and a present patch byte is silently discarded."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "historical-fixture",
+      "provenance": {
+        "frame": "captured-unattributed",
+        "frame_source": "py-opendisplay/tests/fixtures/real_protocol_data/02_read_firmware_response.bin",
+        "limitation": "bytes are a real capture; the originating target, firmware SHA, panel, host version and date were never recorded and are not recoverable from either repository"
+      }
     },
     {
       "id": "dispatch/firmware-version-response-with-patch",
       "dir": "d2h",
       "frame": "0043010508316132623363346403",
       "state": {
-        "fw_patch_byte": true
+        "fw_patch_byte": true,
+        "fw_sha": "1a2b3c4d"
       },
       "expect": {
         "reply": null,
         "note": "AUTHORED (not captured) from opendisplay_protocol.h:342-348: [00][43][major=1][minor=5][shaLen=8]['1a2b3c4d'][patch=3]. major/minor/shaLen stay at fixed offsets so an old host that stops after the SHA still decodes; the patch byte trails. Emitted by NRF54 reply_firmware_version() (opendisplay_pipe.c:605-620, whose comment states the ordering rationale). shaLen is deliberately 8 (a short SHA) rather than 0: shaLen 0 is legal per the header (range 0..40) but py-opendisplay 7.14.0 raises InvalidResponseError on it (responses.py:249-251), so a shaLen-0 vector would assert a host behaviour that contradicts the spec - recorded here rather than authored."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "target-production",
+      "provenance": {
+        "frame": "authored"
+      }
     },
     {
       "id": "dispatch/decrypt-failure",
@@ -108,7 +167,13 @@
         "note": "DIVERGENCE 1.2 - [0x00][echo][0xFF] on decrypt failure (Firmware communication.cpp:668; NRF54 on_pipe_write() decrypt arm; Silabs opendisplay_pipe.c:1244). Frame is a minimum-length encrypted envelope [cmd:2][nonce:16][ct:1][tag:12] = 31 B (opendisplay_protocol.h:209-214) with an all-zero nonce and tag, so the CCM tag cannot validate. 31 is also the >= 31 length gate that makes the frame be treated as encrypted at all (DIVERGENCE 1.5a)."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     },
     {
       "id": "dispatch/oversize-inbound-frame-nack",
@@ -124,7 +189,13 @@
         "host_error": true
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     },
     {
       "id": "dispatch/ack-width-config-write-4byte",
@@ -140,7 +211,13 @@
         "note": "DIVERGENCE 1.4 - config/LED/buzzer acks are FOUR bytes [status][echo][0x00][0x00] (Firmware communication.cpp:476-486; NRF54 handle_config_write() ack[] opendisplay_pipe.c:913; Silabs same). The two trailing zeros are reserved, not payload. Payload is the 85-byte minimal config also used by config_tlv/minimal-required-singletons; 85 <= CONFIG_CHUNK_SIZE (200) so this takes the single-frame path."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     },
     {
       "id": "dispatch/ack-width-direct-write-start-2byte",
@@ -155,7 +232,15 @@
         "note": "DIVERGENCE 1.4 - direct-write acks are TWO bytes [0x00][echo], NOT padded to four. A runner that assumes one ack width breaks on the other. NRF54 handle_direct_write_start() ok[] = {0x00, 0x70} (opendisplay_pipe.c:764-775); opendisplay_protocol.h:499. Frame is the real capture 03_upload_start_uncompressed_command.bin (bare 0x70 = uncompressed; a compressed START would carry [uncompressed_size:4 LE])."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "captured-unattributed",
+        "reply": "authored",
+        "frame_source": "py-opendisplay/tests/fixtures/real_protocol_data/03_upload_start_uncompressed_command.bin",
+        "limitation": "bytes are a real capture; the originating target, firmware SHA, panel, host version and date were never recorded and are not recoverable from either repository"
+      }
     },
     {
       "id": "dispatch/direct-write-data-chunk-ack",
@@ -171,7 +256,15 @@
         "note": "REAL CAPTURE 04_data_chunk_command.bin: 0x71 + 230 filler bytes ('A' * 230), which is exactly the unencrypted chunk budget of 230 data bytes (opendisplay_protocol.h:225, 514). Per-chunk ack is 2-byte [0x00][0x71] (NRF54 handle_direct_write_data(), opendisplay_pipe.c:777-796). The payload is filler, not image data - this vector asserts framing and the chunk ceiling only, never decode output."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "captured-unattributed",
+        "reply": "authored",
+        "frame_source": "py-opendisplay/tests/fixtures/real_protocol_data/04_data_chunk_command.bin",
+        "limitation": "bytes are a real capture; the originating target, firmware SHA, panel, host version and date were never recorded and are not recoverable from either repository"
+      }
     },
     {
       "id": "dispatch/direct-write-end-ack",
@@ -183,11 +276,22 @@
         "xfer_active": true
       },
       "expect": {
-        "reply": "0072",
-        "note": "REAL CAPTURE 05_upload_end_command.bin: [00][72][refresh=0x00] = FULL refresh (opendisplay_protocol.h:521-527). The END ack is 2 bytes and is followed by a SEPARATE unsolicited [00][73] or [00][74] refresh notification, which this schema cannot attach to the same vector - see dispatch/refresh-success-notification. DIVERGENCE 3.3: Firmware/NRF54 send this ack BEFORE the blocking refresh; Silabs sends it after (up to 60 s late)."
+        "note": "REAL CAPTURE 05_upload_end_command.bin: [00][72][refresh=0x00] = FULL refresh (opendisplay_protocol.h:521-527). The END ack is 2 bytes and is followed by a SEPARATE unsolicited [00][73] or [00][74] refresh notification, which this schema cannot attach to the same vector - see dispatch/refresh-success-notification. DIVERGENCE 3.3: Firmware/NRF54 send this ack BEFORE the blocking refresh; Silabs sends it after (up to 60 s late). C12: expressed as an ordered reply list -- the 0x72 ack is followed by the 0x73 refresh status from the same dispatch, which a single expect.reply could not express.",
+        "replies": [
+          "0072",
+          "0073"
+        ]
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "captured-unattributed",
+        "reply": "authored",
+        "frame_source": "py-opendisplay/tests/fixtures/real_protocol_data/05_upload_end_command.bin",
+        "limitation": "bytes are a real capture; the originating target, firmware SHA, panel, host version and date were never recorded and are not recoverable from either repository"
+      }
     },
     {
       "id": "dispatch/refresh-success-notification",
@@ -202,7 +306,11 @@
         "note": "Unsolicited device->host notification following a 0x72/0x82 END: [0x00][0x73] RESP_DIRECT_WRITE_REFRESH_SUCCESS (0x74 = timeout). opendisplay_protocol.h:523-527. The host sends nothing back, so reply is null. NOTE the documented collision at opendisplay_protocol.h:543-544: the same byte 0x73 is RESP_LED_ACTIVATE_ACK; the two are told apart only by direction and by the 4-byte vs 2-byte width (DIVERGENCE 1.4)."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "target-production",
+      "provenance": {
+        "frame": "authored"
+      }
     },
     {
       "id": "dispatch/unknown-opcode-no-reply",
@@ -217,7 +325,13 @@
         "note": "DIVERGENCE 1.9 - an unassigned opcode is logged and draws NO reply at all on all three implementations (Firmware communication.cpp:750-752; NRF54 dispatch() default: opendisplay_pipe.c:1348-1350; Silabs opendisplay_pipe.c:1188-1190). 0x0060 is in no SECTION 1 block. Clients must use a timeout, not a NACK, to detect an unimplemented command. This is the vector that proves the corpus can express silence."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     },
     {
       "id": "dispatch/partial-unsupported-nack",
@@ -225,15 +339,23 @@
       "frame": "00760000000000000000010000000000080008",
       "state": {
         "sec_enabled": false,
-        "session": null,
-        "cap_partial": false
+        "session": null
       },
       "expect": {
         "reply": "ff760700",
         "note": "DIVERGENCE 1 opcode-coverage row 0x76: a target WITHOUT partial support fail-fast NACKs [0xFF][0x76][0x07][0x00], where 0x07 = OD_ERR_PARTIAL_UNSUPPORTED (opendisplay_protocol.h:570, 794). Silabs opendisplay_pipe.c:1177-1186 - adopted as the default for any compiled-out subsystem (ARCHITECTURE.md: a disabled subsystem NACKs rather than drops). Frame carries a well-formed 17-byte BIG-ENDIAN header so the NACK is provably a capability refusal, not a parse error."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "forbids": [
+        "cap_partial"
+      ],
+      "proof": "historical-fixture",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     },
     {
       "id": "dispatch/buzzer-unsupported-nack",
@@ -241,15 +363,23 @@
       "frame": "0077000100",
       "state": {
         "sec_enabled": false,
-        "session": null,
-        "cap_buzzer": false
+        "session": null
       },
       "expect": {
         "reply": "ff770700",
         "note": "DIVERGENCE 1 opcode-coverage row 0x77: buzzer unsupported NACKs [0xFF][0x77][0x07][0x00] (Silabs opendisplay_pipe.c:1177-1186, same fail-fast arm as 0x76). Frame is [instance=0][outer_repeats=1][n_patterns=0] per opendisplay_protocol.h:582. Error byte 0x07 is decoded in the SCOPE of echo 0x77 (opendisplay_protocol.h:194-203) - it is NOT OD_ERR_PARTIAL_UNSUPPORTED here, it is the same numeric 'unsupported' the client's parse_nack() reads."
       },
       "min_protocol": "2.0",
-      "requires": []
+      "requires": [],
+      "forbids": [
+        "cap_buzzer"
+      ],
+      "proof": "historical-fixture",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     },
     {
       "id": "dispatch/power-off-unsupported-nack",
@@ -257,15 +387,23 @@
       "frame": "0052",
       "state": {
         "sec_enabled": false,
-        "session": null,
-        "cap_power_latch": false
+        "session": null
       },
       "expect": {
         "reply": "ff520000",
         "note": "DIVERGENCE 1 opcode-coverage row 0x52 on a non-latch target: 0x00 = OD_ERR_POWER_OFF_UNSUPPORTED (opendisplay_protocol.h:828). SPEC DISAGREEMENT recorded here: opendisplay_protocol.h:420 (@response) says the 4-byte [0xFF][0x52][0x00][0x00] while :432 (@targets) and DIVERGENCE 1's 0x52 row say the 3-byte [0xFF][0x52][0x00]. The only shipped implementation sends FOUR bytes (Silabs opendisplay_pipe.c:1114-1123, {RESP_NACK, RESP_POWER_OFF, OD_ERR_POWER_OFF_UNSUPPORTED, 0x00}); the shipped shape wins, as in 1.1. NRF54 has no 0x52 case at all and silently drops (DIVERGENCE: NRF54 gap). HOST GAP: py-opendisplay 7.14.0 still maps 0x0052 to DEEP_SLEEP (commands.py:40, build_deep_sleep_command()) and defines no POWER_OFF - it has not adopted the 2.1 swap, so a host on that version aiming to deep-sleep a 2.1 device hits POWER_OFF instead."
       },
       "min_protocol": "2.1",
-      "requires": []
+      "requires": [],
+      "forbids": [
+        "cap_power_latch"
+      ],
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "reply": "authored"
+      }
     }
   ]
 }
