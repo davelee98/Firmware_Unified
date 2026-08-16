@@ -14,6 +14,8 @@
 #include "opendisplay_led.h"
 #include "opendisplay_protocol.h"
 
+#include <zephyr/kernel.h>   /* CMSIS, for NVIC_SystemReset() */
+
 #include <string.h>
 
 #ifndef SHA

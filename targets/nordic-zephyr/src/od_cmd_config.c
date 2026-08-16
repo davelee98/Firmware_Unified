@@ -11,6 +11,7 @@
 #include "od_cmd_app.h"
 #include "od_cmd_reply.h"
 #include "od_config_read.h"
+#include "od_dispatch.h"   /* od_cmd_mutates_config / od_cmd_allow_unauthenticated */
 #include "od_log.h"
 #include "od_session.h"
 #include "od_session_app.h"
