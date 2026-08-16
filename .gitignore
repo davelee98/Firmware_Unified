@@ -87,3 +87,9 @@ sdkconfig.old
 # found locally), and it is REWRITTEN PER BOARD with that board's `target:` line, so committing
 # it would mean a diff on every build of a different board.
 dependencies.lock
+
+# Python bytecode. Interpreter-specific, rewritten by any ordinary import, and it was tracked --
+# three files, one added by C12.2 and two older ones -- so a test run left the tree dirty and a
+# `git add -A` swept them back in.
+__pycache__/
+*.py[cod]
