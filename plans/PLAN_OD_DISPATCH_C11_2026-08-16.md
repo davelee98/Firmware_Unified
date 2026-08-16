@@ -318,20 +318,45 @@ failure and assert:
 `esp_fill_random()` returns `void`, so the current HAL always reports success and cannot implement
 the shared contract's “never offer a challenge the device cannot honor” failure path.
 
-Use Mbed TLS PSA's `psa_generate_random()` for this one operation.  It is already supplied by the
-pinned `mbedtls` component and returns `psa_status_t`.  Initialize PSA once in the random adapter,
-propagate init/generation failure as `OD_HAL_CRYPTO_ERROR`, log the status, and leave the caller's
-challenge path to synthesize the existing `AUTH_STATUS_ERROR` response.
+Use Mbed TLS PSA's `psa_generate_random()` for this one operation.  It returns `psa_status_t`.
+Initialize PSA once in the random adapter, propagate init/generation failure as
+`OD_HAL_CRYPTO_ERROR`, log the status, and leave the caller's challenge path to synthesize the
+existing `AUTH_STATUS_ERROR` response.
+
+**AVAILABILITY CONFIRMED, 2026-08-16, by inspecting the built archive rather than the config.**
+`psa_crypto_init`, `psa_generate_random` and `psa_aead_encrypt` are all defined in
+`build/<board>/esp-idf/mbedtls/mbedtls/library/libmbedcrypto.a`, with 16 `psa_*` objects compiled
+in, on a WiFi board (`c6-n4`) and a non-WiFi one (`s3-n8r8`) alike.  No sdkconfig change is needed
+and the baseline gate is untouched.
+
+Check it that way and not by grepping `sdkconfig.h`, which is how this was first answered WRONGLY.
+ESP-IDF exposes **no Kconfig symbol** for `MBEDTLS_PSA_CRYPTO_C` and its port's `esp_config.h`
+neither defines nor undefines it, so the setting comes from upstream Mbed TLS's own default.
+Absence from `sdkconfig.h` is therefore not evidence of absence from the build:
+
+```sh
+nm -g --defined-only build/c6-n4/esp-idf/mbedtls/mbedtls/library/libmbedcrypto.a \
+  | grep -E ' T (psa_crypto_init|psa_generate_random)$'
+```
 
 Keep the existing mbedTLS CCM/CMAC/AES implementations; C11 is not a second crypto-backend swap.
 Isolate the random adapter if necessary so a host test can compile the production function against
 fake PSA calls and assert init failure, generation failure, success and null-argument behavior.
-Do not fall back silently to `esp_fill_random()` after a PSA error.  If the pinned IDF configuration
-cannot link `psa_generate_random()` without enabling a new global crypto mode, stop and revise this
-decision rather than landing an unreviewed sdkconfig change.
+Do not fall back silently to `esp_fill_random()` after a PSA error.  The stop condition stands even
+though linkage is confirmed: if wiring this up turns out to require enabling a global crypto mode,
+revise the decision rather than landing an unreviewed sdkconfig change.  `mbedtls_ctr_drbg_random()`
+is the fallback if it does — also fallible, already linked, and already used for TLS at
+`wifi_service.cpp:485`.
 
-Measure flash and static RAM before/after on one ESP32 board.  A material PSA runtime cost for a
-16-byte challenge is a finding, not permission to hide it.
+Measure flash and static RAM before/after on one ESP32 board.  LINKED IS NOT INITIALIZED: the 16
+`psa_*` objects are already in the image, but `psa_crypto_init()` brings up the key store and driver
+dispatch at runtime, and that cost is what the measurement is for.  A material PSA runtime cost for
+a 16-byte challenge is a finding, not permission to hide it.
+
+Keeping the AEAD on classic Mbed TLS matters more than it looks once PSA is initialized on this
+target: a successful `psa_crypto_init()` makes routing CCM through `psa_aead_*` look like a small
+follow-on, and it is not.  That is a second crypto-backend migration with its own hardware gate,
+and Nordic's PSA arm is itself still unverified on silicon.
 
 ### 5.3 Successful seal stamps activity
 

@@ -134,6 +134,7 @@ set(OD_SHARED_SOURCES_APP_SESSION
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config_read.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_dispatch.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_cmd.c"
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_core.c"
 )
 
 # APP_RXQ, like APP_SESSION, is named for a SEAM rather than a HAL: the ring needs no driver at

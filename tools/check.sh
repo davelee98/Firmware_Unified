@@ -153,6 +153,45 @@ session_constant_time() {
 }
 check "shared boundary: od_session uses no memcmp"  session_constant_time
 
+# ARCHITECTURE, RATCHETED BY SYMBOL. Each name below is one whose ABSENCE is the property: a
+# second opcode map, an implicit frame context, an exported session singleton. Grepping for them
+# is crude but it is what stops a well-meaning "just for now" reintroduction, and unlike a line
+# count it says what is actually wrong when it fires.
+#
+# Scoped to targets/*/src and targets/*/hal so a build directory's .map files cannot trip it.
+c11_structure() {
+    local rc=0 hits
+    scan() {
+        local what="$1" pattern="$2" why="$3"
+        hits=$(grep -rInE "$pattern" targets/*/src targets/*/hal shared/ 2>/dev/null || true)
+        if [ -n "$hits" ]; then
+            echo "$hits"; echo; echo "$what: $why"; echo
+            rc=1
+        fi
+    }
+    # The opcode map is od_dispatch.c's. A target definition of this is a second map, and two maps
+    # is how one target answers an opcode the other treats as unknown.
+    scan "od_cmd_dispatch" '\bod_cmd_dispatch[[:space:]]*\(' \
+         "the per-command seam is od_cmd_app.h; the opcode map is shared."
+    # A frame context stored in a global outlives its frame: any nested or later path can read it
+    # after the caller has moved on, and no compiler can catch that. Both ESP32 ingresses build an
+    # od_reply_t and pass it.
+    scan "implicit frame context" '\b(g_commandOrigin|g_commandInstance|commandOrigin|imageDataWritten)\b' \
+         "build an od_reply_t at the ingress and pass it to od_dispatch_app_frame()."
+    # The session object is private to its od_session_app translation unit. A name reachable from
+    # elsewhere is one a caller can memset -- and memset is not teardown here: the key lives in an
+    # od_hal_crypto slot, so zeroing the struct strands a prepared key in a finite pool and loses
+    # the slot index with it. od_session_clear() is the only teardown.
+    scan "exported session singleton" '\b(g_session|od_pipe_session|od_pipe_device_id)\b' \
+         "reach the session through od_session_app_state()."
+    # Confidentiality is chosen at the CALL SITE. Inferring it from response bytes is how this
+    # firmware once sealed its own rejection frames, which the host then validated as ACKs.
+    scan "byte-inferred sealing" 'response\[(0|2)\][[:space:]]*==[[:space:]]*(RESP_NACK|0xFF)' \
+         "call od_reply_plain() explicitly; never inspect the frame to decide."
+    return $rc
+}
+check "structure: ownership ratchets"  c11_structure
+
 # ================================================================================== host suites ==
 # The real boundary enforcement: shared/ compiled for the host at -std=c99 -Wall -Wextra -Werror
 # under BOTH compilers. A GNU-ism gcc accepts is a failure discovered later on a target instead.

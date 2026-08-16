@@ -20,7 +20,7 @@
 #include "od_hal_radio.h"
 
 #include "opendisplay_ble.h"
-#include "opendisplay_pipe_internal.h"
+#include "opendisplay_pipe.h"
 
 #include "od_log.h"
 #include "od_txq.h"

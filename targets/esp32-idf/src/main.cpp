@@ -874,13 +874,13 @@ static void serviceBleRx() {
         // Recheck immediately before dispatch as well: the owner can depart after the shared
         // helper accepts this head. The next loop iteration consumes it against fresh liveness.
         if (!bleRxTagIsLive(item->tag, nullptr)) continue;
-        // Publish the frame's identity for the dispatcher's activity-clock test.
-        g_commandInstance = item->tag;
-        // imageDataWritten (misleading name) actually services any BLE command.
-        // The dispatch banner (commandName() in communication.cpp) already logs
-        // which command runs, so no drain-start/-end framing line is needed here.
-        const od_frame_outcome_t outcome = imageDataWritten(0, nullptr, item->data, item->len);
-        g_commandInstance = 0;
+        // THE FRAME'S OWN IDENTITY, from its RX slot rather than a global the dispatcher
+        // reads behind us: it must be answered on the connection that sent it, not on
+        // whatever the link has become. The dispatch banner (commandName() in
+        // communication.cpp) already logs which command runs, so no drain-start/-end
+        // framing line is needed here.
+        const od_reply_t rp = { OD_ORIGIN_BLE, item->tag };
+        const od_frame_outcome_t outcome = od_dispatch_app_frame(&rp, item->data, item->len);
         // DEFERRED LEAVES THE FRAME WHERE IT IS. The dispatcher refused it for a reason that will
         // clear on its own -- no response capacity, or a config read holding the scratch -- so the
         // entry must be re-offered byte-identical. Consuming it here would turn ordinary

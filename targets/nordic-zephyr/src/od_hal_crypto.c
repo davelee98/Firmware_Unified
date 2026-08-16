@@ -32,20 +32,34 @@ static bool slot_valid(od_hal_crypto_slot_t slot)
     return slot < OD_HAL_CRYPTO_KEY_SLOTS;
 }
 
+/* OWNERSHIP IS DROPPED BEFORE PSA IS ASKED, and the order is the whole of the fix.
+ *
+ * Clearing the tracked id only after a SUCCESSFUL destroy latches the slot: one destroy error
+ * leaves it marked ready, every later key_set() retries the same failing release, and the device
+ * cannot authenticate again until it reboots. From the host's side that is a brick.
+ *
+ * The failed id is then LEAKED DELIBERATELY, not held for a retry. A parked id is a hazard -- PSA
+ * may reissue that number to another key, and a delayed destroy would free somebody else's. The
+ * handshake that met the failure still fails; the next one starts clean. Repeated occurrences in
+ * a log ARE the finding: destroying a volatile key imported seconds ago should not fail, and if it
+ * does the pool is draining. */
 static enum od_hal_crypto_status slot_release(od_hal_crypto_slot_t slot)
 {
+    psa_key_id_t id;
     psa_status_t status;
 
     if (!s_slot_ready[slot]) {
         return OD_HAL_CRYPTO_OK;
     }
-    status = psa_destroy_key(s_slots[slot]);
-    if (status != PSA_SUCCESS) {
-        od_log_error("crypto: PSA key destroy failed: %ld", (long)status);
-        return OD_HAL_CRYPTO_ERROR;
-    }
+    id = s_slots[slot];
     s_slots[slot] = 0;
     s_slot_ready[slot] = false;
+
+    status = psa_destroy_key(id);
+    if (status != PSA_SUCCESS) {
+        od_log_error("crypto: PSA key destroy failed: %ld - slot leaked", (long)status);
+        return OD_HAL_CRYPTO_ERROR;
+    }
     return OD_HAL_CRYPTO_OK;
 }
 

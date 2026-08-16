@@ -1,9 +1,9 @@
 /* od_cmd.h -- what a handler returns, and what the dispatcher concluded about a frame.
  *
- * SCAFFOLDING, with a shrink schedule. These types exist so dispatch can be written once instead
- * of three times; they are not a permanent public API. As each transfer subsystem is promoted its
- * handlers move behind their own headers and the od_cmd_* declarations here go with them. Do not
- * grow this file into a command registry.
+ * TYPES ONLY. The four here are genuinely shared: every target's handlers speak od_cmd_result_t,
+ * every dispatch produces an od_frame_outcome_t, and od_frame_policy_t is what that outcome MEANS.
+ * The per-command target seam is od_cmd_app.h and the opcode map is od_dispatch.c's; neither
+ * belongs here. Do not grow this file into a command registry.
  */
 
 #ifndef OD_CMD_H

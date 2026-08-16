@@ -27,8 +27,9 @@
 #include "od_dispatch.h"   /* od_dispatch_budget, for the migration's legacy reservations */
 #include "od_cmd_reply.h"
 
-/* The CCM envelope, both directions. g_session is this target's one session (encryption_state.h). */
+/* The CCM envelope, both directions. The session itself is od_session_app.cpp's. */
 #include "od_session.h"
+#include "od_session_app.h"
 #include "od_span.h"
 #include "encryption_state.h"
 
@@ -38,47 +39,18 @@
 bool isAuthenticated();
 extern struct od_config globalConfig;
 
-// F4 -- command origin marker. The shared dispatcher (imageDataWritten) and the
-// response senders read this to (a) BYPASS the app-layer AES-CCM envelope for
-// TLS-secured LAN frames (SECTION 9 rule 4: origin-gated decrypt) and (b) route
-// each response back over ONLY its origin transport (no BLE/LAN dual-delivery).
-// Everything runs on the single loop() task (BLE queue drain + handleWiFiServer),
-// so this plain global needs no locking: it is set immediately before each
-// imageDataWritten() call and restored to ORIGIN_BLE after. On non-LAN builds it
-// stays ORIGIN_BLE for the whole lifetime (LAN never sets it).
-// enum CommandOrigin lives in communication.h so display_service.cpp / main.cpp can
-// name the values instead of comparing against a bare 0.
-volatile uint8_t g_commandOrigin = ORIGIN_BLE;
-
 /* The chunked CONFIG_WRITE transfer in progress, if any. Replaces chunkedWriteState. Loop-task
  * only, like every other dispatcher-adjacent object in this file. */
 struct od_config_asm g_configAsm;
 
-// Instance identity of the frame currently being dispatched -- the packed owner
-// word (link_owner.h) of the connection that WROTE it, not merely its transport.
-//
-// g_commandOrigin says BLE-or-LAN and nothing more, which is not enough to decide
-// whether a frame still belongs to the live session: BLE conn handles are reused,
-// so a frame queued by a dead instance is indistinguishable from the new owner's by
-// transport alone. serviceBleRx() sets this from the frame's own tag (which
-// od_rxq_item_t carries from the write callback) and the LAN listener sets it
-// from the LAN owner's identity, both immediately before dispatch. Same
-// single-loop-task argument as g_commandOrigin, so no locking.
-volatile uint32_t g_commandInstance = 0;
-
-// Transport tag for the RX banner and TX dump. Three transports share this
-// dispatcher (nRF BLE, ESP32 BLE via commandQueue, ESP32 LAN), and without a tag
-// the log cannot show which one a frame took -- in particular whether a frame used
-// the TLS CCM-bypass path. Accurate at every call site below because the LAN
-// listener sets g_commandOrigin immediately around its dispatch. Always "BLE" on
-// nRF and on ESP32 builds without the LAN transport.
-uint8_t commandOrigin(void) { return g_commandOrigin; }
-
-static const char* originTag(void) {
-    switch (g_commandOrigin) {
-        case ORIGIN_LAN_TLS:   return "LAN-TLS";
-        case ORIGIN_LAN_PLAIN: return "LAN";
-        default:               return "BLE";
+/* Transport tag for the log lines below. Takes the origin rather than reading one: three
+ * transports share this dispatcher, and a line that cannot say which one a frame took -- in
+ * particular whether it used the TLS CCM-bypass path -- is a line that cannot be acted on. */
+static const char* originTag(od_origin_t origin) {
+    switch (origin) {
+        case OD_ORIGIN_LAN_TLS:   return "LAN-TLS";
+        case OD_ORIGIN_LAN_PLAIN: return "LAN";
+        default:                  return "BLE";
     }
 }
 
@@ -120,22 +92,6 @@ static const char* originTag(void) {
 // hard-code -- see BleTransport::connIntervalMs().
 #define OD_AUTH_ABUSE_DWELL_FALLBACK_MS 50
 #endif
-
-// Budgets for the nonce-rejection logs. Once nonce failures stop counting toward
-// integrity_failures, nothing else throttles a peer that drives these lines, and
-// out-of-window fires routinely on a lossy link.
-//
-// One budget PER SITE, deliberately, not one shared: a stale client spamming session-id
-// mismatches must not be able to silence the out-of-window line, which is the one that
-// reports real transfer loss.
-static uint32_t s_nonceLogWindowMs = 0;   // replay / out-of-window
-static uint32_t s_nonceLogOtherMs  = 0;   // wrong session, bad tag, malformed, engine fault
-static bool nonceLogAllowed(uint32_t* last_ms) {
-    const uint32_t now = od_hal_uptime_ms();
-    if (*last_ms != 0 && (uint32_t)(now - *last_ms) < 5000u) return false;
-    *last_ms = now;
-    return true;
-}
 
 static uint8_t  s_authRejectRun = 0;        // consecutive RESP_AUTH_REQUIRED answers
 static bool     s_authAbuseDropPending = false;
@@ -453,9 +409,9 @@ enum ConfigWriteGate {
 // Origin ALONE is not sufficient authority: it is paired with lanTlsSessionEstablished()
 // so the exemption tracks a completed handshake on the live socket rather than the
 // global encryption-enabled bit.
-static ConfigWriteGate configWriteGate(void) {
+static ConfigWriteGate configWriteGate(const od_cmd_ctx_t *ctx) {
 #ifdef OPENDISPLAY_HAS_WIFI
-    if (g_commandOrigin == ORIGIN_LAN_TLS && lanTlsSessionEstablished()) {
+    if (ctx->rp.origin == OD_ORIGIN_LAN_TLS && lanTlsSessionEstablished()) {
         return CONFIG_WRITE_ALLOWED;
     }
 #endif
@@ -469,7 +425,7 @@ static ConfigWriteGate configWriteGate(void) {
 
 od_cmd_result_t handleWriteConfig(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
     if (len == 0) return OD_CMD_NACK;
-    const ConfigWriteGate gate = configWriteGate();
+    const ConfigWriteGate gate = configWriteGate(ctx);
     if (gate == CONFIG_WRITE_DENIED) {
         /* AUTH_REJECTED, not NACK. Section 5 separates them because only this advances the
          * link's abuse run -- collapsing it lets a TLS client repeat a refused CONFIG_WRITE and
@@ -537,7 +493,7 @@ od_cmd_result_t handleWriteConfig(const od_cmd_ctx_t *ctx, uint8_t* data, uint16
         /* NOTHING WAS STORED. That is guaranteed by construction: the assembler has no
          * storage symbol to reach, so a rejection cannot have altered NVS. */
         od_log_error("ERROR: [%s] malformed CONFIG_WRITE (%u B) -- nothing stored",
-                     originTag(), (unsigned)len);
+                     originTag(ctx->rp.origin), (unsigned)len);
         (void)od_cmd_reply_plain(ctx, responseErr, sizeof(responseErr));
         return OD_CMD_NACK;
     }
@@ -565,7 +521,7 @@ od_cmd_result_t handleWriteConfigChunk(const od_cmd_ctx_t *ctx, uint8_t* data, u
      * configuration, and it needs frame origin and session state the assembler has no business
      * knowing. Still gated on the first continuation only, exactly as before. */
     if (g_configAsm.chunks == 1u && g_configAsm.active) {
-        const ConfigWriteGate gate = configWriteGate();
+        const ConfigWriteGate gate = configWriteGate(ctx);
         if (gate == CONFIG_WRITE_DENIED) {
             od_config_asm_reset(&g_configAsm);
             uint8_t response[] = {RESP_ACK, (uint8_t)(CMD_CONFIG_CHUNK & 0xFF), RESP_AUTH_REQUIRED};
@@ -603,18 +559,15 @@ od_cmd_result_t handleWriteConfigChunk(const od_cmd_ctx_t *ctx, uint8_t* data, u
     case OD_CONFIG_ASM_REJECTED:
     default:
         od_log_error("ERROR: [%s] bad CONFIG_CHUNK (%u B) -- transfer dropped, nothing stored",
-                     originTag(), (unsigned)len);
+                     originTag(ctx->rp.origin), (unsigned)len);
         (void)od_cmd_reply_plain(ctx, err_resp, sizeof(err_resp));
         return OD_CMD_NACK;
     }
 }
 
-// BLEConnHandle / BLECharPtr and the imageDataWritten declaration come from
-// communication.h -- one declaration shared by all three callers.
-
 // Human-readable name for a command opcode, used for the single dispatch banner
-// emitted by imageDataWritten() (the shared command handler for nRF, ESP32 BLE,
-// and the ESP32 LAN transport). Returns nullptr for opcodes not dispatched here
+// emitted by od_dispatch_app_frame() (this target's ingress adapter for BLE and LAN).
+// Returns nullptr for opcodes not dispatched here
 // (incl. CMD_NFC_ENDPOINT 0x0083, which this Firmware does not implement on any
 // target) — the switch default logs those as unknown. Single source of truth for
 // the banner text: keep in sync with the dispatch switch below; individual
@@ -668,7 +621,7 @@ extern "C" void od_core_frame_done(const od_reply_t *rp, od_frame_outcome_t outc
          * encrypted BLE path, but an accepted TLS-LAN command never reaches od_session_open at all
          * (SECTION 9 rule 4 gates it out), so without this the session's activity clock would stop
          * for exactly the traffic that is keeping the link busy. */
-        od_session_touch(&g_session, od_hal_uptime_ms());
+        od_session_touch(od_session_app_state(), od_hal_uptime_ms());
     }
     /* BLE ONLY, and the origin gate is not decoration: the same auth gate is reachable from
      * plaintext LAN, and counting those would let LAN traffic drop a BLE client. */
@@ -683,15 +636,10 @@ extern "C" void od_core_frame_done(const od_reply_t *rp, od_frame_outcome_t outc
     }
 }
 
-od_frame_outcome_t imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uint16_t len) {
-    (void)conn_hdl;
-    (void)chr;
-
-    const od_reply_t rp = { (od_origin_t)g_commandOrigin, g_commandInstance };
-
+od_frame_outcome_t od_dispatch_app_frame(const od_reply_t *rp, uint8_t* data, uint16_t len) {
     // Single per-command banner for the whole dispatch, emitted before the dispatcher so a frame
-    // it refuses structurally is still attributable. Named via commandName(); unknown opcodes
-    // (nullptr) get no banner and are reported by od_cmd_dispatch()'s default. Handlers must not
+    // it refuses structurally is still attributable. Named via commandName(); an opcode the shared
+    // map does not route (nullptr) gets no banner and no reply at all. Handlers must not
     // log their own banner. Carries no encryption token: the ERX/URX line from od_rxq_push()
     // already reports it for this frame, and stating it twice is how the two spellings drift.
     if (len < 2) {
@@ -705,13 +653,14 @@ od_frame_outcome_t imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint
         if (!quietCmd) {
             const char* name = commandName(command);
             if (name != nullptr) {
-                od_log_info("=== [%s] %s COMMAND (0x%04X) ===", originTag(), name, command);
+                od_log_info("=== [%s] %s COMMAND (0x%04X) ===", originTag(rp->origin), name,
+                            command);
             }
         }
     }
 
-    const od_frame_outcome_t outcome = od_dispatch_frame(&rp, od_span_make(data, len));
-    od_core_frame_done(&rp, outcome);
+    const od_frame_outcome_t outcome = od_dispatch_frame(rp, od_span_make(data, len));
+    od_core_frame_done(rp, outcome);
 
     /* EVERY unit taken must be back. A leak here is invisible on the wire and starves the very
      * next command, so it is asserted rather than trusted -- od_dispatch releases on every exit

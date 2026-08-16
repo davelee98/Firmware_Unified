@@ -2,6 +2,7 @@
 #define COMMUNICATION_H
 
 #include "od_cmd.h"
+#include "od_txq.h"
 
 #include <stdint.h>
 
@@ -16,37 +17,18 @@ od_cmd_result_t handleReadConfig(const od_cmd_ctx_t *ctx);
 od_cmd_result_t handleWriteConfig(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 od_cmd_result_t handleWriteConfigChunk(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 
-// The shared command dispatcher, serving nRF BLE, ESP32 BLE and the ESP32 LAN
-// transport. Both leading parameters are unused by the dispatch logic, so they
-// are opaque on every target and this declaration needs no BLE stack types --
-// which is what lets three callers in three files share one declaration instead
-// of each re-typedef'ing their own. On nRF the Bluefruit write callback has a
-// BLECharacteristic*-shaped signature; ble_transport_nrf.cpp adapts it to this.
-typedef uint16_t BLEConnHandle;
-typedef void*    BLECharPtr;
-/* Dispatch one inbound frame and apply its policy. Returns the outcome so the INGRESS can honour
- * od_frame_policy().consume_rx: OD_FRAME_DEFERRED means the frame was not consumed and must be
- * re-offered unchanged, and an ingress that drops it anyway turns backpressure into silent
- * command loss. */
-od_frame_outcome_t imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uint16_t len);
-
-// Transport a command arrived on. Set by the LAN listener around each dispatch and
-// ORIGIN_BLE at all other times. Multi-frame transfers use it to reject frames from
-// a transport that does not own the in-flight session, and to scope transport-only
-// behaviour (LAN power-save suspension) to the transport that opened the session.
-// Values are part of no wire format -- they are firmware-local bookkeeping.
-enum CommandOrigin { ORIGIN_BLE = 0, ORIGIN_LAN_PLAIN = 1, ORIGIN_LAN_TLS = 2 };
-
-/// Origin of the command currently being dispatched (a CommandOrigin value).
-uint8_t commandOrigin(void);
-
-/**
- * Instance identity (packed owner word) of the frame being dispatched. Set by each
- * transport immediately before it calls imageDataWritten(): BLE from the frame's own
- * queue tag, LAN from the LAN owner's identity. Compared against the live owner word
- * so a frame from a departed instance neither executes nor stamps the activity clock.
- */
-extern volatile uint32_t g_commandInstance;
+/* Dispatch one inbound frame and apply its policy.
+ *
+ * ITS ONLY INPUTS ARE THE FRAME AND WHERE THE ANSWER GOES. The reply context is built by the
+ * INGRESS that has it: BLE from the RX slot's own tag, LAN from the live owner word. It used to be
+ * reconstructed here from a pair of globals the caller had set immediately beforehand, which is a
+ * frame context that outlives its frame -- readable by any nested or later path after the caller
+ * has moved on, and impossible for the compiler to check.
+ *
+ * Returns the outcome so the ingress can honour od_frame_policy().consume_rx: OD_FRAME_DEFERRED
+ * means the frame was NOT consumed and must be re-offered unchanged, and an ingress that drops it
+ * anyway turns backpressure into silent command loss. */
+od_frame_outcome_t od_dispatch_app_frame(const od_reply_t *rp, uint8_t *frame, uint16_t len);
 
 /**
  * Drop a BLE link that has answered OD_AUTH_ABUSE_THRESHOLD consecutive commands

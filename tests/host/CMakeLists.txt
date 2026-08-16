@@ -11,7 +11,10 @@
 # Green against an empty shared/ by design (docs/TEST_OWNERSHIP.md § "First step").
 
 cmake_minimum_required(VERSION 3.16)
-project(od_host_tests C)
+# CXX is here for ONE reason: two Nordic target sources are .cpp, and the suites that cover them
+# compile the production file rather than a transcription of it. shared/ remains plain C and is
+# still built by the C compiler -- the boundary checks in tools/check.sh enforce that separately.
+project(od_host_tests C CXX)
 
 enable_testing()
 find_package(Threads REQUIRED)
@@ -166,6 +169,27 @@ add_executable(od_dispatch_test dispatch_test.c)
 target_link_libraries(od_dispatch_test od_session_fake)
 add_test(NAME dispatch COMMAND od_dispatch_test)
 
+# dispatch_route: the opcode map, one case per canonical opcode.
+#
+# Separate from od_dispatch_test because it asks a different question. That suite drives ONE opcode
+# through the ordering; this one drives EVERY opcode through the map and records which hook ran.
+# The map used to be a switch inside each target, where an opcode could be routed on one target and
+# unknown on the other with nothing to say so -- and "unknown" is wire-visible, since it carries no
+# activity stamp. A new opcode must fail here until its route and capability behaviour are chosen.
+add_executable(od_dispatch_route_test dispatch_route_test.c)
+target_link_libraries(od_dispatch_route_test od_session_fake)
+add_test(NAME dispatch_route COMMAND od_dispatch_route_test)
+
+# core_reset: the shared half of a teardown -- producer, egress and session, in that order.
+#
+# The cases that carry weight are the negative ones: RX must NOT be in it (its producer differs per
+# target, so a shared reset would race one and reorder the other), and the session must go through
+# od_session_clear() rather than a memset, or its prepared HAL key slot is stranded in a finite
+# pool with nothing left naming it.
+add_executable(od_core_reset_test core_reset_test.c)
+target_link_libraries(od_core_reset_test od_session_fake)
+add_test(NAME core_reset COMMAND od_core_reset_test)
+
 # session: the handshake, KDF, replay window and CCM envelope against a fake crypto HAL built on
 # the host AES core. DIFFERENTIAL where it matters -- the replay window is upstream Firmware's
 # own nonce_window.h, ported verbatim, so this suite exercises the shipped state machine rather
@@ -219,6 +243,85 @@ add_test(NAME advert COMMAND od_advert_test)
 add_executable(od_watchdog_test watchdog_test.c)
 target_link_libraries(od_watchdog_test od_shared)
 add_test(NAME watchdog COMMAND od_watchdog_test)
+
+# --------------------------------------------------------------------------------------------
+# TARGET HAL suites. These compile PRODUCTION target sources against fake vendor APIs, which is
+# the point: the defects they cover are lifecycle defects -- which key id is destroyed, whether a
+# failure propagates -- and a test that re-implements the logic proves only that the copy agrees
+# with itself. fake_psa/ is on the include path of these binaries ONLY; it is not visible to
+# shared/ or to any target build.
+add_library(od_fake_psa STATIC fake_psa/fake_psa.c)
+target_include_directories(od_fake_psa PUBLIC ${CMAKE_CURRENT_LIST_DIR}/fake_psa)
+
+# nordic_crypto_slot: the prepared-key slot lifecycle in the Nordic PSA HAL. The case that matters
+# is the injected destroy failure -- not reproducible on a board, and the one that used to latch
+# the slot ready-but-unusable until reboot, leaving the device unable to re-authenticate.
+add_executable(od_nordic_crypto_slot_test
+    nordic_crypto_slot_test.c
+    ../../targets/nordic-zephyr/src/od_hal_crypto.c)
+target_include_directories(od_nordic_crypto_slot_test PRIVATE
+    ../../targets/nordic-zephyr/src)
+target_link_libraries(od_nordic_crypto_slot_test od_shared od_fake_psa)
+add_test(NAME nordic_crypto_slot COMMAND od_nordic_crypto_slot_test)
+
+# esp_crypto_random: the ESP32 RNG arm, which feeds the AUTHENTICATE challenge. od_session's rule
+# is that a device never offers a challenge it cannot honour, and that rule is unenforceable while
+# the backend cannot report failure.
+add_executable(od_esp_crypto_random_test
+    esp_crypto_random_test.c
+    ../../targets/esp32-idf/hal/od_hal_crypto_random.c)
+target_include_directories(od_esp_crypto_random_test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/fake_esp)
+target_link_libraries(od_esp_crypto_random_test od_shared od_fake_psa)
+add_test(NAME esp_crypto_random COMMAND od_esp_crypto_random_test)
+
+# pipe_write: the Nordic PIPE state machine's VERDICTS, against fake display/reply/kernel seams.
+#
+# A verdict is invisible in a packet capture -- both sides see the same NACK -- but it decides
+# whether the frame stamps the session's activity clock, so a wrong OK on a refused frame keeps a
+# link alive on traffic the device rejected. Each case asserts the verdict AND the frames.
+add_executable(od_pipe_write_test
+    pipe_write_test.c
+    ../../targets/nordic-zephyr/src/opendisplay_pipe_write.cpp)
+target_include_directories(od_pipe_write_test PRIVATE
+    ../../targets/nordic-zephyr/src
+    ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr)
+target_link_libraries(od_pipe_write_test od_shared)
+# The production file is C++ and the target builds it with exceptions and RTTI off; match that so
+# the host is not compiling a different language from the device.
+target_compile_options(od_pipe_write_test PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions -fno-rtti>)
+add_test(NAME pipe_write COMMAND od_pipe_write_test)
+
+# nordic_session_app: the device-id packing, which is WIRE-VISIBLE -- four bytes of the silicon id
+# feed both the KDF and the AUTHENTICATE proof, so a different selection is a different device to
+# the host and every provisioned tag in a fleet becomes one no stored key opens. C11 moved that
+# arithmetic between files, which is exactly the change that can alter it without altering anything
+# a build or a boot would notice. Expectations are hand-computed, not taken from the code.
+add_executable(od_nordic_session_app_test
+    nordic_session_app_test.c
+    ../../targets/nordic-zephyr/src/od_session_app.c)
+target_include_directories(od_nordic_session_app_test PRIVATE
+    ../../targets/nordic-zephyr/src
+    ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr)
+# od_session_fake, not od_shared: this pulls in od_session.c, which binds the crypto HAL at
+# link time. The fake is the one every other session binary already uses.
+target_link_libraries(od_nordic_session_app_test od_session_fake)
+add_test(NAME nordic_session_app COMMAND od_nordic_session_app_test)
+
+# nordic_cmd_device: what this target's device commands ANSWER, which dispatch_route_test cannot
+# see -- that suite replaces every hook with a recorder, so it proves routing and nothing about
+# behaviour. Two answers here were decided deliberately and had no other coverage: 0x52's
+# unsupported NACK (a C11 wire change) and 0x53's deliberate silence. 0x43 is included because
+# ESP32 answered nothing to it from C8 to C11.2 and no suite noticed.
+add_executable(od_nordic_cmd_device_test
+    nordic_cmd_device_test.c
+    ../../targets/nordic-zephyr/src/od_cmd_device.c)
+target_include_directories(od_nordic_cmd_device_test PRIVATE
+    ../../targets/nordic-zephyr/src
+    ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr)
+target_link_libraries(od_nordic_cmd_device_test od_shared)
+add_test(NAME nordic_cmd_device COMMAND od_nordic_cmd_device_test)
 
 # Nordic config pin bytes are a wire contract and deliberately differ by
 # platform: nRF52840 uses absolute port*32+pin values, while nRF54 uses the

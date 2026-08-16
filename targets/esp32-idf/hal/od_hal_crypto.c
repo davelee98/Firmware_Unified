@@ -1,9 +1,12 @@
-/* od_hal_crypto for ESP-IDF over mbedTLS. Contract: shared/hal/od_hal_crypto.h. */
+/* od_hal_crypto for ESP-IDF over mbedTLS. Contract: shared/hal/od_hal_crypto.h.
+ *
+ * od_hal_crypto_random() is NOT here: it lives in od_hal_crypto_random.c so a host test can
+ * compile it against a fake RNG backend without dragging mbedTLS in. Same contract, same
+ * translation-unit-local state, one file each. */
 
 #include "od_hal_crypto.h"
 
 #include "esp_log.h"
-#include "esp_random.h"
 #include "mbedtls/aes.h"
 #include "mbedtls/ccm.h"
 #include "mbedtls/cipher.h"
@@ -174,14 +177,5 @@ enum od_hal_crypto_status od_hal_crypto_aes_ecb(const uint8_t key[16], const uin
         ESP_LOGE(s_tag, "mbedTLS AES-ECB failed: %d", ret);
         return OD_HAL_CRYPTO_ERROR;
     }
-    return OD_HAL_CRYPTO_OK;
-}
-
-enum od_hal_crypto_status od_hal_crypto_random(uint8_t *buf, uint16_t len)
-{
-    if (crypto_init_once() != OD_HAL_CRYPTO_OK || (buf == NULL && len != 0u)) {
-        return OD_HAL_CRYPTO_ERROR;
-    }
-    esp_fill_random(buf, len);
     return OD_HAL_CRYPTO_OK;
 }

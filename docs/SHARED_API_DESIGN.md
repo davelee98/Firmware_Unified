@@ -109,6 +109,17 @@ Two obligations follow, and both are easy to skip:
 
 ## Layering
 
+> **As built, 2026-08-16 (C8-C11).** The composition below was the design; what shipped differs in
+> two named ways, and both are deliberate. There is no `od_core_rx()`/`od_core_process()` pair —
+> ingress is `od_rxq_push()` and each target writes its own pump, because the surrounding work
+> differs (Nordic's main thread also owns LED, buzzer, input and watchdog; ESP32's `loop()` also
+> owns the LAN listener and the connection policy). Both pumps are bounded to one ring per pass and
+> compose the same shared steps: `od_txq_process()` → `od_config_read_pump()` → stale discard →
+> `od_dispatch_frame()` → `od_core_frame_done()` → consume → `od_txq_process()`. The only shared
+> `od_core_*` calls are `od_core_frame_done()` (target-implemented policy) and `od_core_reset()`
+> (the shared half of a teardown). Second: the transfer state machines are **not** in `shared/`
+> — they are target-owned, and C11 left them so on purpose.
+
 ```
 target BLE/LAN glue ──frame in──► od_core_rx() ──enqueue──► od_core_process()
                                                                  │ parse, decrypt, dispatch
@@ -656,16 +667,17 @@ void od_core_rx(od_origin_t origin, const uint8_t *frame, uint16_t len);
 void od_core_process(void);
 ```
 
-On Silabs the ring depth is 1 and `od_core_process` is called right after the event handler
-(same superloop pass); on NRF54 the ring is the `K_MSGQ` (depth 8) drained on the main thread;
-on ESP32 it is the existing `commandQueue`. The **ring is target-sized** (a `OD_RX_QUEUE_DEPTH`
-macro) but the logic is one implementation.
+**Superseded by what shipped.** Both promoted targets use one SPSC ring, `shared/core/od_rxq.c`
+(peek/consume, every slot carrying its writer's identity), pushed from the transport callback and
+drained by the target's own pump — not a shared `od_core_process()`. Depth derives from the
+target's own `PIPE_MAX_W + 2` and is asserted where both constants are visible. Silabs still
+dispatches inline from the BGAPI handler.
 
 ### Internal structure (one file per subsystem, all file-static state)
 
 | Unit | Responsibility | Primary donor |
 |---|---|---|
-| `od_dispatch.c` | opcode BE parse, encryption gate, the `CMD_*` switch, response framing helpers (2/4-byte acks, NACK namespaces) | NRF54 `dispatch()` (structure), Firmware (coverage) |
+| `od_dispatch.c` | opcode BE parse, structural validation, tag liveness, producer conflict, response budget, reservation, the auth/decrypt gate, **and the `CMD_*` map** — which dispatches to the per-command target hooks in `od_cmd_app.h`. The ORDER is the specification; see the header. | NRF54 `dispatch()` (structure), Firmware (coverage) |
 | `od_config.c` | TLV walk into `opendisplay_structs.h` types, chunked assembly, CRC, `od_hal_nvs` calls | NRF54 size-table parser (unknown-TLV safety) |
 | `od_xfer_direct.c` | 0x70/0x71/0x72 state machine, streaming into `od_hal_panel_write`, inflate integration | Firmware (most complete) |
 | `od_xfer_partial.c` | 0x76 header parse (17-byte BE), etag policy, two-plane routing | Firmware / NRF54 (parity) |
@@ -724,7 +736,7 @@ true:
 | Sense of *optional* | NFC | Mechanism |
 |---|---|---|
 | Optional **in a config blob** — a config need not contain one | **yes** | schema: `@packet 0x2A @repeatable max=2`, unlike `system`/`manufacturer`/`power`, which are required singletons |
-| Optional **to support** — a target need not drive NFC hardware or answer `0x83` | **yes** | `OD_NFC_ENABLE`; a target with `0` links no NFC code and NACKs the opcode |
+| Optional **to support** — a target need not drive NFC hardware or answer `0x83` | **yes** | the target's `od_cmd_app_nfc()` hook. ESP32's returns `OD_CMD_UNKNOWN` and answers **nothing** |
 | Optional **to parse** — a target may fail to step over the packet | **NO** | the size-table parser walks every canonical packet unconditionally |
 
 So the placement is a three-way split, not a two-way one:
@@ -732,10 +744,19 @@ So the placement is a three-way split, not a two-way one:
 | Concern | Placement | Gate |
 |---|---|---|
 | `0x2A` TLV parse into `struct NfcConfig` | `shared/core` — `od_config.c` | **none. Never gated.** |
-| `0x83` dispatch + the §5 NFC sub-protocol framing | `shared/core` — `od_dispatch.c` | `OD_NFC_ENABLE`, NACK when `0` |
+| `0x83` routing | `shared/core` — `od_dispatch.c`, unconditionally | none: every target defines the hook, so a missing one is a link error |
+| the §5 NFC sub-protocol framing | `targets/<t>/` — Nordic's `od_cmd_nfc.c` | absent on a target that returns `OD_CMD_UNKNOWN` |
 | TNB132M-over-I2C / SoC-NFCT driver | `targets/<t>/` | target-local backend |
 
-**`OD_NFC_ENABLE` gates *applying and answering*, never *parsing*.** `OD_PKT_NFC = 0x2A` is a
+> **Correction, 2026-08-16.** This section said a non-supporting target "NACKs the opcode". It does
+> not, and should not: ESP32 answers `0x83` with **silence**, because the canonical header defines
+> no "unsupported NFC" code and manufacturing one would be inventing a wire meaning unilaterally.
+> `OD_CMD_UNKNOWN` also keeps the frame out of the activity stamp, so probing `0x83` cannot hold
+> an exclusive link open. The one place a target does emit an unsupported NACK is `0x52`, where
+> the header defines `OD_ERR_POWER_OFF_UNSUPPORTED` for exactly that. `OD_NFC_ENABLE` was never
+> implemented; the gate is which hook the target links.
+
+**The gate is on *applying and answering*, never *parsing*.** `OD_PKT_NFC = 0x2A` is a
 first-class member of the canonical packet enum in `opendisplay_structs.h`, so a target that
 cannot do NFC still walks the packet, stores it, and returns it byte-stable on `CONFIG_READ` —
 it simply never acts on it. This is DIVERGENCE §2.1's rule stated for the case that motivated

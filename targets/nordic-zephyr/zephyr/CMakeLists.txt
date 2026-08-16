@@ -231,6 +231,10 @@ target_sources(app PRIVATE
   ${SRC_DIR}/opendisplay_touch.c
   ${SRC_DIR}/opendisplay_buzzer.c
   ${SRC_DIR}/opendisplay_pipe.c
+  ${SRC_DIR}/od_cmd_device.c
+  ${SRC_DIR}/od_cmd_config.c
+  ${SRC_DIR}/od_cmd_direct.c
+  ${SRC_DIR}/od_cmd_nfc.c
   ${SRC_DIR}/od_rxq_app.c
   ${SRC_DIR}/od_session_app.c
   ${SRC_DIR}/od_hal_radio.c

@@ -2,6 +2,7 @@
 #define DISPLAY_SERVICE_H
 
 #include "od_cmd.h"
+#include "od_txq.h"   /* od_origin_t, via od_hal_radio.h */
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -98,9 +99,10 @@ void cleanupPartialWriteOnDisconnect(void);
  *
  * No-op when the FastEPD parallel driver owns the pins -- that path never took the SPI bus. */
 void displayReleaseSpiBus(void);
-// Origin (see commandOrigin()) of the transport that opened the in-flight transfer.
-// A disconnect must only tear down a session its own transport owns.
-uint8_t transferSessionOrigin(void);
+// Origin of the transport that opened the in-flight transfer, recorded from that
+// frame's own reply context at START. A disconnect must only tear down a session
+// its own transport owns.
+od_origin_t transferSessionOrigin(void);
 int getplane();
 int getBitsPerPixel();
 

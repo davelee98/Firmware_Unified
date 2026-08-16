@@ -1,5 +1,6 @@
 #include "encryption.h"
 #include "od_session.h"
+#include "od_session_app.h"
 #include "od_span.h"
 #include "communication.h"
 #include "encryption_state.h"
@@ -79,7 +80,9 @@ void getAuthDeviceIdBytes(uint8_t* device_id) {
  * the auth-abuse counter live.
  * ============================================================================================ */
 
-struct od_session g_session;   /* zero-init == od_session_init(&g_session, 0) */
+/* THE COMPATIBILITY SHIMS. Older call sites ask these questions in this firmware's own words;
+ * each is now one line over the shared session, reached through the seam rather than through a
+ * global of its own. The session object itself is od_session_app.cpp's. */
 
 bool isEncryptionEnabled() {
     return od_session_security_enabled(&securityConfig);
@@ -87,19 +90,19 @@ bool isEncryptionEnabled() {
 
 /* Mutating by design, exactly as before: an expired session is torn down by the act of asking. */
 bool isAuthenticated() {
-    return od_session_alive(&g_session, od_hal_uptime_ms(), NULL);
+    return od_session_alive(od_session_app_state(), od_hal_uptime_ms(), NULL);
 }
 
 bool checkEncryptionSessionTimeout() {
-    return od_session_alive(&g_session, od_hal_uptime_ms(), NULL);
+    return od_session_alive(od_session_app_state(), od_hal_uptime_ms(), NULL);
 }
 
 void clearEncryptionSession() {
-    od_session_clear(&g_session);
+    od_session_clear(od_session_app_state());
 }
 
 void updateEncryptionSessionActivity() {
-    od_session_touch(&g_session, od_hal_uptime_ms());
+    od_session_touch(od_session_app_state(), od_hal_uptime_ms());
 }
 
 bool deriveTlsPsk(uint8_t* psk_out16) {

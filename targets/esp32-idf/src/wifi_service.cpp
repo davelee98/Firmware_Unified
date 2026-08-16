@@ -222,11 +222,6 @@ static int lanAcceptOne(void) {
 }
 
 
-// Command origin marker (F4): the shared dispatcher (imageDataWritten) reads this
-// to decide whether to run the app-layer AES-CCM gate. Defined in communication.cpp;
-// enum CommandOrigin comes from communication.h.
-// ORIGIN_LAN_TLS frames are already secured by TLS, so CCM MUST be bypassed.
-extern volatile uint8_t g_commandOrigin;
 
 // Roam gating: never re-associate (or full-channel scan, which steals the shared radio
 // from BLE under coex) while a transfer is in flight. transferActive() covers all three
@@ -241,7 +236,7 @@ static void lanBeginConnect(void);   // defined with the roaming / RTC AP-cache 
 uint8_t getFirmwareMajor();
 uint8_t getFirmwareMinor();
 
-// imageDataWritten + its opaque parameter typedefs come from communication.h.
+// od_dispatch_app_frame() comes from communication.h.
 
 // ------------------------------------------------------------------ TLS-PSK ---
 // One TLS session at a time, driven cooperatively from handleWiFiServer(). The
@@ -1730,26 +1725,24 @@ void handleWiFiServer() {
             if (tcpReceiveBufferPos < (uint32_t)(2 + flen)) {
                 break;
             }
-            // F4: tag the frame's origin so the dispatcher bypasses app-layer CCM on
-            // TLS (already-secure) and routes the response back over LAN only.
-            g_commandOrigin = tlsMode ? ORIGIN_LAN_TLS : ORIGIN_LAN_PLAIN;
-            // Instance identity for the R4 activity test. LAN frames never traverse
-            // the BLE ring, so there is no queued tag to carry: the socket is parsed
-            // and dispatched within this pass, and its buffer dies with the session.
-            // Publishing the live owner word directly is therefore exact -- if LAN
-            // does not own the slot, the word will not match and the frame stamps
-            // nothing.
-            {
-                const LinkId lanOwner = linkOwnerId();
-                g_commandInstance = (lanOwner.who == OWNER_LAN) ? linkIdWord(lanOwner) : 0;
-            }
-            // No stamp here: imageDataWritten() stamps the shared clock itself,
-            // and only for a RECOGNISED command from the owner -- which is the
-            // whole of R4's definition and what this site could not enforce.
+            // THE FRAME'S REPLY CONTEXT, built here because this is where both halves are
+            // known. The origin makes the dispatcher bypass app-layer CCM on TLS (already
+            // secure) and routes the response back over LAN only. The instance is the live
+            // owner word: LAN frames never traverse the BLE ring, so there is no queued tag
+            // to carry -- the socket is parsed and dispatched within this pass and its buffer
+            // dies with the session -- and publishing the owner directly is exact, because if
+            // LAN does not own the slot the word will not match and the frame stamps nothing.
+            //
+            // No stamp here: od_dispatch_app_frame() stamps the shared clock itself, and only
+            // for a RECOGNISED command from the owner, which is the whole of R4's definition
+            // and what this site could not enforce.
+            const LinkId lanOwner = linkOwnerId();
+            const od_reply_t rp = {
+                tlsMode ? OD_ORIGIN_LAN_TLS : OD_ORIGIN_LAN_PLAIN,
+                (lanOwner.who == OWNER_LAN) ? linkIdWord(lanOwner) : 0u
+            };
             const od_frame_outcome_t outcome =
-                imageDataWritten(NULL, NULL, tcpReceiveBuffer + 2, flen);
-            g_commandInstance = 0;
-            g_commandOrigin = ORIGIN_BLE;   // restore default for any subsequent BLE drain
+                od_dispatch_app_frame(&rp, tcpReceiveBuffer + 2, flen);
             // DEFERRED means the dispatcher did not consume this frame and it must be re-offered
             // byte-identical. Leave it at the head of the socket buffer and stop draining: the
             // reason it was deferred -- no response capacity, or a live config read -- clears from

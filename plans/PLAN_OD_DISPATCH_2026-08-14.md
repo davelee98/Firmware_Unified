@@ -1,10 +1,12 @@
 # Plan: `od_dispatch` — one command path for BLE ingress, dispatch and writeback
 
-**Status:** revision 8, 2026-08-16. C8-C10 are landed through `a37c04b`; C11 is planned in
-[`PLAN_OD_DISPATCH_C11_2026-08-16.md`](PLAN_OD_DISPATCH_C11_2026-08-16.md).
-**Execution gate:** C9/C10 have not run on Nordic hardware, and the ESP32 C1/C5/C8 stack remains
-unverified on silicon. Run the C10 Nordic matrix and ESP32-S3 smoke gate before C11 when boards are
-available; otherwise preserve the result as ACCEPTED-UNRUN rather than hardware-verified.
+**Status:** revision 9, 2026-08-16. **C8-C11 are landed** — C8-C10 through `a37c04b`, C11 through
+the series beginning `40bcc69`, per
+[`PLAN_OD_DISPATCH_C11_2026-08-16.md`](PLAN_OD_DISPATCH_C11_2026-08-16.md). Future work is C12.
+**Execution gate: ACCEPTED-UNRUN.** No board was available, so the C10 Nordic matrix and the
+ESP32-S3 smoke gate were not run, and neither was the C11 exit matrix. Every C9/C10/C11 layer on
+both targets is software-verified only, and C12 inherits the full stacked debt. A green
+`tools/check.sh --targets` says nothing about radio timing.
 **Prior art:** [DIVERGENCE_MATRIX.md](../docs/DIVERGENCE_MATRIX.md) § 1,
 [SHARED_API_DESIGN.md](../docs/SHARED_API_DESIGN.md) § "Layering", `tests/vectors/dispatch.json`.
 
@@ -448,13 +450,15 @@ commit is accepted. C12 adds the cross-corpus runner, not the first C-side cover
 | **C8** | Shared foundation plus an **ESP32 vertical adoption**: `od_session_app` seam; `od_hal_radio`; TX ring and reservation tokens; explicit plain/protected replies; exhaustive authenticate/open/seal mapping; typed outcomes; § 3.5 barrier; resumable `CONFIG_READ`; and `od_dispatch.c`. The existing ESP RX pump calls shared dispatch and `od_txq_process()`. Nordic remains on its landed dispatcher/inline notify in this commit, so no half-migrated reservation has to hide in a current-origin global. |
 | **C9** | Shared BLE RX ring on both targets; delete ESP32 `command_queue.cpp`; narrow Nordic to ATT MTU 256 / value admission 253 and matching ACL buffers. Nordic's existing main-thread pump calls its existing dispatcher from the new ring for this one commit; LAN remains direct. |
 | **C10** | **Nordic vertical adoption** of the C8 egress, resumable config producer, session seam and shared dispatcher; compose RX, TX and producer work in `od_core_process()`. Retire Nordic's blanket inline retry only here. Preserve log-before-silence and the control-frame activity policy. |
-| **C11** | Retire the remaining dispatch scaffolding, make the shared dispatcher own the opcode map, split Nordic command policy out of `opendisplay_pipe.c`, remove ESP32 implicit frame-context globals, close the session/reset seams, and fix the three landed crypto/HAL defects below. See the [detailed C11 execution plan](PLAN_OD_DISPATCH_C11_2026-08-16.md). |
+| **C11** | **LANDED 2026-08-16.** Shared dispatcher owns the opcode map (`od_cmd_app.h`); Nordic command policy split out of `opendisplay_pipe.c`; ESP32 implicit frame-context globals removed; both session objects private behind `od_session_app`; `od_core_reset()` added and adopted; Nordic PIPE returns truthful verdicts; the three crypto/HAL defects below fixed. Two more surfaced and were fixed with it: ESP32 had answered nothing to `CMD_FIRMWARE_VERSION` since C8, and Nordic's device id could be stack residue when `hwinfo` failed. See the [detailed C11 execution plan](PLAN_OD_DISPATCH_C11_2026-08-16.md). |
 | **C12** | C corpus runner + hardware passes. |
 
-### 7.1 Landed crypto-HAL defects folded into C11
+### 7.1 Landed crypto-HAL defects folded into C11 — **ALL THREE CLOSED, C11.1, 2026-08-16**
 
 Found by the post-merge integration review, deferred here rather than fixed on `main` because C11
-rewrites these files anyway. The first is an availability bug, not a hardening item.
+rewrites these files anyway. The first is an availability bug, not a hardening item. The
+descriptions below are kept as written, because what each was is the reason its test exists; the
+resolution follows each.
 
 **Nordic `slot_release()` latches the prepared slot.** `targets/nordic-zephyr/src/od_hal_crypto.c`
 returns `OD_HAL_CRYPTO_ERROR` on a `psa_destroy_key` failure **without clearing
@@ -471,17 +475,46 @@ regardless, accept the leaked slot, report the failure. A reusable slot beats an
 and holding the id was already rejected — retrying needs it kept somewhere, and PSA may reissue a
 held id to another key.
 
+> **Closed.** That decision, taken exactly: `slot_release()` copies the id to a local, clears the
+> tracked id and the ready flag, and only then calls `psa_destroy_key()`. A failure logs "slot
+> leaked" and returns ERROR; the next `key_set()` imports cleanly. `tests/host/nordic_crypto_slot_test.c`
+> compiles the production HAL against a fake PSA and injects the fault — it is not reproducible on
+> a board, which is why hardware cannot own it.
+
 **ESP32's CSPRNG cannot report failure.** `targets/esp32-idf/hal/od_hal_crypto.c` wraps the `void`
 `esp_fill_random()` and always returns OK, so `od_session_authenticate`'s "never offer a challenge
 the device cannot honour" branch is unreachable on that target while Nordic honours it. Benign
 today — a `0x0050` implies a live BLE link, and ESP-IDF's RNG is true while RF is on — but the two
 HALs disagree on a contract the header states.
 
+> **Closed.** `psa_generate_random()`, in its own translation unit (`hal/od_hal_crypto_random.c`)
+> so a host test can compile the production function against a fake PSA. No fallback to
+> `esp_fill_random()` on error, and no sdkconfig change — the symbols were already linked. The
+> AEAD stays on classic mbedTLS: routing CCM through `psa_aead_*` is a second backend migration
+> with its own hardware gate.
+
 **`od_session_seal()` omits upstream's activity stamp.** `../Firmware/src/encryption.cpp:841`
 stamps activity at the end of `encryptResponse()`; the port stamps only in `od_session_open()`, so
 an outbound-heavy session's `last_activity_ms` goes stale. No consumer today (the timeout is
 absolute and nothing reads the field), but `od_session.h` advertises it as the basis for a target
 idle policy, and C11 is where the adapters that would use it are rewritten.
+
+> **Closed.** A successful seal stamps `now_ms` and nothing else does — not a preflight refusal,
+> which produced no bytes, and not a cipher error, which may have spent a counter but still put
+> nothing on the wire. Every side of that boundary is pinned in `session_test.c`.
+
+### 7.2 Two more defects C11 surfaced
+
+**ESP32 answered nothing to `CMD_FIRMWARE_VERSION`, from C8 until C11.2.** The cutover moved the
+pre-gate FIRMWARE_VERSION arm into shared dispatch and left no target case behind it, so the switch
+fell through to `OD_CMD_UNKNOWN` and the frame drew no reply. It is the one command a client must be
+able to issue before it can authenticate, and a device whose key the host has lost is otherwise
+unidentifiable. Found by the link error the per-command seam produces, which is the argument for
+that seam: a missing handler is now a build failure rather than a silent capability loss.
+
+**Nordic's device id could be stack residue.** `od_session_app_device_id()` ignores
+`hwinfo_get_device_id()`'s status deliberately, but folded a buffer it never initialised, so on that
+path the wire-visible identity varied per boot. Zeroed 2026-08-16.
 
 ---
 

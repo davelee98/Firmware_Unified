@@ -49,17 +49,12 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame);
  * the two drift, and the one that matters is whichever is live. */
 uint8_t od_dispatch_budget(uint16_t cmd);
 
-/* IMPLEMENTED BY THE TARGET. Runs one command that has passed the gate; `body` is plaintext.
+/* The per-command target seam is od_cmd_app.h. The opcode-to-hook map is od_dispatch.c's, not a
+ * target's: two copies of that switch is how one target answers an opcode the other treats as
+ * unknown, and unknown is wire-visible.
  *
- * C8 SCOPE NOTE: the plan names one seam per opcode (od_cmd_led_activate, od_cmd_config_read, ...)
- * as scaffolding with a shrink schedule. This is a single seam instead, so the shared ordering can
- * land and be tested against the targets' EXISTING handler switches rather than against a
- * simultaneous rewrite of every handler signature. The per-opcode split belongs to C11's shrink,
- * where the transfer subsystems move behind their own headers anyway.
- *
- * The handler must complete: dispatch has already resolved capacity and producer conflicts, so
- * there is nothing left for a handler to defer on. It spends units from `r` via od_reply(). */
-od_cmd_result_t od_cmd_dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, od_span_t body);
+ * The two predicates below stay here because they are questions ABOUT an opcode that only the
+ * target can answer, asked by the dispatcher before any handler runs. */
 
 /* IMPLEMENTED BY THE TARGET. May this opcode run with NO authenticated session, on a device where
  * security IS configured?

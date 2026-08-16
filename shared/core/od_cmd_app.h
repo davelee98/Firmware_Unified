@@ -1,0 +1,77 @@
+/* od_cmd_app.h -- the per-command target seam. One link-time function per canonical opcode.
+ *
+ * MIGRATION SEAM, and named as one. The opcode map itself is shared (od_dispatch.c): a target
+ * supplies the BEHAVIOUR of a command, never the routing of it. That split is the point -- two
+ * targets each owning a copy of the switch is how one of them silently answers an opcode the other
+ * treats as unknown, and "unknown" is a wire-visible property (od_frame_policy gives it no
+ * activity stamp, so an unrecognised opcode cannot hold an exclusive link open).
+ *
+ * AUTHENTICATE (0x0050) is deliberately absent: od_gate owns the whole handshake and no target
+ * sees it.
+ *
+ * EVERY TARGET IMPLEMENTS EVERY HOOK. A capability a target lacks still gets a definition, which
+ * returns OD_CMD_UNKNOWN and answers nothing -- unless the protocol defines an explicit
+ * unsupported response, which is a decision recorded at that hook, not an omission. A missing
+ * definition is a link error, which is the enforcement: a new opcode cannot be added to the shared
+ * switch without every target stating what it does about it.
+ *
+ * `body` is PLAINTEXT: the frame has already met the session gate, so an encrypted frame arrives
+ * decrypted and a plaintext one arrives as sent. A handler must complete -- dispatch has already
+ * resolved capacity and producer conflicts, so there is nothing left to defer on -- and spends
+ * response units from ctx->r via od_reply().
+ *
+ * STATIC LINK-TIME COMPOSITION. No registry, no vtable, no constructor, no heap.
+ */
+
+#ifndef OD_CMD_APP_H
+#define OD_CMD_APP_H
+
+#include "od_cmd.h"
+#include "od_span.h"
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* --- device and lifecycle ------------------------------------------------------------------ */
+
+od_cmd_result_t od_cmd_app_reboot(const od_cmd_ctx_t *ctx, od_span_t body);            /* 0x000F */
+/* Exempt from the session gate on every target, and answered as DISCOVERY rather than ACCEPTED --
+ * a client must be able to learn what it is talking to before it can authenticate. */
+od_cmd_result_t od_cmd_app_firmware_version(const od_cmd_ctx_t *ctx, od_span_t body);  /* 0x0043 */
+od_cmd_result_t od_cmd_app_read_msd(const od_cmd_ctx_t *ctx, od_span_t body);          /* 0x0044 */
+od_cmd_result_t od_cmd_app_enter_dfu(const od_cmd_ctx_t *ctx, od_span_t body);         /* 0x0051 */
+od_cmd_result_t od_cmd_app_power_off(const od_cmd_ctx_t *ctx, od_span_t body);         /* 0x0052 */
+od_cmd_result_t od_cmd_app_deep_sleep(const od_cmd_ctx_t *ctx, od_span_t body);        /* 0x0053 */
+
+/* --- configuration ------------------------------------------------------------------------- */
+
+od_cmd_result_t od_cmd_app_config_read(const od_cmd_ctx_t *ctx, od_span_t body);       /* 0x0040 */
+od_cmd_result_t od_cmd_app_config_write(const od_cmd_ctx_t *ctx, od_span_t body);      /* 0x0041 */
+od_cmd_result_t od_cmd_app_config_chunk(const od_cmd_ctx_t *ctx, od_span_t body);      /* 0x0042 */
+od_cmd_result_t od_cmd_app_config_clear(const od_cmd_ctx_t *ctx, od_span_t body);      /* 0x0045 */
+
+/* --- image transfer ------------------------------------------------------------------------ */
+
+od_cmd_result_t od_cmd_app_direct_start(const od_cmd_ctx_t *ctx, od_span_t body);      /* 0x0070 */
+od_cmd_result_t od_cmd_app_direct_data(const od_cmd_ctx_t *ctx, od_span_t body);       /* 0x0071 */
+od_cmd_result_t od_cmd_app_direct_end(const od_cmd_ctx_t *ctx, od_span_t body);        /* 0x0072 */
+od_cmd_result_t od_cmd_app_partial_start(const od_cmd_ctx_t *ctx, od_span_t body);     /* 0x0076 */
+od_cmd_result_t od_cmd_app_pipe_start(const od_cmd_ctx_t *ctx, od_span_t body);        /* 0x0080 */
+od_cmd_result_t od_cmd_app_pipe_data(const od_cmd_ctx_t *ctx, od_span_t body);         /* 0x0081 */
+od_cmd_result_t od_cmd_app_pipe_end(const od_cmd_ctx_t *ctx, od_span_t body);          /* 0x0082 */
+
+/* --- peripherals --------------------------------------------------------------------------- */
+
+od_cmd_result_t od_cmd_app_led_activate(const od_cmd_ctx_t *ctx, od_span_t body);      /* 0x0073 */
+od_cmd_result_t od_cmd_app_led_stop(const od_cmd_ctx_t *ctx, od_span_t body);          /* 0x0075 */
+od_cmd_result_t od_cmd_app_buzzer(const od_cmd_ctx_t *ctx, od_span_t body);            /* 0x0077 */
+od_cmd_result_t od_cmd_app_nfc(const od_cmd_ctx_t *ctx, od_span_t body);               /* 0x0083 */
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* OD_CMD_APP_H */

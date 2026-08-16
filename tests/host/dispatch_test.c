@@ -12,6 +12,7 @@
 
 #include "od_dispatch.h"
 
+#include "od_cmd_app.h"
 #include "od_config_read.h"
 #include "od_reply.h"
 #include "od_session.h"
@@ -101,7 +102,12 @@ static uint16_t        g_handler_body_len;
 static od_cmd_result_t g_handler_result;
 static uint8_t         g_handler_replies;   /* how many frames the fake handler emits */
 
-od_cmd_result_t od_cmd_dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, od_span_t body)
+/* ONE RECORDER BEHIND EVERY HOOK. This suite is about the ORDERING, not the map -- which opcode
+ * reaches which hook is dispatch_route_test.c's question -- so every od_cmd_app hook lands here
+ * and reports the opcode it stands for. The opcode is a constant per hook rather than a parameter,
+ * because after C11 the hook IS the routing decision: a fake that took the opcode as an argument
+ * would agree with itself however the shared switch were wired. */
+static od_cmd_result_t handler(const od_cmd_ctx_t *ctx, uint16_t cmd, od_span_t body)
 {
     const od_reply_t *rp = &ctx->rp;
     od_tx_reservation_t *r = ctx->r;
@@ -124,6 +130,32 @@ od_cmd_result_t od_cmd_dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, od_span_t
     }
     return g_handler_result;
 }
+
+#define HOOK(fn, cmd)                                                    \
+    od_cmd_result_t fn(const od_cmd_ctx_t *ctx, od_span_t body)          \
+    { return handler(ctx, (cmd), body); }
+
+HOOK(od_cmd_app_reboot,           CMD_REBOOT)
+HOOK(od_cmd_app_firmware_version, CMD_FIRMWARE_VERSION)
+HOOK(od_cmd_app_read_msd,         CMD_READ_MSD)
+HOOK(od_cmd_app_enter_dfu,        CMD_ENTER_DFU)
+HOOK(od_cmd_app_power_off,        CMD_POWER_OFF)
+HOOK(od_cmd_app_deep_sleep,       CMD_DEEP_SLEEP)
+HOOK(od_cmd_app_config_read,      CMD_CONFIG_READ)
+HOOK(od_cmd_app_config_write,     CMD_CONFIG_WRITE)
+HOOK(od_cmd_app_config_chunk,     CMD_CONFIG_CHUNK)
+HOOK(od_cmd_app_config_clear,     CMD_CONFIG_CLEAR)
+HOOK(od_cmd_app_direct_start,     CMD_DIRECT_WRITE_START)
+HOOK(od_cmd_app_direct_data,      CMD_DIRECT_WRITE_DATA)
+HOOK(od_cmd_app_direct_end,       CMD_DIRECT_WRITE_END)
+HOOK(od_cmd_app_partial_start,    CMD_PARTIAL_WRITE_START)
+HOOK(od_cmd_app_pipe_start,       CMD_PIPE_WRITE_START)
+HOOK(od_cmd_app_pipe_data,        CMD_PIPE_WRITE_DATA)
+HOOK(od_cmd_app_pipe_end,         CMD_PIPE_WRITE_END)
+HOOK(od_cmd_app_led_activate,     CMD_LED_ACTIVATE)
+HOOK(od_cmd_app_led_stop,         CMD_LED_STOP)
+HOOK(od_cmd_app_buzzer,           CMD_BUZZER)
+HOOK(od_cmd_app_nfc,              CMD_NFC_ENDPOINT)
 
 static bool g_mutates_config;
 bool od_cmd_mutates_config(uint16_t cmd)

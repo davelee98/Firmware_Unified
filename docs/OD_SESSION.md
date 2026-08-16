@@ -17,6 +17,13 @@ That same regression is still live on Silabs.
 **Callers:** `esp32-idf` and `nordic-zephyr`. `efr32bg22-slc` still open-codes its own and is
 unaffected — see `FOLLOWUPS.md` § 5 for what it inherits when it swaps.
 
+> **C11 (2026-08-16) made the session object private.** Neither target exports it: it is
+> file-static in its `od_session_app` translation unit and reached only through
+> `od_session_app_state()`. An exported singleton is one a caller can `memset`, and `memset` is not
+> teardown here — the key lives in an `od_hal_crypto` slot, so zeroing the struct strands a
+> prepared key in a finite pool and loses the slot index with it. `od_session_clear()` is the only
+> teardown; `tools/check.sh` ratchets the old names' absence.
+
 ## What each target keeps
 
 Everything that cannot be shared, and nothing else: the clock, the device identity (efuse MAC on
@@ -123,15 +130,24 @@ options in `FOLLOWUPS.md` § 5.
 
 ## Verification
 
-**`tools/check.sh --targets` is the gate. There is no CI.** 12 checks: three boundary greps, the
-host suite under gcc and clang, the same suite under ASan/UBSan, three fuzz targets, the
-py-opendisplay wire corpus, the shim ratchet, all 10 ESP32 fragments with the sdkconfig baseline,
-and all 3 Nordic boards. A skip is counted, reprinted, and exits 2.
+**`tools/check.sh --targets` is the gate. There is no CI.** 13 checks: three boundary greps, the
+`od_session` no-memcmp check, the C11 ownership ratchets (one check covering four names -- no
+second opcode map, no implicit frame context, no exported session singleton, no byte-inferred
+sealing), the host suite under gcc and clang, the same suite under ASan/UBSan, three fuzz targets,
+the py-opendisplay wire corpus, the shim ratchet, all 10 ESP32 fragments with the sdkconfig
+baseline, and all 3 Nordic boards. A skip is counted, reprinted, and exits 2.
+**13 passed, 0 failed, 0 skipped at C11 (2026-08-16).**
 
-**Host suite: 11,756 checks.** Its credibility rests on mutation testing rather than on passing —
+**`od_session_test` alone: 11,831 checks; the whole host suite, 24 binaries, 38,062.** Its
+credibility rests on mutation testing rather than on passing —
 ~40 deliberate defects were injected and the suite's ability to catch each was measured. Six
 survivors were found and closed; the surviving-mutation list is in
-`OD_SESSION_LANDED_REVIEW_2026-08-15.md`.
+`OD_SESSION_LANDED_REVIEW_2026-08-15.md`. C11 added ten more, all caught: restoring the slot
+latch, making the ESP RNG always report OK, deleting the seal activity stamp, routing an opcode to
+its neighbour's hook, turning a Nordic PIPE NACK path into an OK, making DEFERRED consume RX, and —
+after the C11 review — dropping the abort from a substituted START ack, dropping it from a
+substituted SACK, returning unconditional OK from the refresh-status reply, and reverting Nordic's
+`0x52` to silence.
 
 **One mutation survives permanently:** `od_ct_equal` → `memcmp`. No host test can measure
 constant-time behaviour, so it is enforced structurally — `check.sh` fails if `memcmp` appears in
@@ -141,8 +157,8 @@ constant-time behaviour, so it is enforced structurally — `check.sh` fails if 
 
 | | status |
 |---|---|
-| `nordic-zephyr` / `xiao_nrf52840` | **Gate 2 passed 2026-08-15.** Native PSA CCM with the 12-byte shortened-tag policy authenticates real traffic — the risk both the plan and the review ranked first. |
-| `esp32-idf` | **No hardware result.** C5's swap and C1's mbedTLS arm are unproven. The authority target is the one trailing. |
+| `nordic-zephyr` / `xiao_nrf52840` | **Gate 2 passed 2026-08-15, at C6.** Native PSA CCM with the 12-byte shortened-tag policy authenticates real traffic — the risk both the plan and the review ranked first. **C9, C10 and C11 have not been flashed on it**, so the session code that runs today is not the code that passed. |
+| `esp32-idf` | **No hardware result at all.** C1's mbedTLS arm, C5's swap and everything from C8 to C11 are unproven. The authority target is the one trailing. |
 | `xiao_nrf54l15`, `xiao_nrf54lm20a` | build clean, never flashed |
 
 **Not exercised on any board:** the PIPE silence path (a nonce-rejected `0x81` frame must draw no
@@ -159,12 +175,25 @@ likewise unexercised.
   decrypt so it cancels as an oracle (needs RFC 3610 vectors); `OD_SESSION_OPEN_REPLAY` is
   unreachable in both open fuzzers; the fake's error injection is all-or-nothing, so four of five
   step-2 crypto-failure paths never run; one of nine `od_session_report` fields is asserted.
-- **Nordic's `slot_release()` latches the prepared key slot** — a single `psa_destroy_key` failure
-  leaves `s_slot_ready` set, `key_set()` then fails forever, and the device is UNAUTHENTICATABLE
-  until reboot. Same latch class removed from the one-shot path in `c0b3206`; the fix is the same
-  decision (clear the tracking, accept the leak). Deliberately deferred to `od_dispatch` C11, which
-  rewrites that file — see `plans/PLAN_OD_DISPATCH_2026-08-14.md` § 7.1. Needs a PSA fault to
-  trigger, which is why it is scheduled rather than hotfixed.
-- Smaller, same commit: ESP32's RNG wrapper cannot report failure (so the "never offer a challenge
-  the device cannot honour" branch is unreachable there), and `od_session_seal()` dropped upstream's
-  activity stamp.
+- ~~Nordic's `slot_release()` latches the prepared key slot~~ — **closed C11.1, 2026-08-16.**
+  Ownership of the key id is dropped BEFORE `psa_destroy_key()` is called, so a failure leaks the
+  PSA slot (reported, not retried — a parked id may be reissued to another key) and leaves the HAL
+  slot empty for the next handshake. `tests/host/nordic_crypto_slot_test.c` compiles the production
+  HAL against a fake PSA and injects the fault; it is not reproducible on a board, which is why it
+  lives there.
+- ~~ESP32's RNG wrapper cannot report failure~~ — **closed C11.1.** `od_hal_crypto_random()` is
+  `psa_generate_random()` in its own translation unit (`hal/od_hal_crypto_random.c`), so the
+  "never offer a challenge the device cannot honour" branch is reachable, and a host test compiles
+  the production function against the same fake PSA. **The AEAD stays on classic mbedTLS** — routing
+  CCM through `psa_aead_*` is a second backend migration with its own hardware gate, not a
+  follow-on. No sdkconfig change: `psa_crypto_init` and `psa_generate_random` are already defined in
+  `libmbedcrypto.a` on WiFi and non-WiFi boards alike (ESP-IDF exposes no Kconfig symbol for
+  `MBEDTLS_PSA_CRYPTO_C`, so absence from `sdkconfig.h` proves nothing — inspect the archive).
+- ~~`od_session_seal()` dropped upstream's activity stamp~~ — **closed C11.1.** A successful seal
+  stamps `last_activity_ms`, and nothing else does: a preflight refusal produced no bytes, and a
+  cipher error may have spent a counter but still put nothing on the wire. Every side of that
+  boundary is pinned in `session_test.c`.
+- **Nordic's device id could vary between boots** — closed 2026-08-16. `od_session_app_device_id()`
+  ignores `hwinfo_get_device_id()`'s status by design, but folded an uninitialised buffer, so the
+  degraded answer was stack residue. It is zeroed now. Four bytes of this feed the KDF and the auth
+  proof, so a varying id is a device that silently stops being the one that was provisioned.

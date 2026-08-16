@@ -48,29 +48,59 @@ looks arbitrary and is not); delete the story.
   --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF. `compat/ratchet.sh` and
   `tools/sdkconfig_baseline.sh` are gates a change must not break.
 - **`shared/` is no longer empty** —
-  `core/od_{adv_control,advert,cmd,config,config_asm,config_read,config_tlv,dispatch,gate,reply,rxq,session,txq,watchdog}.c`
+  `core/od_{adv_control,advert,cmd,config,config_asm,config_read,config_tlv,core,dispatch,gate,reply,rxq,session,txq,watchdog}.c`
   listed in `shared/sources.cmake` (never globbed) in per-HAL tiers, plus the two all-inline
-  headers `od_span.h` and `od_nonce_window.h`, which correctly have no entry there. Consumers:
+  headers `od_span.h` and `od_nonce_window.h` and the two pure seam headers `od_cmd_app.h` and
+  `od_session_app.h`, which correctly have no entry there. Consumers:
   host tests and `esp32-idf` take the aggregate; `nordic-zephyr` takes PURE + HAL_CRYPTO +
-  HAL_WDT + APP_RXQ; `efr32bg22-slc` takes PURE only — called on Nordic, still compiled-only on
-  Silabs except `od_advert`.
+  HAL_RADIO + HAL_WDT + APP_SESSION + APP_RXQ; `efr32bg22-slc` takes PURE only — called on Nordic,
+  still compiled-only on Silabs except `od_advert`.
   Two tiers are named for a **seam** rather than a HAL, because what they need is a target
   function rather than a driver: APP_SESSION (`od_session_app.h`) and APP_RXQ
   (`od_rxq_app_report`).
-- **THE WHOLE COMMAND PATH IS SHARED ON `esp32-idf`, AND NONE OF IT HAS RUN ON SILICON** (C8,
-  2026-08-15). `od_txq` is egress (capacity a counter, ownership a generation-tagged token),
-  `od_reply` chooses seal-or-plain **at the call site** instead of inferring it from response
-  bytes, `od_gate` maps every `od_session` result to a wire action, `od_dispatch` owns the
-  ordering, `od_config_read` makes CONFIG_READ a resumable producer, and `od_frame_policy()` is
-  the outcome table as data. `imageDataWritten()` is now a banner plus `od_dispatch_frame()` plus
-  `od_core_frame_done()`; `sendResponse`, `sendResponseUnencrypted`, `queueBleNotifyCopy`,
-  `serviceBleTx` and the 10-slot ring are gone.
+- **THE WHOLE COMMAND PATH IS SHARED ON BOTH TARGETS, AND NONE OF IT HAS RUN ON SILICON**
+  (C8 2026-08-15, C10 2026-08-15, C11 2026-08-16). `od_txq` is egress (capacity a counter,
+  ownership a generation-tagged token), `od_reply` chooses seal-or-plain **at the call site**
+  instead of inferring it from response bytes, `od_gate` maps every `od_session` result to a wire
+  action, `od_dispatch` owns the ordering AND the opcode map, `od_config_read` makes CONFIG_READ a
+  resumable producer, and `od_frame_policy()` is the outcome table as data.
   **The ordering IS the design** (`od_dispatch.h`): reservation precedes the *gate*, which answers
   `[00][cmd][FE]` and needs a slot of its own, and precedes *decrypt*, because decrypt advances the
   replay window — so a frame deferred after decrypting is a replay when re-offered. That is why
   `OD_FRAME_DEFERRED` is returnable only before decrypt.
-  **`esp32-idf` is now the TRAILING target on verification**, carrying three unproven layers: C1's
-  mbedTLS arm, C5's `od_session` swap and all of C8.
+- **C11 (2026-08-16) retired the dispatch scaffolding. NOT HARDWARE-VERIFIED, on either target.**
+  - **The opcode map is `od_dispatch.c`'s, once.** Targets supply named per-command hooks
+    (`shared/core/od_cmd_app.h`); `od_cmd_dispatch()` is gone from both. Every target defines
+    every hook, so adding an opcode without every target stating its answer is a **link error** —
+    and that check immediately found a live C8 defect: **ESP32 had answered nothing to
+    `CMD_FIRMWARE_VERSION` since the cutover**, because the pre-gate arm moved into shared dispatch
+    and no target case was left behind it. That is the one command a client must be able to issue
+    before it can authenticate.
+  - **One deliberate wire change:** Nordic `0x0052` now answers
+    `{FF,52,OD_ERR_POWER_OFF_UNSUPPORTED,00}` instead of falling silent. It has no power latch, and
+    silence left a host unable to tell that from firmware older than the command.
+  - **Nordic PIPE commands return truthful verdicts.** The three entry points were `void`, so the
+    caller had no choice but an unconditional `OD_CMD_OK` — a frame answered with a hard NACK was
+    reported as accepted, and the verdict is what decides whether a frame stamps the session's
+    activity clock. Silence is refusal too: DATA for a transfer that is not open draws nothing
+    (a `0x81` NACK is fatal to a client's upload loop) but accepts nothing either.
+  - **ESP32's frame context is an argument.** `g_commandOrigin`, `g_commandInstance`,
+    `commandOrigin()` and `imageDataWritten()` are gone; both ingresses build an `od_reply_t` and
+    call `od_dispatch_app_frame()`. `enum CommandOrigin` retired in favour of `od_origin_t`.
+  - **`opendisplay_pipe.c` is transport and pump only**, 1194 → 200 lines. Commands moved with
+    their state to `od_cmd_{device,config,direct,nfc}.c`, each exporting the one reset disconnect
+    cleanup calls.
+  - **Both session objects are private to their `od_session_app` translation unit**, and
+    `od_core_reset()` is the shared half of a teardown (producer, egress, session — in that order).
+    RX is deliberately not in it: its producer differs per target.
+  - **Three defects fixed**: Nordic's prepared-key slot no longer latches on a failed
+    `psa_destroy_key` (it dropped ownership only on success, so authentication was unavailable
+    until reboot); ESP32's RNG is `psa_generate_random()` and can report failure, where
+    `esp_fill_random()` returns `void`; a successful `od_session_seal()` stamps activity, and
+    nothing else does. A fourth surfaced during the work: a failing `hwinfo_get_device_id()` folded
+    an uninitialised stack buffer, so the wire-visible device identity could differ between boots.
+  - Ratcheted by symbol in [tools/check.sh](tools/check.sh): no second opcode map, no implicit
+    frame context, no exported session singleton, no byte-inferred sealing.
 - **`od_rxq` is the inbound ring on BOTH targets** (C9, 2026-08-15), replacing ESP32's
   `command_queue.cpp` and Nordic's 40 × 509 B `k_msgq`. SPSC, peek/consume rather than a copying
   pop, and every slot carries its writer's identity so stale frames self-discard at dispatch.
@@ -94,8 +124,9 @@ looks arbitrary and is not); delete the story.
   (`PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 12)`) accepts and authenticates real traffic.
   That was the single likeliest first-flash failure and it is retired: plain `PSA_ALG_CCM` pins a
   16-byte tag and would have failed every operation with `NOT_PERMITTED`.
-  **`esp32-idf` IS STILL UNVERIFIED** — C5's swap and C1's mbedTLS arm have never run on a board,
-  so the authority target is the one now trailing. Two things there that only hardware shows: the
+  **`esp32-idf` IS STILL UNVERIFIED** — C5's swap, C1's mbedTLS arm and everything from C8 to C11
+  have never run on a board, so the authority target is the one trailing. Nordic carries C9-C11
+  unflashed too. Two things there that only hardware shows: the
   `diff == 0` replay fix and the exact inner-length check are the two behaviour changes
   (`DIVERGENCE_MATRIX` § 6.5-6.9) that can refuse a frame the old code accepted.
   **The `OD-S1` PIPE silence fix is UNPROVEN on either target.** The nRF52840 pass completed an
@@ -137,9 +168,11 @@ looks arbitrary and is not); delete the story.
   +1 byte of RAM **only with `OD_CONFIG_WITH_{TOUCH,BUZZER,WIFI,DATA_EXTENDED}=0`** (gated 909 B
   vs its current 844 + 64; ungated 1617 B against 484 B of static slack at 98.5% RAM). Its real
   gate is `MAX_CONFIG_SIZE` 4096 + the NVM3 object-size check, not the aggregate. The remaining
-  unpromoted protocol logic — dispatch and the transfer state machines — still lives in the
-  ESP32 target.
-- `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel,crypto}`.
+  unpromoted protocol logic is **the transfer state machines** — direct, partial, PIPE and NFC,
+  target-owned on purpose (C11 § 1) and now smaller, explicit inputs to their own promotions.
+- `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel,crypto}`;
+  `od_hal_crypto_random.c` is its own translation unit so a host test can compile the RNG arm
+  without mbedTLS.
 - **`shared/hal/od_hal_crypto.h` is the third shared HAL** (2026-08-15, with `od_hal_adv` and
   `od_hal_wdt`), implemented on both `esp32-idf` (mbedTLS) and `nordic-zephyr` (native
   `psa_aead_*`, which needed only `CONFIG_PSA_WANT_ALG_CCM=y` — the hand-rolled RFC 3610 both
