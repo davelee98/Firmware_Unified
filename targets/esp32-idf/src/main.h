@@ -14,7 +14,7 @@
 #include "encryption_state.h"
 #include "config_parser.h"
 #include "ble_transport.h"
-#include "command_queue.h"
+#include "od_rxq.h"
 #include "wifi_service.h"
 #include "display_service.h"
 

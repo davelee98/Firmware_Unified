@@ -20,5 +20,6 @@ set(OD_BOARD_DEFINES
     # default because that default covers W=32 and would keep ~4 KB of TX storage this board
     # can never fill. structs.h asserts the relationship.
     OD_TXQ_SLOTS=18u
+    OD_RXQ_SLOTS=18u
     OPENDISPLAY_ZLIB_USE_HEAP_WINDOW=1
 )

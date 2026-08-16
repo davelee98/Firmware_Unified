@@ -82,7 +82,7 @@ extern "C" {
 #endif
 
 #include "ble_transport.h"
-#include "command_queue.h"
+#include "od_rxq.h"
 
 extern BBEPDISP bbep;
 extern struct od_config globalConfig;
@@ -2467,12 +2467,12 @@ bool pipeWriteActive(void) { return pipeState.active; }
 // imageWriteFramesMayStillArrive() -- "would logging this frame spam?" Keeps the
 // errored pipe, because frames keep arriving after a fatal NACK: a compliant client
 // may already have a full window in flight, one that ignores the NACK streams until
-// END. At ~90 frames/s and two lines each (bleRxQueuePush() arrival plus the
+// END. At ~90 frames/s and two lines each (od_rxq_push() arrival plus the
 // dispatch banner) un-suppressing those would evict the NACK itself from the log
 // ring -- losing exactly the line worth keeping.
 //
 // The split also keeps the new pipeState.error read off the logging path, which
-// imageWriteLogQuietFrame() reaches from bleRxQueuePush() on the stack callback
+// imageWriteLogQuietFrame() reaches from od_rxq_push() on the stack callback
 // task. That predicate is read cross-task; it keeps precisely the field reads it
 // has always made.
 bool transferActive(void) {

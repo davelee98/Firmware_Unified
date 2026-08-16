@@ -14,7 +14,7 @@
 #include "od_txq.h"
 #include "ble_transport.h"
 #include "communication.h"
-#include "command_queue.h"
+#include "od_rxq.h"
 #include "config_parser.h"
 #include "display_service.h"
 #include "encryption.h"
@@ -138,7 +138,7 @@ void abortToKnownState(const char* reason, bool dropLink, LinkId ownerId) {
     //    passed the owner check when written. A frame the owner writes AFTER this,
     //    during step 10's wait, is deliberately not re-flushed: it carries the
     //    departing instance's tag and fails the dispatch check once step 11 releases.
-    const uint8_t droppedRx = bleRxQueueReset();
+    const uint8_t droppedRx = od_rxq_reset();
     if (droppedRx > 0) {
         od_log_warn("[abort] dropped %u queued command(s) from the departed session",
                     (unsigned)droppedRx);

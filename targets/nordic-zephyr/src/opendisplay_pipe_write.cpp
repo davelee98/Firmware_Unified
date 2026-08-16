@@ -1,3 +1,4 @@
+#include "od_rxq.h"
 #include "opendisplay_pipe_write.h"
 #include "opendisplay_display.h"
 #include "opendisplay_protocol.h"
@@ -7,28 +8,23 @@
 
 #define PIPE_REORDER_SLOTS 33
 #define PIPE_MAX_W         32
+/* The shared RX ring must hold a whole window plus its END, or a saturating client stalls: the
+ * frame whose ACK would refund a slot is the one being dropped. shared/ cannot see PIPE_MAX_W, so
+ * the relationship is asserted here, where both are visible -- the same check ESP32 makes in
+ * structs.h. This target's default OD_RXQ_SLOTS (34) already covers W=32. */
+OD_STATIC_ASSERT(OD_RXQ_SLOTS >= (PIPE_MAX_W + 2u),
+                 "RX ring is too shallow for this target's PIPE window");
 #define PIPE_MAX_N         32
 #define PIPE_REORDER_SLOT_SIZE 248
 
 #define RESP_ACK  0x00u
 #define RESP_NACK 0xFFu
 
-struct PipeStartRequest {
-  uint8_t version;
-  uint8_t flags;
-  uint8_t req_window;
-  uint8_t req_ack_every;
-  uint16_t client_max_frame;
-  uint32_t total_size;
-} __attribute__((packed));
-
-struct PipePartialExt {
-  uint32_t old_etag;
-  uint16_t x;
-  uint16_t y;
-  uint16_t w;
-  uint16_t h;
-} __attribute__((packed));
+/* PipeStartRequest and PipePartialExt come from shared/protocol/opendisplay_structs.h -- the
+ * canonical wire contract -- via od_rxq.h. This file carried hand-written copies of both, matching
+ * field for field but under no assertion tying them to the header; a change upstream would have
+ * left the shadow behind silently. That is precisely what OD_STATIC_ASSERT(sizeof(...)) exists to
+ * catch there, and a local redefinition escapes it. */
 
 struct PipeReorderSlot {
   bool occupied;

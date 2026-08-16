@@ -37,7 +37,7 @@
 
 #include "ble_transport.h"
 #include "ble_transport_esp32.h"
-#include "command_queue.h"
+#include "od_rxq.h"
 #include "link_owner.h"
 #include "structs.h"
 #include "esp_log.h"   /* OD-INSTRUMENTATION 2026-08-05, temporary */
@@ -230,7 +230,7 @@ void od_ble_evt_disconnect(uint16_t conn_handle, uint16_t reason) {
     // notice a departed owner even when every event edge was lost.
     //
     // No RX-boundary capture here any more: frames carry their writer's identity
-    // (CommandQueueItem::tag), so a departed session's frames self-discard at
+    // (od_rxq_item_t::tag), so a departed session's frames self-discard at
     // dispatch instead of needing a boundary that handle reuse could destroy.
     instanceRetire(conn_handle);
     // The token is deliberately NOT released here -- see the matching note in
@@ -279,14 +279,14 @@ void od_ble_evt_write(uint16_t conn_handle, const uint8_t* data, uint16_t len) {
     // 00 81), so it would report length 0.
     //
     // Copy-and-enqueue is all this callback may do; loop() dispatches.
-    // bleRxQueuePush() owns the arrival log and every drop reason (empty, too
+    // od_rxq_push() owns the arrival log and every drop reason (empty, too
     // large, ring full) so this hook and nRF's onWriteCb() cannot report the
     // same frame differently. Add no logging here.
     //
     // The frame carries `word` as its tag: the dispatcher re-checks it against
     // the live owner word, so a frame that was legitimate on arrival but whose
     // session ended before it was drained never executes in the next session.
-    (void)bleRxQueuePush(data, len, word);
+    (void)od_rxq_push(data, len, word);
 }
 
 // Report the whole negotiated picture on every event rather than one field per

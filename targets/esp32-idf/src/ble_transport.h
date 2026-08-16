@@ -167,7 +167,7 @@ public:
     // raw HCI byte with no wrapping and is unaffected.
     //
     // The rxBoundary out-param is GONE: the RX-boundary mechanism it fed is retired
-    // in favour of per-frame identity tags (CommandQueueItem::tag).
+    // in favour of per-frame identity tags (od_rxq_item_t::tag).
     bool takeDisconnectedEvent(uint16_t* reason = nullptr, uint32_t* instanceWord = nullptr);
 
     // --- identity ---

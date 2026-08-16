@@ -8,7 +8,7 @@
 
 #include "ble_transport.h"
 #include "ble_transport_nrf.h"
-#include "command_queue.h"
+#include "od_rxq.h"
 #include "link_owner.h"
 #include "structs.h"
 #include "encryption.h"
@@ -167,7 +167,7 @@ static void onDisconnectCb(uint16_t conn_handle, uint8_t reason) {
     __atomic_store_n(&s_disconnectedWord, word, __ATOMIC_RELAXED);
     // Retire the entry: this is what makes link death observable per handle, for
     // the R3a wait and for the loop's owner comparison. No RX-boundary capture --
-    // frames carry their writer's identity instead (CommandQueueItem::tag).
+    // frames carry their writer's identity instead (od_rxq_item_t::tag).
     s_instanceSubscribed = false;
     __atomic_store_n(&s_instanceDecidedWord, (uint32_t)0, __ATOMIC_RELAXED);
     __atomic_store_n(&s_instanceWord, (uint32_t)0, __ATOMIC_RELEASE);
@@ -206,11 +206,11 @@ static void onWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, 
         od_log_debug("Dropped write from non-owner h=%u", (unsigned)conn_hdl);
         return;
     }
-    // bleRxQueuePush() owns the arrival log and every drop reason (empty, too large,
+    // od_rxq_push() owns the arrival log and every drop reason (empty, too large,
     // ring full) so this callback and ESP32's onWrite() cannot report the same frame
     // differently. This site used to print "queue full" for all three, sending you
     // after ring depth when the real cause was a malformed frame. Add no logging here.
-    (void)bleRxQueuePush(data, len, word);
+    (void)od_rxq_push(data, len, word);
 }
 
 // --- BleTransport ------------------------------------------------------------

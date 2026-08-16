@@ -118,6 +118,10 @@ add_executable(od_txq_test txq_test.c)
 target_link_libraries(od_txq_test od_shared)
 add_test(NAME txq COMMAND od_txq_test)
 
+add_executable(od_rxq_test rxq_test.c)
+target_link_libraries(od_rxq_test od_shared)
+add_test(NAME rxq COMMAND od_rxq_test)
+
 # reply: the seal-or-plain decision, against a fake radio AND a fake od_session_app seam.
 #
 # The property is not "does it encrypt" but "is confidentiality chosen by the CALL". Both targets

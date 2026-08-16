@@ -47,12 +47,39 @@ looks arbitrary and is not); delete the story.
   — or drive them directly, `cmake -S tests/host -B <dir> && cmake --build <dir> && ctest
   --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF. `compat/ratchet.sh` and
   `tools/sdkconfig_baseline.sh` are gates a change must not break.
-- **`shared/` is no longer empty** — `core/od_{adv_control,advert,config,config_asm,config_tlv,session,watchdog}.c`
+- **`shared/` is no longer empty** —
+  `core/od_{adv_control,advert,cmd,config,config_asm,config_read,config_tlv,dispatch,gate,reply,rxq,session,txq,watchdog}.c`
   listed in `shared/sources.cmake` (never globbed) in per-HAL tiers, plus the two all-inline
   headers `od_span.h` and `od_nonce_window.h`, which correctly have no entry there. Consumers:
   host tests and `esp32-idf` take the aggregate; `nordic-zephyr` takes PURE + HAL_CRYPTO +
-  HAL_WDT; `efr32bg22-slc` takes PURE only — called on Nordic, still compiled-only on Silabs
-  except `od_advert`.
+  HAL_WDT + APP_RXQ; `efr32bg22-slc` takes PURE only — called on Nordic, still compiled-only on
+  Silabs except `od_advert`.
+  Two tiers are named for a **seam** rather than a HAL, because what they need is a target
+  function rather than a driver: APP_SESSION (`od_session_app.h`) and APP_RXQ
+  (`od_rxq_app_report`).
+- **THE WHOLE COMMAND PATH IS SHARED ON `esp32-idf`, AND NONE OF IT HAS RUN ON SILICON** (C8,
+  2026-08-15). `od_txq` is egress (capacity a counter, ownership a generation-tagged token),
+  `od_reply` chooses seal-or-plain **at the call site** instead of inferring it from response
+  bytes, `od_gate` maps every `od_session` result to a wire action, `od_dispatch` owns the
+  ordering, `od_config_read` makes CONFIG_READ a resumable producer, and `od_frame_policy()` is
+  the outcome table as data. `imageDataWritten()` is now a banner plus `od_dispatch_frame()` plus
+  `od_core_frame_done()`; `sendResponse`, `sendResponseUnencrypted`, `queueBleNotifyCopy`,
+  `serviceBleTx` and the 10-slot ring are gone.
+  **The ordering IS the design** (`od_dispatch.h`): reservation precedes the *gate*, which answers
+  `[00][cmd][FE]` and needs a slot of its own, and precedes *decrypt*, because decrypt advances the
+  replay window — so a frame deferred after decrypting is a replay when re-offered. That is why
+  `OD_FRAME_DEFERRED` is returnable only before decrypt.
+  **`esp32-idf` is now the TRAILING target on verification**, carrying three unproven layers: C1's
+  mbedTLS arm, C5's `od_session` swap and all of C8.
+- **`od_rxq` is the inbound ring on BOTH targets** (C9, 2026-08-15), replacing ESP32's
+  `command_queue.cpp` and Nordic's 40 × 509 B `k_msgq`. SPSC, peek/consume rather than a copying
+  pop, and every slot carries its writer's identity so stale frames self-discard at dispatch.
+  **Nordic's BLE admission narrowed from 509 to 256** and now refuses over-length writes at ATT
+  with 0x0D as ESP32 does, rather than dropping them silently at the queue — which also keeps the
+  245..256 dispatcher NACK reachable on both. Measured on `xiao_nrf54l15`: RAM 176712 → 154819 B
+  (**21.9 KB reclaimed**, more than the plan's ~12 KB estimate because narrowing the MTU shrinks
+  the ACL buffers too). Both queue depths are now derived from the target's own `PIPE_MAX_W + 2`
+  and asserted where both constants are visible. NOT hardware-verified on either target.
   **`od_session` is CALLED ON BOTH `esp32-idf` AND `nordic-zephyr`, AND HARDWARE-VERIFIED ON
   `nordic-zephyr`/`xiao_nrf52840` ONLY** (C5 2026-08-15, C6 2026-08-15; Gate 2 passed on the
   nRF52840 2026-08-15). It owns the 0x0050 handshake, the KDF, the replay window and the CCM

@@ -136,6 +136,13 @@ set(OD_SHARED_SOURCES_APP_SESSION
     "${CMAKE_CURRENT_LIST_DIR}/core/od_cmd.c"
 )
 
+# APP_RXQ, like APP_SESSION, is named for a SEAM rather than a HAL: the ring needs no driver at
+# all, only od_rxq_app_report() so that arrivals and drops are logged once for both targets
+# instead of once per transport callback. A target that takes this tier must implement it.
+set(OD_SHARED_SOURCES_APP_RXQ
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_rxq.c"
+)
+
 set(OD_SHARED_SOURCES_HAL_WDT
     "${CMAKE_CURRENT_LIST_DIR}/core/od_watchdog.c"
 )
@@ -148,6 +155,7 @@ set(OD_SHARED_SOURCES
     ${OD_SHARED_SOURCES_HAL_CRYPTO}
     ${OD_SHARED_SOURCES_HAL_RADIO}
     ${OD_SHARED_SOURCES_APP_SESSION}
+    ${OD_SHARED_SOURCES_APP_RXQ}
     ${OD_SHARED_SOURCES_HAL_WDT}
 )
 

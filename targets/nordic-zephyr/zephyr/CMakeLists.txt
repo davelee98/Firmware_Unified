@@ -231,6 +231,7 @@ target_sources(app PRIVATE
   ${SRC_DIR}/opendisplay_touch.c
   ${SRC_DIR}/opendisplay_buzzer.c
   ${SRC_DIR}/opendisplay_pipe.c
+  ${SRC_DIR}/od_rxq_app.c
   ${SRC_DIR}/opendisplay_pipe_write.cpp
   ${SRC_DIR}/opendisplay_cs.c
   ${SRC_DIR}/opendisplay_nfc.c
@@ -251,8 +252,10 @@ target_sources(app PRIVATE
 # HAL_ADV is still NOT here -- this target does not implement shared/hal/od_hal_adv.h, and taking
 # a source whose HAL is missing buys an unreferenced object that links only because nothing calls
 # it. Add each tier when its HAL lands, not before.
+# APP_RXQ joins at C9: the inbound ring is shared, and this target implements its one seam in
+# src/od_rxq_app.c. It needs no HAL -- only od_rxq_app_report().
 target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE} ${OD_SHARED_SOURCES_HAL_CRYPTO}
-                           ${OD_SHARED_SOURCES_HAL_WDT})
+                           ${OD_SHARED_SOURCES_HAL_WDT} ${OD_SHARED_SOURCES_APP_RXQ})
 
 # The per-source INCLUDE_DIRECTORIES property that used to sit here is GONE, and its removal is
 # the point of the header adoption: it existed only to pin these two shared TUs to the canonical

@@ -12,7 +12,7 @@
 #include <string.h>
 
 #include "ble_transport.h"
-#include "command_queue.h"
+#include "od_rxq.h"
 
 #ifdef TARGET_ESP32
 // wifi_service.h only, deliberately: this file talks to the LAN transport
@@ -61,7 +61,7 @@ struct od_config_asm g_configAsm;
 // whether a frame still belongs to the live session: BLE conn handles are reused,
 // so a frame queued by a dead instance is indistinguishable from the new owner's by
 // transport alone. serviceBleRx() sets this from the frame's own tag (which
-// CommandQueueItem carries from the write callback) and the LAN listener sets it
+// od_rxq_item_t carries from the write callback) and the LAN listener sets it
 // from the LAN owner's identity, both immediately before dispatch. Same
 // single-loop-task argument as g_commandOrigin, so no locking.
 volatile uint32_t g_commandInstance = 0;
@@ -210,7 +210,7 @@ void serviceBleAuthAbuseDisconnect(void) {
     // That frame may be the client's authentication, which would cancel this drop
     // entirely. Bounded by the same hard deadline, so a client that keeps the ring
     // permanently non-empty cannot defer the drop indefinitely.
-    if (!expired && bleRxQueuePending()) return;
+    if (!expired && od_rxq_pending()) return;
 
     resetAuthAbuseCounter();
     // dropLink=true. The abort's own step 10 is the R3a bounded wait for link-down
@@ -692,7 +692,7 @@ od_frame_outcome_t imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint
     // Single per-command banner for the whole dispatch, emitted before the dispatcher so a frame
     // it refuses structurally is still attributable. Named via commandName(); unknown opcodes
     // (nullptr) get no banner and are reported by od_cmd_dispatch()'s default. Handlers must not
-    // log their own banner. Carries no encryption token: the ERX/URX line from bleRxQueuePush()
+    // log their own banner. Carries no encryption token: the ERX/URX line from od_rxq_push()
     // already reports it for this frame, and stating it twice is how the two spellings drift.
     if (len < 2) {
         od_log_error("ERROR: Command too short (%u bytes)", len);

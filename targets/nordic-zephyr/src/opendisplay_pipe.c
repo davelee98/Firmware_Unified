@@ -15,6 +15,8 @@
 #include "od_hal_crypto.h"
 #include <stdio.h>
 #include <string.h>
+
+#include "od_rxq.h"
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/kernel.h>
 
@@ -183,14 +185,10 @@ static od_nfc_write_chunk_t s_nfc_write_chunk;
  * CCM crypto) must not run there: they starve ATT and break service discovery
  * on reconnect. Writes are queued here and drained on the main thread.
  */
-#define OD_PIPE_MSG_DATA_MAX 509u /* ATT MTU 512 - 3 */
-struct od_pipe_msg {
-  uint16_t len;
-  uint8_t gen;
-  uint8_t write_cmd;
-  uint8_t data[OD_PIPE_MSG_DATA_MAX];
-};
-K_MSGQ_DEFINE(s_pipe_msgq, sizeof(struct od_pipe_msg), 40, 4);
+/* Inbound frames live in shared/core/od_rxq.c now -- one ring, one SPSC contract, one arrival log
+ * for both targets. The 509-byte slots this replaces were sized for an ATT MTU of 512 that nothing
+ * used: the dispatcher refuses anything over OD_PIPE_MAX_PAYLOAD (244), so 40 x 513 B held ~20 KB
+ * to buffer frames it would then reject. */
 static atomic_t s_conn_gen;
 static atomic_t s_close_pending;
 
@@ -1089,18 +1087,14 @@ static void on_pipe_write(uint8_t connection, const uint8_t *data, uint16_t len,
 /* BT RX thread: copy into the queue only, no command processing here. */
 void opendisplay_pipe_on_write(const uint8_t *data, uint16_t len, bool write_cmd)
 {
-  struct od_pipe_msg msg;
-
-  if (len == 0u || len > OD_PIPE_MSG_DATA_MAX) {
-    return;
-  }
-  msg.len = len;
-  msg.gen = (uint8_t)atomic_get(&s_conn_gen);
-  msg.write_cmd = write_cmd ? 1u : 0u;
-  memcpy(msg.data, data, len);
-  if (k_msgq_put(&s_pipe_msgq, &msg, K_MSEC(100)) != 0) {
-    od_log_info("pipe queue full, dropped %u B", (unsigned)len);
-  }
+  /* write_cmd is not carried into the ring: on_pipe_write() has always (void)'d it, so a per-frame
+   * field for it would be storage for a value nothing reads. Write-command vs write-request is a
+   * transport distinction the protocol does not act on. */
+  (void)write_cmd;
+  /* The connection generation IS the frame's identity, and it travels with the frame rather than
+   * being re-read at dispatch: a frame queued by a closed connection must not run against whoever
+   * inherited the link. Same role as ESP32's packed owner word. */
+  (void)od_rxq_push(data, len, (uint32_t)atomic_get(&s_conn_gen));
 }
 
 void opendisplay_pipe_on_notify_changed(bool enabled)
@@ -1120,8 +1114,6 @@ void opendisplay_pipe_on_connection_closed(void)
 /* Main thread: run deferred cleanup and process queued writes. */
 void opendisplay_pipe_process(void)
 {
-  struct od_pipe_msg msg;
-
   if (atomic_cas(&s_close_pending, 1, 0)) {
     clear_session();
     s_long_write_len = 0;
@@ -1131,10 +1123,17 @@ void opendisplay_pipe_process(void)
     opendisplay_pipe_write_reset();
     opendisplay_display_abort();
   }
-  while (k_msgq_get(&s_pipe_msgq, &msg, K_NO_WAIT) == 0) {
-    if (msg.gen != (uint8_t)atomic_get(&s_conn_gen)) {
-      continue; /* stale frame from a closed connection */
+  for (;;) {
+    od_rxq_item_t *item = od_rxq_peek();
+    if (item == NULL) {
+      break;
     }
-    on_pipe_write(0, msg.data, msg.len, msg.write_cmd != 0u);
+    if (item->tag == (uint32_t)atomic_get(&s_conn_gen)) {
+      on_pipe_write(0, item->data, item->len, false);
+    }
+    /* Consumed either way: a stale frame is discarded, not retried. Peek/consume rather than a
+     * copying get, so the dispatcher decrypts in the slot instead of on a 256-byte stack frame in
+     * the middle of the main thread. */
+    od_rxq_consume();
   }
 }

@@ -8,6 +8,7 @@
 // truth for every config-packet struct; the firmware-only runtime types below
 // are the only definitions that remain local.
 #include "opendisplay_structs.h"
+#include "od_rxq.h"
 #include "od_txq.h"
 // The parsed-config aggregate, the instance caps and the two storage normalisations are
 // shared/core/od_config.h. `struct GlobalConfig` was this file's copy of it.
@@ -56,6 +57,14 @@ struct ImageData {
 #define PIPE_MAX_W      32
 #define PIPE_MAX_N      32
 #endif
+/* Both queues are sized from the window they have to cover: PIPE_MAX_W + 2, so usable capacity
+ * (SLOTS - 1) holds a full window plus its END. shared/ cannot see PIPE_MAX_W, so the targets set
+ * these and assert the relationship here, where both are visible. Setting either BELOW the derived
+ * value caps the effective window and costs throughput -- a deliberate trade, never a link-time
+ * discovery. */
+OD_STATIC_ASSERT(OD_RXQ_SLOTS >= (PIPE_MAX_W + 2u),
+                 "RX ring is too shallow for this board's PIPE window");
+
 /* The egress queue must be able to hold a whole window plus its END, or a saturating PIPE client
  * deadlocks: every slot is an unacknowledged ACK, the reserve for the next DATA frame fails, and
  * od_dispatch defers the very command that would refund a slot. od_txq.h states the relationship
@@ -90,7 +99,7 @@ static_assert(OD_BLE_PREFERRED_ATT_MTU - 3u >= PIPE_REORDER_SLOT_SIZE,
 static_assert(OD_BLE_PREFERRED_ATT_MTU - 3u <= OD_BLE_MAX_FRAME,
               "a single-PDU write could overrun an OD_BLE_MAX_FRAME-sized slot");
 
-// The BLE RX command ring (CommandQueueItem and its sizes) lives in command_queue.h; egress is
+// The BLE RX command ring (od_rxq_item_t and its sizes) lives in command_queue.h; egress is
 // shared/core/od_txq.c. Neither is a config-packet or wire-protocol definition, so neither belongs
 // in this hub.
 
