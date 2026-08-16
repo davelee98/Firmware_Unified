@@ -13,7 +13,7 @@
 // yet use it: its write callback still dispatches inline on the SoftDevice
 // callback task, and its responses still go straight out through
 // BleTransport::notify(). Phase 3 makes nRF a producer on the RX ring and moves
-// its dispatch to loop(), at which point serviceBleTx() drives both targets.
+// its dispatch to loop().
 // See docs/PLAN_BLE_TRANSPORT_ABSTRACTION_2026-07-27.md.
 //
 // Deliberately not in structs.h: that header is the config-packet / wire-protocol
@@ -135,39 +135,5 @@ bool bleRxQueuePending(void);                             // unconsumed frames w
 // Replaces bleRxQueueDiscardTo(boundary), retired with the RX-boundary mechanism
 // (see CommandQueueItem::tag).
 uint8_t bleRxQueueReset(void);
-
-// --- TX: command handlers (producer) -> loop() flush (consumer) --------------
-// One definition of the struct, in one place: communication.cpp used to carry
-// its own copy plus a MAX_RESPONSE_SIZE_LOCAL constant, so the bound checked
-// before the memcpy in the enqueue path lived in a different file from the slot
-// it guarded -- two definitions of one type (an ODR violation) that had to be
-// edited in lockstep or the guard would admit a response larger than the slot.
-#define RESPONSE_QUEUE_SIZE 10
-#define MAX_RESPONSE_SIZE   OD_BLE_MAX_FRAME
-
-struct ResponseQueueItem {
-    uint8_t data[MAX_RESPONSE_SIZE];
-    uint16_t len;
-    bool pending;
-};
-
-// Both ends run on loop() today, so no atomics here.
-bool bleTxQueuePush(const uint8_t* data, uint16_t len);   // false = too large or full
-// Discard every queued response. The TX-side analogue of bleRxQueueReset(), and
-// the other half of R6's "RX and TX rings drained of the departed session's
-// traffic". Single-task, so no ordering rules apply here.
-void bleTxQueueReset(void);
-uint8_t bleTxQueueDepth(void);
-uint8_t bleTxQueueHead(void);                             // producer-side, for pollActivity()
-bool bleTxQueuePending(void);
-
-// Drain queued responses to BLE notifications. Called once per loop() pass and --
-// critically -- between commands inside the bounded command drain: at small
-// negotiated ack_every (N_eff 1-2) a 33-command drain can emit up to ~32 pipe
-// ACKs, which would overflow the 10-slot response ring (dropping the NEWEST
-// entry) and leave only stale ACKs, lagging window refunds and collapsing
-// throughput. handleReadConfig() calls it between config chunks for the same
-// reason.
-void serviceBleTx(void);
 
 #endif  // COMMAND_QUEUE_H

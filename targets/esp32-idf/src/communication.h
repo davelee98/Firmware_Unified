@@ -5,8 +5,6 @@
 
 #include <stdint.h>
 
-void sendResponseUnencrypted(uint8_t* response, uint16_t len);
-void sendResponse(uint8_t* response, uint16_t len);
 uint16_t calculateCRC16CCITT(uint8_t* data, uint32_t len);
 uint8_t getFirmwareMajor();
 uint8_t getFirmwareMinor();
@@ -26,7 +24,11 @@ od_cmd_result_t handleWriteConfigChunk(const od_cmd_ctx_t *ctx, uint8_t* data, u
 // BLECharacteristic*-shaped signature; ble_transport_nrf.cpp adapts it to this.
 typedef uint16_t BLEConnHandle;
 typedef void*    BLECharPtr;
-void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uint16_t len);
+/* Dispatch one inbound frame and apply its policy. Returns the outcome so the INGRESS can honour
+ * od_frame_policy().consume_rx: OD_FRAME_DEFERRED means the frame was not consumed and must be
+ * re-offered unchanged, and an ingress that drops it anyway turns backpressure into silent
+ * command loss. */
+od_frame_outcome_t imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uint16_t len);
 
 // Transport a command arrived on. Set by the LAN listener around each dispatch and
 // ORIGIN_BLE at all other times. Multi-frame transfers use it to reject frames from

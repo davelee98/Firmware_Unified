@@ -531,10 +531,9 @@ static void directWriteActivatePanel(void);
 static od_cmd_result_t directWriteFinishAndRefresh(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len, uint8_t endOpcode);
 static bool imageWriteFramesMayStillArrive(void);
 
-// serviceBleTx() comes from command_queue.h. The response ring's only drainer is
-// the loop task, which is the same task running these handlers -- so anything
-// queued here stays queued until we return. Call it before any multi-second
-// blocking work (see the refresh tail).
+// od_txq's only drainer is the loop task, which is the same task running these handlers -- so
+// anything queued here stays queued until we return. Call od_cmd_flush_before_refresh() before any
+// multi-second blocking work (see the refresh tail).
 
 // PIPE_WRITE (0x0080-0x0082) sliding-window receive state + reorder queue. Declared
 // early so the quiet-logging predicates below can consult pipeState.active. The
@@ -2276,7 +2275,15 @@ od_cmd_result_t handleDirectWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uin
         }
         imageWriteLogFinish(partialCtx.bytes_received, partialCtx.expected_stream_size);
         uint8_t ackResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_END_ACK};
-        (void)od_cmd_reply(ctx, ackResponse, sizeof(ackResponse));
+    /* THE ACK DECIDES WHETHER THE REFRESH HAPPENS. od_reply() can substitute a plaintext hard NACK
+     * for an END ack it could not seal, and it reports that rather than lying. Emitting the
+     * post-refresh status after such a substitution would queue a success behind a rejection; and
+     * refreshing at all would put content on the panel that the host has just been told was
+     * refused. Neither the wire nor the display may claim what the other denies, so both stop. */
+        if (od_cmd_reply(ctx, ackResponse, sizeof(ackResponse)) != OD_TXQ_OK) {
+            cleanup_partial_write_state();
+            return OD_CMD_NACK;
+        }
         int refreshMode = REFRESH_PARTIAL;
         if (data != nullptr && len >= 1 && data[0] == REFRESH_FULL) refreshMode = REFRESH_FULL;
         else if (data != nullptr && len >= 1 && data[0] == REFRESH_FAST) refreshMode = REFRESH_FAST;
@@ -2333,7 +2340,14 @@ static od_cmd_result_t directWriteFinishAndRefresh(const od_cmd_ctx_t *ctx, uint
         od_log_info("EPD refresh: %s (mode=%d, end payload none (auto))", modeName, refreshMode);
     }
     uint8_t ackResponse[] = {0x00, endOpcode};
-    (void)od_cmd_reply(ctx, ackResponse, sizeof(ackResponse));
+    /* THE ACK DECIDES WHETHER THE REFRESH HAPPENS. od_reply() can substitute a plaintext hard NACK
+     * for an END ack it could not seal, and it reports that rather than lying. Emitting the
+     * post-refresh status after such a substitution would queue a success behind a rejection; and
+     * refreshing at all would put content on the panel that the host has just been told was
+     * refused. Neither the wire nor the display may claim what the other denies, so both stop. */
+    if (od_cmd_reply(ctx, ackResponse, sizeof(ackResponse)) != OD_TXQ_OK) {
+        return OD_CMD_NACK;
+    }
     // Push the END ack — and the final tail ACK the auto-complete path queued just
     // before calling us — onto the air BEFORE the blocking refresh below. bbepRefresh
     // + waitforrefresh occupy the loop task for seconds on a big panel, and the loop
@@ -2342,14 +2356,8 @@ static od_cmd_result_t directWriteFinishAndRefresh(const od_cmd_ctx_t *ctx, uint
     //
     // Portable as of Phase 3: nRF used to notify() inline from the BLE callback
     // task and so never needed this, but it now shares the ring and the loop task.
-    //
-    // Two drains, one per egress, for exactly as long as both exist: serviceBleTx() empties the
-    // shipped ring that legacy routing still feeds, od_cmd_flush_before_refresh() empties od_txq.
-    // Each is inert against the other's queue, so the pair is correct in both routing modes and
-    // the serviceBleTx() call leaves with the ring at the cutover.
-    serviceBleTx();
-    od_hal_delay_ms(20);
     od_cmd_flush_before_refresh();
+    od_hal_delay_ms(20);
     epdRefreshInProgress = true;
     bool refreshSuccess = false;
     uint32_t newEtag = 0;
@@ -2904,7 +2912,16 @@ od_cmd_result_t handlePipeWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uint1
         }
         imageWriteLogFinish(partialCtx.bytes_received, partialCtx.expected_stream_size);
         uint8_t ackResponse[] = {RESP_ACK, 0x82};
-        (void)od_cmd_reply(ctx, ackResponse, sizeof(ackResponse));
+    /* THE ACK DECIDES WHETHER THE REFRESH HAPPENS. od_reply() can substitute a plaintext hard NACK
+     * for an END ack it could not seal, and it reports that rather than lying. Emitting the
+     * post-refresh status after such a substitution would queue a success behind a rejection; and
+     * refreshing at all would put content on the panel that the host has just been told was
+     * refused. Neither the wire nor the display may claim what the other denies, so both stop. */
+        if (od_cmd_reply(ctx, ackResponse, sizeof(ackResponse)) != OD_TXQ_OK) {
+            cleanup_partial_write_state();
+            resetPipeWriteState();
+            return OD_CMD_NACK;
+        }
         // Refresh selector rides the END tail (plan 1.4): 0->FULL, 1->FAST, 2/absent->PARTIAL.
         int refreshMode = REFRESH_PARTIAL;
         if (data != nullptr && len >= 1 && data[0] == REFRESH_FULL) refreshMode = REFRESH_FULL;

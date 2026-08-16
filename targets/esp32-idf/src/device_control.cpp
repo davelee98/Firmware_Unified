@@ -24,6 +24,7 @@ extern "C" void bootloader_util_app_start(uint32_t start_addr);
 #include "od_hal_adc.h"
 #include "od_hal_gpio.h"
 #include "od_hal_time.h"
+#include "od_txq.h"
 #include "wifi_service.h"      // OPENDISPLAY_HAS_WIFI + opendisplay_lan_teardown()
 #endif
 
@@ -985,20 +986,23 @@ od_cmd_result_t handlePowerOffCommand(const od_cmd_ctx_t *ctx, const uint8_t* pa
     if (powerLatchDffConfigured()) {
         // Fire-and-forget hard rail-cut: queue the ACK, then release the D-FF latch.
         // On latch HW the rail usually drops before the ACK is actually transmitted.
-        /* BEST-EFFORT ON BLE, SYNCHRONOUS ON LAN -- and the difference matters at the cutover.
-         * The shipped sender queues a BLE reply (so on latch hardware the rail usually drops
-         * before anything drains it) but writes a LAN reply straight to the socket
-         * (communication.cpp:397, bypassing the ring entirely). So a LAN client sending 0x0052
-         * gets its ack submitted TODAY, before the 100 ms delay.
+        /* THE FLUSH IS NOT OPTIONAL, and it is the only reply site where that is true. Every other
+         * queued response is drained by the loop; after powerLatchPowerOff() there is no next
+         * pass. Without this the ack is queued and then the rail is cut under it -- which on LAN
+         * is a regression from delivered to never sent, because the shipped sender wrote LAN
+         * replies straight to the socket rather than through a queue.
          *
-         * At the cutover both go into od_txq, which is drained from the loop -- and the loop does
-         * not run again after powerLatchPowerOff(). That REGRESSES the LAN case from "delivered"
-         * to "never sent". Step 8 must therefore add a bounded od_txq_flush() here before cutting
-         * the rail; it is recorded in the handler-rewrite plan rather than left to be rediscovered
-         * from a silent symptom. */
+         * Bounded, and the 100 ms is now the deadline rather than a bare sleep: on latch hardware
+         * the rail usually drops before a BLE notification is really on air anyway, so this buys
+         * the ack a chance, it does not promise delivery. */
         uint8_t ok[] = {RESP_ACK, RESP_POWER_OFF, 0x00, 0x00};
         (void)od_cmd_reply(ctx, ok, sizeof(ok));
-        od_hal_delay_ms(100);
+        {
+            const uint32_t deadline = od_hal_uptime_ms() + 100u;
+            while (od_txq_flush(od_hal_uptime_ms(), deadline) == OD_TXQ_BUSY) {
+                od_hal_delay_ms(5);
+            }
+        }
         powerLatchPowerOff();
         return OD_CMD_OK;
     }

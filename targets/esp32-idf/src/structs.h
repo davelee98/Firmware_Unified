@@ -81,10 +81,9 @@ static_assert(OD_BLE_PREFERRED_ATT_MTU - 3u >= PIPE_REORDER_SLOT_SIZE,
 static_assert(OD_BLE_PREFERRED_ATT_MTU - 3u <= OD_BLE_MAX_FRAME,
               "a single-PDU write could overrun an OD_BLE_MAX_FRAME-sized slot");
 
-// The BLE RX/TX command rings (CommandQueueItem / ResponseQueueItem and their
-// sizes) live in command_queue.h. They used to be split between this header and
-// main.h; they are transport buffering, not config-packet or wire-protocol
-// definitions, so they do not belong in this hub.
+// The BLE RX command ring (CommandQueueItem and its sizes) lives in command_queue.h; egress is
+// shared/core/od_txq.c. Neither is a config-packet or wire-protocol definition, so neither belongs
+// in this hub.
 
 // PIPE_WRITE protocol constants (PIPE_ACK_MASK_BITS, PIPE_MAX_FRAME, PIPE_VERSION,
 // PIPE_FLAG_COMPRESSED, PIPE_FLAG_PARTIAL) come from the canonical opendisplay_protocol.h.

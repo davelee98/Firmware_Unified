@@ -23,6 +23,7 @@
 
 /* Chunked CONFIG_WRITE reassembly, promoted to shared/core (F3). */
 #include "od_config_asm.h"
+#include "od_config_read.h"
 #include "od_dispatch.h"   /* od_dispatch_budget, for the migration's legacy reservations */
 #include "od_cmd_reply.h"
 
@@ -136,34 +137,22 @@ static bool nonceLogAllowed(uint32_t* last_ms) {
     return true;
 }
 
-// Set by any RESP_AUTH_REQUIRED answer for the frame being dispatched, on EVERY
-// transport. Read once after the dispatch switch to decide whether the frame was
-// activity. Loop-task-only, like g_commandOrigin.
-static bool     s_frameRejected = false;
 static uint8_t  s_authRejectRun = 0;        // consecutive RESP_AUTH_REQUIRED answers
 static bool     s_authAbuseDropPending = false;
 static uint32_t s_authAbuseDeadlineMs = 0;  // hard bound on the delivery attempt
 static uint32_t s_authAbuseDwellUntil = 0;  // set once TX has drained; 0 = not yet
 
-// Called at every site that answers RESP_AUTH_REQUIRED.
+// Advance the consecutive-refusal run by one. Called ONLY from od_core_frame_done(), on
+// OD_FRAME_AUTH_REQUIRED, which has already applied the BLE-only and still-the-owner scoping --
+// so neither test is repeated here.
 //
-// BLE ONLY, and the origin gate is not decoration: the same auth gate is reachable
-// from plaintext LAN, and counting those would let LAN traffic drop a BLE client.
-// TLS-LAN never reaches the gate at all (the transport is the authentication).
-static void noteAuthRejected(void) {
-    // Mark the frame first, for every origin. The COUNTER is BLE-only (see below),
-    // but "this frame was refused, so it is not activity" is transport-independent
-    // -- and getting that wrong on LAN is exactly how a TLS client could hold the
-    // slot forever.
-    s_frameRejected = true;
-    if (g_commandOrigin != ORIGIN_BLE) return;
+// One frame, one advance. The handlers that answer RESP_AUTH_REQUIRED used to call this
+// themselves AND return OD_CMD_AUTH_REJECTED; keeping both would count the same refusal twice and
+// drop a link at half the configured threshold.
+static void authAbuseAdvance(void) {
     if (s_authAbuseDropPending) return;              // already decided
     if (s_authRejectRun < 255) s_authRejectRun++;
     if (s_authRejectRun < OD_AUTH_ABUSE_THRESHOLD) return;
-    // The offender is the frame's own instance, taken from its queue tag -- not
-    // "whichever peer the stack lists first", which is how an earlier prototype
-    // misidentified it before frames carried identity.
-    if (!linkIsOwnerWord(g_commandInstance)) return; // not the owner: nothing to drop
     od_log_warn("Auth abuse: %u consecutive unauthenticated commands - dropping link",
                 (unsigned)s_authRejectRun);
     s_authAbuseDropPending = true;
@@ -199,9 +188,9 @@ void serviceBleAuthAbuseDisconnect(void) {
     // an indication -- a wire change this plan forbids -- there is no delivery
     // signal to wait on, so this drains, dwells about one connection interval to
     // give the radio a chance to send, and then drops.
-    serviceBleTx();
+    (void)od_txq_process();
     const bool expired = (int32_t)(od_hal_uptime_ms() - s_authAbuseDeadlineMs) >= 0;
-    if (!bleTxQueuePending() && s_authAbuseDwellUntil == 0) {
+    if (od_txq_depth() == 0u && s_authAbuseDwellUntil == 0) {
         uint16_t intervalMs = ble.connIntervalMs(owner.handle);
         if (intervalMs == 0) intervalMs = OD_AUTH_ABUSE_DWELL_FALLBACK_MS;
         const uint32_t dwellEnd = od_hal_uptime_ms() + intervalMs + 5u;   // +margin
@@ -253,7 +242,6 @@ static void reloadConfigAfterSave(void) {
 #endif
 }
 bool isEncryptionEnabled();
-void sendResponseUnencrypted(uint8_t* response, uint16_t len);
 void secureEraseConfig();
 // chunked_write_state_t comes from config_parser.h; this file used to redefine it
 // with a hardcoded 4096 in place of MAX_CONFIG_SIZE.
@@ -261,19 +249,6 @@ extern uint8_t configReadResponseBuffer[128];
 extern uint8_t msd_payload[16];
 float readBatteryVoltage();
 
-/** Mirror responses to BLE only when a central is connected; LAN responses go via opendisplay_lan_send_frame. */
-static void queueBleNotifyCopy(const uint8_t* response, uint16_t len) {
-    // Nothing to queue against with no central attached; serviceBleTx() would
-    // discard it on the next pass anyway.
-    if (!ble.isConnected()) {
-        return;
-    }
-    // No log here. logTxFrame() reports every response with its PRE-enqueue depth,
-    // so the backlog this used to announce at "depth >= 2 after push" is the same
-    // event as "[Q:1] or higher" on the line immediately above -- it only ever
-    // restated the number. bleTxQueuePush logs the failures (oversize / ring full).
-    (void)bleTxQueuePush(response, len);
-}
 
 #ifndef BUILD_VERSION
 #define BUILD_VERSION "1.0.0"
@@ -330,130 +305,6 @@ static uint8_t parseFirmwareVersionComponent(unsigned index) {
     return (uint8_t)n;
 }
 
-// The single TX log line. Every response leaving this file goes through here, so a
-// response can never reach the drain side without having been logged at its source
-// -- sendResponseUnencrypted() previously had no TX line at all, which is why its
-// responses showed up only as an anonymous queue depth from serviceBleTx().
-//
-// The depth is read BEFORE the response is enqueued, so a healthy path reads
-// [BLE][Q:0] and a rising Q flags the drain falling behind the producer. LAN
-// responses bypass the ring entirely (opendisplay_lan_send_frame), so they carry
-// no depth -- the ORIGIN_BLE test below is deliberately the SAME predicate that
-// routes the frame in both senders, so [Q:n] appears exactly when the frame really
-// enters the ring. Keep the two in step or the depth becomes a lie.
-//
-// Not gated on TARGET_ESP32: both targets have queued their BLE responses through
-// this ring since Phase 3 (see the de-fan-out comment in sendResponse). nRF needs
-// the number more than ESP32 does -- loop() runs there at TASK_PRIO_LOW and is
-// starved by the Bluefruit tasks, which is exactly when the drain falls behind.
-// `encrypted` selects ETX vs UTX, replacing the former three-line "Sending encrypted
-// response: / Original length: / Encrypted length:" block -- on the line that already
-// names the opcode, the length and the bytes. Both states are spelled out rather than
-// letting absence mean plaintext, so a frame that should have been wrapped and was
-// not is visible instead of merely unremarked. Mirrors ERX/URX on the receive side.
-static void logTxFrame(const uint8_t* frame, uint16_t len, bool encrypted = false) {
-    const uint16_t cmd = (len >= 2) ? (uint16_t)((frame[0] << 8) | frame[1]) : frame[0];
-    char label[64];
-    // Folded into the direction token rather than trailing after the length: ETX/UTX
-    // is fixed-width and sits up front where a capture is scanned, whereas a token
-    // after a variable-width byte count never lands in the same column twice.
-    const char* dir = encrypted ? "ETX" : "UTX";
-    if (g_commandOrigin == ORIGIN_BLE) {
-        snprintf(label, sizeof(label), "[%s][Q:%u] %s 0x%04X (%u B): ",
-                 originTag(), (unsigned)bleTxQueueDepth(), dir, cmd, (unsigned)len);
-    } else {
-        snprintf(label, sizeof(label), "[%s] %s 0x%04X (%u B): ", originTag(), dir, cmd, (unsigned)len);
-    }
-    // Label (~50 B) plus 32 bytes of hex (96 B) plus the truncation marker; the old
-    // 160-byte buffer here was close enough to truncating to be worth the margin.
-    char line[192];
-    od_log_hex_line(line, sizeof(line), label, frame, len);
-    od_log_debug("%s", line);
-}
-
-void sendResponseUnencrypted(uint8_t* response, uint16_t len) {
-    logTxFrame(response, len);
-    // F4 de-fan-out: reply over the origin transport only. One path for both
-    // targets as of Phase 3 (see sendResponse).
-    if (g_commandOrigin == ORIGIN_BLE) {
-        queueBleNotifyCopy(response, len);
-    } else {
-#ifdef OPENDISPLAY_HAS_WIFI
-        /* Legacy egress has nowhere to put a status; both sites leave with the ring at the cutover. */
-        (void)opendisplay_lan_send_frame(response, len);
-#endif
-    }
-}
-
-void sendResponse(uint8_t* response, uint16_t len) {
-    static uint8_t encrypted_response[600];
-    uint8_t errorResponse[3];
-    // Suppress the 4-line dump for the per-frame 0x0071 image-write ack once the
-    // stream is past its first chunk (chunk 1's ack still logs). Computed before
-    // `response` is swapped to the encrypted buffer. Errors/NACKs start with 0xFF
-    // and never match, so they always log.
-    // Also suppress the 7-byte PIPE ACK {00 81 highest_seen mask:4} mid-stream.
-    // Length test uses the plaintext ACK (encryption happens after this check).
-    const bool quietAck = (len == 2 && response[0] == 0x00 && response[1] == 0x71 && imageWriteLogQuietAck())
-                       || (len == 7 && response[0] == 0x00 && response[1] == 0x81 && imageWriteLogQuietAck());
-    // Set only where the CCM envelope is actually applied below, so the log reports
-    // what left the device rather than what policy intended. Every skip path -- TLS
-    // origin, unauthenticated, handshake opcode, FE/FF status, and encryptResponse()
-    // itself failing -- leaves it false and the frame is reported "plain".
-    bool wasEncrypted = false;
-    // TLS-origin responses are already secured by the TLS record layer; never wrap
-    // them in the app-layer CCM envelope (no double-encrypt; SECTION 9 rule 4).
-    if (isAuthenticated() && len >= 2 && g_commandOrigin != ORIGIN_LAN_TLS) {
-        uint16_t command = (response[0] << 8) | response[1];
-        // The 7-byte PIPE data ACK {0x00,0x81,highest_seen,mask:4} carries a rolling
-        // seq at byte[2]; a highest_seen of 0xFE/0xFF (any image >= 255 chunks) must
-        // not trip the unencrypted-status heuristic below — pipe ACKs encrypt
-        // normally when authenticated (plan 1.6). Other pipe shapes never collide:
-        // 0x80 response byte[2] = ver (0x01), pipe NACK byte[2] = err (0x01-0x04),
-        // 0x82 acks are 2 bytes (status defaults to 0x00).
-        const bool pipeDataAck = (len == 7 && response[0] == 0x00 && response[1] == 0x81);
-        uint8_t status = (len >= 3 && !pipeDataAck) ? response[2] : 0x00;
-        // Encrypt all authenticated responses except auth/version handshakes and FE/FF status.
-        // Direct-write / partial-write / LED acks must be encrypted too; LAN/BLE clients decrypt every response.
-        if (command != CMD_AUTHENTICATE && command != CMD_FIRMWARE_VERSION && status != RESP_AUTH_REQUIRED && status != RESP_NACK) {
-            /* od_session_seal takes the complete [cmd:2][payload] frame: the two command bytes
-             * are the AAD as well as the echoed prefix, so they travel with the payload. */
-            uint16_t encrypted_len = 0;
-            if (od_session_seal(&g_session, od_span_make(response, len),
-                                encrypted_response, sizeof(encrypted_response),
-                                &encrypted_len, od_hal_uptime_ms(), NULL) == OD_SESSION_SEAL_OK) {
-                response = encrypted_response;
-                len = encrypted_len;
-                wasEncrypted = true;
-            } else {
-                od_log_warn("WARNING: Failed to encrypt response, sending unencrypted error response");
-                errorResponse[0] = RESP_NACK;
-                errorResponse[1] = (uint8_t)(command & 0xFF);
-                errorResponse[2] = 0x00;
-                response = errorResponse;
-                len = sizeof(errorResponse);
-            }
-        }
-    }
-
-    // Logged here, after the encryption swap, so the dump is the bytes actually sent,
-    // the depth is the pre-enqueue one, and the enc/plain token is the outcome rather
-    // than the intent.
-    if (!quietAck) logTxFrame(response, len, wasEncrypted);
-    // F4 de-fan-out: reply over the origin transport only. One path for both
-    // targets as of Phase 3: nRF used to notify() inline here with a blocking
-    // delay(5) x 4 retry, which was only safe because it ran on the same task as
-    // dispatch. Now that both targets dispatch from loop(), both queue and let
-    // serviceBleTx() apply the non-blocking "retry next pass" backpressure rule.
-    if (g_commandOrigin == ORIGIN_BLE) {
-        queueBleNotifyCopy(response, len);
-    } else {
-#ifdef OPENDISPLAY_HAS_WIFI
-        /* Legacy egress has nowhere to put a status; both sites leave with the ring at the cutover. */
-        (void)opendisplay_lan_send_frame(response, len);
-#endif
-    }
-}
 
 od_cmd_result_t handleReadMSD(const od_cmd_ctx_t *ctx) {
     uint8_t response[2 + 16];
@@ -554,62 +405,31 @@ od_cmd_result_t handleFirmwareVersion(const od_cmd_ctx_t *ctx) {
     return OD_CMD_OK;
 }
 
-/* STILL SYNCHRONOUS. The plan's step 4 said this becomes od_config_read_start() here; that was
- * wrong and would have broken config read immediately -- the producer emits chunk 0 and then needs
- * od_config_read_pump(), which nothing calls until step 8. It converts its REPLY CALLS now and
- * becomes the producer at the cutover, in the commit that adds the pump. */
+/* Starts a read; it does not perform one. Chunk 0 goes out here and the rest is emitted by
+ * od_config_read_pump() from the loop, one slot at a time as capacity appears.
+ *
+ * The synchronous loop this replaces could not survive shared egress: it queued every chunk in one
+ * call, and the drain it depended on cannot run until the handler returns. It papered over that by
+ * flushing the ring itself between chunks -- which is what made a config read hold the loop task
+ * for the whole transfer. */
 od_cmd_result_t handleReadConfig(const od_cmd_ctx_t *ctx) {
-    // Shared scratch rather than a 4 KB stack array: this runs on the loop task,
-    // where a 4 KB frame is a real overflow risk. Nothing below re-enters a config
-    // path, so no other consumer can claim the scratch while we hold it.
+    // Shared scratch rather than a 4 KB stack array: this runs on the loop task, where a 4 KB
+    // frame is a real overflow risk. The producer reads from it across many loop passes, which is
+    // exactly why od_dispatch DEFERS any config-mutating opcode while a read is active -- a write
+    // reloading through this same buffer mid-read would splice two configs into one CRC-valid
+    // read-back.
     uint8_t* configData = getConfigScratch();
     uint32_t configLen = MAX_CONFIG_SIZE;
-    if (loadConfig(configData, &configLen)) {
-        uint32_t remaining = configLen;
-        uint32_t offset = 0;
-        uint16_t chunkNumber = 0;
-        // Cover the full MAX_CONFIG_SIZE. Worst-case per-chunk payload is 94 B
-        // (chunk 0 also carries the 2-byte total-length header; later chunks
-        // carry 96), so ceil(MAX_CONFIG_SIZE / 94) chunks always sends it all.
-        const uint16_t maxChunks = (MAX_CONFIG_SIZE + 93) / 94;
-        while (remaining > 0 && chunkNumber < maxChunks) {
-            uint16_t responseLen = 0;
-            configReadResponseBuffer[responseLen++] = RESP_ACK;
-            configReadResponseBuffer[responseLen++] = RESP_CONFIG_READ;
-            configReadResponseBuffer[responseLen++] = chunkNumber & 0xFF;
-            configReadResponseBuffer[responseLen++] = (chunkNumber >> 8) & 0xFF;
-            if (chunkNumber == 0) {
-                configReadResponseBuffer[responseLen++] = configLen & 0xFF;
-                configReadResponseBuffer[responseLen++] = (configLen >> 8) & 0xFF;
-            }
-            uint16_t maxDataSize = MAX_RESPONSE_DATA_SIZE - responseLen;
-            uint16_t chunkSize = (remaining < maxDataSize) ? remaining : maxDataSize;
-            if (chunkSize == 0) break;
-            memcpy(configReadResponseBuffer + responseLen, configData + offset, chunkSize);
-            responseLen += chunkSize;
-            if (responseLen > MAX_RESPONSE_DATA_SIZE || responseLen == 0) break;
-            (void)od_cmd_reply(ctx, configReadResponseBuffer, responseLen);
-            offset += chunkSize;
-            remaining -= chunkSize;
-            chunkNumber++;
-            // Drain THIS chunk to BLE before enqueuing the next: this handler runs
-            // synchronously on the loop task, so the ring's only drainer cannot run
-            // until we return. Without this, chunk 9+ overflows the 10-slot ring and
-            // is silently dropped, truncating configs > ~864 B on read-back.
-            //
-            // nRF used to sit in delay(50) here instead, because it notified
-            // inline from the BLE callback task and only needed to pace the
-            // SoftDevice. It now shares the ring, so it needs the same flush --
-            // and drops 50 ms per chunk.
-            serviceBleTx();
-        }
-        return OD_CMD_OK;
-    }
-    {
-        uint8_t errorResponse[] = {RESP_NACK, RESP_CONFIG_READ, 0x00, 0x00};
-        (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
-    }
-    return OD_CMD_NACK;
+    const bool loaded = loadConfig(configData, &configLen);
+
+    /* The reservation is TRANSFERRED to the producer, which pays chunk 0 out of it and keeps the
+     * rest; od_dispatch's release afterwards is a no-op because the token is already spent. A NULL
+     * blob means the load failed and emits the 4-byte error frame -- a completed read, not a
+     * pending one, which is why it is not a separate branch here. */
+    const od_txq_status_t rc = od_config_read_start(&ctx->rp, ctx->r,
+                                                    loaded ? configData : nullptr,
+                                                    loaded ? configLen : 0u);
+    return (rc == OD_TXQ_OK && loaded) ? OD_CMD_OK : OD_CMD_NACK;
 }
 
 // Outcome of "is this frame allowed to MUTATE stored configuration?".
@@ -653,10 +473,8 @@ od_cmd_result_t handleWriteConfig(const od_cmd_ctx_t *ctx, uint8_t* data, uint16
     if (gate == CONFIG_WRITE_DENIED) {
         /* AUTH_REJECTED, not NACK. Section 5 separates them because only this advances the
          * link's abuse run -- collapsing it lets a TLS client repeat a refused CONFIG_WRITE and
-         * hold the exclusive link forever, which is the bug communication.cpp:1035 records as
-         * already fixed once. noteAuthRejected() stays here until step 8 moves that policy into
-         * od_core_frame_done(). */
-        noteAuthRejected();
+         * hold the exclusive link forever. The run itself is advanced once, by
+         * od_core_frame_done(), off this returned outcome -- never here. */
         uint8_t response[] = {RESP_ACK, (uint8_t)(CMD_CONFIG_WRITE & 0xFF), RESP_AUTH_REQUIRED};
         (void)od_cmd_reply_plain(ctx, response, sizeof(response));
         return OD_CMD_AUTH_REJECTED;
@@ -742,7 +560,6 @@ od_cmd_result_t handleWriteConfigChunk(const od_cmd_ctx_t *ctx, uint8_t* data, u
         const ConfigWriteGate gate = configWriteGate();
         if (gate == CONFIG_WRITE_DENIED) {
             od_config_asm_reset(&g_configAsm);
-            noteAuthRejected();
             uint8_t response[] = {RESP_ACK, (uint8_t)(CMD_CONFIG_CHUNK & 0xFF), RESP_AUTH_REQUIRED};
             (void)od_cmd_reply_plain(ctx, response, sizeof(response));
             return OD_CMD_AUTH_REJECTED;
@@ -817,237 +634,78 @@ static const char* commandName(uint16_t cmd) {
     }
 }
 
-void imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uint16_t len) {
-    (void)conn_hdl;
-    (void)chr;
-    if (len < 2) {
-        od_log_error("ERROR: Command too short (%u bytes)", len);
+/* Applies od_frame_policy() with the origin and ownership scoping the table deliberately leaves
+ * to the target -- see od_cmd.h. This is the ONLY place activity and abuse move, which is what
+ * makes the three earlier positions for this test unrepeatable: each predicted acceptance at a
+ * layer that could still reject, and each was wrong at whatever rejected next. An outcome cannot
+ * predict; it is the answer.
+ *
+ * OWNERSHIP FIRST, for both. A frame whose tag no longer owns the link must neither hold that link
+ * alive nor spend its abuse budget. LAN frames carry tag 0 whenever the link owner is not
+ * OWNER_LAN, so they fall out here exactly as they did before. */
+extern "C" void od_core_frame_done(const od_reply_t *rp, od_frame_outcome_t outcome)
+{
+    const od_frame_policy_t p = od_frame_policy(outcome);
+
+    if (rp == nullptr || !linkIsOwnerWord(rp->tag)) {
         return;
     }
-
-    uint16_t command = (data[0] << 8) | data[1];
-
-
-    // Silence the per-frame command spam for image-write data (0x0071) once the
-    // stream is past its first chunk; the display handler's 5% meter reports it.
-    const bool quietCmd = (command == CMD_DIRECT_WRITE_DATA || command == CMD_PIPE_WRITE_DATA) && imageWriteLogQuietCmd();
-    // Single per-command banner for the whole dispatch. Named via commandName();
-    // unknown opcodes (nullptr) get no banner here and fall to the switch default's
-    // "Unknown command" error. Cases and handlers must not log their own banner.
-    // Carries no encryption token: the ERX/URX line from bleRxQueuePush() already
-    // reports it for this frame, and stating it twice is how the two spellings drift.
-    if (!quietCmd) {
-        const char* name = commandName(command);
-        if (name != nullptr) {
-            od_log_info("=== [%s] %s COMMAND (0x%04X) ===", originTag(), name, command);
-        }
-    }
-
-    // AUTHENTICATE and FIRMWARE_VERSION are handled before the encryption gate
-    // (they are the handshake). The banner is already emitted above via commandName().
-    if (command == CMD_AUTHENTICATE) {
-        handleAuthenticate(data + 2, len - 2);
-        return;
-    }
-
-    if (command == CMD_FIRMWARE_VERSION) {
-        /* Answered before the session gate, as od_dispatch also does: a client must be able to
-         * identify a device before it can authenticate. */
-        od_tx_reservation_t r;
-        if (od_txq_reserve(od_dispatch_budget(CMD_FIRMWARE_VERSION), &r) == OD_TXQ_OK) {
-            const od_cmd_ctx_t ctx = { { (od_origin_t)g_commandOrigin, g_commandInstance }, &r };
-            (void)handleFirmwareVersion(&ctx);
-            od_txq_release(&r);
-        }
-        return;
-    }
-
-    // SECTION 9 rule 4 (origin-gated decrypt): a frame arriving on the TLS-PSK LAN
-    // channel is already confidential + authenticated by TLS, so the app-layer
-    // AES-CCM envelope MUST NOT be required/applied — dispatch its plaintext
-    // command directly. BLE and plaintext-LAN frames still honor the CCM gate.
-    if (isEncryptionEnabled() && g_commandOrigin != ORIGIN_LAN_TLS) {
-        if (!isAuthenticated()) {
-            od_log_error("ERROR: [%s] Command requires authentication (encryption enabled)", originTag());
-            noteAuthRejected();
-            uint8_t response[] = {RESP_ACK, (uint8_t)(command & 0xFF), RESP_AUTH_REQUIRED};
-            sendResponseUnencrypted(response, sizeof(response));
-            return;
-        }
-
-        if (len < BLE_CMD_HEADER_SIZE + ENCRYPTION_NONCE_SIZE + ENCRYPTION_TAG_SIZE) {
-            od_log_error("ERROR: [%s] Unencrypted command received when encryption is enabled", originTag());
-            noteAuthRejected();
-            uint8_t response[] = {RESP_ACK, (uint8_t)(command & 0xFF), RESP_AUTH_REQUIRED};
-            sendResponseUnencrypted(response, sizeof(response));
-            return;
-        }
-
-        // The envelope [nonce:16][ciphertext][tag:12] is contiguous behind the two command
-        // bytes, so it is one span. out_cap covers the decrypted [len:1][payload] frame, one
-        // byte more than plaintext_len ends up being.
-        static uint8_t plaintext[OD_SESSION_PLAIN_MAX];
-        uint16_t plaintext_len = 0;
-        const uint8_t* nonce_full = data + BLE_CMD_HEADER_SIZE;
-        const uint16_t envelope_len = len - BLE_CMD_HEADER_SIZE;
-
-        // The nonce is no longer dumped per frame: the banner above already reports
-        // this frame as "enc", and on ESP32 the transport's RX line dumps the first
-        // 32 bytes -- of which 2..17 ARE the nonce -- so it restated bytes already on
-        // screen. It moves to the failure path below, where it is the only thing that
-        // separates a replay-window jump from nonce reuse from a wrong session key,
-        // and where nRF (which has no RX hex line at all) would otherwise be blind.
-        struct od_session_report report;
-        const enum od_session_open opened =
-            od_session_open(&g_session, command, od_span_make(nonce_full, envelope_len),
-                            plaintext, sizeof(plaintext), &plaintext_len,
-                            od_hal_uptime_ms(), &report);
-        if (opened != OD_SESSION_OPEN_OK) {
-            // A PIPE DATA frame refused for a NONCE reason is ordinary packet loss, not tamper
-            // evidence, and the answer is SILENCE. pipe-write-protocol.md 5.1 makes a 0x81 NACK
-            // unconditionally fatal and 5.2 reserves NACKs for unrecoverable conditions, so
-            // answering here kills the upload on the first dropped frame -- the client raises
-            // IntegrityCheckError, which its send loop does not catch. Saying nothing instead
-            // leaves the seq absent from the next SACK; the host retransmits it under a fresh
-            // higher counter, which the window accepts unconditionally (no forward bound).
-            //
-            // Deliberately narrow: a TAG failure keeps the NACK because it IS tamper evidence,
-            // and 0x0071 legacy DIRECT_WRITE_DATA is left alone -- its ACK discipline differs
-            // and has not been analysed. Not an oversight.
-            const bool nonce_loss = (report.nonce_reason == (uint8_t)NONCE_OUT_OF_WINDOW ||
-                                     report.nonce_reason == (uint8_t)NONCE_REPLAY);
-            // LOG BEFORE THE SILENT RETURN. Upstream logs the rejection inside decryptCommand
-            // (encryption.cpp:745), so its PIPE early-return never costs telemetry; this port
-            // moved logging to the call site, where returning first would make the replay and
-            // out-of-window events -- the exact condition the throttle exists to let you watch
-            // -- invisible on the one path that produces them routinely.
-            if (nonceLogAllowed(nonce_loss ? &s_nonceLogWindowMs : &s_nonceLogOtherMs)) {
-                // 16 bytes render as 47 chars + NUL, an exact fit in 48; sized past that
-                // so a future ENCRYPTION_NONCE_SIZE bump truncates nothing.
-                char nonceHex[64];
-                od_log_hex_line(nonceHex, sizeof(nonceHex), "", nonce_full, ENCRYPTION_NONCE_SIZE);
-                od_log_error("ERROR: Decryption failed (0x%04X, rc=%d, nonce_reason=%u, "
-                             "%u B envelope, nonce %s)",
-                             (unsigned)command, (int)opened, (unsigned)report.nonce_reason,
-                             (unsigned)envelope_len, nonceHex);
-            }
-            if (nonce_loss && command == CMD_PIPE_WRITE_DATA) {
-                return;      // silence is the wire answer; the line above is the record of it
-            }
-            uint8_t response[] = {RESP_ACK, (uint8_t)(command & 0xFF), RESP_NACK};
-            sendResponseUnencrypted(response, sizeof(response));
-            return;
-        }
-
-        static uint8_t decrypted_data[512];
-        decrypted_data[0] = data[0];
-        decrypted_data[1] = data[1];
-        memcpy(decrypted_data + 2, plaintext, plaintext_len);
-        len = 2 + plaintext_len;
-        data = decrypted_data;
-    }
-
-    // Cleared before dispatch, inspected after it: the handlers themselves can
-    // still refuse this frame, so acceptance is not knowable until they return.
-    s_frameRejected = false;
-
-    // The per-command banner is logged once above (commandName()); cases below do
-    // NOT log their own "=== ... COMMAND ... ===". CMD_AUTHENTICATE and
-    // CMD_FIRMWARE_VERSION are handled by the early returns above and so are absent
-    // here. CMD_NFC_ENDPOINT (0x0083) is intentionally not handled by this Firmware
-    // (any target) — it falls to default as an unknown command.
-    /* ------------------------------------------------- NO PIPE ON LAN (review F5) ---
-     *
-     * SECTION 9 rule 2 of the canonical header: the sliding-window image PIPE (0x0080 /
-     * 0x0081 / 0x0082) MUST NOT be used on the LAN transport, because TCP already provides
-     * the ordered, reliable, flow-controlled delivery PIPE reimplements; a host is directed
-     * to DIRECT_WRITE instead. DIVERGENCE_MATRIX.md 9.4 states the same rule as a dispatcher
-     * obligation. Confirmed as settled policy 2026-08-05 (NEXT_STEPS_2026-08-05.md D4).
-     *
-     * The dispatcher did not enforce it, so the device exposed over LAN a protocol its own
-     * specification forbids -- on the TLS port that also means a path reachable without any
-     * app-layer authentication.
-     *
-     * REFUSAL IS INERT. No transfer state is touched, no session is aborted, no panel session
-     * torn down: a stray PIPE frame from a confused LAN client must not be able to disturb a
-     * BLE transfer that legitimately owns the slot. That is the same rule LAN client refusal
-     * follows, and for the same reason.
-     */
-    if (g_commandOrigin != ORIGIN_BLE &&
-        (command == CMD_PIPE_WRITE_START || command == CMD_PIPE_WRITE_DATA ||
-         command == CMD_PIPE_WRITE_END)) {
-        od_log_error("ERROR: [%s] PIPE 0x%04X is BLE-only -- rejected (use DIRECT_WRITE)",
-                     originTag(), command);
-        /* ERROR CODE, AND THE COMPROMISE IN IT. The 0x80 NACK shape is
-         * [0xFF][0x80][OD_ERR_PIPE_START_*][0x00], and that namespace has no "wrong
-         * transport" member -- 0x04 is explicitly marked unused in the canonical header.
-         * Claiming 0x04 here would be inventing a wire meaning unilaterally, which is exactly
-         * the divergence this repo exists to prevent, and the header is frozen so it cannot be
-         * done properly yet. BAD_HEADER is therefore reused: it is the one existing code that
-         * means "this frame is not acceptable as sent", it invents nothing, and the log line
-         * above carries the real reason. A dedicated OD_ERR_PIPE_START_WRONG_TRANSPORT should
-         * be added upstream when the freeze lifts -- flagged, not silently taken.
-         *
-         * 0x81 and 0x82 have no canonical error namespace at all (see the TODO in
-         * display_service.cpp), so they get the bare NACK shape their acks already use. */
-        const uint8_t err = (command == CMD_PIPE_WRITE_START)
-                                ? (uint8_t)OD_ERR_PIPE_START_BAD_HEADER : (uint8_t)0x00;
-        uint8_t nack[4] = {RESP_NACK, (uint8_t)(command & 0xFF), err, 0x00};
-        sendResponse(nack, sizeof(nack));
-        return;
-    }
-
-    /* THE SWITCH IS GONE FROM HERE. It lives in od_cmd_app.cpp as od_cmd_dispatch(), which the
-     * shared dispatcher will call directly at the cutover; this call site is the same shape a
-     * commit early, so the only thing step 8 changes is WHO calls it and what surrounds it.
-     *
-     * One reservation per dispatch, from the shared budget table, replacing the per-case ones. In
-     * legacy mode nothing is committed against it, so it is still accounting -- but it is now the
-     * accounting the cutover depends on, exercised on every command rather than on eleven of
-     * them. */
-    {
-        od_tx_reservation_t r;
-        if (od_txq_reserve(od_dispatch_budget(command), &r) == OD_TXQ_OK) {
-            const od_cmd_ctx_t ctx = { { (od_origin_t)g_commandOrigin, g_commandInstance }, &r };
-            const od_cmd_result_t rc =
-                od_cmd_dispatch(&ctx, command, od_span_make(data + 2, (size_t)(len - 2)));
-            od_txq_release(&r);
-            if (rc == OD_CMD_UNKNOWN) {
-                od_log_error("ERROR: Unknown command: 0x%04X", command);
-            }
-        }
-    }
-
-    // R4 ACTIVITY, decided HERE -- after dispatch, on the OUTCOME rather than on a
-    // prediction of it. This is the third and final position for this test, and the
-    // two earlier ones were both wrong in the same way:
-    //
-    //  - At the top, gated on isAuthenticated(): an authenticated client sending a
-    //    too-short plaintext frame stamped here, then got RESP_AUTH_REQUIRED from
-    //    the length check below it.
-    //  - Just before the switch: TLS-LAN frames bypass the CCM gate and reach
-    //    dispatch, but handleWriteConfig() and the chunk handler apply their OWN
-    //    app-layer auth check and can still answer RESP_AUTH_REQUIRED -- so a TLS
-    //    client repeating CMD_CONFIG_WRITE stamped the clock on every rejected
-    //    attempt and held the slot indefinitely.
-    //
-    // Both are the same mistake at different depths: anything that predicts
-    // acceptance is wrong at whatever layer rejects next. Reading s_frameRejected
-    // after the handler has run is the only position with nothing below it.
-    //
-    // Unknown opcodes do not stamp (commandName() is null for them), and the two
-    // handshake/discovery opcodes return from their own early branches and never
-    // reach here -- so "handshake and discovery are not activity" holds
-    // structurally rather than by a test that could drift.
-    if (!s_frameRejected && commandName(command) != nullptr &&
-        linkIsOwnerWord(g_commandInstance)) {
+    if (p.stamp_activity) {
         linkStampOwnerCommand();
-        // A fully accepted command means this client is working normally, so it
-        // clears the auth-abuse state ENTIRELY -- including a drop already pending.
-        // Clearing only the run would let a client that recovered mid-flush (say it
-        // re-authenticated after its session expired under a 16-frame pipe burst)
-        // still be dropped by a decision taken moments earlier, which is the worst
-        // outcome for a mechanism whose whole value is reacting quickly.
+    }
+    /* BLE ONLY, and the origin gate is not decoration: the same auth gate is reachable from
+     * plaintext LAN, and counting those would let LAN traffic drop a BLE client. */
+    if (rp->origin != OD_ORIGIN_BLE) {
+        return;
+    }
+    if (p.reset_abuse) {
         resetAuthAbuseCounter();
     }
+    if (p.increment_abuse) {
+        authAbuseAdvance();
+    }
+}
+
+od_frame_outcome_t imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint8_t* data, uint16_t len) {
+    (void)conn_hdl;
+    (void)chr;
+
+    const od_reply_t rp = { (od_origin_t)g_commandOrigin, g_commandInstance };
+
+    // Single per-command banner for the whole dispatch, emitted before the dispatcher so a frame
+    // it refuses structurally is still attributable. Named via commandName(); unknown opcodes
+    // (nullptr) get no banner and are reported by od_cmd_dispatch()'s default. Handlers must not
+    // log their own banner. Carries no encryption token: the ERX/URX line from bleRxQueuePush()
+    // already reports it for this frame, and stating it twice is how the two spellings drift.
+    if (len < 2) {
+        od_log_error("ERROR: Command too short (%u bytes)", len);
+    } else {
+        const uint16_t command = (uint16_t)((data[0] << 8) | data[1]);
+        // Silence the per-frame command spam for image-write data once the stream is past its
+        // first chunk; the display handler's 5% meter reports it.
+        const bool quietCmd = (command == CMD_DIRECT_WRITE_DATA || command == CMD_PIPE_WRITE_DATA) &&
+                              imageWriteLogQuietCmd();
+        if (!quietCmd) {
+            const char* name = commandName(command);
+            if (name != nullptr) {
+                od_log_info("=== [%s] %s COMMAND (0x%04X) ===", originTag(), name, command);
+            }
+        }
+    }
+
+    const od_frame_outcome_t outcome = od_dispatch_frame(&rp, od_span_make(data, len));
+    od_core_frame_done(&rp, outcome);
+
+    /* EVERY unit taken must be back. A leak here is invisible on the wire and starves the very
+     * next command, so it is asserted rather than trusted -- od_dispatch releases on every exit
+     * path, including the ones that never reach a handler. It does NOT catch an over-budget
+     * handler: releasing an exhausted token leaves zero either way. That is what the per-opcode
+     * budget cases in dispatch_test.c are for. */
+    if (od_txq_reserved() != 0u) {
+        od_log_error("ERROR: %u reservation unit(s) leaked by 0x%04X",
+                     (unsigned)od_txq_reserved(),
+                     (unsigned)(len >= 2 ? ((data[0] << 8) | data[1]) : 0));
+        od_txq_reset();
+    }
+    return outcome;
 }

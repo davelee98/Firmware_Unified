@@ -29,7 +29,6 @@ using namespace Adafruit_LittleFS_Namespace;
 #include <esp_system.h>
 #endif
 
-void sendResponse(uint8_t* response, uint16_t len);
 
 /* Same split for the two other Arduino primitives this file uses, both in checkResetPin(). */
 static inline void od_delay_ms(uint32_t ms) {
@@ -107,57 +106,6 @@ bool deriveTlsPsk(uint8_t* psk_out16) {
     return od_session_derive_tls_psk(&securityConfig, psk_out16);
 }
 
-/* The handshake returns its reply rather than sending it, so the send stays here where the
- * origin routing and the auth-abuse counter live. */
-bool handleAuthenticate(uint8_t* data, uint16_t len) {
-    uint8_t device_id[OD_SESSION_DEVICE_ID_LEN];
-    uint8_t rsp[OD_SESSION_REPLY_MAX];
-    uint16_t rsp_len = 0;
-    struct od_session_report report;
-
-    getAuthDeviceIdBytes(device_id);
-    const enum od_session_auth r =
-        od_session_authenticate(&g_session, &securityConfig, device_id,
-                                od_span_make(data, len), od_hal_uptime_ms(),
-                                rsp, sizeof(rsp), &rsp_len, &report);
-    if (rsp_len > 0) {
-        sendResponse(rsp, rsp_len);
-    }
-    switch (r) {
-        case OD_SESSION_AUTH_CHALLENGE:
-            od_log_info("Authentication challenge sent");
-            break;
-        case OD_SESSION_AUTH_ESTABLISHED:
-            /* A good handshake ends any run of rejections, even one below the threshold:
-             * CMD_AUTHENTICATE returns from its own early branch and never reaches the
-             * post-dispatch reset, so nine rejections then a good handshake then one more
-             * would otherwise drop a client that had just authenticated. */
-            resetAuthAbuseCounter();
-            od_log_info("Authentication successful, session established");
-            break;
-        case OD_SESSION_AUTH_REJECTED:
-            od_log_error("ERROR: Authentication failed (wrong key)");
-            break;
-        case OD_SESSION_AUTH_RATE_LIMITED:
-            od_log_warn("Authentication rate limited (%u attempts in the window)",
-                        (unsigned)report.attempts);
-            break;
-        case OD_SESSION_AUTH_NOT_CONFIGURED:
-            od_log_error("ERROR: Authentication requested but encryption is not configured");
-            break;
-        case OD_SESSION_AUTH_EXPIRED:
-            od_log_error("ERROR: Server nonce expired");
-            break;
-        case OD_SESSION_AUTH_CRYPTO_ERROR:
-            od_log_error("ERROR: Crypto engine failure during authentication (status %d)",
-                         (int)report.crypto_status);
-            break;
-        default:
-            od_log_error("ERROR: Invalid authentication request format (len=%u)", (unsigned)len);
-            break;
-    }
-    return r == OD_SESSION_AUTH_ESTABLISHED;
-}
 
 
 

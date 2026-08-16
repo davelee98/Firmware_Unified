@@ -4,6 +4,7 @@
 #ifdef OPENDISPLAY_HAS_WIFI
 
 #include "communication.h"
+#include "od_cmd.h"
 #include "encryption.h"
 #include "structs.h"
 #include "od_log.h"
@@ -1703,9 +1704,19 @@ void handleWiFiServer() {
             // No stamp here: imageDataWritten() stamps the shared clock itself,
             // and only for a RECOGNISED command from the owner -- which is the
             // whole of R4's definition and what this site could not enforce.
-            imageDataWritten(NULL, NULL, tcpReceiveBuffer + 2, flen);
+            const od_frame_outcome_t outcome =
+                imageDataWritten(NULL, NULL, tcpReceiveBuffer + 2, flen);
             g_commandInstance = 0;
             g_commandOrigin = ORIGIN_BLE;   // restore default for any subsequent BLE drain
+            // DEFERRED means the dispatcher did not consume this frame and it must be re-offered
+            // byte-identical. Leave it at the head of the socket buffer and stop draining: the
+            // reason it was deferred -- no response capacity, or a live config read -- clears from
+            // the loop, not from another parse of the same bytes. Removing it here would be the
+            // silent command loss DEFERRED exists to prevent, and on LAN there is no retransmit
+            // behind it to cover for that.
+            if (!od_frame_policy(outcome).consume_rx) {
+                return;
+            }
             uint32_t consumed = 2u + (uint32_t)flen;
             uint32_t rem = tcpReceiveBufferPos - consumed;
             if (rem > 0) {

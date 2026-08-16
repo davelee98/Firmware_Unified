@@ -10,7 +10,6 @@ bool isAuthenticated();
 void clearEncryptionSession();
 bool checkEncryptionSessionTimeout();
 void updateEncryptionSessionActivity();
-bool handleAuthenticate(uint8_t* data, uint16_t len);
 /// Derive the 16-byte TLS-PSK for the LAN TLS channel from the configured master
 /// key via AES-CMAC over a fixed KDF label. Returns false if encryption is not
 /// configured (no usable master key). The matching PSK IDENTITY is "opendisplay".

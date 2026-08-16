@@ -6,11 +6,37 @@
 
 #include "od_hal_radio.h"
 
+#include "od_log.h"
+#include "od_txq.h"
+
+#include <stdio.h>
+
 #include "ble_transport.h"
 #include "link_owner.h"
 #ifdef OPENDISPLAY_HAS_WIFI
 #include "wifi_service.h"
 #endif
+
+/* THE SINGLE TX LOG LINE, and this is the only place it can honestly live now: every response
+ * leaves through this function, so a frame cannot reach the wire without having been logged.
+ *
+ * The depth is read BEFORE the entry is dequeued, so a healthy path reads [Q:0] and a rising Q
+ * flags the drain falling behind the producer. It is not conditioned on the frame having been
+ * sealed -- that question is answered at the seam that knows the answer, od_session_app_report's
+ * OD_SESSION_APP_SEAL case, rather than re-derived here from bytes that cannot show it. */
+static void logTxFrame(od_origin_t origin, const uint8_t *frame, uint16_t len)
+{
+    const uint16_t cmd = (len >= 2u) ? (uint16_t)((frame[0] << 8) | frame[1]) : frame[0];
+    const char *tag = (origin == OD_ORIGIN_BLE) ? "BLE"
+                    : (origin == OD_ORIGIN_LAN_TLS) ? "LAN-TLS" : "LAN";
+    char label[64];
+    char line[192];
+
+    snprintf(label, sizeof(label), "[%s][Q:%u] TX 0x%04X (%u B): ",
+             tag, (unsigned)od_txq_depth(), cmd, (unsigned)len);
+    od_log_hex_line(line, sizeof(line), label, frame, len);
+    od_log_debug("%s", line);
+}
 
 extern "C" od_radio_result_t od_hal_radio_send(od_origin_t origin, uint32_t tag,
                                                const uint8_t *frame, uint16_t len)
@@ -18,6 +44,7 @@ extern "C" od_radio_result_t od_hal_radio_send(od_origin_t origin, uint32_t tag,
     if (frame == nullptr || len == 0u) {
         return OD_RADIO_ERROR;
     }
+    logTxFrame(origin, frame, len);
     if (origin != OD_ORIGIN_BLE) {
 #ifdef OPENDISPLAY_HAS_WIFI
         /* LAN responses DO come through here: od_reply() routes a TLS-LAN frame to the queue

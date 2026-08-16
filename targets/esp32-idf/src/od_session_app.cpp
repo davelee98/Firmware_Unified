@@ -15,7 +15,11 @@
 
 #include "opendisplay_protocol.h"
 
-extern "C" void getAuthDeviceIdBytes(uint8_t* device_id);
+/* C++ linkage, matching its definition in encryption.cpp -- this is a target function, not part
+ * of any C ABI. It was declared extern "C" here and linked anyway only because nothing referenced
+ * od_session_app_device_id() until the dispatcher did: --gc-sections dropped the section and the
+ * mismatch with it. */
+void getAuthDeviceIdBytes(uint8_t* device_id);
 
 struct od_session *od_session_app_state(void)
 {

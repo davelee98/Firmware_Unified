@@ -209,8 +209,6 @@ extern uint32_t advertising_start_time;
 void getChipIdHex(char* out, size_t out_size);   // see encryption.h for the contract
 
 // imageDataWritten + its opaque parameter typedefs come from communication.h.
-void sendResponse(uint8_t* response, uint16_t len);
-void sendResponseUnencrypted(uint8_t* response, uint16_t len);
 void secureEraseConfig();
 void checkResetPin();
 void reboot();
@@ -265,7 +263,6 @@ bool isAuthenticated();
 void clearEncryptionSession();
 bool checkEncryptionSessionTimeout();
 void updateEncryptionSessionActivity();
-bool handleAuthenticate(uint8_t* data, uint16_t len);
 
 // chunked_write_state_t comes from config_parser.h so this file and
 // communication.cpp cannot drift apart on the buffer size.

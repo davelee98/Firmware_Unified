@@ -9,6 +9,9 @@
 #include "od_hal_time.h"
 
 #include "session_guard.h"
+
+#include "od_config_read.h"
+#include "od_txq.h"
 #include "ble_transport.h"
 #include "communication.h"
 #include "command_queue.h"
@@ -140,7 +143,11 @@ void abortToKnownState(const char* reason, bool dropLink, LinkId ownerId) {
         od_log_warn("[abort] dropped %u queued command(s) from the departed session",
                     (unsigned)droppedRx);
     }
-    bleTxQueueReset();
+    /* Shared egress, and the producer that feeds it. Cancelling the read is not tidiness: it holds
+     * the config scratch, and od_dispatch DEFERS every config-mutating opcode while it is active --
+     * so a client that vanishes mid-read would otherwise defer every later config write forever. */
+    od_config_read_cancel();
+    od_txq_reset();
 
     // 10. The drop, dispatched on the OWNER'S TRANSPORT. This routine is not
     //     BLE-only: the transfer watchdog that calls it is origin-agnostic, so
