@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "od_cmd_reply.h"
 #include "od_rxq.h"
 #include "opendisplay_pipe_internal.h"
 #include <zephyr/drivers/hwinfo.h>
@@ -65,6 +66,9 @@ typedef struct {
   uint16_t received_chunks;
   uint32_t received_size;
   uint8_t buffer[MAX_CONFIG_SIZE];
+  /* Vestigial on a single-connection target: always 0, so every guard against it is a tautology.
+   * Kept rather than deleted here because removing a guard is a C11 shrink decision, not something
+   * a reply-classification pass should smuggle in. */
   uint8_t connection;
 } od_chunked_config_t;
 
@@ -119,7 +123,7 @@ static bool session_alive(void)
  * 64-bit hwinfo id, big-endian. Wire-visible identity -- a different packing is a different
  * device to the host. */
 static void od_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN]);
-static void pipe_send(uint8_t connection, const uint8_t *data, uint16_t len);
+static void pipe_send(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len);
 
 /* Bumped on every close. A frame carries the generation that produced it, so both queues can
  * discard work belonging to a connection that has gone. */
@@ -199,6 +203,9 @@ static uint8_t s_pipe_enc_buf[544];
 static uint8_t s_nfc_rsp_buf[OD_PIPE_MAX_PAYLOAD];
 typedef struct {
   bool active;
+  /* Vestigial on a single-connection target: always 0, so every guard against it is a tautology.
+   * Kept rather than deleted here because removing a guard is a C11 shrink decision, not something
+   * a reply-classification pass should smuggle in. */
   uint8_t connection;
   uint8_t rec_type;
   uint16_t total_len;
@@ -223,7 +230,7 @@ static atomic_t s_close_pending;
 #define OD_ALLOW_PLAINTEXT_WITH_SECURITY 0
 #endif
 
-static void pipe_send(uint8_t connection, const uint8_t *data, uint16_t len);
+static void pipe_send(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len);
 
 static void cfg_chunk_reset(void)
 {
@@ -273,18 +280,18 @@ static bool sec_enabled(void)
  * constantTimeCompare() (Firmware/src/encryption.cpp).
  */
 
-static void send_auth_required_response(uint8_t connection, uint8_t resp_byte)
+static void send_auth_required_response(const od_cmd_ctx_t *ctx, uint8_t resp_byte)
 {
   uint8_t err[] = { 0x00u, resp_byte, RESP_AUTH_REQUIRED };
-  pipe_send(connection, err, sizeof(err));
+  (void)od_cmd_reply_plain(ctx, err, sizeof(err));
 }
 
 
 
 
-static void pipe_send_raw(uint8_t connection, const uint8_t *data, uint16_t len)
+static void pipe_send_raw(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len)
 {
-  (void)connection;
+  (void)ctx;
   if (!s_notify || len == 0u) {
     return;
   }
@@ -310,7 +317,7 @@ static void pipe_send_raw(uint8_t connection, const uint8_t *data, uint16_t len)
   od_log_info("pipe notify failed len=%u", (unsigned)len);
 }
 
-static void pipe_send(uint8_t connection, const uint8_t *data, uint16_t len)
+static void pipe_send(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len)
 {
   uint8_t err[3];
   uint16_t enc_len = 0;
@@ -322,7 +329,7 @@ static void pipe_send(uint8_t connection, const uint8_t *data, uint16_t len)
     return;
   }
   if (len < 2u) {
-    pipe_send_raw(connection, data, len);
+    pipe_send_raw(ctx, data, len);
     return;
   }
   cmd = data[1];
@@ -348,7 +355,7 @@ static void pipe_send(uint8_t connection, const uint8_t *data, uint16_t len)
                  || data[0] == 0xFFu           /* 4-byte hard-error frames lead with 0xFF */
                  || cmd == RESP_AUTHENTICATE || cmd == RESP_FIRMWARE_VERSION);
   if (force_plain || !session_alive()) {
-    pipe_send_raw(connection, data, len);
+    pipe_send_raw(ctx, data, len);
     return;
   }
   /* od_session_seal takes the complete [status][cmd][payload] frame: those two leading bytes are
@@ -356,16 +363,16 @@ static void pipe_send(uint8_t connection, const uint8_t *data, uint16_t len)
   if (od_session_seal(&s_session, od_span_make(data, len), s_pipe_enc_buf,
                       sizeof(s_pipe_enc_buf), &enc_len, od_now_ms(), NULL)
       == OD_SESSION_SEAL_OK) {
-    pipe_send_raw(connection, s_pipe_enc_buf, enc_len);
+    pipe_send_raw(ctx, s_pipe_enc_buf, enc_len);
     return;
   }
   err[0] = 0x00u;
   err[1] = cmd;
   err[2] = 0xFFu;
-  pipe_send_raw(connection, err, sizeof(err));
+  pipe_send_raw(ctx, err, sizeof(err));
 }
 
-static void reply_firmware_version(uint8_t connection)
+static void reply_firmware_version(const od_cmd_ctx_t *ctx)
 {
   /* [ACK][0x43][major][minor][shaLen][sha…][patch] — patch trails so old
    * hosts that stop after SHA keep working. */
@@ -389,21 +396,21 @@ static void reply_firmware_version(uint8_t connection)
   memcpy(&rsp[o], sha, sha_len);
   o += sha_len;
   rsp[o++] = patch;
-  pipe_send(connection, rsp, o);
+  (void)od_cmd_reply_plain(ctx, rsp, o);
 }
 
-static void reply_read_msd(uint8_t connection)
+static void reply_read_msd(const od_cmd_ctx_t *ctx)
 {
   uint8_t rsp[2 + 16];
 
   rsp[0] = 0x00u;
   rsp[1] = RESP_MSD_READ;
   opendisplay_ble_copy_msd_bytes(&rsp[2]);
-  pipe_send(connection, rsp, sizeof(rsp));
+  (void)od_cmd_reply(ctx, rsp, sizeof(rsp));
 }
 
 
-static void handle_partial_write_start(uint8_t connection, const uint8_t *payload, uint16_t payload_len)
+static void handle_partial_write_start(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len)
 {
   uint8_t ok[] = { 0x00u, 0x76u };
   uint8_t err[] = { 0xFFu, 0x76u, OD_ERR_PARTIAL_STREAM, 0x00u };
@@ -411,27 +418,27 @@ static void handle_partial_write_start(uint8_t connection, const uint8_t *payloa
 
   opendisplay_pipe_write_reset();
   if (opendisplay_display_partial_write_start(payload, payload_len, &err_code) == 0) {
-    pipe_send(connection, ok, sizeof(ok));
+    (void)od_cmd_reply(ctx, ok, sizeof(ok));
   } else {
     err[2] = err_code;
-    pipe_send(connection, err, sizeof(err));
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
   }
 }
 
-static void handle_direct_write_start(uint8_t connection, const uint8_t *payload, uint16_t payload_len)
+static void handle_direct_write_start(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len)
 {
   uint8_t ok[] = { 0x00u, 0x70u };
   uint8_t err[] = { 0xFFu, 0x70u };
   od_log_info("pipe 0070 recv len=%u (epd init next)", (unsigned)payload_len);
   opendisplay_pipe_write_reset();
   if (opendisplay_display_direct_write_start(payload, payload_len) == 0) {
-    pipe_send(connection, ok, sizeof(ok));
+    (void)od_cmd_reply(ctx, ok, sizeof(ok));
   } else {
-    pipe_send(connection, err, sizeof(err));
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
   }
 }
 
-static void handle_direct_write_data(uint8_t connection, const uint8_t *payload, uint16_t payload_len)
+static void handle_direct_write_data(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len)
 {
   uint8_t ack_data[] = { 0x00u, 0x71u };
   uint8_t err[] = { 0xFFu, 0x71u };
@@ -440,19 +447,19 @@ static void handle_direct_write_data(uint8_t connection, const uint8_t *payload,
 
   rc = opendisplay_display_direct_write_data(payload, payload_len);
   if (rc == -4) {
-    pipe_send(connection, partial_err, sizeof(partial_err));
+    (void)od_cmd_reply_plain(ctx, partial_err, sizeof(partial_err));
     return;
   }
   if (rc != 0) {
     opendisplay_display_abort();
-    pipe_send(connection, err, sizeof(err));
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return;
   }
 
-  pipe_send(connection, ack_data, sizeof(ack_data));
+  (void)od_cmd_reply(ctx, ack_data, sizeof(ack_data));
 }
 
-static void handle_direct_write_end(uint8_t connection, const uint8_t *payload, uint16_t payload_len)
+static void handle_direct_write_end(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len)
 {
   bool refresh_ok = false;
   uint8_t ack_end[] = { 0x00u, 0x72u };
@@ -464,43 +471,43 @@ static void handle_direct_write_end(uint8_t connection, const uint8_t *payload, 
 
   rc = opendisplay_display_direct_write_end_prepare(payload, payload_len);
   if (rc == -4) {
-    pipe_send(connection, partial_err, sizeof(partial_err));
+    (void)od_cmd_reply_plain(ctx, partial_err, sizeof(partial_err));
     return;
   }
   if (rc != 0) {
     if (rc != -4) {
       opendisplay_display_abort();
     }
-    pipe_send(connection, err, sizeof(err));
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return;
   }
   /* Ack 0x72 before the blocking refresh, then report 0x73/0x74 afterwards
    * (same ordering as the nRF52840 Firmware). */
-  pipe_send(connection, ack_end, sizeof(ack_end));
+  (void)od_cmd_reply(ctx, ack_end, sizeof(ack_end));
   k_msleep(20);
   if (opendisplay_display_direct_write_end_refresh(payload, payload_len, &refresh_ok) != 0) {
     opendisplay_display_abort();
-    pipe_send(connection, err, sizeof(err));
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return;
   }
-  pipe_send(connection, refresh_ok ? ack_refresh_ok : ack_refresh_timeout,
+  (void)od_cmd_reply(ctx, refresh_ok ? ack_refresh_ok : ack_refresh_timeout,
             refresh_ok ? sizeof(ack_refresh_ok) : sizeof(ack_refresh_timeout));
 }
 
-static void handle_config_clear(uint8_t connection)
+static void handle_config_clear(const od_cmd_ctx_t *ctx)
 {
   uint8_t ok[] = { 0x00u, RESP_CONFIG_CLEAR, 0x00u, 0x00u };
   uint8_t err[] = { 0xFFu, RESP_CONFIG_CLEAR, 0x00u, 0x00u };
 
   if (!clearStoredConfig()) {
-    pipe_send(connection, err, sizeof(err));
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return;
   }
   opendisplay_ble_reload_config_from_nvm();
-  pipe_send(connection, ok, sizeof(ok));
+  (void)od_cmd_reply(ctx, ok, sizeof(ok));
 }
 
-static void handle_config_read(uint8_t connection)
+static void handle_config_read(const od_cmd_ctx_t *ctx)
 {
   static uint8_t config_data[MAX_CONFIG_SIZE];
   uint32_t config_len = MAX_CONFIG_SIZE;
@@ -514,7 +521,7 @@ static void handle_config_read(uint8_t connection)
 
   if (!initConfigStorage()) {
     uint8_t err[] = { 0xFFu, RESP_CONFIG_READ, 0x00u, 0x00u };
-    pipe_send(connection, err, sizeof(err));
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return;
   }
 
@@ -522,7 +529,7 @@ static void handle_config_read(uint8_t connection)
     uint8_t empty[] = {
       0x00u, RESP_CONFIG_READ, 0x00u, 0x00u, 0x00u, 0x00u,
     };
-    pipe_send(connection, empty, sizeof(empty));
+    (void)od_cmd_reply(ctx, empty, sizeof(empty));
     return;
   }
 
@@ -560,14 +567,14 @@ static void handle_config_read(uint8_t connection)
       break;
     }
 
-    pipe_send(connection, s_cfg_read_buf, response_len);
+    (void)od_cmd_reply(ctx, s_cfg_read_buf, response_len);
     offset += chunk_size;
     remaining -= chunk_size;
     chunk_number++;
   }
 }
 
-static void handle_config_write(uint8_t connection, const uint8_t *data, uint16_t len)
+static void handle_config_write(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len)
 {
   uint8_t ack[] = { 0x00u, RESP_CONFIG_WRITE, 0x00u, 0x00u };
   uint8_t err[] = { 0xFFu, RESP_CONFIG_WRITE, 0x00u, 0x00u };
@@ -579,14 +586,14 @@ static void handle_config_write(uint8_t connection, const uint8_t *data, uint16_
   if (len > CONFIG_CHUNK_SIZE) {
     cfg_chunk_reset();
     s_cfg_chunk.active = true;
-    s_cfg_chunk.connection = connection;
+    s_cfg_chunk.connection = 0u;
     s_cfg_chunk.received_chunks = 1;
 
     if (len >= CONFIG_CHUNK_SIZE_WITH_PREFIX) {
       s_cfg_chunk.total_size = (uint32_t)data[0] | ((uint32_t)data[1] << 8);
       if (s_cfg_chunk.total_size > MAX_CONFIG_SIZE || s_cfg_chunk.total_size == 0u) {
         cfg_chunk_reset();
-        pipe_send(connection, err, sizeof(err));
+        (void)od_cmd_reply_plain(ctx, err, sizeof(err));
         return;
       }
       {
@@ -604,7 +611,7 @@ static void handle_config_write(uint8_t connection, const uint8_t *data, uint16_
       s_cfg_chunk.total_size = len;
       if (s_cfg_chunk.total_size > MAX_CONFIG_SIZE) {
         cfg_chunk_reset();
-        pipe_send(connection, err, sizeof(err));
+        (void)od_cmd_reply_plain(ctx, err, sizeof(err));
         return;
       }
       {
@@ -616,11 +623,17 @@ static void handle_config_write(uint8_t connection, const uint8_t *data, uint16_
 
     if (s_cfg_chunk.received_size >= s_cfg_chunk.total_size) {
       if (saveConfig(s_cfg_chunk.buffer, s_cfg_chunk.received_size)) {
+        /* THE ACK IS SEALED AND QUEUED BEFORE THE RELOAD, and the order is load-bearing.
+         * clear_session() drops the session -- the new config may carry a new key -- so a reply
+         * attempted after it finds none, and od_reply substitutes a plaintext hard NACK: the host
+         * is told a write FAILED that has already been persisted, and cannot tell that from a real
+         * failure. od_reply seals at commit, so queueing first makes the bytes final while the
+         * session that sent the write is still the one answering it. */
+        (void)od_cmd_reply(ctx, ack, sizeof(ack));
         opendisplay_ble_reload_config_from_nvm();
         clear_session();
-        pipe_send(connection, ack, sizeof(ack));
       } else {
-        pipe_send(connection, err, sizeof(err));
+        (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       }
       cfg_chunk_reset();
       return;
@@ -632,26 +645,32 @@ static void handle_config_write(uint8_t connection, const uint8_t *data, uint16_
         (uint16_t)(1u + (rem + CONFIG_CHUNK_SIZE - 1u) / CONFIG_CHUNK_SIZE);
     }
 
-    pipe_send(connection, ack, sizeof(ack));
+    (void)od_cmd_reply(ctx, ack, sizeof(ack));
     return;
   }
 
   if (saveConfig((uint8_t *)(void *)data, len)) {
+        /* THE ACK IS SEALED AND QUEUED BEFORE THE RELOAD, and the order is load-bearing.
+         * clear_session() drops the session -- the new config may carry a new key -- so a reply
+         * attempted after it finds none, and od_reply substitutes a plaintext hard NACK: the host
+         * is told a write FAILED that has already been persisted, and cannot tell that from a real
+         * failure. od_reply seals at commit, so queueing first makes the bytes final while the
+         * session that sent the write is still the one answering it. */
+    (void)od_cmd_reply(ctx, ack, sizeof(ack));
     opendisplay_ble_reload_config_from_nvm();
     clear_session();
-    pipe_send(connection, ack, sizeof(ack));
   } else {
-    pipe_send(connection, err, sizeof(err));
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
   }
 }
 
-static void handle_config_chunk(uint8_t connection, const uint8_t *data, uint16_t len)
+static void handle_config_chunk(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len)
 {
   uint8_t ack[] = { 0x00u, RESP_CONFIG_CHUNK, 0x00u, 0x00u };
   uint8_t err[] = { 0xFFu, RESP_CONFIG_CHUNK, 0x00u, 0x00u };
 
-  if (!s_cfg_chunk.active || s_cfg_chunk.connection != connection) {
-    pipe_send(connection, err, sizeof(err));
+  if (!s_cfg_chunk.active || s_cfg_chunk.connection != 0u) {
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return;
   }
   if (len == 0u) {
@@ -659,22 +678,22 @@ static void handle_config_chunk(uint8_t connection, const uint8_t *data, uint16_
   }
   if (len > CONFIG_CHUNK_SIZE) {
     cfg_chunk_reset();
-    pipe_send(connection, err, sizeof(err));
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return;
   }
   if (s_cfg_chunk.received_size + len > s_cfg_chunk.total_size) {
     cfg_chunk_reset();
-    pipe_send(connection, err, sizeof(err));
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return;
   }
   if (s_cfg_chunk.received_size + len > MAX_CONFIG_SIZE) {
     cfg_chunk_reset();
-    pipe_send(connection, err, sizeof(err));
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return;
   }
   if (s_cfg_chunk.received_chunks >= MAX_CONFIG_CHUNKS) {
     cfg_chunk_reset();
-    pipe_send(connection, err, sizeof(err));
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return;
   }
 
@@ -685,30 +704,36 @@ static void handle_config_chunk(uint8_t connection, const uint8_t *data, uint16_
   if (s_cfg_chunk.received_chunks >= s_cfg_chunk.expected_chunks) {
     if (s_cfg_chunk.received_size != s_cfg_chunk.total_size) {
       cfg_chunk_reset();
-      pipe_send(connection, err, sizeof(err));
+      (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       return;
     }
     if (saveConfig(s_cfg_chunk.buffer, s_cfg_chunk.received_size)) {
+        /* THE ACK IS SEALED AND QUEUED BEFORE THE RELOAD, and the order is load-bearing.
+         * clear_session() drops the session -- the new config may carry a new key -- so a reply
+         * attempted after it finds none, and od_reply substitutes a plaintext hard NACK: the host
+         * is told a write FAILED that has already been persisted, and cannot tell that from a real
+         * failure. od_reply seals at commit, so queueing first makes the bytes final while the
+         * session that sent the write is still the one answering it. */
+      (void)od_cmd_reply(ctx, ack, sizeof(ack));
       opendisplay_ble_reload_config_from_nvm();
       clear_session();
-      pipe_send(connection, ack, sizeof(ack));
     } else {
-      pipe_send(connection, err, sizeof(err));
+      (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     }
     cfg_chunk_reset();
   } else {
-    pipe_send(connection, ack, sizeof(ack));
+    (void)od_cmd_reply(ctx, ack, sizeof(ack));
   }
 }
 
-static void handle_nfc_endpoint(uint8_t connection, const uint8_t *payload, uint16_t payload_len)
+static void handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len)
 {
   uint16_t out_len;
   uint8_t rec_type;
 
   if (payload == NULL || payload_len < 1u) {
     uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x01u };
-    pipe_send(connection, err, sizeof(err));
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return;
   }
 
@@ -722,7 +747,7 @@ static void handle_nfc_endpoint(uint8_t connection, const uint8_t *payload, uint
     out_len = max_out;
     if (!opendisplay_ble_nfc_read(&rec_type, &s_nfc_rsp_buf[6], &out_len, max_out)) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x02u };
-      pipe_send(connection, err, sizeof(err));
+      (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       return;
     }
     s_nfc_rsp_buf[0] = 0x00u;
@@ -731,7 +756,7 @@ static void handle_nfc_endpoint(uint8_t connection, const uint8_t *payload, uint
     s_nfc_rsp_buf[3] = rec_type;
     s_nfc_rsp_buf[4] = (uint8_t)((out_len >> 8) & 0xFFu);
     s_nfc_rsp_buf[5] = (uint8_t)(out_len & 0xFFu);
-    pipe_send(connection, s_nfc_rsp_buf, (uint16_t)(6u + out_len));
+    (void)od_cmd_reply(ctx, s_nfc_rsp_buf, (uint16_t)(6u + out_len));
     return;
   }
 
@@ -739,29 +764,29 @@ static void handle_nfc_endpoint(uint8_t connection, const uint8_t *payload, uint
     uint16_t text_len;
     if (payload_len < 4u) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x01u };
-      pipe_send(connection, err, sizeof(err));
+      (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       return;
     }
     rec_type = payload[1];
     text_len = (uint16_t)(((uint16_t)payload[2] << 8) | payload[3]);
     if ((uint16_t)(4u + text_len) > payload_len) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x01u };
-      pipe_send(connection, err, sizeof(err));
+      (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       return;
     }
     if (!nfc_rec_type_valid(rec_type)) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x05u };
-      pipe_send(connection, err, sizeof(err));
+      (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       return;
     }
     if (!opendisplay_ble_nfc_write(rec_type, &payload[4], text_len)) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x03u };
-      pipe_send(connection, err, sizeof(err));
+      (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       return;
     }
     {
       uint8_t ok[] = { 0x00u, RESP_NFC_ENDPOINT, 0x81u };
-      pipe_send(connection, ok, sizeof(ok));
+      (void)od_cmd_reply(ctx, ok, sizeof(ok));
     }
     return;
   }
@@ -770,43 +795,43 @@ static void handle_nfc_endpoint(uint8_t connection, const uint8_t *payload, uint
     uint16_t total_len;
     if (payload_len < 4u) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x01u };
-      pipe_send(connection, err, sizeof(err));
+      (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       return;
     }
     rec_type = payload[1];
     total_len = (uint16_t)(((uint16_t)payload[2] << 8) | payload[3]);
     if (!nfc_rec_type_valid(rec_type)) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x05u };
-      pipe_send(connection, err, sizeof(err));
+      (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       return;
     }
     if (total_len == 0u || total_len > sizeof(s_nfc_write_chunk.data)) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x06u };
-      pipe_send(connection, err, sizeof(err));
+      (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       return;
     }
     nfc_write_chunk_reset();
     s_nfc_write_chunk.active = true;
-    s_nfc_write_chunk.connection = connection;
+    s_nfc_write_chunk.connection = 0u;
     s_nfc_write_chunk.rec_type = rec_type;
     s_nfc_write_chunk.total_len = total_len;
     {
       uint8_t ok[] = { 0x00u, RESP_NFC_ENDPOINT, 0x82u };
-      pipe_send(connection, ok, sizeof(ok));
+      (void)od_cmd_reply(ctx, ok, sizeof(ok));
     }
     return;
   }
 
   if (payload[0] == 0x11u) {
     uint16_t chunk_len;
-    if (!s_nfc_write_chunk.active || s_nfc_write_chunk.connection != connection) {
+    if (!s_nfc_write_chunk.active || s_nfc_write_chunk.connection != 0u) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x07u };
-      pipe_send(connection, err, sizeof(err));
+      (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       return;
     }
     if (payload_len < 2u) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x01u };
-      pipe_send(connection, err, sizeof(err));
+      (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       return;
     }
     chunk_len = (uint16_t)(payload_len - 1u);
@@ -814,7 +839,7 @@ static void handle_nfc_endpoint(uint8_t connection, const uint8_t *payload, uint
       nfc_write_chunk_reset();
       {
         uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x08u };
-        pipe_send(connection, err, sizeof(err));
+        (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       }
       return;
     }
@@ -822,20 +847,20 @@ static void handle_nfc_endpoint(uint8_t connection, const uint8_t *payload, uint
     s_nfc_write_chunk.received_len = (uint16_t)(s_nfc_write_chunk.received_len + chunk_len);
     {
       uint8_t ok[] = { 0x00u, RESP_NFC_ENDPOINT, 0x82u };
-      pipe_send(connection, ok, sizeof(ok));
+      (void)od_cmd_reply(ctx, ok, sizeof(ok));
     }
     return;
   }
 
   if (payload[0] == 0x12u) {
-    if (!s_nfc_write_chunk.active || s_nfc_write_chunk.connection != connection) {
+    if (!s_nfc_write_chunk.active || s_nfc_write_chunk.connection != 0u) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x07u };
-      pipe_send(connection, err, sizeof(err));
+      (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       return;
     }
     if (s_nfc_write_chunk.received_len != s_nfc_write_chunk.total_len) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x09u };
-      pipe_send(connection, err, sizeof(err));
+      (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       return;
     }
     if (!opendisplay_ble_nfc_write(s_nfc_write_chunk.rec_type, s_nfc_write_chunk.data,
@@ -843,31 +868,31 @@ static void handle_nfc_endpoint(uint8_t connection, const uint8_t *payload, uint
       nfc_write_chunk_reset();
       {
         uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x03u };
-        pipe_send(connection, err, sizeof(err));
+        (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       }
       return;
     }
     nfc_write_chunk_reset();
     {
       uint8_t ok[] = { 0x00u, RESP_NFC_ENDPOINT, 0x81u };
-      pipe_send(connection, ok, sizeof(ok));
+      (void)od_cmd_reply(ctx, ok, sizeof(ok));
     }
     return;
   }
 
   {
     uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x04u };
-    pipe_send(connection, err, sizeof(err));
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
   }
 }
 
-static void dispatch(uint8_t connection, uint16_t cmd, const uint8_t *payload, uint16_t payload_len)
+static void dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, const uint8_t *payload, uint16_t payload_len)
 {
   uint8_t auth_rsp[32];
   uint16_t auth_rsp_len = 0;
   if (cmd == CMD_AUTHENTICATE) {
     (void)authenticate_handle(payload, payload_len, auth_rsp, &auth_rsp_len);
-    pipe_send(connection, auth_rsp, auth_rsp_len);
+    (void)od_cmd_reply_plain(ctx, auth_rsp, auth_rsp_len);
     return;
   }
   if (sec_enabled() && !session_alive()) {
@@ -881,7 +906,7 @@ static void dispatch(uint8_t connection, uint16_t cmd, const uint8_t *payload, u
     bool config_rewrite = rewrite_allowed
                           && (cmd == CMD_CONFIG_WRITE || cmd == CMD_CONFIG_CHUNK);
     if (cmd != CMD_FIRMWARE_VERSION && !config_rewrite) {
-      send_auth_required_response(connection, (uint8_t)(cmd & 0xFFu));
+      send_auth_required_response(ctx, (uint8_t)(cmd & 0xFFu));
       return;
     }
     /* Erase the stored config (and thus the old key) before accepting an
@@ -901,22 +926,22 @@ static void dispatch(uint8_t connection, uint16_t cmd, const uint8_t *payload, u
   }
   switch (cmd) {
     case CMD_FIRMWARE_VERSION:
-      reply_firmware_version(connection);
+      reply_firmware_version(ctx);
       break;
     case CMD_READ_MSD:
-      reply_read_msd(connection);
+      reply_read_msd(ctx);
       break;
     case CMD_CONFIG_READ:
-      handle_config_read(connection);
+      handle_config_read(ctx);
       break;
     case CMD_CONFIG_CLEAR:
-      handle_config_clear(connection);
+      handle_config_clear(ctx);
       break;
     case CMD_CONFIG_WRITE:
-      handle_config_write(connection, payload, payload_len);
+      handle_config_write(ctx, payload, payload_len);
       break;
     case CMD_CONFIG_CHUNK:
-      handle_config_chunk(connection, payload, payload_len);
+      handle_config_chunk(ctx, payload, payload_len);
       break;
     case CMD_REBOOT:
       od_log_info("reboot");
@@ -927,7 +952,7 @@ static void dispatch(uint8_t connection, uint16_t cmd, const uint8_t *payload, u
     case CMD_ENTER_DFU:
       {
         uint8_t ok[] = { 0x00u, RESP_ENTER_DFU };
-        pipe_send(connection, ok, sizeof(ok));
+        (void)od_cmd_reply(ctx, ok, sizeof(ok));
       }
       opendisplay_ble_schedule_dfu();
       break;
@@ -958,15 +983,15 @@ static void dispatch(uint8_t connection, uint16_t cmd, const uint8_t *payload, u
       uint8_t e2[] = { 0xFFu, RESP_LED_ACTIVATE_ACK, 0x02u, 0x00u };
 
       if (payload_len < 1u) {
-        pipe_send(connection, e1, sizeof(e1));
+        (void)od_cmd_reply_plain(ctx, e1, sizeof(e1));
         break;
       }
       if (opendisplay_led_activate(payload[0], payload + 1u,
                                   (uint16_t)(payload_len - 1u)) != 0) {
-        pipe_send(connection, e2, sizeof(e2));
+        (void)od_cmd_reply_plain(ctx, e2, sizeof(e2));
         break;
       }
-      pipe_send(connection, ok, sizeof(ok));
+      (void)od_cmd_reply(ctx, ok, sizeof(ok));
       break;
     }
     case CMD_LED_STOP: {
@@ -980,10 +1005,10 @@ static void dispatch(uint8_t connection, uint16_t cmd, const uint8_t *payload, u
         rc = opendisplay_led_stop(0, false);
       }
       if (rc != 0) {
-        pipe_send(connection, e2, sizeof(e2));
+        (void)od_cmd_reply_plain(ctx, e2, sizeof(e2));
         break;
       }
-      pipe_send(connection, ok, sizeof(ok));
+      (void)od_cmd_reply(ctx, ok, sizeof(ok));
       break;
     }
     case CMD_BUZZER: {
@@ -991,36 +1016,36 @@ static void dispatch(uint8_t connection, uint16_t cmd, const uint8_t *payload, u
 
       if (rc == 0) {
         uint8_t ok[] = { 0x00u, RESP_BUZZER_ACK, 0x00u, 0x00u };
-        pipe_send(connection, ok, sizeof(ok));
+        (void)od_cmd_reply(ctx, ok, sizeof(ok));
       } else {
         uint8_t err[] = { 0xFFu, RESP_BUZZER_ACK, (uint8_t)rc, 0x00u };
-        pipe_send(connection, err, sizeof(err));
+        (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       }
       break;
     }
     case CMD_NFC_ENDPOINT:
-      handle_nfc_endpoint(connection, payload, payload_len);
+      handle_nfc_endpoint(ctx, payload, payload_len);
       break;
     case CMD_DIRECT_WRITE_START:
-      handle_direct_write_start(connection, payload, payload_len);
+      handle_direct_write_start(ctx, payload, payload_len);
       break;
     case CMD_DIRECT_WRITE_DATA:
-      handle_direct_write_data(connection, payload, payload_len);
+      handle_direct_write_data(ctx, payload, payload_len);
       break;
     case CMD_DIRECT_WRITE_END:
-      handle_direct_write_end(connection, payload, payload_len);
+      handle_direct_write_end(ctx, payload, payload_len);
       break;
     case CMD_PARTIAL_WRITE_START:
-      handle_partial_write_start(connection, payload, payload_len);
+      handle_partial_write_start(ctx, payload, payload_len);
       break;
     case CMD_PIPE_WRITE_START:
-      opendisplay_pipe_write_start(connection, payload, payload_len, pipe_send);
+      opendisplay_pipe_write_start(ctx, payload, payload_len, pipe_send);
       break;
     case CMD_PIPE_WRITE_DATA:
-      opendisplay_pipe_write_data(connection, payload, payload_len, pipe_send);
+      opendisplay_pipe_write_data(ctx, payload, payload_len, pipe_send);
       break;
     case CMD_PIPE_WRITE_END:
-      opendisplay_pipe_write_end(connection, payload, payload_len, pipe_send);
+      opendisplay_pipe_write_end(ctx, payload, payload_len, pipe_send);
       break;
     default:
       od_log_info("unknown cmd 0x%04X", (unsigned)cmd);
@@ -1028,7 +1053,7 @@ static void dispatch(uint8_t connection, uint16_t cmd, const uint8_t *payload, u
   }
 }
 
-static void on_pipe_write(uint8_t connection, const uint8_t *data, uint16_t len, bool write_cmd)
+static void on_pipe_write(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len, bool write_cmd)
 {
   uint16_t cmd;
   const uint8_t *frame = data;
@@ -1041,7 +1066,7 @@ static void on_pipe_write(uint8_t connection, const uint8_t *data, uint16_t len,
   }
   if (frame_len > OD_PIPE_MAX_PAYLOAD) {
     uint8_t err[] = { 0xFFu, frame[1], 0xFEu };
-    pipe_send(connection, err, sizeof(err));
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return;
   }
 
@@ -1053,7 +1078,7 @@ static void on_pipe_write(uint8_t connection, const uint8_t *data, uint16_t len,
   if (sec_enabled() && cmd != CMD_AUTHENTICATE) {
     if (frame_len >= 31u) {
       if (!session_alive()) {
-        send_auth_required_response(connection, frame[1]);
+        send_auth_required_response(ctx, frame[1]);
         return;
       }
       /* The envelope [nonce:16][ciphertext][tag:12] is contiguous behind the two command bytes,
@@ -1086,10 +1111,10 @@ static void on_pipe_write(uint8_t connection, const uint8_t *data, uint16_t len,
         if (nonce_loss && cmd == CMD_PIPE_WRITE_DATA) {
           return;   /* silence is the wire answer; the line above is the record of it */
         }
-        pipe_send(connection, err, sizeof(err));
+        (void)od_cmd_reply_plain(ctx, err, sizeof(err));
         return;
       }
-      dispatch(connection, cmd, s_plain_buf, plain_len);
+      dispatch(ctx, cmd, s_plain_buf, plain_len);
       return;
     }
     /*
@@ -1104,11 +1129,11 @@ static void on_pipe_write(uint8_t connection, const uint8_t *data, uint16_t len,
      * (fw-version + the config-rewrite path stay reachable).
      */
     if (session_alive() && cmd != CMD_FIRMWARE_VERSION) {
-      send_auth_required_response(connection, frame[1]);
+      send_auth_required_response(ctx, frame[1]);
       return;
     }
   }
-  dispatch(connection, cmd, &frame[2], (uint16_t)(frame_len - 2u));
+  dispatch(ctx, cmd, &frame[2], (uint16_t)(frame_len - 2u));
 }
 
 /* BT RX thread: copy into the queue only, no command processing here. */
@@ -1167,7 +1192,19 @@ void opendisplay_pipe_process(void)
     if (!rx_tag_is_live(item->tag, NULL)) {
       continue;
     }
-    on_pipe_write(0, item->data, item->len, false);
+    {
+      /* THE CONTEXT IS BUILT HERE, and it must be a real one. Passing 0 for it compiles -- it is a
+       * valid null pointer constant -- and od_cmd_reply() then returns INVARIANT for every reply,
+       * so the device would accept commands and answer NONE. Nothing in a build catches that.
+       *
+       * The tag is the frame's own generation, taken from the slot rather than re-read from
+       * s_conn_gen: a frame must be answered on the identity that sent it, not on whatever the
+       * link has become since. The reservation is empty under legacy routing, where od_cmd_reply
+       * hands frames straight to pipe_send(); the dispatcher supplies a real one at the cutover. */
+      od_tx_reservation_t r = { 0u, 0u };
+      const od_cmd_ctx_t ctx = { { OD_ORIGIN_BLE, item->tag }, &r };
+      on_pipe_write(&ctx, item->data, item->len, false);
+    }
     /* Stale frames were consumed above rather than retried. Peek/consume avoids a copying get, so
      * the dispatcher decrypts in the slot instead of on a 256-byte stack frame in main. */
     od_rxq_consume();
