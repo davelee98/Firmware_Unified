@@ -1,3 +1,4 @@
+#include "od_cmd_app.h"
 #include "od_cmd_reply.h"
 #include "od_rxq.h"
 #include "opendisplay_pipe_write.h"
@@ -544,4 +545,27 @@ extern "C" od_cmd_result_t opendisplay_pipe_write_end(const od_cmd_ctx_t *ctx,
   }
 
   return finish_and_refresh(ctx, payload, payload_len, 0x82u);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * shared/core/od_cmd_app.h -- the three PIPE opcodes.
+ *
+ * THE MODULE'S VERDICT IS THE COMMAND'S. It answers the wire itself, so it is the only thing that
+ * knows whether a frame was accepted or refused; an OK tail here would report a PIPE NACK as an
+ * accepted command and stamp the session clock on traffic the device rejected.
+ * ------------------------------------------------------------------------------------------ */
+
+extern "C" od_cmd_result_t od_cmd_app_pipe_start(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  return opendisplay_pipe_write_start(ctx, body.p, (uint16_t)body.n);
+}
+
+extern "C" od_cmd_result_t od_cmd_app_pipe_data(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  return opendisplay_pipe_write_data(ctx, body.p, (uint16_t)body.n);
+}
+
+extern "C" od_cmd_result_t od_cmd_app_pipe_end(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  return opendisplay_pipe_write_end(ctx, body.p, (uint16_t)body.n);
 }
