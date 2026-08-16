@@ -130,6 +130,21 @@ static od_txq_status_t send_pipe_ack(const od_cmd_ctx_t *ctx)
   return rc;
 }
 
+/* Send a SACK, and stop the transfer if od_reply had to substitute a hard NACK for it.
+ *
+ * EVERY 0x81 NACK IS FATAL (pipe-write-protocol.md 5.1), whatever frame it replaced. So a
+ * substituted SACK is not "an ack the host missed" -- it is the end of the upload, and the device
+ * must not carry on holding the panel and consuming DATA for a transfer the host has abandoned.
+ * Returns false when that happened; the caller reports OD_CMD_NACK and does no more. */
+static bool sack_or_abort(const od_cmd_ctx_t *ctx)
+{
+  if (send_pipe_ack(ctx) == OD_TXQ_OK) {
+    return true;
+  }
+  pipe_abort_no_reply();
+  return false;
+}
+
 static void send_pipe_nack(const od_cmd_ctx_t *ctx, uint8_t err)
 {
   uint8_t r[8] = { RESP_NACK, 0x81u, err, 0, 0, 0, 0, 0 };
@@ -223,10 +238,16 @@ static od_cmd_result_t finish_and_refresh(const od_cmd_ctx_t *ctx, const uint8_t
   }
   /* OK on BOTH refresh outcomes. 0x74 reports a refresh that timed out, not a refused command:
    * the transfer completed and the panel was driven. The distinction the verdict carries is
-   * accepted-vs-refused, and this frame was accepted. */
-  (void)od_cmd_reply(ctx, refresh_ok ? ack_ok : ack_to, 2u);
-  opendisplay_pipe_write_reset();
-  return OD_CMD_OK;
+   * accepted-vs-refused, and this frame was accepted.
+   *
+   * Unless this last reply was itself substituted -- then the only thing the host received for
+   * this frame was a hard NACK, and reporting acceptance would be reporting the opposite of what
+   * went out. The transfer is over either way, so only the verdict differs. */
+  {
+    const od_txq_status_t rc = od_cmd_reply(ctx, refresh_ok ? ack_ok : ack_to, 2u);
+    opendisplay_pipe_write_reset();
+    return (rc == OD_TXQ_OK) ? OD_CMD_OK : OD_CMD_NACK;
+  }
 }
 
 extern "C" od_cmd_result_t opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx,
@@ -339,11 +360,16 @@ extern "C" od_cmd_result_t opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx,
   resp[5] = (uint8_t)(PIPE_MAX_FRAME & 0xFFu);
   resp[6] = (uint8_t)((PIPE_MAX_FRAME >> 8) & 0xFFu);
   resp[7] = (uint8_t)(0x01u | (partial ? PIPE_FLAG_PARTIAL : 0u));
-  /* The verdict follows the wire: od_reply can substitute a plaintext hard NACK for a START ack it
-   * could not seal, and the host then sees a refusal. Reading the status here changes nothing that
-   * is sent -- it only stops the caller reporting an accepted command the peer was told was
-   * refused. */
+  /* THE STATE IS ALREADY ARMED ABOVE, so a substituted hard NACK has to unwind it. The host was
+   * told the transfer was refused and will start no upload; leaving s_pipe.active set would leave
+   * a transfer nobody is driving -- and, worse, one whose display session was never started,
+   * because the setup below is on the far side of this return. A later DATA frame would then
+   * stream into a panel that was never opened. */
   if (od_cmd_reply(ctx, resp, sizeof(resp)) != OD_TXQ_OK) {
+    if (partial) {
+      opendisplay_display_clear_etag();
+    }
+    pipe_abort_no_reply();
     return OD_CMD_NACK;
   }
 
@@ -429,8 +455,7 @@ extern "C" od_cmd_result_t opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx,
 
     if (!s_pipe.partial && !s_pipe.compressed
         && opendisplay_display_bytes_written() >= opendisplay_display_total_bytes()) {
-      if (send_pipe_ack(ctx) != OD_TXQ_OK) {
-        pipe_abort_no_reply();
+      if (!sack_or_abort(ctx)) {
         return OD_CMD_NACK;
       }
       /* AUTO-COMPLETE: the byte count met the total, so this DATA frame carries the END. Its
@@ -440,8 +465,7 @@ extern "C" od_cmd_result_t opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx,
     /* No later reply follows a cadence ACK -- but the TRANSFER does, which is why the result is
      * not simply discarded: a substituted NACK is fatal, so carrying on would accept DATA for a
      * transfer the host has already stopped. */
-    if (s_pipe.frames_since_ack >= s_pipe.ack_every && send_pipe_ack(ctx) != OD_TXQ_OK) {
-      pipe_abort_no_reply();
+    if (s_pipe.frames_since_ack >= s_pipe.ack_every && !sack_or_abort(ctx)) {
       return OD_CMD_NACK;
     }
     return OD_CMD_OK;
@@ -466,15 +490,16 @@ extern "C" od_cmd_result_t opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx,
       return OD_CMD_NACK;
     }
     pipe_update_highest_seen(seq);
-    /* A GAP SACK, not a refusal: the frame was accepted into the reorder window. The ack's status
-     * still decides the verdict, because a substituted hard NACK is what the host actually got. */
+    /* A GAP SACK, not a refusal: the frame was accepted into the reorder window. But if the ack
+     * could not be sealed the host got a fatal NACK instead, and the queued frame is then part of
+     * an upload that is over -- so the transfer stops rather than holding the panel and the slot. */
     if (!s_pipe.gap_open) {
       s_pipe.gap_open = true;
-      if (send_pipe_ack(ctx) != OD_TXQ_OK) {
+      if (!sack_or_abort(ctx)) {
         return OD_CMD_NACK;
       }
     } else if (++s_pipe.ooo_acks_since_gap >= s_pipe.ack_every) {
-      if (send_pipe_ack(ctx) != OD_TXQ_OK) {
+      if (!sack_or_abort(ctx)) {
         return OD_CMD_NACK;
       }
     }
@@ -485,11 +510,11 @@ extern "C" od_cmd_result_t opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx,
    * with the current SACK so a client that lost an ack can resynchronise. Accepted. */
   if (back <= W) {
     if (!s_pipe.gap_open) {
-      if (send_pipe_ack(ctx) != OD_TXQ_OK) {
+      if (!sack_or_abort(ctx)) {
         return OD_CMD_NACK;
       }
     } else if (++s_pipe.ooo_acks_since_gap >= s_pipe.ack_every) {
-      if (send_pipe_ack(ctx) != OD_TXQ_OK) {
+      if (!sack_or_abort(ctx)) {
         return OD_CMD_NACK;
       }
     }
@@ -518,8 +543,7 @@ extern "C" od_cmd_result_t opendisplay_pipe_write_end(const od_cmd_ctx_t *ctx,
     return OD_CMD_NACK;
   }
 
-  if (send_pipe_ack(ctx) != OD_TXQ_OK) {
-    pipe_abort_no_reply();
+  if (!sack_or_abort(ctx)) {
     return OD_CMD_NACK;
   }
 

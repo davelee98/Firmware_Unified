@@ -68,9 +68,16 @@ od_txq_status_t od_cmd_reply(const od_cmd_ctx_t *ctx, const uint8_t *frame, uint
     (void)ctx;
     ++g_reply_calls;
     if (g_reply_fail_on == g_reply_calls) {
-        /* od_reply substitutes the NACK itself, so the frame the caller asked for never goes out.
-         * Recording nothing here is what makes "no success was queued behind the refusal"
-         * checkable. */
+        /* WHAT THE HOST ACTUALLY GETS. od_reply does not merely fail -- it queues a plaintext
+         * {FF, cmd_low, 00} in place of the frame it could not seal, and every 0x81 NACK is fatal
+         * to the client's upload loop. Recording that shape rather than nothing is what lets a
+         * case assert the difference between "the ack was replaced by a refusal" and "nothing was
+         * sent", which are very different things to the peer. */
+        uint8_t nack[3];
+        nack[0] = RESP_NACK;
+        nack[1] = (len >= 2u) ? frame[1] : 0x00u;
+        nack[2] = 0x00u;
+        record(nack, sizeof nack, true);
         return OD_TXQ_SEAL_FAILED;
     }
     record(frame, len, false);
@@ -440,7 +447,8 @@ static void test_reply_substitution_aborts(void)
 
     CHECK(data_frame(0u, 100u) == OD_CMD_OK);
     CHECK(data_frame(1u, 100u) == OD_CMD_NACK);
-    CHECK(g_sent_n == 0u);                        /* nothing queued behind the substitution */
+    CHECK(g_sent_n == 1u);                        /* the substituted NACK, and nothing behind it */
+    CHECK(last_is(RESP_NACK, 0x81u));
     CHECK(g_aborts >= 1u);
     CHECK(!opendisplay_pipe_write_active());
 
@@ -454,12 +462,72 @@ static void test_reply_substitution_aborts(void)
     CHECK(data_frame(1u, 100u) == OD_CMD_NACK);
     CHECK(g_refreshes == 0u);                     /* refused on the wire, so nothing is displayed */
     CHECK(g_aborts >= 1u);
+    CHECK(!opendisplay_pipe_write_active());
+}
 
-    CASE("a substituted START ack is reported as refused rather than opening a transfer");
+/* THE STATE, NOT JUST THE VERDICT. A substituted hard NACK ends the upload as far as the host is
+ * concerned, so anything the device keeps afterwards is state nobody will ever drive: a transfer
+ * holding the panel, a reorder queue that will never drain, and -- on START -- an "active"
+ * transfer whose display session was never opened at all, because the setup runs after the ack.
+ * A later DATA frame would stream into a panel nobody started.
+ *
+ * Each case below therefore checks the transfer is DEAD, not merely that the verdict was NACK. */
+static void test_reply_substitution_leaves_no_live_transfer(void)
+{
+    CASE("a substituted START ack leaves no transfer, not an armed one with no display session");
     reset_all(1000u);
     g_reply_fail_on = 1u;
     CHECK(start_ok(1000u, 4u, 2u) == OD_CMD_NACK);
+    CHECK(!opendisplay_pipe_write_active());
+    CHECK(last_is(RESP_NACK, 0x80u));
+    g_reply_fail_on = 0u;
+    /* And the proof that it is really dead: DATA is now a frame for a transfer that is not open,
+     * which is refused and silent -- rather than being consumed into an unopened panel. */
+    g_sent_n = 0u;
+    CHECK(data_frame(0u, 100u) == OD_CMD_NACK);
     CHECK(g_sent_n == 0u);
+    CHECK(g_dw_written == 0u);
+
+    CASE("a substituted GAP SACK stops the transfer rather than holding the queued frame");
+    reset_all(1000u);
+    CHECK(start_ok(1000u, 4u, 2u) == OD_CMD_OK);
+    g_sent_n = 0u;
+    g_reply_calls = 0u;
+    g_reply_fail_on = 1u;                         /* the immediate SACK for the first gap */
+    CHECK(data_frame(1u, 100u) == OD_CMD_NACK);   /* seq 0 missing: queued, then the SACK fails */
+    CHECK(last_is(RESP_NACK, 0x81u));
+    CHECK(g_aborts >= 1u);
+    CHECK(!opendisplay_pipe_write_active());
+    g_reply_fail_on = 0u;
+    /* The queued frame went with it: seq 0 arriving now finds no transfer at all, so it cannot
+     * drain seq 1 into a panel the host has stopped feeding. */
+    CHECK(data_frame(0u, 100u) == OD_CMD_NACK);
+    CHECK(g_dw_written == 0u);
+
+    CASE("a substituted DUPLICATE SACK stops the transfer too");
+    reset_all(1000u);
+    CHECK(start_ok(1000u, 4u, 2u) == OD_CMD_OK);
+    CHECK(data_frame(0u, 100u) == OD_CMD_OK);     /* consumed; expected_seq now 1 */
+    g_sent_n = 0u;
+    g_reply_calls = 0u;
+    g_reply_fail_on = 1u;
+    CHECK(data_frame(0u, 100u) == OD_CMD_NACK);   /* a duplicate, answered with the current SACK */
+    CHECK(g_aborts >= 1u);
+    CHECK(!opendisplay_pipe_write_active());
+
+    CASE("a substituted refresh status is reported as refused, after the refresh has happened");
+    reset_all(200u);
+    CHECK(start_ok(200u, 4u, 4u) == OD_CMD_OK);
+    CHECK(data_frame(0u, 100u) == OD_CMD_OK);
+    g_sent_n = 0u;
+    g_reply_calls = 0u;
+    g_reply_fail_on = 3u;                         /* 1 = tail SACK, 2 = END ack, 3 = 0x73 */
+    CHECK(data_frame(1u, 100u) == OD_CMD_NACK);
+    /* The panel WAS driven -- the END ack succeeded, so the refresh was authorised and ran. Only
+     * the completion report was lost, and the verdict says so rather than claiming acceptance. */
+    CHECK(g_refreshes == 1u);
+    CHECK(last_is(RESP_NACK, 0x73u));
+    CHECK(!opendisplay_pipe_write_active());
 }
 
 int main(void)
@@ -474,6 +542,7 @@ int main(void)
     test_auto_complete();
     test_explicit_end();
     test_reply_substitution_aborts();
+    test_reply_substitution_leaves_no_live_transfer();
 
     printf("pipe_write: %u checks, %u failures\n", g_checks, g_failures);
     return (g_failures == 0u) ? 0 : 1;

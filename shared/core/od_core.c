@@ -1,9 +1,13 @@
-/* od_core.c -- see od_core.h. Three calls, and the ORDER of the first two matters.
+/* od_core.c -- see od_core.h.
  *
- * The producer is cancelled BEFORE the queue is dropped. Reversed, a producer still holding its
- * reservation can commit a chunk into the freshly emptied ring between the two calls, and that
- * chunk belongs to a read the caller has just decided is over -- it would go out to whoever
- * inherits the link, as chunk N of a transfer they never started.
+ * Three calls, written in dependency order: the producer that owns a reservation, then the queue
+ * that reservation is against, then the session those frames would have been sealed with.
+ *
+ * THE ORDER IS NOT LOAD-BEARING, and saying so is worth more than a story about why it is. This
+ * runs on the consumer context with nothing interleaved, and od_txq_reset() invalidates
+ * outstanding tokens by generation anyway, so a producer cancelled second could not have committed
+ * in between. What IS load-bearing is that all three happen -- which is the whole reason this
+ * exists rather than three calls copied into each target's teardown.
  */
 
 #include "od_core.h"

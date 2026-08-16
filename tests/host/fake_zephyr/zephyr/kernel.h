@@ -25,6 +25,11 @@ void k_msleep(int32_t ms);
 extern uint32_t fake_k_uptime_ms;
 uint32_t k_uptime_get_32(void);
 
+/* CMSIS, not the kernel -- but it reaches a target source through this header, so the stand-in
+ * lives here too. Counted rather than performed, obviously. */
+extern unsigned fake_nvic_resets;
+void NVIC_SystemReset(void);
+
 #ifdef __cplusplus
 }
 #endif

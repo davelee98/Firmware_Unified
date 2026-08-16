@@ -5,10 +5,11 @@
  * around its own ring -- so a reset here would race one target and reorder the other. The call
  * sites drain RX themselves, on their own terms.
  *
- * The ORDER of the two it does own is load-bearing and is asserted: the producer is cancelled
- * before the queue is dropped, because a producer still holding its reservation can otherwise
- * commit a chunk into the freshly emptied ring -- a chunk belonging to a read the caller has just
- * ended, delivered to whoever inherits the link as chunk N of a transfer they never started.
+ * WHAT IS NOT ASSERTED HERE, stated so a green run is not over-read: the ORDER of the three calls.
+ * They run straight-line on the consumer context with nothing interleaved, so no test driving the
+ * public API can distinguish one order from another -- swapping the cancel and the reset leaves
+ * every assertion below unchanged, verified by mutation. The order is not load-bearing (od_core.c
+ * says why); what these cases pin is that all three happen, which is.
  */
 
 #include "od_core.h"
@@ -199,12 +200,13 @@ static void test_reset_is_idempotent(void)
     CHECK(!od_session_authenticated(&g_app_session));
 }
 
-/* THE ORDER. The producer must be cancelled before the queue is emptied, or a chunk it was still
- * entitled to commit lands in the fresh ring after the drop. Driving the producer after the reset
- * is what makes that visible: if cancellation had not happened first, this pump would emit. */
+/* A CANCELLED PRODUCER STAYS CANCELLED. Not an ordering check -- see the header comment -- but the
+ * property that matters at the call sites: after a disconnect teardown, pumping the producer again
+ * (which both targets do, every pass) must not resurrect a chunk of a read the departed client
+ * started. Without the cancel, this pump emits chunk N to whoever inherits the link. */
 static void test_no_chunk_survives_the_reset(void)
 {
-    CASE("a cancelled producer cannot commit into the emptied queue");
+    CASE("a cancelled producer emits nothing when the pump runs again");
     setup();
     start_a_stuck_read();
 

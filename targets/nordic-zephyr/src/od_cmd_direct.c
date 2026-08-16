@@ -115,7 +115,13 @@ od_cmd_result_t od_cmd_app_direct_end(const od_cmd_ctx_t *ctx, od_span_t body)
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return OD_CMD_NACK;
   }
-  (void)od_cmd_reply(ctx, refresh_ok ? ack_refresh_ok : ack_refresh_timeout,
-                     refresh_ok ? sizeof(ack_refresh_ok) : sizeof(ack_refresh_timeout));
+  /* Same rule as the END ack above: if od_reply had to substitute a hard NACK for this last
+   * frame, that NACK is the only thing the host received for this command, and reporting
+   * acceptance would report the opposite of what went out. The transfer is over either way. */
+  if (od_cmd_reply(ctx, refresh_ok ? ack_refresh_ok : ack_refresh_timeout,
+                   refresh_ok ? sizeof(ack_refresh_ok) : sizeof(ack_refresh_timeout))
+      != OD_TXQ_OK) {
+    return OD_CMD_NACK;
+  }
   return OD_CMD_OK;
 }

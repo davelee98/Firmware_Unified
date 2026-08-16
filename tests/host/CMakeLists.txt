@@ -309,6 +309,20 @@ target_include_directories(od_nordic_session_app_test PRIVATE
 target_link_libraries(od_nordic_session_app_test od_session_fake)
 add_test(NAME nordic_session_app COMMAND od_nordic_session_app_test)
 
+# nordic_cmd_device: what this target's device commands ANSWER, which dispatch_route_test cannot
+# see -- that suite replaces every hook with a recorder, so it proves routing and nothing about
+# behaviour. Two answers here were decided deliberately and had no other coverage: 0x52's
+# unsupported NACK (a C11 wire change) and 0x53's deliberate silence. 0x43 is included because
+# ESP32 answered nothing to it from C8 to C11.2 and no suite noticed.
+add_executable(od_nordic_cmd_device_test
+    nordic_cmd_device_test.c
+    ../../targets/nordic-zephyr/src/od_cmd_device.c)
+target_include_directories(od_nordic_cmd_device_test PRIVATE
+    ../../targets/nordic-zephyr/src
+    ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr)
+target_link_libraries(od_nordic_cmd_device_test od_shared)
+add_test(NAME nordic_cmd_device COMMAND od_nordic_cmd_device_test)
+
 # Nordic config pin bytes are a wire contract and deliberately differ by
 # platform: nRF52840 uses absolute port*32+pin values, while nRF54 uses the
 # compact packed form. Keep the pure decoder checked without a Zephyr build.
