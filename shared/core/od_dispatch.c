@@ -15,8 +15,8 @@
  * be shared with anything that runs inside one. */
 static uint8_t s_plain[OD_SESSION_PLAIN_MAX];
 
-/* Dispatcher ceilings, per origin. BLE's is well below the 256-byte transport admission so the
- * 245..256 band is a dispatcher NACK rather than a silent transport drop -- a host can discover
+/* Dispatcher ceilings, per origin. BLE's is below the 253-byte value admission so the
+ * 245..253 band is a dispatcher NACK rather than a silent transport drop -- a host can discover
  * the first and cannot discover the second. */
 #define OD_DISPATCH_MAX_BLE  244u
 #define OD_DISPATCH_MAX_LAN  4094u
@@ -83,7 +83,7 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
     /* ---- structural ---- */
     if (frame.n > origin_ceiling(rp->origin)) {
         /* Refused by the DISPATCHER, deliberately, rather than dropped by the transport: the band
-         * between this and the 256-byte admission is where a host learns its frame was too big. */
+         * between this and the 253-byte value admission tells a host its frame was too big. */
         refuse(rp, cmd, RESP_NACK);
         return OD_FRAME_REJECTED_FRAME;
     }

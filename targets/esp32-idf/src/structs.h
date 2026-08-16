@@ -78,8 +78,8 @@ OD_STATIC_ASSERT(OD_TXQ_SLOTS >= (PIPE_MAX_W + 2u),
 // LOCAL link policy: the ATT MTU this device asks the stack to negotiate on the
 // BLE transport. "Preferred" is literal -- the central drives the exchange and may
 // settle lower, so nothing may assume this value was granted. Deliberately
-// distinct from OD_BLE_MAX_FRAME: that is the cross-repo WIRE ceiling used to size
-// buffers and the GATT value, whereas this is one device's request on one physical
+// distinct from OD_BLE_MAX_FRAME: that is the cross-repo whole-ATT-MTU ceiling used to size
+// storage buffers, whereas this is one device's request on one physical
 // link. They are equal today; the asserts below state the coupling that actually
 // matters instead of leaving it to a shared symbol.
 //
@@ -99,7 +99,7 @@ static_assert(OD_BLE_PREFERRED_ATT_MTU - 3u >= PIPE_REORDER_SLOT_SIZE,
 static_assert(OD_BLE_PREFERRED_ATT_MTU - 3u <= OD_BLE_MAX_FRAME,
               "a single-PDU write could overrun an OD_BLE_MAX_FRAME-sized slot");
 
-// The BLE RX command ring (od_rxq_item_t and its sizes) lives in command_queue.h; egress is
+// The BLE RX command ring (od_rxq_item_t and its sizes) lives in shared/core/od_rxq.h; egress is
 // shared/core/od_txq.c. Neither is a config-packet or wire-protocol definition, so neither belongs
 // in this hub.
 

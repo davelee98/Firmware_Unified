@@ -12,7 +12,7 @@
 
 #include <string.h>
 
-/* OD_BLE_MAX_FRAME -- the declared GATT value length, enforced in od_gatt_access(). */
+/* OD_BLE_MAX_FRAME -- the complete ATT MTU; writes carry three fewer value bytes. */
 #include "opendisplay_protocol.h"
 
 /* The shared advertising HAL this file implements at the bottom, and OD_ADV_MSD_LEN. Both are
@@ -240,13 +240,10 @@ static int od_gatt_access(uint16_t conn_handle, uint16_t attr_handle,
          * and note the reason its comment gave for not converting to String: pipe-write
          * frames begin with 0x00, so any C-string conversion truncates to length 0. Same trap
          * here: this payload is binary, never a string. */
-        /* Enforce the declared value length at the GATT layer, returning ATT 0x0D
-         * (Invalid Attribute Value Length). The Arduino characteristic declared max_len =
-         * OD_BLE_MAX_FRAME for exactly this reason -- "makes the GATT layer reject an
-         * oversize write with ATT 0x0D instead of letting it reach onWrite() and be dropped
-         * silently". ble_gatt_chr_def has no max_len field, so the check has to be here;
-         * without it the port answered "success" to writes it then discarded. */
-        if (OS_MBUF_PKTLEN(ctxt->om) > OD_BLE_MAX_FRAME) {
+        /* Enforce the ATT VALUE ceiling at the GATT layer, returning ATT 0x0D. The 256-byte
+         * OD_BLE_MAX_FRAME includes opcode(1) + handle(2), so it admits 253 value bytes. A storage
+         * buffer sized to the whole MTU is not permission to accept a 256-byte value. */
+        if (OS_MBUF_PKTLEN(ctxt->om) > (OD_BLE_MAX_FRAME - 3u)) {
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         }
         /* File-static rather than a stack array: this runs on the NimBLE host task, whose

@@ -860,24 +860,12 @@ static void serviceBleRx() {
     uint8_t drained = 0;
     uint16_t staleDropped = 0;
     while (drained < OD_RXQ_SLOTS) {
+        staleDropped = (uint16_t)(staleDropped + od_rxq_discard_stale(linkOwnerWord()));
         od_rxq_item_t* item = od_rxq_peek();
         if (item == nullptr) break;
-        // CONNECTION_POLICY R3 requirement 6, and the whole of it: a frame executes
-        // only if its writer is STILL the owner. The write callback already refused
-        // non-owners, so this catches the other half -- a frame that was legitimate
-        // on arrival but whose session ended before loop() drained it. That is
-        // reachable whenever loop() was blocked in a ~16 s refresh: the owner
-        // disconnects, a new client connects (possibly on the same reused handle),
-        // and the old frames are still sitting here.
-        //
-        // This replaced the RX-boundary flush, which could not survive the table
-        // entry being overwritten by handle reuse before the loop scanned. One
-        // compare per frame, and no boundary to lose.
-        if (!linkIsOwnerWord(item->tag)) {
-            od_rxq_consume();
-            staleDropped++;
-            continue;
-        }
+        // CONNECTION_POLICY R3 requirement 6: od_rxq_discard_stale() leaves only a frame whose
+        // writer is STILL the owner. The write callback already refused non-owner writes; this
+        // catches a formerly legitimate frame left queued across disconnect and handle reuse.
         // Publish the frame's identity for the dispatcher's activity-clock test.
         g_commandInstance = item->tag;
         // imageDataWritten (misleading name) actually services any BLE command.

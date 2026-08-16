@@ -32,7 +32,7 @@ predicate diverges on the wire. `od_core_reset()` needed a threading contract.
 | § 5: "both the stamp and the abuse counter are gated on `origin == BLE`" | **Only the counter is.** `communication.cpp:998` has no origin check: `!s_frameRejected && commandName(...) && linkIsOwnerWord(...)`. The BLE gate lives inside `noteAuthRejected()` (`:136`). As written, rev 4 would stop refreshing a LAN client's idle clock and disconnect active LAN sessions. |
 | D-C bounds the buffers | …but never the **TX entry width** — and the fix is not a wider slot. The definitive `Firmware` implementation shows that sealing adds 29 bytes to its input plain frame (`../Firmware/src/encryption.cpp:810-840`). BLE's whole frame is 256 and its usable value is **253**, so the plain-frame cap is **224**. `Firmware`'s `payload_len > 255` check only prevents the one-byte length from wrapping; no producer can emit that much and it is not a supported frame ceiling. Nordic's NFC read produces a 244-byte plain frame → 273 sealed, which no 256-byte BLE frame can carry; it works only under `CONFIG_BT_L2CAP_TX_MTU=512` (`prj.conf:58`). See § 2. |
 | `0x71` worst case is 3 | **2.** `handleDirectWriteData` emits *either* a data ACK *or* calls END, never both (`display_service.cpp:2242-2247`). `0x81` genuinely is 3 — `sendPipeAck()` **and** `directWriteFinishAndRefresh()` both run (`:2793-2797`). |
-| Nordic RX admission "509, or narrow to 256" | Undecided is not a specification. Settled in § 2. |
+| Nordic RX value admission "509, or narrow with ATT MTU 256" | Undecided is not a specification. Settled in § 2. |
 | "gate → reserve → decrypt" | Ambiguous: any gate that can emit `FE`/`FF` needs a slot, so it must run *after* reservation. Ordering restated in § 3.3. |
 | Sealed LAN-plain listed as a conforming case | It is a **robustness** case: with security enabled the device serves TLS, not plaintext LAN. Relabelled in § 8. |
 | "Reset rejected from a non-consumer context" test | Not testable through a `void` API — the portable core cannot identify the caller's thread. Replaced in § 8. |
@@ -73,16 +73,17 @@ Matrix § 1.7 records the Nordic queue as 8 × 514 B — pre-import. Correct it.
 
 | Origin | Dispatcher gate | Transport admission | RX slot |
 |---|---|---|---|
-| BLE, both targets | **244**, `{0xFF,cmd,0xFE}` | **256** | **256** |
+| BLE, both targets | **244**, `{0xFF,cmd,0xFE}` | **ATT MTU 256 / value 253** | **256** |
 | LAN plain / TLS | **4094**, transport-checked | 4094 | n/a — direct dispatch |
 
-**Decision: Nordic narrows BLE admission from 509 to 256**, matching ESP32, and rejects 257+ at the
+**Decision: Nordic narrows BLE value admission from 509 to 253 (ATT MTU 256)**, matching ESP32, and rejects 254+ at the
 ATT layer as ESP32 does (`od_ble_nimble.cpp:249` → ATT 0x0D) rather than dropping silently at the
 queue (`opendisplay_pipe.c:1447`). Removes a wire divergence a host cannot discover, keeps the
-245–256 dispatcher NACK reachable on both, and reclaims ~12 KB of Nordic RX ring.
+245–253 dispatcher NACK reachable on both, and reclaims ~12 KB of Nordic RX ring. RX storage remains
+256 bytes wide; storage width is not value admission.
 
 **RX queue depth:** `PIPE_MAX_W + 2` slots on both, so usable capacity (`SLOTS − 1`) covers a full
-window plus END. Assert it, as `command_queue.h:71-73` already does.
+window plus END. Assert it at each target integration, as `od_rxq.h` requires.
 
 **TX entry width: `OD_TX_FRAME_MAX` = `OD_BLE_MAX_FRAME` = 256, and everything must fit inside it.**
 256 is the whole BLE frame — opcode(1) + handle(2) + value — so the **usable value is 253**
@@ -117,7 +118,7 @@ write but no NFC-read API, so there is no host read-size assumption to preserve.
 documented Nordic behaviour change and a hardware acceptance item because it has not run on a
 board.
 
-PIPE stays forbidden on LAN. **ESP32 behaviour change:** 245–256-byte BLE frames now NACK;
+PIPE stays forbidden on LAN. **ESP32 behaviour change:** 245–253-byte BLE values now NACK;
 `dispatch.json:123`'s note is corrected in the same commit.
 
 ---
@@ -326,7 +327,7 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame);
 bool od_rxq_push(const uint8_t *frame, uint16_t len, uint32_t tag);   /* BLE producer ctx */
 void od_core_process(void);                                           /* loop ctx */
 
-/* CONSUMER CONTEXT ONLY. Never with a peek outstanding (command_queue.h:120-137).
+/* CONSUMER CONTEXT ONLY. Never with a peek outstanding (od_rxq.h reset contract).
    Nordic's disconnect runs on the BT thread and keeps deferring via s_close_pending
    (opendisplay_pipe.c:1466-1471) rather than calling this directly. */
 void od_core_reset(void);
@@ -417,7 +418,7 @@ no vtable (decision 2).
 
 | # | Decision |
 |---|---|
-| D-A | Origin-specific gates; **Nordic BLE admission narrows to 256** with an ATT-layer reject (§ 2). Correct `dispatch.json:123`. |
+| D-A | Origin-specific gates; **Nordic BLE value admission narrows to 253 under ATT MTU 256** with an ATT-layer reject (§ 2). Correct `dispatch.json:123`. |
 | D-B | TX ring with `{origin,tag}`, typed results incl. `ERROR` semantics, token-owned capacity reservation, § 3.5 barrier. |
 | D-C | Shared **decrypt** scratch is sized to `OD_SESSION_PLAIN_MAX` = **223**, the largest supported CCM plaintext `[len:1][payload:222]`. `od_session_open()` accepts at most a 251-byte envelope after the two command bytes and returns at most 222 payload bytes after validating/removing the length prefix. `Firmware`'s 512-byte scratch and 255-byte representational check are defensive implementation details, not producer limits. LAN-plain *unsealed* frames reach 4094 but dispatch in place and never transit this scratch, so it does not need 4 KB — which BG22 could not pay. |
 | D-C2 | `OD_TX_FRAME_MAX` = `OD_BLE_MAX_FRAME` = **256** (usable value 253). Dispatch and `od_session` accept a complete plain response frame of at most **224**, carrying at most **222 payload bytes**, and seal it into at most **253** bytes (§ 2). The shared encrypt scratch is 253. Preserve the already-landed Nordic 218-byte NFC read-data cap. |
@@ -443,7 +444,7 @@ commit is accepted. C12 adds the cross-corpus runner, not the first C-side cover
 | Commit | Content |
 |---|---|
 | **C8** | Shared foundation plus an **ESP32 vertical adoption**: `od_session_app` seam; `od_hal_radio`; TX ring and reservation tokens; explicit plain/protected replies; exhaustive authenticate/open/seal mapping; typed outcomes; § 3.5 barrier; resumable `CONFIG_READ`; and `od_dispatch.c`. The existing ESP RX pump calls shared dispatch and `od_txq_process()`. Nordic remains on its landed dispatcher/inline notify in this commit, so no half-migrated reservation has to hide in a current-origin global. |
-| **C9** | Shared BLE RX ring on both targets; delete ESP32 `command_queue.cpp`; narrow Nordic admission and MTU/buffers to 256. Nordic's existing main-thread pump calls its existing dispatcher from the new ring for this one commit; LAN remains direct. |
+| **C9** | Shared BLE RX ring on both targets; delete ESP32 `command_queue.cpp`; narrow Nordic to ATT MTU 256 / value admission 253 and matching ACL buffers. Nordic's existing main-thread pump calls its existing dispatcher from the new ring for this one commit; LAN remains direct. |
 | **C10** | **Nordic vertical adoption** of the C8 egress, resumable config producer, session seam and shared dispatcher; compose RX, TX and producer work in `od_core_process()`. Retire Nordic's blanket inline retry only here. Preserve log-before-silence and the control-frame activity policy. |
 | **C11** | Remove dead dispatch/egress helpers from `communication.cpp`; finish shrinking `opendisplay_pipe.c`; shrink both target session adapters to the § 3.7 seam. **Also fix the three landed crypto-HAL defects below**, which live in exactly the code this commit rewrites. Update matrix § 1.5b / § 1.7, `SHARED_API_DESIGN.md:680`, `CLAUDE.md`, and `docs/OD_SESSION.md` verification status. |
 | **C12** | C corpus runner + hardware passes. |
@@ -488,7 +489,7 @@ Landing with the commit that introduces the code, not at C12.
 
 - **Gate matrix** — {security off/on} × {no session, live} × {AUTHENTICATE, FIRMWARE_VERSION, short
   plaintext, sealed, corrupt sealed} × {BLE, LAN plain, LAN TLS} → handler call, reply bytes,
-  outcome. Plus BLE 245 → NACK; BLE 257 → ATT reject; LAN DIRECT_WRITE at 4092 data bytes →
+  outcome. Plus BLE value 245 → NACK; BLE value 254 → ATT reject; LAN DIRECT_WRITE at 4092 data bytes →
   accepted.
 - **Session-result matrix** — one case for every `od_session_authenticate`, `od_session_open`, and
   `od_session_seal` enum member, checking wire bytes, outcome/status, session clear/retain, counter
@@ -573,7 +574,7 @@ idle-plus-accepted-traffic cycle (§ 5).
   safely retryable. PIPE loss may be silent, but other commands would still be lost.
 - **§ 3.7 is a security-policy seam** — `od_session_report.nonce_reason`, log-before-silence, and
   the no-plaintext-on-seal-failure rule need mutation-style tests, not only happy-path vectors.
-- **D-A** changes ESP32 behaviour for 245–256-byte BLE frames and narrows Nordic admission.
+- **D-A** changes ESP32 behaviour for 245–253-byte BLE values and narrows Nordic admission.
 - **D-I changes ESP32 NACK confidentiality** to the matrix's plaintext rule. Pin host behavior for
   every NACK shape before swapping the target.
 - **`od_cmd.h` becoming permanent** — mitigated by the shrink schedule and doing `od_xfer_direct` next.

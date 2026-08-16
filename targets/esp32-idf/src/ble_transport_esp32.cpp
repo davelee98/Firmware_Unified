@@ -319,7 +319,7 @@ bool BleTransport::begin(const char* deviceName) {
     od_ble_set_preferred_mtu(OD_BLE_PREFERRED_ATT_MTU);
     // Brings up the controller, host and GATT server, and starts the host task.
     // The GATT layout (service and characteristic both 0x2446, READ | NOTIFY |
-    // WRITE | WRITE_NR, auto CCCD, declared value length OD_BLE_MAX_FRAME) is
+    // WRITE | WRITE_NR, auto CCCD, maximum value OD_BLE_MAX_FRAME - 3) is
     // built in ble/od_ble_nimble.cpp and is a wire contract -- see od_ble.h.
     if (!od_ble_init(deviceName)) {
         od_log_error("ERROR: Failed to initialise the BLE stack");

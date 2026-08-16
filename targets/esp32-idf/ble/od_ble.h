@@ -228,8 +228,8 @@ void od_ble_evt_subscribe(uint16_t conn_handle, bool enabled);
  *
  * The payload is BINARY, never a string. Pipe-write frames START with 0x00 (00 70 / 00 71 /
  * 00 81), so any C-string conversion reports length 0 and silently drops every transfer
- * frame. `len` is already bounded by OD_BLE_MAX_FRAME: the GATT layer rejects anything larger
- * with ATT 0x0D (Invalid Attribute Value Length) before this is called. */
+ * frame. `len` is already bounded by OD_BLE_MAX_FRAME - 3 (253 value bytes): the GATT layer
+ * rejects anything larger with ATT 0x0D before this is called. */
 void od_ble_evt_write(uint16_t conn_handle, const uint8_t *data, uint16_t len);
 
 /* Negotiation completed for `conn_handle`. `trigger` is a short literal naming what completed

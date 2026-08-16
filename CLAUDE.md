@@ -74,10 +74,11 @@ looks arbitrary and is not); delete the story.
 - **`od_rxq` is the inbound ring on BOTH targets** (C9, 2026-08-15), replacing ESP32's
   `command_queue.cpp` and Nordic's 40 × 509 B `k_msgq`. SPSC, peek/consume rather than a copying
   pop, and every slot carries its writer's identity so stale frames self-discard at dispatch.
-  **Nordic's BLE admission narrowed from 509 to 256** and now refuses over-length writes at ATT
+  **Nordic's BLE value admission narrowed from 509 to 253 (ATT MTU 256)** and now refuses over-length writes at ATT
   with 0x0D as ESP32 does, rather than dropping them silently at the queue — which also keeps the
-  245..256 dispatcher NACK reachable on both. Measured on `xiao_nrf54l15`: RAM 176712 → 154819 B
-  (**21.9 KB reclaimed**, more than the plan's ~12 KB estimate because narrowing the MTU shrinks
+  245..253 dispatcher NACK reachable on both. RX storage stays 256 bytes wide. Measured on
+  `xiao_nrf54l15`: RAM 176712 → 154700 B
+  (**22.0 KB reclaimed**, more than the plan's ~12 KB estimate because narrowing the MTU shrinks
   the ACL buffers too). Both queue depths are now derived from the target's own `PIPE_MAX_W + 2`
   and asserted where both constants are visible. NOT hardware-verified on either target.
   **`od_session` is CALLED ON BOTH `esp32-idf` AND `nordic-zephyr`, AND HARDWARE-VERIFIED ON

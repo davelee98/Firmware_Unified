@@ -34,7 +34,7 @@ extern "C" void od_rxq_app_report(od_rxq_event_t ev, const uint8_t *frame, uint1
         return;
     case OD_RXQ_DROP_TOO_LARGE:
         od_log_warn("WARNING: Command too large for queue (%u > %u), dropping",
-                    (unsigned)len, (unsigned)OD_RXQ_FRAME_MAX);
+                    (unsigned)len, (unsigned)OD_RXQ_VALUE_MAX_BLE);
         return;
     case OD_RXQ_DROP_FULL:
         od_log_error("ERROR: Command queue full, dropping command (%u slots)",

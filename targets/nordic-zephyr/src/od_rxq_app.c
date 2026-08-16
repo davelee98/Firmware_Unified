@@ -22,7 +22,7 @@ void od_rxq_app_report(od_rxq_event_t ev, const uint8_t *frame, uint16_t len, ui
     /* Unreachable from the GATT layer, which now refuses over-length writes with ATT 0x0D so the
      * host learns of them. Kept because this seam is also the contract for any future producer. */
     od_log_info("rx dropped: %u B exceeds the %u B admission", (unsigned)len,
-                (unsigned)OD_RXQ_FRAME_MAX);
+                (unsigned)OD_RXQ_VALUE_MAX_BLE);
     return;
   case OD_RXQ_DROP_FULL:
     od_log_info("rx dropped: ring full at %u slots", (unsigned)OD_RXQ_SLOTS);

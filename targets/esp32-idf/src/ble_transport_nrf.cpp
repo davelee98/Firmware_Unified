@@ -29,7 +29,7 @@ static BLEService s_imageService("2446");
 // (vloc = BLE_GATTS_VLOC_STACK), so 512 cost 512 B of attribute table while the
 // link caps at ATT MTU 247 (payload 244) -- half of it was unreachable.
 static BLECharacteristic s_imageCharacteristic(
-    "2446", BLEWrite | BLEWriteWithoutResponse | BLENotify, OD_BLE_MAX_FRAME);
+    "2446", BLEWrite | BLEWriteWithoutResponse | BLENotify, OD_BLE_MAX_FRAME - 3u);
 
 static bool     s_begun = false;
 static uint16_t s_connHandle = BLE_CONN_HANDLE_INVALID;

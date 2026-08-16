@@ -37,10 +37,15 @@
 extern "C" {
 #endif
 
-/* SLOT WIDTH IS THE TRANSPORT ADMISSION BOUND, not the dispatcher's. 256 is the whole BLE frame;
- * the dispatcher refuses above 244 with a NACK a host can actually see, and the 245..256 band
- * exists so that refusal is reachable rather than being a silent transport drop. */
-#define OD_RXQ_FRAME_MAX OD_BLE_MAX_FRAME
+/* Keep storage width and wire admission separate, exactly as od_txq does. OD_BLE_MAX_FRAME is the
+ * complete ATT MTU -- opcode(1) + handle(2) + value -- so a write carries at most 253 value bytes.
+ * The slot stays 256 bytes wide; that storage headroom is not permission to admit a 256-byte
+ * value. The dispatcher refuses above 244, leaving 245..253 as the observable protocol-NACK band. */
+#define OD_RXQ_FRAME_MAX      OD_BLE_MAX_FRAME
+#define OD_RXQ_VALUE_MAX_BLE (OD_BLE_MAX_FRAME - 3u)
+
+OD_STATIC_ASSERT(OD_RXQ_VALUE_MAX_BLE <= OD_RXQ_FRAME_MAX,
+                 "BLE value admission must fit the RX storage slot");
 
 /* Depth. The target sets this from its own PIPE window -- PIPE_MAX_W + 2, so usable capacity
  * (SLOTS - 1) covers a full window plus its END -- and asserts the relationship where both are
@@ -67,7 +72,7 @@ typedef struct {
 typedef enum {
     OD_RXQ_ARRIVED = 0,     /* queued; `depth` is the pre-push occupancy */
     OD_RXQ_DROP_EMPTY,      /* len == 0 or a NULL pointer */
-    OD_RXQ_DROP_TOO_LARGE,  /* len > OD_RXQ_FRAME_MAX -- above transport admission */
+    OD_RXQ_DROP_TOO_LARGE,  /* len > OD_RXQ_VALUE_MAX_BLE -- above transport admission */
     OD_RXQ_DROP_FULL        /* the ring is full; the OLDEST frames are kept, this one is refused */
 } od_rxq_event_t;
 
@@ -82,6 +87,10 @@ bool od_rxq_push(const uint8_t *data, uint16_t len, uint32_t tag);
 /* Consumer side, loop/main thread only. */
 od_rxq_item_t *od_rxq_peek(void);     /* NULL = empty; the slot stays valid until consume */
 void           od_rxq_consume(void);  /* advance past the peeked slot */
+/* Consume consecutive head frames whose writer is not `live_tag`, stopping before the first live
+ * frame. Returns the number discarded. Keeping this comparison in the shared consumer policy makes
+ * stale-owner rejection testable once instead of relying on two target-local open-coded loops. */
+uint8_t        od_rxq_discard_stale(uint32_t live_tag);
 uint8_t        od_rxq_head(void);     /* producer-side index, for an activity poll */
 uint8_t        od_rxq_depth(void);    /* unconsumed frames */
 bool           od_rxq_pending(void);

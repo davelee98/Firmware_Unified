@@ -28,7 +28,7 @@ bool od_rxq_push(const uint8_t *data, uint16_t len, uint32_t tag)
         od_rxq_app_report(OD_RXQ_DROP_EMPTY, data, len, 0u);
         return false;
     }
-    if (len > OD_RXQ_FRAME_MAX) {
+    if (len > OD_RXQ_VALUE_MAX_BLE) {
         od_rxq_app_report(OD_RXQ_DROP_TOO_LARGE, data, len, 0u);
         return false;
     }
@@ -77,6 +77,18 @@ void od_rxq_consume(void)
         return;                       /* nothing peeked; advancing would hand out a live slot */
     }
     __atomic_store_n(&s_tail, (uint8_t)((tail + 1u) % OD_RXQ_SLOTS), __ATOMIC_RELEASE);
+}
+
+uint8_t od_rxq_discard_stale(uint32_t live_tag)
+{
+    uint8_t dropped = 0u;
+    od_rxq_item_t *item;
+
+    while ((item = od_rxq_peek()) != NULL && item->tag != live_tag) {
+        od_rxq_consume();
+        ++dropped;
+    }
+    return dropped;
 }
 
 uint8_t od_rxq_head(void)

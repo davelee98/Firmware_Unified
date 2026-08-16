@@ -495,12 +495,13 @@ static ssize_t od_gatt_write(struct bt_conn *conn, const struct bt_gatt_attr *at
 	if (len == 0) {
 		return 0;
 	}
-	/* ADMISSION AT THE ATT LAYER, matching ESP32. Over-length writes are refused with ATT 0x0D
+	/* ADMISSION AT THE ATT LAYER, matching ESP32. Over-length values are refused with ATT 0x0D
 	 * (Invalid Attribute Value Length) rather than accepted and dropped at the queue: a host can
-	 * discover the first and cannot discover the second. This also keeps the 245..256 band
+	 * discover the first and cannot discover the second. ATT MTU 256 leaves 253 value bytes after
+	 * opcode(1) + handle(2), keeping the 245..253 band
 	 * reachable, where the DISPATCHER answers {0xFF,cmd,0xFE} -- so a client learns whether its
 	 * frame was too big for the transport or too big for the protocol. */
-	if (len > OD_RXQ_FRAME_MAX) {
+	if (len > OD_RXQ_VALUE_MAX_BLE) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
 	opendisplay_pipe_on_write(buf, len, (flags & BT_GATT_WRITE_FLAG_CMD) != 0);

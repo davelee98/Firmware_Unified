@@ -1124,16 +1124,14 @@ void opendisplay_pipe_process(void)
     opendisplay_display_abort();
   }
   for (;;) {
+    (void)od_rxq_discard_stale((uint32_t)atomic_get(&s_conn_gen));
     od_rxq_item_t *item = od_rxq_peek();
     if (item == NULL) {
       break;
     }
-    if (item->tag == (uint32_t)atomic_get(&s_conn_gen)) {
-      on_pipe_write(0, item->data, item->len, false);
-    }
-    /* Consumed either way: a stale frame is discarded, not retried. Peek/consume rather than a
-     * copying get, so the dispatcher decrypts in the slot instead of on a 256-byte stack frame in
-     * the middle of the main thread. */
+    on_pipe_write(0, item->data, item->len, false);
+    /* Stale frames were consumed above rather than retried. Peek/consume avoids a copying get, so
+     * the dispatcher decrypts in the slot instead of on a 256-byte stack frame in main. */
     od_rxq_consume();
   }
 }

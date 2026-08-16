@@ -14,6 +14,7 @@ cmake_minimum_required(VERSION 3.16)
 project(od_host_tests C)
 
 enable_testing()
+find_package(Threads REQUIRED)
 
 # -----------------------------------------------------------------------------------
 # The contract: C99, no compiler extensions, warnings are errors.
@@ -119,7 +120,7 @@ target_link_libraries(od_txq_test od_shared)
 add_test(NAME txq COMMAND od_txq_test)
 
 add_executable(od_rxq_test rxq_test.c)
-target_link_libraries(od_rxq_test od_shared)
+target_link_libraries(od_rxq_test od_shared Threads::Threads)
 add_test(NAME rxq COMMAND od_rxq_test)
 
 # reply: the seal-or-plain decision, against a fake radio AND a fake od_session_app seam.
