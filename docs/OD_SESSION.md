@@ -138,14 +138,16 @@ the py-opendisplay wire corpus, the shim ratchet, all 10 ESP32 fragments with th
 baseline, and all 3 Nordic boards. A skip is counted, reprinted, and exits 2.
 **13 passed, 0 failed, 0 skipped at C11 (2026-08-16).**
 
-**`od_session_test` alone: 11,831 checks; the whole host suite, 23 binaries, 37,974.** Its
+**`od_session_test` alone: 11,831 checks; the whole host suite, 24 binaries, 38,062.** Its
 credibility rests on mutation testing rather than on passing —
 ~40 deliberate defects were injected and the suite's ability to catch each was measured. Six
 survivors were found and closed; the surviving-mutation list is in
-`OD_SESSION_LANDED_REVIEW_2026-08-15.md`. C11 added six more mutations, one per fix, and all six
-were caught: restoring the slot latch, making the ESP RNG always report OK, deleting the seal
-activity stamp, routing an opcode to its neighbour's hook, turning a Nordic PIPE NACK path into an
-OK, and making DEFERRED consume RX.
+`OD_SESSION_LANDED_REVIEW_2026-08-15.md`. C11 added ten more, all caught: restoring the slot
+latch, making the ESP RNG always report OK, deleting the seal activity stamp, routing an opcode to
+its neighbour's hook, turning a Nordic PIPE NACK path into an OK, making DEFERRED consume RX, and —
+after the C11 review — dropping the abort from a substituted START ack, dropping it from a
+substituted SACK, returning unconditional OK from the refresh-status reply, and reverting Nordic's
+`0x52` to silence.
 
 **One mutation survives permanently:** `od_ct_equal` → `memcmp`. No host test can measure
 constant-time behaviour, so it is enforced structurally — `check.sh` fails if `memcmp` appears in
