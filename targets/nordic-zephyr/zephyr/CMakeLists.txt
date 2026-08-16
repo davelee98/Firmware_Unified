@@ -232,6 +232,9 @@ target_sources(app PRIVATE
   ${SRC_DIR}/opendisplay_buzzer.c
   ${SRC_DIR}/opendisplay_pipe.c
   ${SRC_DIR}/od_rxq_app.c
+  ${SRC_DIR}/od_session_app.c
+  ${SRC_DIR}/od_hal_radio.c
+  ${SRC_DIR}/od_cmd_reply.c
   ${SRC_DIR}/opendisplay_pipe_write.cpp
   ${SRC_DIR}/opendisplay_cs.c
   ${SRC_DIR}/opendisplay_nfc.c
@@ -254,8 +257,12 @@ target_sources(app PRIVATE
 # it. Add each tier when its HAL lands, not before.
 # APP_RXQ joins at C9: the inbound ring is shared, and this target implements its one seam in
 # src/od_rxq_app.c. It needs no HAL -- only od_rxq_app_report().
+# C10 adds HAL_RADIO and APP_SESSION: this target now implements od_hal_radio (src/od_hal_radio.c)
+# and the od_session_app seam (src/od_session_app.c), so it takes the shared egress, gate,
+# dispatcher and config-read producer rather than its own copies.
 target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE} ${OD_SHARED_SOURCES_HAL_CRYPTO}
-                           ${OD_SHARED_SOURCES_HAL_WDT} ${OD_SHARED_SOURCES_APP_RXQ})
+                           ${OD_SHARED_SOURCES_HAL_WDT} ${OD_SHARED_SOURCES_APP_RXQ}
+                           ${OD_SHARED_SOURCES_HAL_RADIO} ${OD_SHARED_SOURCES_APP_SESSION})
 
 # The per-source INCLUDE_DIRECTORIES property that used to sit here is GONE, and its removal is
 # the point of the header adoption: it existed only to pin these two shared TUs to the canonical

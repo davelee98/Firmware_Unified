@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "od_rxq.h"
+#include "opendisplay_pipe_internal.h"
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/kernel.h>
 
@@ -117,6 +118,33 @@ static bool session_alive(void)
 /* The four device-id bytes that feed both the KDF and the auth proof: the low 32 bits of the
  * 64-bit hwinfo id, big-endian. Wire-visible identity -- a different packing is a different
  * device to the host. */
+static void od_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN]);
+static void pipe_send(uint8_t connection, const uint8_t *data, uint16_t len);
+
+/* Bumped on every close. A frame carries the generation that produced it, so both queues can
+ * discard work belonging to a connection that has gone. */
+static atomic_t s_conn_gen;
+
+struct od_session *od_pipe_session(void)
+{
+  return &s_session;
+}
+
+uint32_t od_pipe_conn_gen(void)
+{
+  return (uint32_t)atomic_get(&s_conn_gen);
+}
+
+void od_pipe_legacy_send(const uint8_t *data, uint16_t len)
+{
+  pipe_send(0, data, len);
+}
+
+void od_pipe_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN])
+{
+  od_device_id(out);
+}
+
 static void od_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN])
 {
   uint8_t id[8];
@@ -189,7 +217,6 @@ static od_nfc_write_chunk_t s_nfc_write_chunk;
  * for both targets. The 509-byte slots this replaces were sized for an ATT MTU of 512 that nothing
  * used: the dispatcher refuses anything over OD_PIPE_MAX_PAYLOAD (244), so 40 x 513 B held ~20 KB
  * to buffer frames it would then reject. */
-static atomic_t s_conn_gen;
 static atomic_t s_close_pending;
 
 #ifndef OD_ALLOW_PLAINTEXT_WITH_SECURITY
