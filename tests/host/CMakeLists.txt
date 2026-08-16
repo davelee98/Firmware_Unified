@@ -354,8 +354,25 @@ if(Python3_FOUND)
     add_test(NAME vectors_schema
              COMMAND ${Python3_EXECUTABLE} ${OD_VEC_TOOL} --check ${OD_VEC_DIR})
 
+    # ONE runner source, TWO executables. od_cmd_app_* is static link-time composition, so two
+    # profiles cannot share a binary -- and the answer to that is emphatically not a runtime
+    # registry. Each executable resolves the seam once.
+    #
+    # Only the runner sees the generated table. A profile gets corpus_runner.h, which exposes
+    # semantic knobs and no expected bytes: a fake that could read expect.reply would make the
+    # corpus its own oracle, and every vector would pass while proving nothing.
+    add_executable(od_dispatch_corpus_portable_test
+        corpus_runner.c
+        corpus_profile_portable.c
+        ${OD_VEC_INC})
+    target_include_directories(od_dispatch_corpus_portable_test
+        PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+    target_link_libraries(od_dispatch_corpus_portable_test od_session_fake)
+    add_dependencies(od_dispatch_corpus_portable_test od_vectors_generated)
+    add_test(NAME dispatch_corpus_portable COMMAND od_dispatch_corpus_portable_test)
 else()
-    message(WARNING "od: Python3 not found -- the vector schema is UNCHECKED in this build.")
+    message(WARNING "od: Python3 not found -- the dispatch corpus runner is NOT built and the "
+                    "corpus reply half is UNCHECKED in this build.")
 endif()
 
 # Nordic config pin bytes are a wire contract and deliberately differ by

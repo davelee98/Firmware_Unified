@@ -69,9 +69,19 @@ static uint16_t origin_ceiling(od_origin_t origin)
     return (origin == OD_ORIGIN_BLE) ? OD_DISPATCH_MAX_BLE : OD_DISPATCH_MAX_LAN;
 }
 
-/* Answer [00][cmd][status] without a reservation of our own. Used only on the paths that refuse a
- * frame before any budget was claimed, where a one-slot reserve is the whole cost. */
-static void refuse(const od_reply_t *rp, uint16_t cmd, uint8_t status)
+/* THE OVERSIZE REFUSAL, and its bytes are the two donors' rather than this dispatcher's invention:
+ * [0xFF][cmd_lo][0xFE]. Firmware_NRF54 (opendisplay_pipe.c:1366) and Firmware_Silabs
+ * (opendisplay_pipe.c:1235) both ship exactly that, and DIVERGENCE 1.3 records it.
+ *
+ * THE SHAPE IS LOAD-BEARING TWICE OVER. A leading 0xFF is the hard-NACK family; a leading 0x00 is
+ * the "status carried as data" ACK family (DIVERGENCE 1.1/1.2). And [00][cmd][FF] is ALREADY
+ * taken -- it is the decrypt-failure answer -- so emitting it here would leave a host unable to
+ * tell "your frame was too big" from "your frame failed to authenticate". Two meanings, one byte
+ * string, on a path a host reaches by sending 245..253 bytes.
+ *
+ * Reserves for itself: this refuses before any budget was claimed, where a one-slot reserve is the
+ * whole cost. */
+static void refuse_oversize(const od_reply_t *rp, uint16_t cmd)
 {
     od_tx_reservation_t r;
     uint8_t frame[3];
@@ -79,9 +89,13 @@ static void refuse(const od_reply_t *rp, uint16_t cmd, uint8_t status)
     if (od_txq_reserve(1u, &r) != OD_TXQ_OK) {
         return;                       /* nothing to say it with; the host times out */
     }
-    frame[0] = RESP_ACK;
+    frame[0] = RESP_NACK;
     frame[1] = (uint8_t)(cmd & 0xFFu);
-    frame[2] = status;
+    /* 0xFE, and deliberately NOT spelled RESP_AUTH_REQUIRED even though the value matches: this is
+     * an error byte inside a hard NACK, not the [00][cmd][FE] auth-required frame. The canonical
+     * header names no constant for "frame too long" and is frozen, so the literal stays with this
+     * note rather than borrowing a name that means something else. */
+    frame[2] = 0xFEu;
     (void)od_reply_plain(&r, rp, frame, sizeof frame);
     od_txq_release(&r);
 }
@@ -157,7 +171,7 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
     if (frame.n > origin_ceiling(rp->origin)) {
         /* Refused by the DISPATCHER, deliberately, rather than dropped by the transport: the band
          * between this and the 253-byte value admission tells a host its frame was too big. */
-        refuse(rp, cmd, RESP_NACK);
+        refuse_oversize(rp, cmd);
         return OD_FRAME_REJECTED_FRAME;
     }
 
