@@ -335,12 +335,19 @@ add_test(NAME nordic_cmd_device COMMAND od_nordic_cmd_device_test)
 # The table is GENERATED into the build directory and never committed: a checked-in copy is the
 # second corpus TEST_OWNERSHIP.md forbids, and it permits a stale green. Regenerating depends on the
 # JSON, so editing a vector rebuilds the table.
-find_package(Python3 COMPONENTS Interpreter QUIET)
+# REQUIRED, not optional. A warning here used to leave the schema gate, both corpus executables and
+# the bench test out of a build that still configured and reported green -- which is the whole
+# C12 firmware-reply and bench coverage vanishing without a failure. That is the "a skip is not a
+# pass" rule of tools/check.sh, applied where it was quietly not.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
 if(Python3_FOUND)
     set(OD_VEC_TOOL ${CMAKE_CURRENT_LIST_DIR}/vectors_tool.py)
     set(OD_VEC_DIR  ${CMAKE_CURRENT_LIST_DIR}/../vectors)
     set(OD_VEC_INC  ${CMAKE_CURRENT_BINARY_DIR}/generated/dispatch_vectors.inc)
-    file(GLOB OD_VEC_JSON ${OD_VEC_DIR}/*.json)
+    # CONFIGURE_DEPENDS: without it a vector file added after configuration is seen by the runtime
+    # schema check but absent from the already-generated table, so the two halves disagree about
+    # what the corpus is.
+    file(GLOB OD_VEC_JSON CONFIGURE_DEPENDS ${OD_VEC_DIR}/*.json)
     add_custom_command(
         OUTPUT ${OD_VEC_INC}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/generated
@@ -351,8 +358,10 @@ if(Python3_FOUND)
 
     # The schema gate, as its own test: a malformed or under-specified vector must fail loudly
     # rather than be silently dropped by whatever consumes it next.
+    # --audit, not --check: the corpus-wide invariants (exact counts, and the paired vectors that
+    # must not drift apart) belong to THE corpus, and only the real one.
     add_test(NAME vectors_schema
-             COMMAND ${Python3_EXECUTABLE} ${OD_VEC_TOOL} --check ${OD_VEC_DIR})
+             COMMAND ${Python3_EXECUTABLE} ${OD_VEC_TOOL} --audit ${OD_VEC_DIR})
 
     # ONE runner source, TWO executables. od_cmd_app_* is static link-time composition, so two
     # profiles cannot share a binary -- and the answer to that is emphatically not a runtime
@@ -361,12 +370,18 @@ if(Python3_FOUND)
     # Only the runner sees the generated table. A profile gets corpus_runner.h, which exposes
     # semantic knobs and no expected bytes: a fake that could read expect.reply would make the
     # corpus its own oracle, and every vector would pass while proving nothing.
+    # THE GENERATED DIRECTORY GOES ON ONE SOURCE, not the target. target_include_directories()
+    # applies to every source in the target, so the profiles and fakes could reach
+    # dispatch_vectors.inc and consult the answers -- the anti-oracle property was documented and
+    # not enforced. A source-level property scopes it to the runner, which is the only translation
+    # unit entitled to see an expectation.
+    set_source_files_properties(corpus_runner.c PROPERTIES
+        INCLUDE_DIRECTORIES ${CMAKE_CURRENT_BINARY_DIR}/generated)
+
     add_executable(od_dispatch_corpus_portable_test
         corpus_runner.c
         corpus_profile_portable.c
         ${OD_VEC_INC})
-    target_include_directories(od_dispatch_corpus_portable_test
-        PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
     target_link_libraries(od_dispatch_corpus_portable_test od_session_fake)
     add_dependencies(od_dispatch_corpus_portable_test od_vectors_generated)
     add_test(NAME dispatch_corpus_portable COMMAND od_dispatch_corpus_portable_test)
@@ -387,7 +402,6 @@ if(Python3_FOUND)
         ../../targets/nordic-zephyr/src/opendisplay_pipe_write.cpp
         ${OD_VEC_INC})
     target_include_directories(od_dispatch_corpus_nordic_test PRIVATE
-        ${CMAKE_CURRENT_BINARY_DIR}/generated
         ${CMAKE_CURRENT_LIST_DIR}/fake_nordic
         ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr
         ../../targets/nordic-zephyr/src)
@@ -401,9 +415,6 @@ if(Python3_FOUND)
     target_link_libraries(od_dispatch_corpus_nordic_test od_session_fake)
     add_dependencies(od_dispatch_corpus_nordic_test od_vectors_generated)
     add_test(NAME dispatch_corpus_nordic COMMAND od_dispatch_corpus_nordic_test)
-else()
-    message(WARNING "od: Python3 not found -- the dispatch corpus runner is NOT built and the "
-                    "corpus reply half is UNCHECKED in this build.")
 endif()
 
 # bench_dispatch_gate: the two `dispatch-gate` helpers against a fake BLE client.
@@ -416,13 +427,16 @@ endif()
 #
 # bleak is stubbed rather than required, so this never degrades to a skip on a machine without the
 # BLE stack.
-if(Python3_FOUND)
-    add_test(NAME bench_dispatch_gate
-             COMMAND ${Python3_EXECUTABLE}
-                     ${CMAKE_CURRENT_LIST_DIR}/bench_dispatch_gate_test.py)
-else()
-    message(WARNING "od: Python3 not found -- the dispatch-gate bench helpers are UNCHECKED.")
-endif()
+add_test(NAME bench_dispatch_gate
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_LIST_DIR}/bench_dispatch_gate_test.py)
+
+# vectors_schema: positive AND negative fixtures. A validator is worth its REJECTIONS, and a suite
+# that only feeds it the real corpus proves it accepts what already exists -- which it must, or the
+# tree would be red. The C12 review found five malformed shapes it accepted; each has a case.
+add_test(NAME vectors_schema_fixtures
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_LIST_DIR}/vectors_schema_test.py)
 
 # Nordic config pin bytes are a wire contract and deliberately differ by
 # platform: nRF52840 uses absolute port*32+pin values, while nRF54 uses the
