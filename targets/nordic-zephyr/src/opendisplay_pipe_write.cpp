@@ -103,14 +103,30 @@ static void pipe_build_ack_payload(uint8_t *out)
   out[4] = (uint8_t)((mask >> 24) & 0xFFu);
 }
 
-static void send_pipe_ack(const od_cmd_ctx_t *ctx)
+/* The teardown half of a fatal PIPE refusal, WITHOUT the NACK: od_reply has already substituted
+ * one for the ack it could not seal, and every 0x81 NACK is fatal (pipe-write-protocol.md 5.1), so
+ * a second would add nothing and cost a slot. Stopping the replies is not enough on its own -- a
+ * transfer owns the panel, and leaving it half-alive keeps the display session open for a transfer
+ * the host has abandoned. */
+static void pipe_abort_no_reply(void)
+{
+  opendisplay_display_abort();
+  opendisplay_pipe_write_reset();
+}
+
+/* RETURNS ITS RESULT, and callers that go on to emit more -- or to touch the panel -- must honour
+ * it. The cadence counters reset either way: they describe what this device decided to send, not
+ * what the transport managed to do with it. */
+static od_txq_status_t send_pipe_ack(const od_cmd_ctx_t *ctx)
 {
   uint8_t r[7] = { RESP_ACK, 0x81u, 0, 0, 0, 0, 0 };
+  od_txq_status_t rc;
 
   pipe_build_ack_payload(r + 2);
-  (void)od_cmd_reply(ctx, r, sizeof(r));
+  rc = od_cmd_reply(ctx, r, sizeof(r));
   s_pipe.frames_since_ack = 0;
   s_pipe.ooo_acks_since_gap = 0;
+  return rc;
 }
 
 static void send_pipe_nack(const od_cmd_ctx_t *ctx, uint8_t err)
@@ -188,7 +204,14 @@ static void finish_and_refresh(const od_cmd_ctx_t *ctx, const uint8_t *payload, 
     return;
   }
 
-  (void)od_cmd_reply(ctx, ack_end, sizeof(ack_end));
+  /* THE ACK GATES THE REFRESH -- see the same rule on the direct-write END path. A hard NACK
+   * substituted for this ack is fatal to the transfer, so neither the refresh status nor the panel
+   * work may follow it. Inert under legacy routing. */
+  if (od_cmd_reply(ctx, ack_end, sizeof(ack_end)) != OD_TXQ_OK) {
+    opendisplay_display_abort();
+    opendisplay_pipe_write_reset();
+    return;
+  }
   k_msleep(20);
   if (opendisplay_display_direct_write_end_refresh(prep, prep_len, &refresh_ok) != 0) {
     (void)od_cmd_reply_plain(ctx, nack, sizeof(nack));
@@ -384,12 +407,18 @@ extern "C" void opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx, const uint8
 
     if (!s_pipe.partial && !s_pipe.compressed
         && opendisplay_display_bytes_written() >= opendisplay_display_total_bytes()) {
-      send_pipe_ack(ctx);
+      if (send_pipe_ack(ctx) != OD_TXQ_OK) {
+        pipe_abort_no_reply();
+        return;
+      }
       finish_and_refresh(ctx, nullptr, 0u, 0x82u);
       return;
     }
-    if (s_pipe.frames_since_ack >= s_pipe.ack_every) {
-      send_pipe_ack(ctx);
+    /* No later reply follows a cadence ACK -- but the TRANSFER does, which is why the result is
+     * not simply discarded: a substituted NACK is fatal, so carrying on would accept DATA for a
+     * transfer the host has already stopped. */
+    if (s_pipe.frames_since_ack >= s_pipe.ack_every && send_pipe_ack(ctx) != OD_TXQ_OK) {
+      pipe_abort_no_reply();
     }
     return;
   }
@@ -415,18 +444,18 @@ extern "C" void opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx, const uint8
     pipe_update_highest_seen(seq);
     if (!s_pipe.gap_open) {
       s_pipe.gap_open = true;
-      send_pipe_ack(ctx);
+      (void)send_pipe_ack(ctx);
     } else if (++s_pipe.ooo_acks_since_gap >= s_pipe.ack_every) {
-      send_pipe_ack(ctx);
+      (void)send_pipe_ack(ctx);
     }
     return;
   }
 
   if (back <= W) {
     if (!s_pipe.gap_open) {
-      send_pipe_ack(ctx);
+      (void)send_pipe_ack(ctx);
     } else if (++s_pipe.ooo_acks_since_gap >= s_pipe.ack_every) {
-      send_pipe_ack(ctx);
+      (void)send_pipe_ack(ctx);
     }
     return;
   }
@@ -451,7 +480,10 @@ extern "C" void opendisplay_pipe_write_end(const od_cmd_ctx_t *ctx, const uint8_
     return;
   }
 
-  send_pipe_ack(ctx);
+  if (send_pipe_ack(ctx) != OD_TXQ_OK) {
+    pipe_abort_no_reply();
+    return;
+  }
 
   incomplete = (s_pipe.queued_count > 0u);
   if (s_pipe.partial) {

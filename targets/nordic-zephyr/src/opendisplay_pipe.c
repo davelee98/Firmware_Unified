@@ -493,8 +493,18 @@ static od_cmd_result_t handle_direct_write_end(const od_cmd_ctx_t *ctx, const ui
     return OD_CMD_NACK;
   }
   /* Ack 0x72 before the blocking refresh, then report 0x73/0x74 afterwards
-   * (same ordering as the nRF52840 Firmware). */
-  (void)od_cmd_reply(ctx, ack_end, sizeof(ack_end));
+   * (same ordering as the nRF52840 Firmware).
+   *
+   * THE ACK DECIDES WHETHER THE REFRESH HAPPENS. od_reply() can substitute a plaintext hard NACK
+   * for an END ack it could not seal, and it reports that rather than lying. Emitting the refresh
+   * status afterwards would queue a success behind a rejection; refreshing at all would put
+   * content on the panel that the host has just been told was refused. Neither the wire nor the
+   * display may claim what the other denies, so both stop. Inert under legacy routing, where the
+   * adapter cannot fail. */
+  if (od_cmd_reply(ctx, ack_end, sizeof(ack_end)) != OD_TXQ_OK) {
+    opendisplay_display_abort();
+    return OD_CMD_NACK;
+  }
   k_msleep(20);
   if (opendisplay_display_direct_write_end_refresh(payload, payload_len, &refresh_ok) != 0) {
     opendisplay_display_abort();
