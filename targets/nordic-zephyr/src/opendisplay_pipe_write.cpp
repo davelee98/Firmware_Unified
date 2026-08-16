@@ -1,3 +1,4 @@
+#include "od_cmd_reply.h"
 #include "od_rxq.h"
 #include "opendisplay_pipe_write.h"
 #include "opendisplay_display.h"
@@ -102,22 +103,22 @@ static void pipe_build_ack_payload(uint8_t *out)
   out[4] = (uint8_t)((mask >> 24) & 0xFFu);
 }
 
-static void send_pipe_ack(const od_cmd_ctx_t *ctx, opendisplay_pipe_reply_fn reply)
+static void send_pipe_ack(const od_cmd_ctx_t *ctx)
 {
   uint8_t r[7] = { RESP_ACK, 0x81u, 0, 0, 0, 0, 0 };
 
   pipe_build_ack_payload(r + 2);
-  reply(ctx, r, sizeof(r));
+  (void)od_cmd_reply(ctx, r, sizeof(r));
   s_pipe.frames_since_ack = 0;
   s_pipe.ooo_acks_since_gap = 0;
 }
 
-static void send_pipe_nack(const od_cmd_ctx_t *ctx, uint8_t err, opendisplay_pipe_reply_fn reply)
+static void send_pipe_nack(const od_cmd_ctx_t *ctx, uint8_t err)
 {
   uint8_t r[8] = { RESP_NACK, 0x81u, err, 0, 0, 0, 0, 0 };
 
   pipe_build_ack_payload(r + 3);
-  reply(ctx, r, sizeof(r));
+  (void)od_cmd_reply_plain(ctx, r, sizeof(r));
   s_pipe.error = true;
   if (s_pipe.partial) {
     opendisplay_display_clear_etag();
@@ -125,11 +126,11 @@ static void send_pipe_nack(const od_cmd_ctx_t *ctx, uint8_t err, opendisplay_pip
   opendisplay_display_abort();
 }
 
-static void send_pipe_start_nack(const od_cmd_ctx_t *ctx, uint8_t err, opendisplay_pipe_reply_fn reply)
+static void send_pipe_start_nack(const od_cmd_ctx_t *ctx, uint8_t err)
 {
   uint8_t r[4] = { RESP_NACK, 0x80u, err, 0x00u };
 
-  reply(ctx, r, sizeof(r));
+  (void)od_cmd_reply_plain(ctx, r, sizeof(r));
 }
 
 static void pipe_update_highest_seen(uint8_t seq)
@@ -154,7 +155,7 @@ static bool pipe_consume_payload(uint8_t *data, uint16_t len)
 }
 
 static void finish_and_refresh(const od_cmd_ctx_t *ctx, const uint8_t *payload, uint16_t payload_len,
-                               uint8_t end_opcode, opendisplay_pipe_reply_fn reply)
+                               uint8_t end_opcode)
 {
   bool refresh_ok = false;
   uint8_t ack_end[2] = { RESP_ACK, end_opcode };
@@ -178,7 +179,7 @@ static void finish_and_refresh(const od_cmd_ctx_t *ctx, const uint8_t *payload, 
 
   rc = opendisplay_display_direct_write_end_prepare(prep, prep_len);
   if (rc != 0) {
-    reply(ctx, nack, sizeof(nack));
+    (void)od_cmd_reply_plain(ctx, nack, sizeof(nack));
     if (s_pipe.partial) {
       opendisplay_display_clear_etag();
     }
@@ -187,19 +188,19 @@ static void finish_and_refresh(const od_cmd_ctx_t *ctx, const uint8_t *payload, 
     return;
   }
 
-  reply(ctx, ack_end, sizeof(ack_end));
+  (void)od_cmd_reply(ctx, ack_end, sizeof(ack_end));
   k_msleep(20);
   if (opendisplay_display_direct_write_end_refresh(prep, prep_len, &refresh_ok) != 0) {
-    reply(ctx, nack, sizeof(nack));
+    (void)od_cmd_reply_plain(ctx, nack, sizeof(nack));
     opendisplay_pipe_write_reset();
     return;
   }
-  reply(ctx, refresh_ok ? ack_ok : ack_to, 2u);
+  (void)od_cmd_reply(ctx, refresh_ok ? ack_ok : ack_to, 2u);
   opendisplay_pipe_write_reset();
 }
 
 extern "C" void opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx, const uint8_t *payload,
-                                             uint16_t payload_len, opendisplay_pipe_reply_fn reply)
+                                             uint16_t payload_len)
 {
   struct PipeStartRequest req;
   uint8_t ver;
@@ -221,7 +222,7 @@ extern "C" void opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx, const uint
   opendisplay_pipe_write_reset();
 
   if (payload == nullptr || payload_len < sizeof(req)) {
-    send_pipe_start_nack(ctx, OD_ERR_PIPE_START_BAD_HEADER, reply);
+    send_pipe_start_nack(ctx, OD_ERR_PIPE_START_BAD_HEADER);
     return;
   }
   memcpy(&req, payload, sizeof(req));
@@ -233,11 +234,11 @@ extern "C" void opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx, const uint
   total_size = req.total_size;
 
   if (ver != PIPE_VERSION) {
-    send_pipe_start_nack(ctx, OD_ERR_PIPE_START_BAD_HEADER, reply);
+    send_pipe_start_nack(ctx, OD_ERR_PIPE_START_BAD_HEADER);
     return;
   }
   if ((flags & ~(PIPE_FLAG_COMPRESSED | PIPE_FLAG_PARTIAL)) != 0u) {
-    send_pipe_start_nack(ctx, OD_ERR_PIPE_START_UNKNOWN_FLAG, reply);
+    send_pipe_start_nack(ctx, OD_ERR_PIPE_START_UNKNOWN_FLAG);
     return;
   }
 
@@ -249,21 +250,21 @@ extern "C" void opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx, const uint
     uint8_t err = OD_ERR_PIPE_START_BAD_HEADER;
 
     if (payload_len < sizeof(req) + sizeof(ext)) {
-      send_pipe_start_nack(ctx, OD_ERR_PIPE_START_BAD_HEADER, reply);
+      send_pipe_start_nack(ctx, OD_ERR_PIPE_START_BAD_HEADER);
       return;
     }
     memcpy(&ext, payload + sizeof(req), sizeof(ext));
     if (opendisplay_display_pipe_partial_arm(flags, ext.old_etag, ext.x, ext.y, ext.w, ext.h,
                                              total_size, &err)
         != 0) {
-      send_pipe_start_nack(ctx, err, reply);
+      send_pipe_start_nack(ctx, err);
       return;
     }
   } else {
     uint32_t expected = opendisplay_display_expected_dw_bytes();
 
     if (expected == 0u || total_size != expected) {
-      send_pipe_start_nack(ctx, OD_ERR_PIPE_START_SIZE_MISMATCH, reply);
+      send_pipe_start_nack(ctx, OD_ERR_PIPE_START_SIZE_MISMATCH);
       return;
     }
   }
@@ -307,7 +308,7 @@ extern "C" void opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx, const uint
   resp[5] = (uint8_t)(PIPE_MAX_FRAME & 0xFFu);
   resp[6] = (uint8_t)((PIPE_MAX_FRAME >> 8) & 0xFFu);
   resp[7] = (uint8_t)(0x01u | (partial ? PIPE_FLAG_PARTIAL : 0u));
-  reply(ctx, resp, sizeof(resp));
+  (void)od_cmd_reply(ctx, resp, sizeof(resp));
 
   if (partial) {
     if (opendisplay_display_pipe_partial_prepare() != 0) {
@@ -326,7 +327,7 @@ extern "C" void opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx, const uint
 }
 
 extern "C" void opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx, const uint8_t *payload,
-                                            uint16_t payload_len, opendisplay_pipe_reply_fn reply)
+                                            uint16_t payload_len)
 {
   uint8_t seq;
   uint8_t *data;
@@ -343,7 +344,7 @@ extern "C" void opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx, const uint8
   data = (uint8_t *)(void *)(payload + 1);
   plen = (uint16_t)(payload_len - 1u);
   if (plen > PIPE_REORDER_SLOT_SIZE) {
-    send_pipe_nack(ctx, 0x03u, reply);
+    send_pipe_nack(ctx, 0x03u);
     return;
   }
 
@@ -352,7 +353,7 @@ extern "C" void opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx, const uint8
 
   if (fwd == 0u) {
     if (!pipe_consume_payload(data, plen)) {
-      send_pipe_nack(ctx, s_pipe.compressed ? 0x02u : 0x03u, reply);
+      send_pipe_nack(ctx, s_pipe.compressed ? 0x02u : 0x03u);
       return;
     }
     s_pipe.expected_seq++;
@@ -364,7 +365,7 @@ extern "C" void opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx, const uint8
            && s_reorder[pipe_slot(s_pipe.expected_seq)].seq == s_pipe.expected_seq) {
       PipeReorderSlot &slot = s_reorder[pipe_slot(s_pipe.expected_seq)];
       if (!pipe_consume_payload(slot.data, slot.len)) {
-        send_pipe_nack(ctx, s_pipe.compressed ? 0x02u : 0x03u, reply);
+        send_pipe_nack(ctx, s_pipe.compressed ? 0x02u : 0x03u);
         return;
       }
       slot.occupied = false;
@@ -383,12 +384,12 @@ extern "C" void opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx, const uint8
 
     if (!s_pipe.partial && !s_pipe.compressed
         && opendisplay_display_bytes_written() >= opendisplay_display_total_bytes()) {
-      send_pipe_ack(ctx, reply);
-      finish_and_refresh(ctx, nullptr, 0u, 0x82u, reply);
+      send_pipe_ack(ctx);
+      finish_and_refresh(ctx, nullptr, 0u, 0x82u);
       return;
     }
     if (s_pipe.frames_since_ack >= s_pipe.ack_every) {
-      send_pipe_ack(ctx, reply);
+      send_pipe_ack(ctx);
     }
     return;
   }
@@ -408,49 +409,49 @@ extern "C" void opendisplay_pipe_write_data(const od_cmd_ctx_t *ctx, const uint8
       }
     }
     if (s_pipe.queued_count >= PIPE_REORDER_SLOTS) {
-      send_pipe_nack(ctx, 0x03u, reply);
+      send_pipe_nack(ctx, 0x03u);
       return;
     }
     pipe_update_highest_seen(seq);
     if (!s_pipe.gap_open) {
       s_pipe.gap_open = true;
-      send_pipe_ack(ctx, reply);
+      send_pipe_ack(ctx);
     } else if (++s_pipe.ooo_acks_since_gap >= s_pipe.ack_every) {
-      send_pipe_ack(ctx, reply);
+      send_pipe_ack(ctx);
     }
     return;
   }
 
   if (back <= W) {
     if (!s_pipe.gap_open) {
-      send_pipe_ack(ctx, reply);
+      send_pipe_ack(ctx);
     } else if (++s_pipe.ooo_acks_since_gap >= s_pipe.ack_every) {
-      send_pipe_ack(ctx, reply);
+      send_pipe_ack(ctx);
     }
     return;
   }
 
-  send_pipe_nack(ctx, 0x04u, reply);
+  send_pipe_nack(ctx, 0x04u);
 }
 
 extern "C" void opendisplay_pipe_write_end(const od_cmd_ctx_t *ctx, const uint8_t *payload,
-                                           uint16_t payload_len, opendisplay_pipe_reply_fn reply)
+                                           uint16_t payload_len)
 {
   uint8_t nack[2] = { RESP_NACK, 0x82u };
   bool incomplete;
 
   if (!s_pipe.active) {
-    reply(ctx, nack, sizeof(nack));
+    (void)od_cmd_reply_plain(ctx, nack, sizeof(nack));
     return;
   }
   if (s_pipe.error) {
-    reply(ctx, nack, sizeof(nack));
+    (void)od_cmd_reply_plain(ctx, nack, sizeof(nack));
     opendisplay_display_abort();
     opendisplay_pipe_write_reset();
     return;
   }
 
-  send_pipe_ack(ctx, reply);
+  send_pipe_ack(ctx);
 
   incomplete = (s_pipe.queued_count > 0u);
   if (s_pipe.partial) {
@@ -464,7 +465,7 @@ extern "C" void opendisplay_pipe_write_end(const od_cmd_ctx_t *ctx, const uint8_
   }
 
   if (incomplete) {
-    reply(ctx, nack, sizeof(nack));
+    (void)od_cmd_reply_plain(ctx, nack, sizeof(nack));
     if (s_pipe.partial) {
       opendisplay_display_clear_etag();
     }
@@ -473,5 +474,5 @@ extern "C" void opendisplay_pipe_write_end(const od_cmd_ctx_t *ctx, const uint8_
     return;
   }
 
-  finish_and_refresh(ctx, payload, payload_len, 0x82u, reply);
+  finish_and_refresh(ctx, payload, payload_len, 0x82u);
 }

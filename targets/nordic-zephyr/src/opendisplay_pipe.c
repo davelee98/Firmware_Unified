@@ -142,7 +142,11 @@ uint32_t od_pipe_conn_gen(void)
 
 void od_pipe_legacy_send(const uint8_t *data, uint16_t len)
 {
-  pipe_send(0, data, len);
+  /* NULL context, deliberately and safely: pipe_send() and pipe_send_raw() both (void) it -- the
+   * legacy sender routes by inference, not by context. Spelled NULL rather than 0 so it cannot be
+   * mistaken for the connection number this parameter used to be, which is how a null context
+   * reached on_pipe_write() unnoticed and would have silenced every reply. */
+  pipe_send(NULL, data, len);
 }
 
 void od_pipe_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN])
@@ -425,6 +429,7 @@ static od_cmd_result_t handle_partial_write_start(const od_cmd_ctx_t *ctx, const
   } else {
     err[2] = err_code;
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+    return OD_CMD_NACK;
   }
   return OD_CMD_OK;
 }
@@ -439,6 +444,7 @@ static od_cmd_result_t handle_direct_write_start(const od_cmd_ctx_t *ctx, const 
     (void)od_cmd_reply(ctx, ok, sizeof(ok));
   } else {
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+    return OD_CMD_NACK;
   }
   return OD_CMD_OK;
 }
@@ -679,6 +685,7 @@ static od_cmd_result_t handle_config_write(const od_cmd_ctx_t *ctx, const uint8_
     clear_session();
   } else {
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+    return OD_CMD_NACK;
   }
   return OD_CMD_OK;
 }
@@ -744,9 +751,10 @@ static od_cmd_result_t handle_config_chunk(const od_cmd_ctx_t *ctx, const uint8_
       rc = OD_CMD_NACK;
     }
     cfg_chunk_reset();
-  } else {
-    (void)od_cmd_reply(ctx, ack, sizeof(ack));
+    return rc;
   }
+  /* An intermediate chunk: accepted, and the transfer continues. */
+  (void)od_cmd_reply(ctx, ack, sizeof(ack));
   return OD_CMD_OK;
 }
 
@@ -905,10 +913,11 @@ static od_cmd_result_t handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_
   }
 
   {
+    /* Unknown NFC subcommand: a refusal, not an acceptance. */
     uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x04u };
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
   }
-  return OD_CMD_OK;
+  return OD_CMD_NACK;
 }
 
 static od_cmd_result_t dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd,
@@ -1073,17 +1082,17 @@ od_cmd_result_t od_cmd_dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, od_span_t
     case CMD_PARTIAL_WRITE_START:
       return handle_partial_write_start(ctx, payload, payload_len);
     case CMD_PIPE_WRITE_START:
-      opendisplay_pipe_write_start(ctx, payload, payload_len, pipe_send);
+      opendisplay_pipe_write_start(ctx, payload, payload_len);
       /* The PIPE-write module answers for itself and does not yet
        * report a verdict; C11 gives it one with its own header. */
       return OD_CMD_OK;
     case CMD_PIPE_WRITE_DATA:
-      opendisplay_pipe_write_data(ctx, payload, payload_len, pipe_send);
+      opendisplay_pipe_write_data(ctx, payload, payload_len);
       /* The PIPE-write module answers for itself and does not yet
        * report a verdict; C11 gives it one with its own header. */
       return OD_CMD_OK;
     case CMD_PIPE_WRITE_END:
-      opendisplay_pipe_write_end(ctx, payload, payload_len, pipe_send);
+      opendisplay_pipe_write_end(ctx, payload, payload_len);
       /* The PIPE-write module answers for itself and does not yet
        * report a verdict; C11 gives it one with its own header. */
       return OD_CMD_OK;
