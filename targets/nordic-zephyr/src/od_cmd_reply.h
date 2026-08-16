@@ -36,6 +36,20 @@ extern "C" {
 od_txq_status_t od_cmd_reply(const od_cmd_ctx_t *ctx, const uint8_t *frame, uint16_t len);
 od_txq_status_t od_cmd_reply_plain(const od_cmd_ctx_t *ctx, const uint8_t *frame, uint16_t len);
 
+/* Drain queued replies before a blocking panel refresh. Call it AFTER the END ack is queued and
+ * IMMEDIATELY BEFORE the refresh, on every path that blocks.
+ *
+ * WITHOUT THIS THE ACK DOES NOT LEAVE. od_cmd_reply() only ENQUEUES now; the drain runs in the
+ * pump, which cannot re-enter until the handler returns -- and the handler is inside a refresh
+ * that can hold the main thread for a minute. The host spends its 500 ms tail-flush read, probes,
+ * and aborts a transfer that in fact completed, and a disconnect on the way out can discard the
+ * queued ack entirely. The synchronous sender this replaced had the property for free; the queue
+ * does not, and that is the one regression a cutover to shared egress introduces for free.
+ *
+ * BOUNDED: on the deadline od_txq_flush() reports TIMEOUT and LEAVES THE ENTRIES QUEUED -- late
+ * beats dropped -- so there is nothing for a caller to decide. Hence void. */
+void od_cmd_flush_before_refresh(void);
+
 #ifdef __cplusplus
 }
 #endif

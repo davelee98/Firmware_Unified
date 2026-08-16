@@ -67,6 +67,9 @@ typedef struct {
   uint16_t expected_chunks;
   uint16_t received_chunks;
   uint32_t received_size;
+  /* Whether this transfer OPENED unauthenticated, under the key-loss exemption. Every continuation
+   * must match, so a transfer cannot be started with a session and finished without one. */
+  bool unauth;
   uint8_t buffer[MAX_CONFIG_SIZE];
   /* Vestigial on a single-connection target: always 0, so every guard against it is a tautology.
    * Kept rather than deleted here because removing a guard is a C11 shrink decision, not something
@@ -74,7 +77,6 @@ typedef struct {
   uint8_t connection;
 } od_chunked_config_t;
 
-static bool s_notify;
 static od_chunked_config_t s_cfg_chunk;
 /* The uptime clock, defined below with the other Zephyr shims. */
 static uint32_t od_now_ms(void)
@@ -84,9 +86,8 @@ static uint32_t od_now_ms(void)
 
 /* ============================================================================================
  * THE SESSION ADAPTER. The handshake, KDF, replay window and CCM envelope are
- * shared/core/od_session.c; what stays here is this target's half -- the clock, the nRF device
- * identity, and the Zephyr logging. od_session sends nothing itself, which is why
- * authenticate_handle still returns its reply for dispatch() to send.
+ * shared/core/od_session.c; what stays here is this target's half -- the clock and the nRF device
+ * identity. The logging moved to od_session_app.c, and the handshake itself is od_gate's.
  * ============================================================================================ */
 
 static struct od_session s_session;
@@ -295,6 +296,11 @@ static od_cmd_result_t handle_direct_write_end(const od_cmd_ctx_t *ctx, const ui
     opendisplay_display_abort();
     return OD_CMD_NACK;
   }
+  /* PUT THE ACK ON AIR BEFORE BLOCKING. od_cmd_reply only enqueues, and the pump cannot drain
+   * until this handler returns -- which is on the far side of a refresh that can hold this thread
+   * for a minute. Without this the host spends its tail-flush read, probes, and aborts a transfer
+   * that completed. */
+  od_cmd_flush_before_refresh();
   k_msleep(20);
   if (opendisplay_display_direct_write_end_refresh(payload, payload_len, &refresh_ok) != 0) {
     opendisplay_display_abort();
@@ -306,6 +312,22 @@ static od_cmd_result_t handle_direct_write_end(const od_cmd_ctx_t *ctx, const ui
   return OD_CMD_OK;
 }
 
+/* An unauthenticated rewrite has NO session to seal with -- that is the whole point of the
+ * exemption -- so its ack MUST go plaintext. Sending it through od_cmd_reply() instead makes
+ * od_reply substitute a plaintext hard NACK, and the host is told the write FAILED after the new
+ * config has already been persisted: recovery appears broken while actually having worked.
+ *
+ * This is not the byte-2 inference returning. The choice is made from whether a session EXISTS,
+ * which is a fact about what is possible, never from the response bytes.
+ */
+static od_txq_status_t config_ack(const od_cmd_ctx_t *ctx, const uint8_t *frame, uint16_t len)
+{
+  if (!od_session_authenticated(&s_session)) {
+    return od_cmd_reply_plain(ctx, frame, len);
+  }
+  return od_cmd_reply(ctx, frame, len);
+}
+
 static od_cmd_result_t handle_config_clear(const od_cmd_ctx_t *ctx)
 {
   uint8_t ok[] = { 0x00u, RESP_CONFIG_CLEAR, 0x00u, 0x00u };
@@ -315,8 +337,11 @@ static od_cmd_result_t handle_config_clear(const od_cmd_ctx_t *ctx)
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return OD_CMD_NACK;
   }
+  /* SEALED BEFORE THE RELOAD, same rule as the config-write acks. Reloading an erased config
+   * turns security OFF, after which od_reply takes its plaintext shortcut -- so replying second
+   * silently downgrades an ack that the session which sent the command could still protect. */
+  (void)config_ack(ctx, ok, sizeof(ok));
   opendisplay_ble_reload_config_from_nvm();
-  (void)od_cmd_reply(ctx, ok, sizeof(ok));
   return OD_CMD_OK;
 }
 
@@ -379,6 +404,7 @@ static od_cmd_result_t handle_config_read(const od_cmd_ctx_t *ctx)
 }
 
 
+
 /* The erase that pays for the key-loss exemption, and the half od_dispatch deliberately does not
  * own -- what "erase" means is storage policy.
  *
@@ -405,8 +431,6 @@ static od_cmd_result_t handle_config_write(const od_cmd_ctx_t *ctx, const uint8_
   uint8_t ack[] = { 0x00u, RESP_CONFIG_WRITE, 0x00u, 0x00u };
   uint8_t err[] = { 0xFFu, RESP_CONFIG_WRITE, 0x00u, 0x00u };
 
-  erase_before_unauthenticated_rewrite(CMD_CONFIG_WRITE);
-
   if (len == 0u) {
     /* Answers NOTHING, which is the shipped behaviour and is preserved here. It is still a
      * REFUSAL: the frame was malformed and no config was written, so it must not be reported as
@@ -414,9 +438,14 @@ static od_cmd_result_t handle_config_write(const od_cmd_ctx_t *ctx, const uint8_
     return OD_CMD_NACK;
   }
 
+  /* AFTER the length checks, never before: erasing and then rejecting a malformed frame destroys
+   * a working configuration on a frame the device does not even accept. */
+  erase_before_unauthenticated_rewrite(CMD_CONFIG_WRITE);
+
   if (len > CONFIG_CHUNK_SIZE) {
     cfg_chunk_reset();
     s_cfg_chunk.active = true;
+    s_cfg_chunk.unauth = !od_session_authenticated(&s_session);
     s_cfg_chunk.connection = 0u;
     s_cfg_chunk.received_chunks = 1;
 
@@ -460,7 +489,7 @@ static od_cmd_result_t handle_config_write(const od_cmd_ctx_t *ctx, const uint8_
          * is told a write FAILED that has already been persisted, and cannot tell that from a real
          * failure. od_reply seals at commit, so queueing first makes the bytes final while the
          * session that sent the write is still the one answering it. */
-        (void)od_cmd_reply(ctx, ack, sizeof(ack));
+        (void)config_ack(ctx, ack, sizeof(ack));
         opendisplay_ble_reload_config_from_nvm();
         clear_session();
         rc = OD_CMD_OK;
@@ -481,7 +510,7 @@ static od_cmd_result_t handle_config_write(const od_cmd_ctx_t *ctx, const uint8_
         (uint16_t)(1u + (rem + CONFIG_CHUNK_SIZE - 1u) / CONFIG_CHUNK_SIZE);
     }
 
-    (void)od_cmd_reply(ctx, ack, sizeof(ack));
+    (void)config_ack(ctx, ack, sizeof(ack));
     return OD_CMD_OK;
   }
 
@@ -492,7 +521,7 @@ static od_cmd_result_t handle_config_write(const od_cmd_ctx_t *ctx, const uint8_
          * is told a write FAILED that has already been persisted, and cannot tell that from a real
          * failure. od_reply seals at commit, so queueing first makes the bytes final while the
          * session that sent the write is still the one answering it. */
-    (void)od_cmd_reply(ctx, ack, sizeof(ack));
+    (void)config_ack(ctx, ack, sizeof(ack));
     opendisplay_ble_reload_config_from_nvm();
     clear_session();
   } else {
@@ -512,10 +541,16 @@ static od_cmd_result_t handle_config_chunk(const od_cmd_ctx_t *ctx, const uint8_
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return OD_CMD_NACK;
   }
-  /* First continuation only, matching the reference: the CONFIG_WRITE that opened this transfer
-   * erased already, and erasing again mid-stream would discard the chunks collected so far. */
-  if (s_cfg_chunk.received_chunks == 1u) {
-    erase_before_unauthenticated_rewrite(CMD_CONFIG_CHUNK);
+  /* A TRANSFER MAY NOT CHANGE AUTHENTICATION STATE MID-FLIGHT. The opening CONFIG_WRITE recorded
+   * whether it arrived unauthenticated, and every continuation must match: otherwise a transfer
+   * begun under a live session could be COMPLETED unauthenticated after that session expired,
+   * finishing without the erase the exemption is paid for -- landing a new config while the old
+   * key survived. Refused rather than erased here, because erasing mid-stream would discard the
+   * chunks already collected and turn a downgrade attempt into data loss. */
+  if (s_cfg_chunk.unauth != !od_session_authenticated(&s_session)) {
+    cfg_chunk_reset();
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+    return OD_CMD_NACK;
   }
   if (len == 0u) {
     /* Silent, as shipped -- but a refusal, not an acceptance. */
@@ -559,7 +594,7 @@ static od_cmd_result_t handle_config_chunk(const od_cmd_ctx_t *ctx, const uint8_
          * is told a write FAILED that has already been persisted, and cannot tell that from a real
          * failure. od_reply seals at commit, so queueing first makes the bytes final while the
          * session that sent the write is still the one answering it. */
-      (void)od_cmd_reply(ctx, ack, sizeof(ack));
+      (void)config_ack(ctx, ack, sizeof(ack));
       opendisplay_ble_reload_config_from_nvm();
       clear_session();
       rc = OD_CMD_OK;
@@ -571,7 +606,7 @@ static od_cmd_result_t handle_config_chunk(const od_cmd_ctx_t *ctx, const uint8_
     return rc;
   }
   /* An intermediate chunk: accepted, and the transfer continues. */
-  (void)od_cmd_reply(ctx, ack, sizeof(ack));
+  (void)config_ack(ctx, ack, sizeof(ack));
   return OD_CMD_OK;
 }
 
@@ -893,14 +928,12 @@ void opendisplay_pipe_on_write(const uint8_t *data, uint16_t len, bool write_cmd
 
 void opendisplay_pipe_on_notify_changed(bool enabled)
 {
-  s_notify = enabled;
   od_log_info("pipe notifications %s", enabled ? "on" : "off");
 }
 
 /* BT RX thread: mark only; cleanup (EPD abort etc.) runs on the main thread. */
 void opendisplay_pipe_on_connection_closed(void)
 {
-  s_notify = false;
   atomic_inc(&s_conn_gen);
   atomic_set(&s_close_pending, 1);
 }
@@ -949,6 +982,8 @@ void od_core_frame_done(const od_reply_t *rp, od_frame_outcome_t outcome)
  * it is re-offered, and the window refuses it the second time. */
 void opendisplay_pipe_process(void)
 {
+  uint8_t drained;
+
   if (atomic_cas(&s_close_pending, 1, 0)) {
     clear_session();
     s_long_write_len = 0;
@@ -965,7 +1000,12 @@ void opendisplay_pipe_process(void)
     od_txq_reset();
   }
 
-  for (;;) {
+  /* BOUNDED, and the bound is not defensive tidiness. A central issuing write-without-response can
+   * refill the SPSC ring as fast as this drains it, and an unbounded loop then never returns to the
+   * LED, buzzer, input and watchdog work the main thread also owns -- a peer could hold the thread
+   * indefinitely with valid traffic. One ring's worth per pass is enough for a full PIPE window
+   * plus its END, which is the deepest legitimate burst; anything beyond that is the next pass's. */
+  for (drained = 0u; drained < OD_RXQ_SLOTS; ++drained) {
     od_rxq_item_t *item;
     od_reply_t rp;
     od_frame_outcome_t outcome;
@@ -981,6 +1021,10 @@ void opendisplay_pipe_process(void)
     /* Close can advance the generation after the shared helper accepted this head. Recheck at the
      * handler boundary; the next iteration consumes it under the new generation. */
     if (!rx_tag_is_live(item->tag, NULL)) {
+      /* Consumed here rather than left for the next iteration's discard: `continue` alone would
+       * re-peek the same head, and if the generation moved again between the two calls the loop
+       * would spin without progress. The frame is dead either way. */
+      od_rxq_consume();
       continue;
     }
 
@@ -1046,7 +1090,14 @@ bool od_cmd_allow_unauthenticated(uint16_t cmd)
 {
   const struct SecurityConfig *sec = od_get_parsed_security();
 
-  if (sec == NULL || (sec->flags & 0x01u) == 0u) {
+  /* SECURITY MUST BE ON. With no key configured there is nothing to recover from and no gate to
+   * be exempt from -- but the flag byte can still be set, and reading it alone made every ordinary
+   * CONFIG_WRITE on an unsecured device erase its own storage first. The flag is documented as
+   * applying "while encryption is enabled"; this is where that is enforced. */
+  if (!od_session_security_enabled(sec)) {
+    return false;
+  }
+  if ((sec->flags & 0x01u) == 0u) {
     return false;
   }
   return cmd == CMD_CONFIG_WRITE || cmd == CMD_CONFIG_CHUNK;

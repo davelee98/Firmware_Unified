@@ -212,6 +212,8 @@ static void finish_and_refresh(const od_cmd_ctx_t *ctx, const uint8_t *payload, 
     opendisplay_pipe_write_reset();
     return;
   }
+  /* On air before blocking -- see the same barrier on the direct-write END path. */
+  od_cmd_flush_before_refresh();
   k_msleep(20);
   if (opendisplay_display_direct_write_end_refresh(prep, prep_len, &refresh_ok) != 0) {
     (void)od_cmd_reply_plain(ctx, nack, sizeof(nack));
