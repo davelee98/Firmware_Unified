@@ -130,6 +130,12 @@ The only shipped implementation (Silabs) sends **four**. The corpus follows the 
 on the §1.1 precedent that a spec disagreeing with unanimous shipped behaviour is the thing
 that gets corrected. Fix the `@targets` line when the freeze lifts.
 
+**Still open after C11 (2026-08-16), and note what did NOT change.** Nordic's `0x52` now answers
+`{FF,52,OD_ERR_POWER_OFF_UNSUPPORTED,00}` where it used to fall silent — a second implementation,
+also four bytes, chosen to match Silabs rather than to take a position on the contradiction. The
+header still disagrees with itself and the vendored copies here are frozen; this is a protocol
+defect and firmware agreeing with firmware does not close it.
+
 ### 2.2 `0x0040` never says what an UNPROVISIONED device answers
 
 **verified 2026-08-16** — `opendisplay_protocol.h:293-301` describes two cases and the field has a

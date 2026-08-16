@@ -149,6 +149,18 @@ how the four repos drifted apart the first time.
 
 ## 1. Framing and dispatch
 
+> **Status, 2026-08-16 (C8-C11).** This section was written against the four source repos before
+> any promotion. Dispatch is now ONE implementation: `shared/core/od_dispatch.c` owns validation,
+> tag liveness, producer conflict, budget, reservation, the gate and **the opcode map**; targets
+> supply named per-command hooks (`shared/core/od_cmd_app.h`) and nothing else. The line references
+> below point at the donor repos and are historical — read them as "where the divergence was", not
+> as "where the code is". Resolutions marked below as adopted have been adopted on `esp32-idf` and
+> `nordic-zephyr`; `efr32bg22-slc` still runs its own dispatcher.
+>
+> Three rows have moved since: **1.6** no longer uses a global at all (§ 1.6), **1.7** is the
+> shared `od_rxq` ring plus each target's pump (§ 1.7), and **0x52 on NRF54** is now the compliant
+> NACK (opcode coverage table). NOT hardware-verified on either target.
+
 | # | Behaviour | spec | Firmware | NRF54 | Silabs | Resolution for `shared/core` |
 |---|---|---|---|---|---|---|
 | 1.1 | Auth-required reply | `[0xFE][echo]` (status byte 0xFE) | `{0x00, cmd_lo, 0xFE}` — 0xFE as *data* (`src/communication.cpp:630,637`) | same (`src/opendisplay_pipe.c:277`) | same (`opendisplay_pipe.c:227`) | Implementations are unanimous and clients parse the shipped shape. **Correct the spec** to `[0x00][echo][0xFE]`; do not change firmware. |
@@ -158,10 +170,10 @@ how the four repos drifted apart the first time.
 | 1.5 | Plaintext exemptions when security on, pre-auth | AUTHENTICATE + FIRMWARE_VERSION always plaintext; Silabs also READ_MSD | exempts AUTH + FW_VERSION before the gate (`communication.cpp:613-621`); config write/chunk pass if `rewrite_allowed` flag, after secure erase (`:447-455, 508-517`) | same policy (`opendisplay_pipe.c:1187-1214`), plus rejects *plaintext* non-FW_VERSION commands **mid-session** (`:1356-1370`) | dispatch auth-gates everything except AUTHENTICATE (`opendisplay_pipe.c:1079-1084`); READ_MSD forced plaintext in `pipe_send` (`:532`) | **NRF54 is right** (most complete and matches spec). Shared dispatcher fixes both Silabs issues on adoption. |
 | 1.5a | **Encrypted-frame detection when security on** | gate on `isEncryptionEnabled()` | length gate: decrypt only if `len ≥ BLE_CMD_HEADER+NONCE+TAG` else treat as auth-required (`communication.cpp:635`) | length gate `frame_len ≥ 31`, but **also** rejects short plaintext mid-session (`opendisplay_pipe.c:1342-1370`) — closes the hole | length gate `frame_len ≥ 31` with **no mid-session guard** (`opendisplay_pipe.c:1238-1251`) | **Security bug on Silabs**: once any client authenticates, a *short* (<31 B) plaintext command — REBOOT (2 B), DEEP_SLEEP, DIRECT_WRITE_END — bypasses CCM and executes, because `dispatch()` only blocks when there is *no* live session. NRF54's mid-session plaintext rejection is the correct model; shared dispatcher must gate on `sec_enabled()`, never on frame length. |
 | 1.5b | NACK confidentiality | unspecified | NACKs (0xFF) sent unencrypted (`communication.cpp:218`) | same (`opendisplay_pipe.c:571`) | same — every NACK forced plaintext (`opendisplay_pipe.c:532`) | Unanimous; document. A NACK leaks only an opcode+error code, so plaintext is acceptable, but make it a deliberate rule in `shared/core`. |
-| 1.6 | Origin-gated decrypt (LAN TLS bypasses CCM) | SECTION 9 rule 4 | implemented via `g_commandOrigin` (`communication.cpp:27-45, 623-679`) | n/a (no LAN) | n/a | Core takes `origin` as an explicit argument of frame RX (see SHARED_API_DESIGN.md); no global. |
-| 1.7 | Execution context | unspecified | single `loop()` task; BLE cb enqueues to `commandQueue`, responses via 10-slot ring (`communication.cpp:89-131`) | BT RX thread copies into `K_MSGQ` (8 × 514 B ≈ 4.1 KB), main thread drains via `opendisplay_pipe_process()` (`opendisplay_pipe.c:70-84, 1375-1425`) | dispatch runs directly in the BGAPI event handler, i.e. superloop context (`opendisplay_pipe.c:1271-1298`) | Adopt the NRF54 shape as the core API: RX enqueue + `od_core_process()` pump. Silabs pumps inline (queue depth 1); queue depth is a target macro. |
+| 1.6 | Origin-gated decrypt (LAN TLS bypasses CCM) | SECTION 9 rule 4 | was `g_commandOrigin`, a per-frame fact in a global | n/a (no LAN) | n/a | **DONE (C8/C11).** `od_dispatch_frame()` takes an `od_reply_t` (origin + tag) built by the ingress that has it — BLE from the RX slot's tag, LAN from the live owner word — and `shared/core/od_dispatch.c` gates decrypt on `rp->origin != OD_ORIGIN_LAN_TLS`. No global; `tools/check.sh` ratchets the old names' absence. |
+| 1.7 | Execution context | unspecified | was a `commandQueue` plus a 10-slot response ring | was a `K_MSGQ` (40 × 509 B), main thread drained it | dispatch runs directly in the BGAPI event handler, i.e. superloop context (`opendisplay_pipe.c:1271-1298`) | **DONE (C9/C10/C11).** One SPSC `od_rxq` on both targets, peek/consume, every slot carrying its writer's identity; egress is `od_txq`. Each target keeps its own pump — ESP32's `serviceBleRx()` in `loop()`, Nordic's `opendisplay_pipe_process()` — because the surrounding work differs; both are bounded to one ring per pass. Depth derives from the target's own `PIPE_MAX_W + 2`. Silabs unchanged. |
 | 1.8 | Long-write reassembly (ATT prepare/execute) | unspecified | not needed (NimBLE hands whole values) | rejects > 509 B at msgq bound (`opendisplay_pipe.c:75, 1380`) | explicit offset-based reassembly into `s_long_write_buf` (`opendisplay_pipe.c:1209-1227`) | Keep reassembly in the target BLE glue, not in core — it is a transport artifact. |
-| 1.9 | Unknown opcode | no reply specified | logs, **no reply** (`communication.cpp:750-752`) | logs, no reply (`opendisplay_pipe.c:1316-1318`) | logs, no reply (`:1188-1190`) | Adopt; note clients must use timeouts for unknown commands. |
+| 1.9 | Unknown opcode | no reply specified | logs, **no reply** | logs, no reply | logs, no reply (`:1188-1190`) | **DONE (C11).** One answer, from the shared map's `default:` arm — no reply, and `od_frame_policy()` gives `OD_FRAME_UNKNOWN_OPCODE` no activity stamp, so unknown-command traffic cannot hold an exclusive link open. Nordic still logs the opcode, from its pump (the one place with both the bytes and the verdict); shared/ cannot log. Clients must use timeouts. |
 
 ### Opcode coverage (implemented handler exists)
 
@@ -174,14 +186,14 @@ how the four repos drifted apart the first time.
 | 0x45 CONFIG_CLEAR | yes | yes | **no case — silent drop** (grep: zero hits in `opendisplay_pipe.c`) | no | **spec error**: `@targets` for 0x45 lists Silabs. Either implement on Silabs or fix `@targets`. |
 | 0x50 AUTHENTICATE | yes | yes | yes | yes | |
 | 0x51 ENTER_DFU | yes | yes | yes | yes | |
-| 0x52 POWER_OFF | yes (latch HW) | **no case — silent drop** (`opendisplay_pipe.c:1216-1319` switch) | NACK unsupported (`:1114-1123`) | no | spec says non-latch targets NACK `[FF][52][00]`. **NRF54 gap** — Silabs is the compliant model. |
+| 0x52 POWER_OFF | yes (latch HW) | **NACK unsupported** — `{FF,52,OD_ERR_POWER_OFF_UNSUPPORTED,00}` (C11, `od_cmd_device.c`) | NACK unsupported (`:1114-1123`) | no | **CLOSED (C11).** The NRF54 gap was a silent drop, which left a host unable to tell "no rail cut here" from "firmware older than the command". Silabs was the compliant model and Nordic now matches it. The 4-vs-3-byte width contradiction in the canonical header is unresolved — `FOLLOWUPS.md` § 2.1. |
 | 0x53 DEEP_SLEEP | yes | recognized, deliberately **no reply** (`:1248-1254`) | ACKs then EM4, ignores payload (`:1124-1130`) | yes (opcode drift, see above) | spec permits both ("may instead stay silent"); shared handler should emit the proper NACK namespace and make silence unnecessary. |
 | 0x70/71/72 DIRECT_WRITE | yes | yes | yes | yes (uncompressed only) | |
 | 0x73/0x75 LED | yes | yes | yes | 0x73 only | |
 | 0x76 PARTIAL | yes | yes | NACK `{FF,76,07,00}` fail-fast (`:1177-1186`) | no | Silabs fail-fast NACK is correct behaviour for an unsupporting target — adopt as the default for any compiled-out subsystem. |
 | 0x77 BUZZER | yes | yes | NACK `{FF,77,07,00}` | no | |
-| 0x80-0x82 PIPE | **yes — only implementation** | no (silent drop) | no (silent drop) | no | non-implementing targets should NACK the 0x80 START (`OD_ERR_PIPE_START_BAD_HEADER` is wrong; needs an "unsupported" code — spec gap) rather than silently drop. |
-| 0x83 NFC | no (falls to default; `communication.cpp:684-685`) | yes | yes | no | |
+| 0x80-0x82 PIPE | yes | **yes** (`opendisplay_pipe_write.cpp`; the row's "no" predates the NRF54 port) | no (silent drop) | no | Silabs should NACK the 0x80 START rather than silently drop (`OD_ERR_PIPE_START_BAD_HEADER` is wrong; needs an "unsupported" code — spec gap). ESP32 refuses PIPE on LAN with that same reused code, post-gate, for want of a better one — SECTION 9 rule 2. |
+| 0x83 NFC | **UNKNOWN, silent** — `od_cmd_app_nfc()` exists and returns `OD_CMD_UNKNOWN` | yes | yes | no | Every target now DEFINES the hook, because a missing definition is a link error; ESP32's says "not implemented here" rather than being absent from a switch. It answers nothing and stamps no activity — deliberately not an "unsupported" NACK, which would mean inventing a wire code. |
 
 ## 2. Config TLV parsing
 
