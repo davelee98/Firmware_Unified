@@ -130,7 +130,10 @@ looks arbitrary and is not); delete the story.
   unflashed too. Two things there that only hardware shows: the
   `diff == 0` replay fix and the exact inner-length check are the two behaviour changes
   (`DIVERGENCE_MATRIX` § 6.5-6.9) that can refuse a frame the old code accepted.
-  **The `OD-S1` PIPE silence fix is UNPROVEN on either target.** The nRF52840 pass completed an
+  **The `OD-S1` PIPE silence fix is UNPROVEN on either target** — though the stimulus for it now
+  exists: `targets/esp32-idf/tools/od-device-cli.py dispatch-gate` (C12.2) seals one `0x0081` frame
+  and writes the retained bytes twice, and ends with a corrupted-tag control so that silence is
+  falsifiable. Its helpers are host-tested; it has never run on a board. The nRF52840 pass completed an
   encrypted upload but did not deliberately induce loss or reordering, so the path that stays
   quiet on a nonce-rejected `0x81` frame — instead of sending the NACK that kills the upload —
   has never been exercised. It is not host-testable; forcing reorder on a board is the only way.

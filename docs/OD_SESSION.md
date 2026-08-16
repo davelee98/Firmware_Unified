@@ -166,6 +166,15 @@ response, or the client's upload dies on the first dropped frame) — it needs d
 loss or reordering, and no host test can produce the condition. Nordic's 218-byte NFC read cap is
 likewise unexercised.
 
+**The stimulus now exists, and the run does not** (C12.2, 2026-08-16).
+`targets/esp32-idf/tools/od-device-cli.py dispatch-gate` seals one `0x0081` frame and writes the
+retained bytes twice, which is the distinction that decides whether this row is tested at all:
+re-sealing the same sequence number produces a fresh nonce and exercises PIPE duplicate handling
+instead, and the two are indistinguishable in a device log. It ends with a deliberately corrupted
+tag that MUST draw a NACK — silence is not evidence unless a response could have been seen, and a
+disconnected notify path is also silent. Its helpers are pinned against a fake BLE client
+(`tests/host/bench_dispatch_gate_test.py`); nothing about it has run on a board.
+
 ## Open items
 
 - Flash an ESP32-S3 and close C5.

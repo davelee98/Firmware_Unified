@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import re
 import sys
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -742,9 +744,19 @@ class _BleCtx:
         self.client = client
         self.session = session
         self.notify_handler: Callable[[bytes], None] | None = None
+        # Bench instrumentation, off for every ordinary command. It receives frames BEFORE
+        # decryption, because what the bench has to prove is about the bytes on air: a replayed
+        # frame is byte-identical to its original, and a decrypted view cannot show that.
+        self.raw_log: Callable[[str, bytes], None] | None = None
+        self.notify_enabled = False
+
+    def _log_raw(self, direction: str, data: bytes) -> None:
+        if self.raw_log:
+            self.raw_log(direction, data)
 
     def _on_notify(self, _sender: object, payload: bytearray) -> None:
         data = bytes(payload)
+        self._log_raw("d2h", data)
         if self.session and self.session.needs_decryption(data):
             try:
                 data = self.session.decrypt(data)
@@ -758,7 +770,38 @@ class _BleCtx:
             wire = self.session.encrypt(cmd_hi, cmd_lo, payload)
         else:
             wire = bytes([cmd_hi, cmd_lo]) + payload
+        self._log_raw("h2d", wire)
         await self.client.write_gatt_char(CHAR_UUID, wire)
+
+    async def seal_command(self, cmd_hi: int, cmd_lo: int, payload: bytes = b"") -> bytes:
+        """Seal a command and RETURN the wire bytes without sending them.
+
+        The counter advances exactly once, here. Everything the replay test rests on follows from
+        that: the caller sends these same bytes twice, so the second copy carries the same session
+        id and the same counter and is a replay by construction. Sealing twice would produce a
+        fresh nonce, and that tests PIPE duplicate handling rather than the replay window."""
+        if not (self.session and self.session.authenticated):
+            raise RuntimeError("seal_command requires an authenticated session")
+        return self.session.encrypt(cmd_hi, cmd_lo, payload)
+
+    async def send_raw(self, wire: bytes) -> None:
+        """Write bytes exactly as given -- no sealing, no counter movement."""
+        self._log_raw("h2d", wire)
+        await self.client.write_gatt_char(CHAR_UUID, wire)
+
+    async def set_notify(self, enabled: bool) -> None:
+        """Subscribe or unsubscribe the notification characteristic.
+
+        WITHHOLDING IS THE POINT. With the CCCD disabled the device's radio HAL reports RETRY
+        rather than sending, which is the arm that exercises egress backpressure -- and it does so
+        without a fault hook or a firmware build that differs from the one under test."""
+        if enabled == self.notify_enabled:
+            return
+        if enabled:
+            await self.client.start_notify(CHAR_UUID, self._on_notify)
+        else:
+            await self.client.stop_notify(CHAR_UUID)
+        self.notify_enabled = enabled
 
 
 async def _ble_authenticate(ctx: _BleCtx, session: BleSession, timeout: float) -> None:
@@ -817,13 +860,16 @@ async def _ble_connection(addr: str, key: bytes | None = None, auth_timeout: flo
         _status("Connected.")
         ctx = _BleCtx(client, session)
         await client.start_notify(CHAR_UUID, ctx._on_notify)
+        ctx.notify_enabled = True
         try:
             if session:
                 _status("Authenticating...")
                 await _ble_authenticate(ctx, session, auth_timeout)
             yield ctx
         finally:
-            await client.stop_notify(CHAR_UUID)
+            if ctx.notify_enabled:
+                await client.stop_notify(CHAR_UUID)
+                ctx.notify_enabled = False
 
 
 async def _do_read_config(ctx: _BleCtx, timeout: float) -> bytes:
@@ -989,6 +1035,227 @@ async def _ble_read_modify_write(
         new_packet = encode_packet(doc)
         await _do_write_config(ctx, new_packet, timeout)
         return new_packet
+
+
+# ============================================================================================
+# BENCH ONLY -- `dispatch-gate`
+#
+# The two hardware rows nothing else can produce. Both are in the C12 plan's exit matrix, and both
+# fail QUIETLY if driven approximately, which is why they are a tool rather than a checklist.
+#
+#   OD-S1 REPLAY. A replayed encrypted 0x0081 must draw NO response, be logged, and leave the
+#   transfer alive. The frame has to be byte-identical to one the device already accepted -- same
+#   session id, same counter -- so the tool seals ONCE and writes those retained bytes twice.
+#   Re-sealing the same sequence number produces a fresh nonce and tests PIPE duplicate handling
+#   instead, which is the easy mistake and looks identical in a log.
+#
+#   EGRESS BACKPRESSURE. Disabling the CCCD makes the device's radio HAL report RETRY rather than
+#   send, so queued replies accumulate instead of being dropped. Re-enabling must deliver the whole
+#   config read intact. No fault hook, no altered firmware: the build under test is the build that
+#   ships.
+#
+# WHAT THE TOOL WILL NOT DO is claim a pass it did not observe. Silence proves nothing on its own --
+# a disconnected notify path is also silent -- so the replay phase ends with a deliberately corrupt
+# frame that MUST draw a plaintext NACK. Without that control, "no notification" is unfalsifiable.
+# ============================================================================================
+
+PIPE_VERSION = 1
+PIPE_ACK_EVERY = 1
+
+
+class _FrameLog:
+    """Every frame, both directions, timestamped from a monotonic clock and recorded BEFORE
+    decryption. The raw bytes are the evidence: a replay is only a replay if the second copy is
+    identical to the first, and a decrypted view cannot show that."""
+
+    def __init__(self) -> None:
+        self._t0 = time.monotonic()
+        self.records: list[dict[str, Any]] = []
+
+    def __call__(self, direction: str, data: bytes) -> None:
+        self.records.append({
+            "t_ms": round((time.monotonic() - self._t0) * 1000.0, 3),
+            "dir": direction,
+            "len": len(data),
+            "hex": data.hex(),
+        })
+
+    def since(self, t_ms: float, direction: str = "d2h") -> list[dict[str, Any]]:
+        return [r for r in self.records if r["dir"] == direction and r["t_ms"] >= t_ms]
+
+    def now_ms(self) -> float:
+        return round((time.monotonic() - self._t0) * 1000.0, 3)
+
+
+def _pipe_start_request(total_size: int, window: int, ack_every: int, max_frame: int) -> bytes:
+    """ver(1) flags(1) req_window(1) req_ack_every(1) client_max_frame(2 LE) total_size(4 LE)."""
+    return (bytes([PIPE_VERSION, 0x00, window, ack_every])
+            + max_frame.to_bytes(2, "little")
+            + total_size.to_bytes(4, "little"))
+
+
+async def _bench_replay(ctx: _BleCtx, log: _FrameLog, args: argparse.Namespace) -> dict[str, Any]:
+    """Phase 1: OD-S1. Seal one DATA frame, send it twice, require silence for the second."""
+    out: dict[str, Any] = {"phase": "od-s1-replay"}
+    chunk = bytes([0x41]) * args.chunk_bytes
+
+    _status("OD-S1: opening an encrypted PIPE transfer...")
+    await ctx.send_command(0x00, 0x80,
+                           _pipe_start_request(args.total_size, args.window,
+                                               PIPE_ACK_EVERY, args.max_frame))
+    await asyncio.sleep(args.settle)
+    out["start_replies"] = len(log.since(0.0))
+
+    # SEALED ONCE. The counter moves here and nowhere else in this phase.
+    counter_before = ctx.session.counter if ctx.session else -1
+    wire = await ctx.seal_command(0x00, 0x81, bytes([0x00]) + chunk)
+    counter_after = ctx.session.counter if ctx.session else -1
+    out["counter_delta_for_one_frame"] = counter_after - counter_before
+
+    t_first = log.now_ms()
+    await ctx.send_raw(wire)
+    await asyncio.sleep(args.settle)
+    out["first_send_replies"] = len(log.since(t_first))
+
+    _status("OD-S1: re-sending the IDENTICAL sealed bytes...")
+    t_replay = log.now_ms()
+    await ctx.send_raw(wire)                      # byte-identical: same nonce, same counter
+    await asyncio.sleep(args.observe)
+    replay_replies = log.since(t_replay)
+    out["replay_replies"] = replay_replies
+    out["replay_drew_silence"] = (len(replay_replies) == 0)
+
+    # THE CONTROL. Silence only means something if a response could have been seen. A frame with a
+    # corrupted tag is refused loudly, so if THIS draws nothing the capture window is broken and
+    # the replay result above is worthless rather than positive.
+    _status("OD-S1: control -- a corrupted tag must draw a NACK...")
+    bad = bytearray(await ctx.seal_command(0x00, 0x81, bytes([0x01]) + chunk))
+    bad[-1] ^= 0xFF
+    t_ctrl = log.now_ms()
+    await ctx.send_raw(bytes(bad))
+    await asyncio.sleep(args.observe)
+    ctrl = log.since(t_ctrl)
+    out["control_replies"] = ctrl
+    out["control_was_answered"] = (len(ctrl) > 0)
+
+    out["pass"] = bool(out["replay_drew_silence"] and out["control_was_answered"]
+                       and out["counter_delta_for_one_frame"] == 1)
+    return out
+
+
+async def _bench_withhold(ctx: _BleCtx, log: _FrameLog, args: argparse.Namespace) -> dict[str, Any]:
+    """Phase 2: egress backpressure. Withhold notifications, drive a multi-frame read, restore."""
+    out: dict[str, Any] = {"phase": "withhold-notify"}
+    chunks: dict[int, bytes] = {}
+    state: dict[str, int] = {}
+    done = asyncio.Event()
+
+    def handle(payload: bytes) -> None:
+        if len(payload) < 4 or payload[0] == 0xFF:
+            return
+        n = payload[2] | (payload[3] << 8)
+        if n == 0:
+            if len(payload) < 6:
+                return
+            state["total_len"] = payload[4] | (payload[5] << 8)
+            chunks[0] = bytes(payload[6:])
+        else:
+            chunks[n] = bytes(payload[4:])
+        if "total_len" in state and sum(len(b) for b in chunks.values()) >= state["total_len"]:
+            done.set()
+
+    _status("backpressure: disabling notifications...")
+    await ctx.set_notify(False)
+    t_withheld = log.now_ms()
+
+    # Both writes happen while the device cannot send. The canary is second, and RX is FIFO, so a
+    # device log line naming 0x0060 proves the config read ahead of it had already been dispatched
+    # with the notify path unwritable.
+    await ctx.send_command(0x00, 0x40)
+    await ctx.send_command(0x00, 0x60)
+    await asyncio.sleep(args.withhold)
+    during = log.since(t_withheld)
+    out["frames_during_withhold"] = len(during)
+
+    _status("backpressure: re-enabling notifications...")
+    ctx.notify_handler = handle
+    await ctx.set_notify(True)
+    try:
+        await asyncio.wait_for(done.wait(), timeout=args.timeout)
+        out["config_reassembled"] = True
+    except asyncio.TimeoutError:
+        out["config_reassembled"] = False
+    finally:
+        ctx.notify_handler = None
+
+    out["chunks"] = sorted(chunks)
+    out["contiguous"] = (sorted(chunks) == list(range(len(chunks)))) if chunks else False
+    out["total_len"] = state.get("total_len")
+    # The device must have SENT NOTHING while unsubscribed and then delivered the whole read. A
+    # partial reassembly means queued frames were dropped rather than held, which is the defect
+    # this phase exists to detect.
+    out["pass"] = bool(out["frames_during_withhold"] == 0 and out["config_reassembled"]
+                       and out["contiguous"])
+    return out
+
+
+def _redact(record: dict[str, Any]) -> dict[str, Any]:
+    """Keys, nonces and addresses never enter an evidence file. The corpus ownership rules forbid
+    it and a JSON pasted into a ticket is exactly how such a thing escapes."""
+    banned = ("key", "master", "nonce", "psk", "secret", "addr", "address", "mac")
+    out: dict[str, Any] = {}
+    for k, v in record.items():
+        if any(b in k.lower() for b in banned):
+            out[k] = "<redacted>"
+        elif isinstance(v, dict):
+            out[k] = _redact(v)
+        else:
+            out[k] = v
+    return out
+
+
+async def _do_dispatch_gate(ctx: _BleCtx, args: argparse.Namespace) -> dict[str, Any]:
+    log = _FrameLog()
+    ctx.raw_log = log
+    phases: list[dict[str, Any]] = []
+    try:
+        if args.phase in ("all", "replay"):
+            phases.append(await _bench_replay(ctx, log, args))
+        if args.phase in ("all", "withhold"):
+            phases.append(await _bench_withhold(ctx, log, args))
+    finally:
+        ctx.raw_log = None
+    record = {
+        "tool": "od-device-cli dispatch-gate",
+        "schema": "opendisplay-bench-evidence/1",
+        "phases": phases,
+        "frames": log.records,
+        # Provenance the evidence commit needs. Filled by the operator rather than guessed: the
+        # tool cannot know which board or which firmware SHA it is talking to, and inventing them
+        # is worse than leaving them blank.
+        "target": args.target,
+        "firmware_sha": args.firmware_sha,
+        "pass": all(p.get("pass") for p in phases) if phases else False,
+    }
+    return _redact(record)
+
+
+def cmd_dispatch_gate(args: argparse.Namespace) -> int:
+    key = _parse_key_arg(args.key)
+    if key is None:
+        _status("dispatch-gate needs --key: both phases require an authenticated session.")
+        return 2
+
+    async def run() -> dict[str, Any]:
+        async with _ble_connection(args.address, key=key) as ctx:
+            return await _do_dispatch_gate(ctx, args)
+
+    record = asyncio.run(run())
+    text = json.dumps(record, indent=2)
+    _write_output(text, Path(args.output) if args.output else None)
+    for p in record["phases"]:
+        _status(f"{p['phase']}: {'PASS' if p.get('pass') else 'FAIL'}")
+    return 0 if record["pass"] else 1
 
 
 def _parse_key_arg(key_hex: str | None) -> bytes | None:
@@ -1222,6 +1489,61 @@ Examples:
     p_msd.add_argument("--key", metavar="HEX", help="16-byte master key (32 hex chars) for encrypted BLE")
     p_msd.add_argument("--raw", action="store_true", help="Print the raw 16-byte MSD payload as hex instead of decoding")
     p_msd.set_defaults(func=cmd_read_msd)
+
+    p_gate = sub.add_parser(
+        "dispatch-gate",
+        help="BENCH ONLY: drive the two hardware rows nothing else can produce\n"
+        "  e.g. od-device-cli.py dispatch-gate --addr AA:BB:CC:DD:EE:FF --key <hex> --total-size 48000\n",
+        description="Run the C12 exit-matrix rows that need deliberate stimulus rather than a "
+        "normal session: the OD-S1 encrypted-replay silence path, and egress backpressure driven "
+        "by withholding notifications. Writes a JSON evidence record with secrets redacted.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+This is a BENCH tool. It deliberately replays an already-sealed frame and unsubscribes mid-session;
+neither is something a conforming client does, and neither belongs in a script that talks to a
+deployed device.
+
+WHY IT EXISTS. Both rows fail quietly when driven approximately:
+
+  * A replay must be BYTE-IDENTICAL to a frame the device already accepted. Re-sealing the same
+    PIPE sequence number produces a fresh nonce and tests duplicate handling instead -- which looks
+    the same in a log and proves nothing about the replay window. This tool seals once and writes
+    the retained bytes twice.
+
+  * Silence is not evidence on its own: a disconnected notify path is also silent. The replay phase
+    therefore ends with a deliberately corrupted tag, which MUST draw a plaintext NACK. If that
+    control is quiet, the run is void rather than passing.
+
+Examples:
+    od-device-cli.py dispatch-gate --addr AA:BB:CC:DD:EE:FF --key <hex> --total-size 48000 \\
+        --target xiao_nrf52840 --firmware-sha ab4ff36 -o evidence.json
+        Both phases, recording provenance for the evidence commit.
+
+    od-device-cli.py dispatch-gate --addr ... --key <hex> --phase withhold
+        Backpressure only; needs no transfer and no --total-size.
+""",
+    )
+    p_gate.add_argument("--addr", required=True, dest="address", help="BLE device address")
+    p_gate.add_argument("--key", metavar="HEX", required=True,
+                        help="16-byte master key (32 hex chars); both phases need a session")
+    p_gate.add_argument("--phase", choices=("all", "replay", "withhold"), default="all")
+    p_gate.add_argument("--total-size", type=int, default=0,
+                        help="bytes the PIPE transfer declares; must match what the panel expects")
+    p_gate.add_argument("--window", type=int, default=4, help="requested PIPE window")
+    p_gate.add_argument("--max-frame", type=int, default=244, help="requested client max frame")
+    p_gate.add_argument("--chunk-bytes", type=int, default=64, help="DATA payload size per frame")
+    p_gate.add_argument("--settle", type=float, default=0.5,
+                        help="seconds to wait for a reply that IS expected")
+    p_gate.add_argument("--observe", type=float, default=2.0,
+                        help="bounded window for a reply that must NOT arrive; too short turns a "
+                             "slow device into a false pass")
+    p_gate.add_argument("--withhold", type=float, default=2.0,
+                        help="seconds to hold notifications off while commands are dispatched")
+    p_gate.add_argument("--timeout", type=float, default=15.0, help="config reassembly timeout")
+    p_gate.add_argument("--target", default=None, help="board id, recorded in the evidence file")
+    p_gate.add_argument("--firmware-sha", default=None, help="firmware SHA under test, recorded")
+    p_gate.add_argument("-o", "--output", help="write the JSON evidence record to a file")
+    p_gate.set_defaults(func=cmd_dispatch_gate)
 
     args = parser.parse_args()
     try:
