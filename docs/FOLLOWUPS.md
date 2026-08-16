@@ -430,3 +430,52 @@ of those are behaviour changes on that target specifically, not merely code moti
 Also still live on Silabs and closed everywhere else: the constant-time auth-proof compare
 downgraded to `memcmp` (`targets/efr32bg22-slc/opendisplay_pipe.c:646`), first recorded in
 `AUDIT_NORDIC_ZEPHYR_2026-08-14.md:259` as an NRF54 defect and fixed there, never fixed here.
+
+---
+
+## 6. `py-opendisplay` — `deep_sleep()` sends the POWER_OFF opcode
+
+**Status:** open, **host-side, pre-dates the Firmware_Unified work.** **Evidence:** `verified` —
+read from both the canonical header and the host enum. **Severity:** high on latch hardware, where
+the observable result is a device that does not come back.
+
+Found 2026-08-15 by an independent review of an unrelated firmware refactor.
+
+### The defect
+
+`py-opendisplay/src/opendisplay/protocol/commands.py:41` declares:
+
+```python
+DEEP_SLEEP = 0x0052  # Enter deep sleep now (ESP32 timer-wake / Silabs EM4; nRF unsupported)
+```
+
+The canonical header disagrees, and the firmware implements the header:
+
+| opcode | canonical meaning | firmware handler |
+|---|---|---|
+| `0x0052` | `CMD_POWER_OFF` | `handlePowerOffCommand()` — releases the D-FF latch, cutting the rail |
+| `0x0053` | `CMD_DEEP_SLEEP` | `handleDeepSleepCommand()` — timer-wake sleep |
+
+So a host calling `deep_sleep()` sends **POWER_OFF**. `0x0053` appears nowhere in the host, which
+means the real deep-sleep command is currently **unreachable from py-opendisplay at all**.
+
+### Consequences, by hardware
+
+- **D-FF latch boards** (`DEVICE_FLAG_PWR_LATCH_DFF`): the rail is cut. A caller that asked to
+  sleep for ten minutes and wake gets a device that stays off until someone presses a button. This
+  is the bad one — it looks like a crash or a dead battery.
+- **Non-latch boards**: the device answers `OD_ERR_POWER_OFF_UNSUPPORTED` and stays awake, so
+  `deep_sleep()` silently does nothing — on a device that supports `0x0053` perfectly well.
+
+### Fix
+
+Host-side, and it is two changes rather than one, because the name is also wrong:
+
+1. `DEEP_SLEEP = 0x0053`, matching the header.
+2. Add `POWER_OFF = 0x0052` and a corresponding call, since the capability exists and currently
+   has no host API.
+
+Both are host-only; no firmware or protocol change is required, and the firmware is already
+correct against the canonical header. Worth checking `Home_Assistant_Integration` for a caller of
+`deep_sleep()` before releasing, since the failure mode on latch hardware is a device that appears
+to have died.

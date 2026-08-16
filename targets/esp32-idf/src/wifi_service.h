@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "od_hal_radio.h"   /* od_radio_result_t: the LAN sender speaks the transport's vocabulary */
+
 // OPENDISPLAY_HAS_WIFI gates the entire WiFi/LAN transport surface (mDNS, TCP
 // server, TLS-PSK listener, RX reassembly buffer, LAN response framing). It is
 // defined only on ESP32 targets built with -DOPENDISPLAY_ENABLE_WIFI, which is
@@ -110,8 +112,18 @@ void opendisplay_mdns_update_msd_txt(void);
 /// Tear down the LAN session, TLS context, TCP server, and WiFi before a reboot.
 void opendisplay_lan_teardown(void);
 /// Frame [len:2 LE][payload] and write it over the ACTIVE LAN channel (TLS or
-/// plaintext). Used by communication.cpp to route LAN-origin responses.
-void opendisplay_lan_send_frame(const uint8_t* payload, uint16_t len);
+/// plaintext). Routes LAN-origin responses.
+///
+/// BOUNDED, and the result is not advisory. The accepted socket carries SO_SNDTIMEO, so a peer
+/// that has stopped reading cannot park the caller: the write returns and this reports
+/// OD_RADIO_RETRY with NOTHING on the wire, which is the only state from which re-presenting the
+/// same frame is safe. od_txq is sized on that promise, as is every bounded drain above it.
+///
+/// A PARTIAL write is NOT retryable and does not return RETRY. This is a length-prefixed stream:
+/// once some bytes of a frame are out, re-sending the frame duplicates them and every subsequent
+/// frame the peer parses is misaligned. So a partial write drops the connection and returns
+/// OD_RADIO_GONE -- a dead session beats a desynchronised one, and the peer reconnects.
+od_radio_result_t opendisplay_lan_send_frame(const uint8_t* payload, uint16_t len);
 /// True while a LAN client is connected (plaintext or TLS).
 bool wifiLanClientConnected(void);
 /// Port the LAN listener binds: WifiConfig.server_port (or OD_LAN_TCP_PORT when 0),

@@ -1,4 +1,5 @@
 #include "display_service.h"
+#include "od_cmd_reply.h"
 
 /* THE ESP32 HALF OF THIS FILE IS OFF THE SHIM (phase C step 14). The 41 Wire transactions and
  * 13+4 read clusters went to od_hal_i2c, GPIO to od_hal_gpio, millis/delay to od_hal_time, and
@@ -519,7 +520,7 @@ static bool zlib_stream_to_direct_write(const uint8_t* data, uint32_t len, bool 
 static bool zlib_stream_to_partial_write(const uint8_t* data, uint32_t len, bool final);
 static uint32_t calc_controller_plane_bytes(uint16_t width, uint16_t height);
 static uint32_t parse_be_u32(const uint8_t* data);
-static void send_direct_write_nack(uint8_t opcode, uint8_t error, bool cleanupState);
+static void send_direct_write_nack(const od_cmd_ctx_t *ctx, uint8_t opcode, uint8_t error, bool cleanupState);
 static PartialStreamContext partialCtx = {};
 
 // Direct-write session-setup helpers (shared by legacy 0x70 START and PIPE 0x80 START)
@@ -527,13 +528,12 @@ static PartialStreamContext partialCtx = {};
 // both auto-complete paths). Declared here; defined below near the direct-write handlers.
 static void directWriteComputeGeometry(bool compressed);
 static void directWriteActivatePanel(void);
-static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t endOpcode);
+static od_cmd_result_t directWriteFinishAndRefresh(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len, uint8_t endOpcode);
 static bool imageWriteFramesMayStillArrive(void);
 
-// serviceBleTx() comes from command_queue.h. The response ring's only drainer is
-// the loop task, which is the same task running these handlers -- so anything
-// queued here stays queued until we return. Call it before any multi-second
-// blocking work (see the refresh tail).
+// od_txq's only drainer is the loop task, which is the same task running these handlers -- so
+// anything queued here stays queued until we return. Call od_cmd_flush_before_refresh() before any
+// multi-second blocking work (see the refresh tail).
 
 // PIPE_WRITE (0x0080-0x0082) sliding-window receive state + reorder queue. Declared
 // early so the quiet-logging predicates below can consult pipeState.active. The
@@ -2048,7 +2048,7 @@ static bool frameOwnsSession(const char* what) {
     return false;
 }
 
-void handleDirectWriteStart(uint8_t* data, uint16_t len) {
+od_cmd_result_t handleDirectWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
     sessionOrigin = commandOrigin();
     if (partialCtx.active) cleanup_partial_write_state();
     if (directWriteActive) {
@@ -2070,8 +2070,8 @@ void handleDirectWriteStart(uint8_t* data, uint16_t len) {
         if (directWriteDecompressedTotal != directWriteTotalBytes) {
             cleanupDirectWriteState(false);
             uint8_t errorResponse[] = {RESP_NACK, RESP_DIRECT_WRITE_START_ACK};
-            sendResponse(errorResponse, sizeof(errorResponse));
-            return;
+            (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
+            return OD_CMD_NACK;
         }
     }
     directWriteActivatePanel();
@@ -2080,16 +2080,17 @@ void handleDirectWriteStart(uint8_t* data, uint16_t len) {
         if (!zlib_stream_to_direct_write(data + 4, compressedDataLen, false)) {
             cleanupDirectWriteState(false);
             uint8_t errorResponse[] = {RESP_NACK, RESP_DIRECT_WRITE_START_ACK};
-            sendResponse(errorResponse, sizeof(errorResponse));
-            return;
+            (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
+            return OD_CMD_NACK;
         }
         directWriteCompressedReceived = compressedDataLen;
     }
     uint8_t ackResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_START_ACK};
-    sendResponse(ackResponse, sizeof(ackResponse));
+    (void)od_cmd_reply(ctx, ackResponse, sizeof(ackResponse));
+    return OD_CMD_OK;
 }
 
-void handlePartialWriteStart(uint8_t* data, uint16_t len) {
+od_cmd_result_t handlePartialWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
     sessionOrigin = commandOrigin();
     if (directWriteActive) cleanupDirectWriteState(false);
     if (partialCtx.active) cleanup_partial_write_state();
@@ -2097,8 +2098,8 @@ void handlePartialWriteStart(uint8_t* data, uint16_t len) {
     imageWriteLogReset();
 
     if (len < sizeof(struct PartialWriteStartHeader)) {
-        send_direct_write_nack(0x76, OD_ERR_PARTIAL_STREAM, false);
-        return;
+        send_direct_write_nack(ctx, 0x76, OD_ERR_PARTIAL_STREAM, false);
+        return OD_CMD_NACK;
     }
 
     // Layout is struct PartialWriteStartHeader (17 B). It is ALL big-endian, unlike
@@ -2113,13 +2114,13 @@ void handlePartialWriteStart(uint8_t* data, uint16_t len) {
     uint16_t rectH    = ((uint16_t)data[15] << 8) | data[16];
 
     if ((flags & ~PARTIAL_ALLOWED_FLAGS) != 0) {
-        send_direct_write_nack(0x76, OD_ERR_PARTIAL_FLAGS, false);
-        return;
+        send_direct_write_nack(ctx, 0x76, OD_ERR_PARTIAL_FLAGS, false);
+        return OD_CMD_NACK;
     }
 
     if (oldEtag == 0 || oldEtag != displayed_etag || newEtag == 0) {
-        send_direct_write_nack(0x76, OD_ERR_PARTIAL_ETAG_MISMATCH, false);
-        return;
+        send_direct_write_nack(ctx, 0x76, OD_ERR_PARTIAL_ETAG_MISMATCH, false);
+        return OD_CMD_NACK;
     }
 
     uint16_t dispW = globalConfig.displays[0].pixel_width;
@@ -2128,33 +2129,33 @@ void handlePartialWriteStart(uint8_t* data, uint16_t len) {
         // bb_epaper partial refresh support is effectively non-existent for
         // 2bpp+ panels, and physical panels may not support that mode either.
         // This protocol uses two 1bpp controller planes as old/new image memory.
-        send_direct_write_nack(0x76, OD_ERR_PARTIAL_UNSUPPORTED, false);
-        return;
+        send_direct_write_nack(ctx, 0x76, OD_ERR_PARTIAL_UNSUPPORTED, false);
+        return OD_CMD_NACK;
     }
 
     if (rectW == 0 || rectH == 0 ||
         (uint32_t)rectX + rectW > dispW ||
         (uint32_t)rectY + rectH > dispH) {
-        send_direct_write_nack(0x76, OD_ERR_PARTIAL_RECT_OOB, false);
-        return;
+        send_direct_write_nack(ctx, 0x76, OD_ERR_PARTIAL_RECT_OOB, false);
+        return OD_CMD_NACK;
     }
 
     if ((rectX & 7u) != 0 || (rectW & 7u) != 0) {
-        send_direct_write_nack(0x76, OD_ERR_PARTIAL_RECT_ALIGN, false);
-        return;
+        send_direct_write_nack(ctx, 0x76, OD_ERR_PARTIAL_RECT_ALIGN, false);
+        return OD_CMD_NACK;
     }
 
     uint32_t planeBytes = calc_controller_plane_bytes(rectW, rectH);
     uint32_t expectedLogicalSize = planeBytes * 2u;
 
     // TODO(protocol): 0x76 (partial-write) has no RESP_* mirror in the canonical
-    // header, so the opcode-echo byte in these frames — and in the send_direct_write_nack(0x76, ...)
+    // header, so the opcode-echo byte in these frames — and in the send_direct_write_nack(ctx, 0x76, ...)
     // calls below — stays a raw literal. Add RESP_PARTIAL_WRITE_START upstream in
     // opendisplay-protocol, then replace the raw 0x76 here.
     if (expectedLogicalSize == 0) {
         uint8_t errResponse[] = {RESP_NACK, 0x76};
-        sendResponse(errResponse, sizeof(errResponse));
-        return;
+        (void)od_cmd_reply_plain(ctx, errResponse, sizeof(errResponse));
+        return OD_CMD_NACK;
     }
 
     memset(&partialCtx, 0, sizeof(partialCtx));
@@ -2179,49 +2180,50 @@ void handlePartialWriteStart(uint8_t* data, uint16_t len) {
     if (len > 17) {
         uint16_t initLen = len - 17;
         if (!partial_consume_bytes(data + 17, (uint32_t)initLen)) {
-            send_direct_write_nack(0x76, OD_ERR_PARTIAL_STREAM, true);
-            return;
+            send_direct_write_nack(ctx, 0x76, OD_ERR_PARTIAL_STREAM, true);
+            return OD_CMD_NACK;
         }
     }
 
     uint8_t ackResponse[] = {RESP_ACK, 0x76};
-    sendResponse(ackResponse, sizeof(ackResponse));
+    (void)od_cmd_reply(ctx, ackResponse, sizeof(ackResponse));
+    return OD_CMD_OK;
 }
 
-void handleDirectWriteData(uint8_t* data, uint16_t len) {
+od_cmd_result_t handleDirectWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
     // A pipe transfer (0x0080-0x0082) owns the panel session — and a pipe-partial
     // one owns partialCtx. A stray legacy 0x71 must not feed that context out of
     // band from the sliding-window seq accounting. Silent-discard mirrors how the
     // pipe path treats frames after a fatal error.
-    if (pipeState.active) return;
+    if (pipeState.active) return OD_CMD_OK;   /* silent discard */
     if (partialCtx.active) {
-        if (len == 0) return;
-        if (!frameOwnsSession("0x0071 (partial)")) return;
+        if (len == 0) return OD_CMD_OK;   /* silent discard */
+        if (!frameOwnsSession("0x0071 (partial)")) return OD_CMD_OK;   /* silent discard */
         imageWriteLogChunk(data, len);
         if (!partial_consume_bytes(data, (uint32_t)len)) {
-            send_direct_write_nack(RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true);
-            return;
+            send_direct_write_nack(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true);
+            return OD_CMD_NACK;
         }
         imageWriteLogProgress(partialCtx.bytes_received, partialCtx.expected_stream_size);
         uint8_t ackResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_DATA_ACK};
-        sendResponse(ackResponse, sizeof(ackResponse));
-        return;
+        (void)od_cmd_reply(ctx, ackResponse, sizeof(ackResponse));
+        return OD_CMD_OK;
     }
-    if (!directWriteActive || len == 0) return;
-    if (!frameOwnsSession("0x0071")) return;
+    if (!directWriteActive || len == 0) return OD_CMD_OK;
+    if (!frameOwnsSession("0x0071")) return OD_CMD_OK;
     imageWriteLogChunk(data, len);
     if (directWriteCompressed) {
         if (!handleDirectWriteCompressedData(data, len)) {
             cleanupDirectWriteState(true);
             uint8_t errorResponse[] = {RESP_NACK, RESP_DIRECT_WRITE_DATA_ACK};
-            sendResponse(errorResponse, sizeof(errorResponse));
+            (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
         } else {
             directWriteCompressedReceived += len;
             imageWriteLogProgress(directWriteBytesWritten, directWriteTotalBytes);
             uint8_t ackResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_DATA_ACK};
-            sendResponse(ackResponse, sizeof(ackResponse));
+            (void)od_cmd_reply(ctx, ackResponse, sizeof(ackResponse));
         }
-        return;
+        return OD_CMD_OK;
     }
     uint32_t remainingBytes = (directWriteBytesWritten < directWriteTotalBytes) ? (directWriteTotalBytes - directWriteBytesWritten) : 0;
     uint16_t bytesToWrite = (len > remainingBytes) ? remainingBytes : len;
@@ -2240,67 +2242,85 @@ void handleDirectWriteData(uint8_t* data, uint16_t len) {
     }
     imageWriteLogProgress(directWriteBytesWritten, directWriteTotalBytes);
     if (directWriteBytesWritten >= directWriteTotalBytes) {
-        handleDirectWriteEnd(nullptr, 0);
+        /* AUTO-COMPLETE: the last data frame finishes the transfer and calls END itself, which is
+         * why 0x71 reserves TWO -- the data ack is NOT sent on this branch, but END emits its own
+         * ack and then a refresh status. Its verdict is this frame's verdict. */
+        return handleDirectWriteEnd(ctx, nullptr, 0);
     } else {
         uint8_t ackResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_DATA_ACK};
-        sendResponse(ackResponse, sizeof(ackResponse));
+        (void)od_cmd_reply(ctx, ackResponse, sizeof(ackResponse));
     }
+    return OD_CMD_OK;
 }
 
-void handleDirectWriteEnd(uint8_t* data, uint16_t len) {
+od_cmd_result_t handleDirectWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
     // Same guard as handleDirectWriteData: a stray legacy 0x72 mid-pipe must not
     // finalize/refresh a pipe-owned session (partial would commit new_etag==0 and
     // leave pipeState zombied; full-frame would refresh with pipeState still active).
-    if (pipeState.active) return;
-    if ((directWriteActive || partialCtx.active) && !frameOwnsSession("0x0072")) return;
+    if (pipeState.active) return OD_CMD_OK;   /* silent discard */
+    if ((directWriteActive || partialCtx.active) && !frameOwnsSession("0x0072")) return OD_CMD_OK;   /* silent discard */
     if (partialCtx.active) {
         if (data != nullptr && len > 1) {
-            send_direct_write_nack(RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true);
-            return;
+            send_direct_write_nack(ctx, RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true);
+            return OD_CMD_NACK;
         }
         if (partialCtx.compressed) {
             if (partialCtx.bytes_received == 0 || !zlib_stream_to_partial_write(nullptr, 0, true)) {
-                send_direct_write_nack(RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true);
-                return;
+                send_direct_write_nack(ctx, RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true);
+                return OD_CMD_NACK;
             }
         } else if (partialCtx.bytes_written != partialCtx.expected_stream_size) {
-            send_direct_write_nack(RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true);
-            return;
+            send_direct_write_nack(ctx, RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true);
+            return OD_CMD_NACK;
         }
         imageWriteLogFinish(partialCtx.bytes_received, partialCtx.expected_stream_size);
         uint8_t ackResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_END_ACK};
-        sendResponse(ackResponse, sizeof(ackResponse));
+    /* THE ACK DECIDES WHETHER THE REFRESH HAPPENS. od_reply() can substitute a plaintext hard NACK
+     * for an END ack it could not seal, and it reports that rather than lying. Emitting the
+     * post-refresh status after such a substitution would queue a success behind a rejection; and
+     * refreshing at all would put content on the panel that the host has just been told was
+     * refused. Neither the wire nor the display may claim what the other denies, so both stop. */
+        if (od_cmd_reply(ctx, ackResponse, sizeof(ackResponse)) != OD_TXQ_OK) {
+            /* Clear the negotiated etag with the state, parity with send_direct_write_nack: the
+             * host was told this END failed, so it must not believe the device holds the new
+             * image. */
+            displayed_etag = 0;
+            cleanup_partial_write_state();
+            return OD_CMD_NACK;
+        }
         int refreshMode = REFRESH_PARTIAL;
         if (data != nullptr && len >= 1 && data[0] == REFRESH_FULL) refreshMode = REFRESH_FULL;
         else if (data != nullptr && len >= 1 && data[0] == REFRESH_FAST) refreshMode = REFRESH_FAST;
+        od_cmd_flush_before_refresh();
         bool refreshSuccess = partial_write_to_panel(refreshMode);
         if (refreshSuccess) {
             displayed_etag = partialCtx.new_etag;
             uint8_t validatedResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_REFRESH_SUCCESS};
-            sendResponse(validatedResponse, sizeof(validatedResponse));
+            (void)od_cmd_reply(ctx, validatedResponse, sizeof(validatedResponse));
         } else {
             displayed_etag = 0;
             uint8_t timeoutResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_REFRESH_TIMEOUT};
-            sendResponse(timeoutResponse, sizeof(timeoutResponse));
+            (void)od_cmd_reply(ctx, timeoutResponse, sizeof(timeoutResponse));
         }
         cleanup_partial_write_state();
-        return;
+        return OD_CMD_OK;
     }
-    if (!directWriteActive) return;
-    directWriteFinishAndRefresh(data, len, 0x72);
+    if (!directWriteActive) return OD_CMD_OK;   /* silent discard */
+    return directWriteFinishAndRefresh(ctx, data, len, 0x72);
+    return OD_CMD_OK;
 }
 
 // Shared finalize+refresh tail for a full-frame direct-write session. Emits the
 // END success ack {0x00,endOpcode} (0x72 legacy / 0x82 PIPE) or a NACK
 // {0xFF,endOpcode} on compressed-flush/completeness failure, then refreshes the
 // panel and emits {0x00,0x73}/{0x00,0x74}. Caller guarantees directWriteActive.
-static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t endOpcode) {
+static od_cmd_result_t directWriteFinishAndRefresh(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len, uint8_t endOpcode) {
     directWriteStartTime = 0;
     if (directWriteCompressed && !zlib_stream_to_direct_write(nullptr, 0, true)) {
         cleanupDirectWriteState(true);
         uint8_t errorResponse[] = {0xFF, endOpcode};
-        sendResponse(errorResponse, sizeof(errorResponse));
-        return;
+        (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
+        return OD_CMD_NACK;
     }
     const bool gray4 = directWriteIsGray4();
     if (gray4 || directWriteBitplanes) {
@@ -2310,8 +2330,8 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
         if (directWriteBytesWritten != directWriteTotalBytes) {
             cleanupDirectWriteState(false);
             uint8_t errorResponse[] = {0xFF, endOpcode};
-            sendResponse(errorResponse, sizeof(errorResponse));
-            return;
+            (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
+            return OD_CMD_NACK;
         }
     }
     imageWriteLogFinish(directWriteBytesWritten, directWriteTotalBytes);
@@ -2324,7 +2344,20 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
         od_log_info("EPD refresh: %s (mode=%d, end payload none (auto))", modeName, refreshMode);
     }
     uint8_t ackResponse[] = {0x00, endOpcode};
-    sendResponse(ackResponse, sizeof(ackResponse));
+    /* THE ACK DECIDES WHETHER THE REFRESH HAPPENS. od_reply() can substitute a plaintext hard NACK
+     * for an END ack it could not seal, and it reports that rather than lying. Emitting the
+     * post-refresh status after such a substitution would queue a success behind a rejection; and
+     * refreshing at all would put content on the panel that the host has just been told was
+     * refused. Neither the wire nor the display may claim what the other denies, so both stop. */
+    if (od_cmd_reply(ctx, ackResponse, sizeof(ackResponse)) != OD_TXQ_OK) {
+        /* A hard NACK is already on the wire in place of this ack. Returning without clearing the
+         * direct-write session would leave the device mid-transfer -- panel powered, touch
+         * suspended -- for a transfer the host has abandoned. This helper serves 0x76 as well as
+         * PIPE auto-complete, so it cleans the full-frame session it owns and touches no
+         * pipeState; the PIPE caller aborts its own. */
+        cleanupDirectWriteState(true);
+        return OD_CMD_NACK;
+    }
     // Push the END ack — and the final tail ACK the auto-complete path queued just
     // before calling us — onto the air BEFORE the blocking refresh below. bbepRefresh
     // + waitforrefresh occupy the loop task for seconds on a big panel, and the loop
@@ -2333,7 +2366,7 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
     //
     // Portable as of Phase 3: nRF used to notify() inline from the BLE callback
     // task and so never needed this, but it now shares the ring and the loop task.
-    serviceBleTx();
+    od_cmd_flush_before_refresh();
     od_hal_delay_ms(20);
     epdRefreshInProgress = true;
     bool refreshSuccess = false;
@@ -2370,12 +2403,15 @@ static void directWriteFinishAndRefresh(uint8_t* data, uint16_t len, uint8_t end
         if (hasNewEtag && newEtag != 0) displayed_etag = newEtag;
         else displayed_etag = 0;
         uint8_t refreshResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_REFRESH_SUCCESS};
-        sendResponse(refreshResponse, sizeof(refreshResponse));
+        (void)od_cmd_reply(ctx, refreshResponse, sizeof(refreshResponse));
     } else {
         if (hasNewEtag) displayed_etag = 0;
         uint8_t timeoutResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_REFRESH_TIMEOUT};
-        sendResponse(timeoutResponse, sizeof(timeoutResponse));
+        (void)od_cmd_reply(ctx, timeoutResponse, sizeof(timeoutResponse));
     }
+    /* The refresh status above is the last word: a timeout is still a completed transfer from the
+     * dispatcher's point of view, so both arms are OK. Only the two early NACKs are refusals. */
+    return OD_CMD_OK;
 }
 
 // ===========================================================================
@@ -2424,7 +2460,7 @@ bool pipeWriteActive(void) { return pipeState.active; }
 // direct-write watchdog and its teardown, the 0x0072 session-ownership check).
 //
 // transferActive() -- "is viable work in flight?" Excludes a fatally NACKed pipe,
-// whose panel sendPipeNack() has already released: touch I2C polling and a
+// whose panel sendPipeNack(ctx, ) has already released: touch I2C polling and a
 // full-channel WiFi scan are safe again the moment that happens, and suspending
 // them until the client next says something is protecting nothing.
 //
@@ -2484,18 +2520,24 @@ static void pipeBuildAckPayload(uint8_t* out) {
 // for the pipe-write opcodes, so the response opcode-echo byte in the helpers
 // below (0x80 / 0x81 / 0x82) stays a raw literal. It also defines no data-phase
 // pipe error namespace (only OD_ERR_PIPE_START_* for the 0x80 START), so the
-// sendPipeNack() error codes (0x03 over-size/overflow, 0x04 out-of-window) are
+// sendPipeNack(ctx, ) error codes (0x03 over-size/overflow, 0x04 out-of-window) are
 // raw too. Add RESP_PIPE_WRITE_{START,DATA,END} + an OD_ERR_PIPE_DATA_* set
 // upstream in opendisplay-protocol, then replace those literals here.
 
 // {0x00,0x81, highest_seen, ack_mask LE(4)} via sendResponse (auto-encrypts when
 // authenticated). Resets both cadence counters.
-static void sendPipeAck(void) {
+/* RETURNS ITS RESULT, and callers that go on to emit more must honour it. od_reply can substitute
+ * a plaintext hard NACK for an ACK it could not seal, and 5.1 makes every 0x81 NACK fatal -- so
+ * anything queued behind one contradicts a frame the host has already treated as the end of the
+ * transfer. The cadence counters still reset either way: they describe what this device decided to
+ * send, not what the transport managed to do with it. */
+static od_txq_status_t sendPipeAck(const od_cmd_ctx_t *ctx) {
     uint8_t r[7] = {RESP_ACK, 0x81, 0, 0, 0, 0, 0};
     pipeBuildAckPayload(r + 2);
-    sendResponse(r, sizeof(r));
+    const od_txq_status_t rc = od_cmd_reply(ctx, r, sizeof(r));  /* an application ACK */
     pipeState.frames_since_ack = 0;
     pipeState.ooo_acks_since_gap = 0;
+    return rc;
 }
 
 // {0xFF,0x81, err, highest_seen, ack_mask LE(4)}. All 0x81 NACKs are FATAL: the
@@ -2506,10 +2548,30 @@ static void sendPipeAck(void) {
 // same way the legacy mid-stream {0xFF,0x71} failure does (cleanupDirectWriteState
 // with refreshDisplay=true: sleep a powered controller cleanly, cut power, resume
 // touch) instead of leaving the panel powered until the next transfer.
-static void sendPipeNack(uint8_t err) {
+/* THE TEARDOWN HALF OF sendPipeNack, WITHOUT THE NACK -- for the one case that needs exactly
+ * that: an ACK od_reply could not seal, for which it has ALREADY substituted a hard NACK. Every
+ * 0x81 NACK is fatal (pipe-write-protocol.md 5.1), so the host has terminated the transfer; a
+ * second NACK would add nothing and cost a slot.
+ *
+ * Stopping the replies is not enough on its own, which is what an earlier version of this got
+ * wrong. A PIPE transfer owns hardware: leaving it half-alive keeps panel power up, leaves touch
+ * suspended, and -- on a cadence ACK -- lets the device go on accepting DATA for a transfer the
+ * host has already abandoned. Same branch as sendPipeNack, for the same reason: partial transfers
+ * own partialCtx, full-frame ones own the direct-write session. */
+static void pipeAbortNoReply(void) {
+    pipeState.error = true;
+    if (pipeState.partial) {
+        displayed_etag = 0;
+        cleanup_partial_write_state();
+    } else {
+        cleanupDirectWriteState(true);
+    }
+}
+
+static void sendPipeNack(const od_cmd_ctx_t *ctx, uint8_t err) {
     uint8_t r[8] = {RESP_NACK, 0x81, err, 0, 0, 0, 0, 0};
     pipeBuildAckPayload(r + 3);
-    sendResponse(r, sizeof(r));
+    (void)od_cmd_reply_plain(ctx, r, sizeof(r)); /* {RESP_NACK,0x81,..} -- a hard NACK */
     pipeState.error = true;
     // Partial transfers own partialCtx, not the full-frame direct-write session:
     // clear the negotiated etag (any partial NACK invalidates it, parity with
@@ -2523,9 +2585,9 @@ static void sendPipeNack(uint8_t err) {
 }
 
 // {0xFF,0x80, err, 0x00}. Caller owns any session teardown.
-static void sendPipeStartNack(uint8_t err) {
+static void sendPipeStartNack(const od_cmd_ctx_t *ctx, uint8_t err) {
     uint8_t r[4] = {RESP_NACK, 0x80, err, 0x00};
-    sendResponse(r, sizeof(r));
+    (void)od_cmd_reply_plain(ctx, r, sizeof(r));
 }
 
 // Advance highest_seen only for a genuinely newer seq (forward distance small and
@@ -2579,7 +2641,7 @@ static bool pipeConsumePayload(uint8_t* data, uint16_t len) {
     return true;
 }
 
-void handlePipeWriteStart(uint8_t* data, uint16_t len) {
+od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
     sessionOrigin = commandOrigin();
     // A new START aborts any in-flight transfer of any family and resets pipe state
     // (mirrors legacy START). Reset happens up-front so even a malformed START is safe.
@@ -2590,7 +2652,7 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
     // Fixed 10-byte payload (opcode already stripped by the dispatcher):
     // ver(1)+flags(1)+req_w(1)+req_n(1)+client_max_frame(2)+total_size(4).
     // Tolerate trailing bytes (future fields).
-    if (len < sizeof(struct PipeStartRequest)) { sendPipeStartNack(OD_ERR_PIPE_START_BAD_HEADER); return; }
+    if (len < sizeof(struct PipeStartRequest)) { sendPipeStartNack(ctx, OD_ERR_PIPE_START_BAD_HEADER); return OD_CMD_NACK; }
     struct PipeStartRequest req;
     memcpy(&req, data, sizeof req);   // canonical 10-byte LE header (byte-identical to the old shifts)
     uint8_t  ver              = req.version;
@@ -2600,9 +2662,9 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
     uint16_t client_max_frame = req.client_max_frame;
     uint32_t total_size       = req.total_size;
 
-    if (ver != PIPE_VERSION) { sendPipeStartNack(OD_ERR_PIPE_START_BAD_HEADER); return; }
+    if (ver != PIPE_VERSION) { sendPipeStartNack(ctx, OD_ERR_PIPE_START_BAD_HEADER); return OD_CMD_NACK; }
     // Defined flags: bit0 zlib compression, bit1 partial-region refresh. Any other bit unsupported.
-    if ((flags & ~(PIPE_FLAG_COMPRESSED | PIPE_FLAG_PARTIAL)) != 0) { sendPipeStartNack(OD_ERR_PIPE_START_UNKNOWN_FLAG); return; }
+    if ((flags & ~(PIPE_FLAG_COMPRESSED | PIPE_FLAG_PARTIAL)) != 0) { sendPipeStartNack(ctx, OD_ERR_PIPE_START_UNKNOWN_FLAG); return OD_CMD_NACK; }
 
     bool compressed = (flags & PIPE_FLAG_COMPRESSED) != 0;
     bool partial    = (flags & PIPE_FLAG_PARTIAL) != 0;
@@ -2610,7 +2672,7 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
     // Partial START appends a 12-byte LE extension after total_size (payload len 22 vs 10):
     // [old_etag:4][x:2][y:2][w:2][h:2]. LE, unlike 0x76's big-endian layout.
     if (partial && len < sizeof(struct PipeStartRequest) + sizeof(struct PipePartialExt)) {
-        sendPipeStartNack(OD_ERR_PIPE_START_BAD_HEADER); return;
+        sendPipeStartNack(ctx, OD_ERR_PIPE_START_BAD_HEADER); return OD_CMD_NACK;
     }
     uint32_t old_etag = 0;
     uint16_t rectX = 0, rectY = 0, rectW = 0, rectH = 0;
@@ -2632,17 +2694,17 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
         // 5: partial uses two 1bpp planes (old+new). FastEPD IT8951 accepts that stream
         // and applies a row-band update; 2bpp+ remains unsupported.
         if (getBitsPerPixel() != 1) {
-            displayed_etag = 0; sendPipeStartNack(OD_ERR_PIPE_START_PARTIAL_UNSUPPORTED); return;
+            displayed_etag = 0; sendPipeStartNack(ctx, OD_ERR_PIPE_START_PARTIAL_UNSUPPORTED); return OD_CMD_NACK;
         }
         // 6: etag gate — nonzero and must match what is currently on the panel.
         if (old_etag == 0 || old_etag != displayed_etag) {
-            displayed_etag = 0; sendPipeStartNack(OD_ERR_PIPE_START_ETAG_MISMATCH); return;
+            displayed_etag = 0; sendPipeStartNack(ctx, OD_ERR_PIPE_START_ETAG_MISMATCH); return OD_CMD_NACK;
         }
         // 7: rectangle must be non-empty, in-bounds, and x/width byte-aligned (1bpp packing).
         if (rectW == 0 || rectH == 0 ||
             (uint32_t)rectX + rectW > dispW || (uint32_t)rectY + rectH > dispH ||
             (rectX & 7u) != 0 || (rectW & 7u) != 0) {
-            displayed_etag = 0; sendPipeStartNack(OD_ERR_PIPE_START_RECT_INVALID); return;
+            displayed_etag = 0; sendPipeStartNack(ctx, OD_ERR_PIPE_START_RECT_INVALID); return OD_CMD_NACK;
         }
     }
 
@@ -2654,11 +2716,11 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
         if (planeBytes == 0 || total_size != planeBytes * 2u) {
             // Plan 1.2: every partial-request NACK at steps 5-8 clears the etag
             // (parity with send_direct_write_nack).
-            displayed_etag = 0; sendPipeStartNack(OD_ERR_PIPE_START_SIZE_MISMATCH); return;
+            displayed_etag = 0; sendPipeStartNack(ctx, OD_ERR_PIPE_START_SIZE_MISMATCH); return OD_CMD_NACK;
         }
     } else {
         directWriteComputeGeometry(compressed);
-        if (total_size != directWriteTotalBytes) { sendPipeStartNack(OD_ERR_PIPE_START_SIZE_MISMATCH); return; }
+        if (total_size != directWriteTotalBytes) { sendPipeStartNack(ctx, OD_ERR_PIPE_START_SIZE_MISMATCH); return OD_CMD_NACK; }
     }
 
     // Effective values (min-rule, plan 1.1). Floors at 1; N <= W; frame <= 244.
@@ -2714,7 +2776,7 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
     // responding first keeps the wait short on nRF and any direct-notify path.
     // Ordering is safe on both targets: on ESP32 this handler runs in the main-loop
     // queue drain, so 0x0081 frames arriving during bring-up park in the 33-slot
-    // ingest ring until we return; on nRF the Bluefruit write callback dispatches
+    // ingest ring until we return OD_CMD_OK;   /* silent discard */ on nRF the Bluefruit write callback dispatches
     // commands sequentially from its callback task, so activation below completes
     // before any queued 0x0081 write is handed to the dispatcher.
     // Device maxima; flags bit0 SET (selective repeat), bit1 = partial accepted (plan 1.2).
@@ -2725,7 +2787,7 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
     uint8_t resp[8] = {RESP_ACK, 0x80, PIPE_VERSION, PIPE_MAX_W, PIPE_MAX_N,
                        (uint8_t)(PIPE_MAX_FRAME & 0xFF), (uint8_t)((PIPE_MAX_FRAME >> 8) & 0xFF),
                        (uint8_t)(0x01 | (partial ? PIPE_FLAG_PARTIAL : 0))};
-    sendResponse(resp, sizeof(resp));
+    (void)od_cmd_reply(ctx, resp, sizeof(resp));
 
     if (partial) {
         // Partial bring-up (0x76 parity): white-fill both controller planes and reset the
@@ -2736,7 +2798,7 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
         imageWriteLogStart(total_size);
         partial_prepare_panel_ram();
         if (compressed) od_zlib_stream_reset(total_size);
-        return;
+        return OD_CMD_OK;
     }
 
     // Bring up the full-frame session exactly like legacy START (touch suspend, panel prep).
@@ -2750,16 +2812,17 @@ void handlePipeWriteStart(uint8_t* data, uint16_t len) {
 #endif
     directWriteDecompressedTotal = total_size;   // compressed zlib reset + overflow guard
     directWriteActivatePanel();
+    return OD_CMD_OK;
 }
 
-void handlePipeWriteData(uint8_t* data, uint16_t len) {
-    if (!pipeState.active || pipeState.error) return;   // silent discard
-    if (len < 1) return;
-    if (!frameOwnsSession("0x0081")) return;
+od_cmd_result_t handlePipeWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
+    if (!pipeState.active || pipeState.error) return OD_CMD_OK;   /* silent discard */   // silent discard
+    if (len < 1) return OD_CMD_OK;   /* silent discard */
+    if (!frameOwnsSession("0x0081")) return OD_CMD_OK;   /* silent discard */
     uint8_t  seq     = data[0];
     uint8_t* payload = data + 1;
     uint16_t plen    = (uint16_t)(len - 1);
-    if (plen > PIPE_REORDER_SLOT_SIZE) { sendPipeNack(0x03); return; }  // over-size frame (impossible <=244)
+    if (plen > PIPE_REORDER_SLOT_SIZE) { sendPipeNack(ctx, 0x03); return OD_CMD_NACK; }  // over-size frame (impossible <=244)
 
     const uint8_t W   = pipeState.window;
     uint8_t fwd  = (uint8_t)(seq - pipeState.expected_seq);   // 0 in-order; 1..W-1 ahead
@@ -2769,7 +2832,7 @@ void handlePipeWriteData(uint8_t* data, uint16_t len) {
         // In-order accept -> stream to controller, then drain contiguous successors.
         // Count every accepted frame (trigger + drained) toward the ACK cadence so a
         // post-gap drain refunds tokens promptly instead of waiting for fresh frames.
-        if (!pipeConsumePayload(payload, plen)) { sendPipeNack(pipeState.compressed ? 0x02 : 0x03); return; }
+        if (!pipeConsumePayload(payload, plen)) { sendPipeNack(ctx, pipeState.compressed ? 0x02 : 0x03); return OD_CMD_NACK; }
         pipeState.expected_seq++;
         pipeState.received_count++;
         pipeState.frames_since_ack++;
@@ -2777,7 +2840,7 @@ void handlePipeWriteData(uint8_t* data, uint16_t len) {
         while (pipeReorder[pipeSlot(pipeState.expected_seq)].occupied &&
                pipeReorder[pipeSlot(pipeState.expected_seq)].seq == pipeState.expected_seq) {
             PipeReorderSlot& s = pipeReorder[pipeSlot(pipeState.expected_seq)];
-            if (!pipeConsumePayload(s.data, s.len)) { sendPipeNack(pipeState.compressed ? 0x02 : 0x03); return; }
+            if (!pipeConsumePayload(s.data, s.len)) { sendPipeNack(ctx, pipeState.compressed ? 0x02 : 0x03); return OD_CMD_NACK; }
             s.occupied = false;
             if (pipeState.queued_count > 0) pipeState.queued_count--;
             pipeState.expected_seq++;
@@ -2791,13 +2854,30 @@ void handlePipeWriteData(uint8_t* data, uint16_t len) {
         // touches directWrite* (both are 0), so 0>=0 would false-fire a FULL refresh on the very
         // first frame — partial transfers complete only on the explicit 0x0082 END (plan 1.5).
         if (!pipeState.partial && !pipeState.compressed && directWriteBytesWritten >= directWriteTotalBytes) {
-            sendPipeAck();                                   // final tail flush ({0x00,0x81})
-            directWriteFinishAndRefresh(nullptr, 0, 0x82);   // {0x00,0x82} + FULL refresh, no etag
+            /* A tail flush that could not be sealed has already put a FATAL 0x81 NACK on the
+             * wire (5.1), so the transfer is over from the host's point of view. Emitting the END
+             * ack and refreshing behind it would contradict that -- and would show the image the
+             * host has just been told did not land. */
+            if (sendPipeAck(ctx) != OD_TXQ_OK) {   // final tail flush ({0x00,0x81})
+                pipeAbortNoReply();
+                resetPipeWriteState();
+                return OD_CMD_NACK;
+            }
+            const od_cmd_result_t fin =
+                directWriteFinishAndRefresh(ctx, nullptr, 0, 0x82);   // {0x00,0x82} + FULL refresh
             resetPipeWriteState();
-            return;
+            return fin;
         }
-        if (pipeState.frames_since_ack >= pipeState.ack_every) sendPipeAck();
-        return;
+        /* No later reply follows a cadence ACK inside this call -- but the TRANSFER does, and that
+         * is what makes discarding the result wrong. A substituted NACK is fatal, so the host has
+         * stopped; carrying on would accept DATA for a transfer that no longer exists. */
+        if (pipeState.frames_since_ack >= pipeState.ack_every &&
+            sendPipeAck(ctx) != OD_TXQ_OK) {
+            pipeAbortNoReply();
+            resetPipeWriteState();
+            return OD_CMD_NACK;
+        }
+        return OD_CMD_OK;
     }
 
     if (fwd < W) {
@@ -2814,17 +2894,25 @@ void handlePipeWriteData(uint8_t* data, uint16_t len) {
             if (pipeState.queued_count > pipeState.queue_high_water)
                 pipeState.queue_high_water = pipeState.queued_count;
         }
-        if (pipeState.queued_count >= PIPE_REORDER_SLOTS) { sendPipeNack(0x03); return; }  // overflow guard
+        if (pipeState.queued_count >= PIPE_REORDER_SLOTS) { sendPipeNack(ctx, 0x03); return OD_CMD_NACK; }  // overflow guard
         pipeUpdateHighestSeen(seq);
         // Gap ACK: immediately when the gap first opens (fast-retransmit), then
         // rate-limited to one per ack_every subsequent out-of-order arrivals.
         if (!pipeState.gap_open) {
             pipeState.gap_open = true;
-            sendPipeAck();                                   // resets ooo_acks_since_gap to 0
+            if (sendPipeAck(ctx) != OD_TXQ_OK) {  // resets ooo_acks_since_gap to 0
+                pipeAbortNoReply();
+                resetPipeWriteState();
+                return OD_CMD_NACK;
+            }
         } else if (++pipeState.ooo_acks_since_gap >= pipeState.ack_every) {
-            sendPipeAck();
+            if (sendPipeAck(ctx) != OD_TXQ_OK) {
+                pipeAbortNoReply();
+                resetPipeWriteState();
+                return OD_CMD_NACK;
+            }
         }
-        return;
+        return OD_CMD_OK;
     }
 
     // fwd >= W: either a duplicate of an already-accepted chunk (seq just below
@@ -2833,36 +2921,50 @@ void handlePipeWriteData(uint8_t* data, uint16_t len) {
         // Duplicate/below-expected -> discard, ACK so the sender learns our position
         // (rate-limited the same way as out-of-order arrivals).
         if (!pipeState.gap_open) {
-            sendPipeAck();
+            if (sendPipeAck(ctx) != OD_TXQ_OK) {
+                pipeAbortNoReply();
+                resetPipeWriteState();
+                return OD_CMD_NACK;
+            }
         } else if (++pipeState.ooo_acks_since_gap >= pipeState.ack_every) {
-            sendPipeAck();
+            if (sendPipeAck(ctx) != OD_TXQ_OK) {
+                pipeAbortNoReply();
+                resetPipeWriteState();
+                return OD_CMD_NACK;
+            }
         }
-        return;
+        return OD_CMD_OK;
     }
 
     // Out of window on both sides -> protocol violation.
-    sendPipeNack(0x04);
+    sendPipeNack(ctx, 0x04);
+    return OD_CMD_NACK;
 }
 
-void handlePipeWriteEnd(uint8_t* data, uint16_t len) {
-    if (pipeState.active && !frameOwnsSession("0x0082")) return;
+od_cmd_result_t handlePipeWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
+    if (pipeState.active && !frameOwnsSession("0x0082")) return OD_CMD_NACK;
     if (!pipeState.active) {
         uint8_t n[2] = {RESP_NACK, 0x82};   // no active pipe transfer
-        sendResponse(n, sizeof(n));
-        return;
+        (void)od_cmd_reply_plain(ctx, n, sizeof(n));
+        return OD_CMD_NACK;
     }
     if (pipeState.error) {
         uint8_t n[2] = {RESP_NACK, 0x82};   // a fatal error already NACKed this transfer
-        sendResponse(n, sizeof(n));
+        (void)od_cmd_reply_plain(ctx, n, sizeof(n));
         // sendPipeNack already released the panel hardware at NACK time; this
         // re-run is a defensive no-op (partialCtx / directWriteActive already down).
         if (pipeState.partial) cleanup_partial_write_state();
         else cleanupDirectWriteState(false);
         resetPipeWriteState();
-        return;
+        return OD_CMD_NACK;
     }
-    // Tail-flush ACK precedes the END result (plan 1.3c / 1.5).
-    sendPipeAck();
+    // Tail-flush ACK precedes the END result (plan 1.3c / 1.5) -- and gates it: a substituted
+    // 0x81 NACK is fatal, so nothing may follow it.
+    if (sendPipeAck(ctx) != OD_TXQ_OK) {
+        pipeAbortNoReply();          /* branches on partial; cleanup_partial alone is a no-op here */
+        resetPipeWriteState();
+        return OD_CMD_NACK;
+    }
 
     // Partial transfers never auto-complete (plan 1.5): the 0x0082 END alone carries the
     // refresh mode + new_etag. Completeness mirrors the 0x76 partial branch.
@@ -2875,34 +2977,44 @@ void handlePipeWriteEnd(uint8_t* data, uint16_t len) {
         }
         if (incomplete) {
             uint8_t n[2] = {RESP_NACK, 0x82};
-            sendResponse(n, sizeof(n));
+            (void)od_cmd_reply_plain(ctx, n, sizeof(n));
             displayed_etag = 0;
             cleanup_partial_write_state();
             resetPipeWriteState();
-            return;
+            return OD_CMD_NACK;
         }
         imageWriteLogFinish(partialCtx.bytes_received, partialCtx.expected_stream_size);
         uint8_t ackResponse[] = {RESP_ACK, 0x82};
-        sendResponse(ackResponse, sizeof(ackResponse));
+    /* THE ACK DECIDES WHETHER THE REFRESH HAPPENS. od_reply() can substitute a plaintext hard NACK
+     * for an END ack it could not seal, and it reports that rather than lying. Emitting the
+     * post-refresh status after such a substitution would queue a success behind a rejection; and
+     * refreshing at all would put content on the panel that the host has just been told was
+     * refused. Neither the wire nor the display may claim what the other denies, so both stop. */
+        if (od_cmd_reply(ctx, ackResponse, sizeof(ackResponse)) != OD_TXQ_OK) {
+            cleanup_partial_write_state();
+            resetPipeWriteState();
+            return OD_CMD_NACK;
+        }
         // Refresh selector rides the END tail (plan 1.4): 0->FULL, 1->FAST, 2/absent->PARTIAL.
         int refreshMode = REFRESH_PARTIAL;
         if (data != nullptr && len >= 1 && data[0] == REFRESH_FULL) refreshMode = REFRESH_FULL;
         else if (data != nullptr && len >= 1 && data[0] == REFRESH_FAST) refreshMode = REFRESH_FAST;
         // new_etag rides the END tail [refresh:1][new_etag:4 BE]; absent => 0.
         uint32_t newEtag = (len >= 5) ? parse_be_u32(data + 1) : 0;
+        od_cmd_flush_before_refresh();
         bool refreshSuccess = partial_write_to_panel(refreshMode);
         if (refreshSuccess) {
             displayed_etag = newEtag;
             uint8_t validatedResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_REFRESH_SUCCESS};
-            sendResponse(validatedResponse, sizeof(validatedResponse));
+            (void)od_cmd_reply(ctx, validatedResponse, sizeof(validatedResponse));
         } else {
             displayed_etag = 0;
             uint8_t timeoutResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_REFRESH_TIMEOUT};
-            sendResponse(timeoutResponse, sizeof(timeoutResponse));
+            (void)od_cmd_reply(ctx, timeoutResponse, sizeof(timeoutResponse));
         }
         cleanup_partial_write_state();
         resetPipeWriteState();
-        return;
+        return OD_CMD_OK;
     }
 
     // The client must not send END before every chunk is acked; a hole or short
@@ -2911,18 +3023,24 @@ void handlePipeWriteEnd(uint8_t* data, uint16_t len) {
     if (!pipeState.compressed && directWriteBytesWritten < directWriteTotalBytes) incomplete = true;
     if (incomplete) {
         uint8_t n[2] = {RESP_NACK, 0x82};
-        sendResponse(n, sizeof(n));
+        (void)od_cmd_reply_plain(ctx, n, sizeof(n));
         // Mid-stream abort with the panel powered: use the legacy mid-stream
         // variant (refreshDisplay=true → sleep the controller cleanly, cut power,
         // resume touch), matching the legacy {0xFF,0x71}/zlib-flush failure paths.
         cleanupDirectWriteState(true);
         resetPipeWriteState();
-        return;
+        return OD_CMD_NACK;
     }
     // Shared END/refresh flow emits {0x00,0x82} then {0x00,0x73}/{0x00,0x74}.
     // Compressed incompleteness surfaces as a zlib-flush NACK {0xFF,0x82} inside.
-    directWriteFinishAndRefresh(data, len, 0x82);
-    resetPipeWriteState();
+    /* Its verdict is this frame's: the comment above says a compressed-incompleteness NACK
+     * surfaces INSIDE the shared flow, so discarding the result reports a refused 0x82 as
+     * accepted. */
+    {
+        const od_cmd_result_t fin = directWriteFinishAndRefresh(ctx, data, len, 0x82);
+        resetPipeWriteState();
+        return fin;
+    }
 }
 
 static void cleanup_partial_write_state(void) {
@@ -3254,14 +3372,14 @@ static uint32_t parse_be_u32(const uint8_t* data) {
            ((uint32_t)data[2] << 8)  |  (uint32_t)data[3];
 }
 
-static void send_direct_write_nack(uint8_t opcode, uint8_t error, bool cleanupState) {
+static void send_direct_write_nack(const od_cmd_ctx_t *ctx, uint8_t opcode, uint8_t error, bool cleanupState) {
     displayed_etag = 0;
     if (cleanupState) {
         if (partialCtx.active) cleanup_partial_write_state();
         else cleanupDirectWriteState(false);
     }
     uint8_t errResponse[] = {RESP_NACK, opcode, error, 0x00};
-    sendResponse(errResponse, sizeof(errResponse));
+    (void)od_cmd_reply_plain(ctx, errResponse, sizeof(errResponse));
 }
 
 // See display_service.h for why this exists rather than main.cpp calling SPI.end() itself.

@@ -97,6 +97,23 @@ unsigned g_key_set_calls;
 unsigned g_key_clear_calls;
 static uint8_t  g_rand_next;                    /* deterministic: handshakes must reproduce */
 enum od_hal_crypto_status g_force_status; /* OK, or an error to inject */
+int32_t g_force_after;                    /* HAL calls to let through first; -1 = inject none */
+int32_t g_zero_cmac_after = -1;           /* make the Nth CMAC return all zeros; -1 = never */
+unsigned g_hal_calls;                     /* every entry point counts, whatever it returns */
+
+/* One gate for every entry point. Counting happens on EVERY call so a test can say "fail the
+ * THIRD one" and mean it -- with a single all-or-nothing flag the first call swallows the
+ * injection, which left four of the five step-2 crypto-failure paths in od_session.c unreachable:
+ * the two derivations after the proof compare, the all-zero-session-id rejection, and both
+ * od_session_clear() calls that stop a half-derived session persisting. */
+static enum od_hal_crypto_status forced(void)
+{
+    const unsigned n = g_hal_calls++;
+
+    if (g_force_status == OD_HAL_CRYPTO_OK) { return OD_HAL_CRYPTO_OK; }
+    if (g_force_after < 0) { return OD_HAL_CRYPTO_OK; }
+    return (n >= (unsigned)g_force_after) ? g_force_status : OD_HAL_CRYPTO_OK;
+}
 
 void fake_reset(void)
 {
@@ -106,11 +123,17 @@ void fake_reset(void)
     g_key_clear_calls = 0;
     g_rand_next = 0;
     g_force_status = OD_HAL_CRYPTO_OK;
+    g_force_after = 0;                    /* fail from the first call, the historical behaviour */
+    g_zero_cmac_after = -1;
+    g_hal_calls = 0;
 }
 
 enum od_hal_crypto_status od_hal_crypto_key_set(od_hal_crypto_slot_t slot, const uint8_t key[16])
 {
-    if (g_force_status != OD_HAL_CRYPTO_OK) { return g_force_status; }
+    {
+        const enum od_hal_crypto_status forced_status = forced();
+        if (forced_status != OD_HAL_CRYPTO_OK) { return forced_status; }
+    }
     if (slot >= OD_HAL_CRYPTO_KEY_SLOTS) { return OD_HAL_CRYPTO_ERROR; }
     ++g_key_set_calls;
     memcpy(g_slot_key[slot], key, 16u);
@@ -129,7 +152,17 @@ void od_hal_crypto_key_clear(od_hal_crypto_slot_t slot)
 enum od_hal_crypto_status od_hal_crypto_cmac(const uint8_t key[16], const uint8_t *msg,
                                              uint32_t msg_len, uint8_t out[16])
 {
-    if (g_force_status != OD_HAL_CRYPTO_OK) { return g_force_status; }
+    unsigned index;
+
+    {
+        const enum od_hal_crypto_status forced_status = forced();
+        if (forced_status != OD_HAL_CRYPTO_OK) { return forced_status; }
+    }
+    index = g_hal_calls - 1u;             /* forced() has already consumed this call's index */
+    if (g_zero_cmac_after >= 0 && index == (unsigned)g_zero_cmac_after) {
+        memset(out, 0, 16u);              /* SUCCEEDS, and yields zeros -- see the header */
+        return OD_HAL_CRYPTO_OK;
+    }
     host_cmac(key, msg, msg_len, out);
     return OD_HAL_CRYPTO_OK;
 }
@@ -137,7 +170,10 @@ enum od_hal_crypto_status od_hal_crypto_cmac(const uint8_t key[16], const uint8_
 enum od_hal_crypto_status od_hal_crypto_aes_ecb(const uint8_t key[16], const uint8_t in[16],
                                                 uint8_t out[16])
 {
-    if (g_force_status != OD_HAL_CRYPTO_OK) { return g_force_status; }
+    {
+        const enum od_hal_crypto_status forced_status = forced();
+        if (forced_status != OD_HAL_CRYPTO_OK) { return forced_status; }
+    }
     od_test_aes128_encrypt(key, in, out);
     return OD_HAL_CRYPTO_OK;
 }
@@ -146,7 +182,10 @@ enum od_hal_crypto_status od_hal_crypto_random(uint8_t *buf, uint16_t len)
 {
     uint16_t i;
 
-    if (g_force_status != OD_HAL_CRYPTO_OK) { return g_force_status; }
+    {
+        const enum od_hal_crypto_status forced_status = forced();
+        if (forced_status != OD_HAL_CRYPTO_OK) { return forced_status; }
+    }
     for (i = 0; i < len; ++i) { buf[i] = g_rand_next++; }
     return OD_HAL_CRYPTO_OK;
 }
@@ -156,7 +195,10 @@ enum od_hal_crypto_status od_hal_crypto_ccm_encrypt(od_hal_crypto_slot_t slot,
         const uint8_t *plain, uint16_t plain_len,
         uint8_t *ct, uint16_t ct_cap, uint16_t *ct_len)
 {
-    if (g_force_status != OD_HAL_CRYPTO_OK) { return g_force_status; }
+    {
+        const enum od_hal_crypto_status forced_status = forced();
+        if (forced_status != OD_HAL_CRYPTO_OK) { return forced_status; }
+    }
     if (slot >= OD_HAL_CRYPTO_KEY_SLOTS || !g_slot_loaded[slot]) { return OD_HAL_CRYPTO_ERROR; }
     if (nonce_len != OD_SESSION_CCM_NONCE_LEN || aad_len != 2u) { return OD_HAL_CRYPTO_ERROR; }
     if (ct_cap < (uint16_t)(plain_len + OD_HAL_CRYPTO_TAG_LEN)) { return OD_HAL_CRYPTO_ERROR; }
@@ -176,7 +218,10 @@ enum od_hal_crypto_status od_hal_crypto_ccm_decrypt(od_hal_crypto_slot_t slot,
 {
     uint16_t body;
 
-    if (g_force_status != OD_HAL_CRYPTO_OK) { return g_force_status; }
+    {
+        const enum od_hal_crypto_status forced_status = forced();
+        if (forced_status != OD_HAL_CRYPTO_OK) { return forced_status; }
+    }
     if (slot >= OD_HAL_CRYPTO_KEY_SLOTS || !g_slot_loaded[slot]) { return OD_HAL_CRYPTO_ERROR; }
     if (nonce_len != OD_SESSION_CCM_NONCE_LEN || aad_len != 2u) { return OD_HAL_CRYPTO_ERROR; }
     if (ct_len <= OD_HAL_CRYPTO_TAG_LEN) { return OD_HAL_CRYPTO_ERROR; }

@@ -8,6 +8,7 @@
 // truth for every config-packet struct; the firmware-only runtime types below
 // are the only definitions that remain local.
 #include "opendisplay_structs.h"
+#include "od_txq.h"
 // The parsed-config aggregate, the instance caps and the two storage normalisations are
 // shared/core/od_config.h. `struct GlobalConfig` was this file's copy of it.
 #include "od_config.h"
@@ -55,6 +56,14 @@ struct ImageData {
 #define PIPE_MAX_W      32
 #define PIPE_MAX_N      32
 #endif
+/* The egress queue must be able to hold a whole window plus its END, or a saturating PIPE client
+ * deadlocks: every slot is an unacknowledged ACK, the reserve for the next DATA frame fails, and
+ * od_dispatch defers the very command that would refund a slot. od_txq.h states the relationship
+ * and cannot check it -- shared/ may not see PIPE_MAX_W -- so it is checked here, where both are
+ * visible. Boards that narrow the window narrow OD_TXQ_SLOTS with it (boards/esp32-n4.cmake). */
+OD_STATIC_ASSERT(OD_TXQ_SLOTS >= (PIPE_MAX_W + 2u),
+                 "egress queue is too shallow for this board's PIPE window");
+
 #define PIPE_REORDER_SLOT_SIZE  248    // >= max plaintext data payload (241 @ frame 244; 212 encrypted)
 
 // LOCAL link policy: the ATT MTU this device asks the stack to negotiate on the
@@ -81,10 +90,9 @@ static_assert(OD_BLE_PREFERRED_ATT_MTU - 3u >= PIPE_REORDER_SLOT_SIZE,
 static_assert(OD_BLE_PREFERRED_ATT_MTU - 3u <= OD_BLE_MAX_FRAME,
               "a single-PDU write could overrun an OD_BLE_MAX_FRAME-sized slot");
 
-// The BLE RX/TX command rings (CommandQueueItem / ResponseQueueItem and their
-// sizes) live in command_queue.h. They used to be split between this header and
-// main.h; they are transport buffering, not config-packet or wire-protocol
-// definitions, so they do not belong in this hub.
+// The BLE RX command ring (CommandQueueItem and its sizes) lives in command_queue.h; egress is
+// shared/core/od_txq.c. Neither is a config-packet or wire-protocol definition, so neither belongs
+// in this hub.
 
 // PIPE_WRITE protocol constants (PIPE_ACK_MASK_BITS, PIPE_MAX_FRAME, PIPE_VERSION,
 // PIPE_FLAG_COMPRESSED, PIPE_FLAG_PARTIAL) come from the canonical opendisplay_protocol.h.

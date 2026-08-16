@@ -8,6 +8,7 @@
  * which this build does not define (it takes the __LINUX__ branch), so nothing is laundered
  * in through it. */
 #include "structs.h"
+#include "od_cmd.h"   /* od_cmd_result_t / od_cmd_ctx_t, for the handler declarations below */
 #include "uzlib.h"
 #include <bb_epaper.h>
 #include "encryption_state.h"
@@ -208,8 +209,6 @@ extern uint32_t advertising_start_time;
 void getChipIdHex(char* out, size_t out_size);   // see encryption.h for the contract
 
 // imageDataWritten + its opaque parameter typedefs come from communication.h.
-void sendResponse(uint8_t* response, uint16_t len);
-void sendResponseUnencrypted(uint8_t* response, uint16_t len);
 void secureEraseConfig();
 void checkResetPin();
 void reboot();
@@ -232,22 +231,22 @@ void initSensors();
 void initAXP2101(uint8_t busId);
 void updatemsdata();
 uint16_t calculateCRC16CCITT(uint8_t* data, uint32_t len);
-void handleReadConfig();
-void handleWriteConfig(uint8_t* data, uint16_t len);
-void handleWriteConfigChunk(uint8_t* data, uint16_t len);
-void handleFirmwareVersion();
-void handleReadMSD();  // Read Manufacturer Specific Data (MSD) payload
+od_cmd_result_t handleReadConfig(const od_cmd_ctx_t *ctx);
+od_cmd_result_t handleWriteConfig(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
+od_cmd_result_t handleWriteConfigChunk(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
+od_cmd_result_t handleFirmwareVersion(const od_cmd_ctx_t *ctx);
+od_cmd_result_t handleReadMSD(const od_cmd_ctx_t *ctx);  // Read Manufacturer Specific Data (MSD) payload
 const char* getFirmwareShaString();
 void cleanupDirectWriteState(bool refreshDisplay);
-void handleDirectWriteStart(uint8_t* data, uint16_t len);
-void handleDirectWriteData(uint8_t* data, uint16_t len);
+od_cmd_result_t handleDirectWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
+od_cmd_result_t handleDirectWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 void handleDirectWriteEnd(uint8_t* data = nullptr, uint16_t len = 0);
 bool handleDirectWriteCompressedData(uint8_t* data, uint16_t len);
-void handlePipeWriteStart(uint8_t* data, uint16_t len);
-void handlePipeWriteData(uint8_t* data, uint16_t len);
-void handlePipeWriteEnd(uint8_t* data, uint16_t len);
+od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
+od_cmd_result_t handlePipeWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
+od_cmd_result_t handlePipeWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 void resetPipeWriteState(void);
-void handlePartialWriteStart(uint8_t* data, uint16_t len);
+od_cmd_result_t handlePartialWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 int mapEpd(int id);
 uint8_t getFirmwareMajor();
 uint8_t getFirmwareMinor();
@@ -264,7 +263,6 @@ bool isAuthenticated();
 void clearEncryptionSession();
 bool checkEncryptionSessionTimeout();
 void updateEncryptionSessionActivity();
-bool handleAuthenticate(uint8_t* data, uint16_t len);
 
 // chunked_write_state_t comes from config_parser.h so this file and
 // communication.cpp cannot drift apart on the buffer size.

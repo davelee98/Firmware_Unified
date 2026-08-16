@@ -15,5 +15,10 @@ set(OD_SDKCONFIG_FRAGMENTS sdkconfig.defaults.esp32 boards/esp32-n4.sdkconfig)
 set(OD_BOARD_DEFINES
     TARGET_ESP32
     PIPE_SMALL_DRAM_WINDOW
+    # Egress depth follows the window it has to cover: PIPE_MAX_W + 2, so usable capacity
+    # (SLOTS - 1) holds a full window plus its END. Sized here rather than left at the shared
+    # default because that default covers W=32 and would keep ~4 KB of TX storage this board
+    # can never fill. structs.h asserts the relationship.
+    OD_TXQ_SLOTS=18u
     OPENDISPLAY_ZLIB_USE_HEAP_WINDOW=1
 )

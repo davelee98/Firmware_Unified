@@ -4,6 +4,7 @@
 #ifdef OPENDISPLAY_HAS_WIFI
 
 #include "communication.h"
+#include "od_cmd.h"
 #include "encryption.h"
 #include "structs.h"
 #include "od_log.h"
@@ -148,6 +149,23 @@ static void lanSockSetRcvTimeout(int fd, uint32_t ms) {
     tv.tv_sec  = (time_t)(ms / 1000);
     tv.tv_usec = (suseconds_t)((ms % 1000) * 1000);
     lwip_setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+}
+
+// The send-side counterpart, and it exists for the same reason: the accepted socket is
+// blocking-by-default, so without it a peer that stops reading fills the window and parks the loop
+// task inside send() with no bound at all. od_hal_radio.h requires the opposite ("MUST NOT BLOCK")
+// and every drain deadline above it is sized on that.
+//
+// Short deliberately. A send blocks only once the peer's receive window is full, and waiting longer
+// does not empty it -- it just spends the caller's deadline. 200 ms sits inside the 250 ms
+// pre-refresh barrier, so one stalled peer costs a single retry rather than the whole barrier.
+#define LAN_SEND_TIMEOUT_MS 200u
+
+static void lanSockSetSndTimeout(int fd, uint32_t ms) {
+    struct timeval tv;
+    tv.tv_sec  = (time_t)(ms / 1000);
+    tv.tv_usec = (suseconds_t)((ms % 1000) * 1000);
+    lwip_setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 }
 
 // Dotted-quad of the peer, into a caller buffer. Replaces
@@ -535,40 +553,104 @@ static uint8_t lanTxFrame[2 + 640];
 
 // Write one [len:2 LE][payload] frame over the active LAN channel (TLS or plain).
 // Called by communication.cpp for LAN-origin responses (send_tls_lan_frame / plain).
-void opendisplay_lan_send_frame(const uint8_t* payload, uint16_t len) {
-    if (!wifiServerConnected || !lanClientConnected() || len == 0) {
-        return;
+// Drop the socket and let the ordinary reap path do the orderly teardown: with the fd cleared,
+// lanClientConnected() reports false and wifiLanReapClosedSession() calls disconnectWiFiServer()
+// early next pass. Calling that from here instead would re-enter the TLS context this write is
+// standing in.
+static od_radio_result_t lanAbandonSession(const char* why) {
+    od_log_error("LAN: %s -- dropping the session", why);
+    lanSockClose(&s_lanClientFd);
+    return OD_RADIO_GONE;
+}
+
+// One bounded write of one whole buffer over plain TCP.
+//
+// The return is a framing statement, not an errno translation. RETRY is reserved for the case
+// where ZERO bytes reached the wire, because that is the only state in which od_txq re-presenting
+// the same frame is safe. A short write has already put part of a length-prefixed frame on the
+// stream, so no retry can repair it and the session goes.
+static od_radio_result_t lanPlainWriteAll(const uint8_t* buf, size_t n) {
+    if (s_lanClientFd < 0) {
+        return OD_RADIO_GONE;
     }
-    if (tlsMode && (!tlsSessionActive || !tlsHandshakeDone)) return;
+    const int sent = (int)lwip_send(s_lanClientFd, buf, n, 0);
+    if (sent == (int)n) {
+        return OD_RADIO_SENT;
+    }
+    if (sent > 0) {
+        return lanAbandonSession("partial frame write desynchronised the stream");
+    }
+    // SO_SNDTIMEO expiry lands here as EWOULDBLOCK/EAGAIN with nothing written -- the peer's
+    // window is full. A zero return is not a documented success either; both are safe to re-offer.
+    if (sent < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+        return OD_RADIO_RETRY;
+    }
+    if (sent == 0) {
+        return OD_RADIO_RETRY;
+    }
+    return lanAbandonSession("socket write failed");
+}
+
+// The TLS counterpart, and it is NOT symmetric with the plain one on partial writes.
+//
+// WANT_WRITE may follow mbedTLS having already pushed part of a record to the socket, but mbedTLS
+// owns that resumption: its contract is to re-call with IDENTICAL arguments, which is exactly what
+// od_txq does with an unchanged queue head. So WANT_WRITE is retryable here even though the same
+// situation is fatal on plain TCP. A short POSITIVE return is not -- that is application data
+// mbedTLS considers delivered, and re-presenting the frame would duplicate it.
+static od_radio_result_t lanTlsWriteAll(const uint8_t* buf, size_t n) {
+    const int ret = mbedtls_ssl_write(&tlsSsl, buf, n);
+    if (ret == (int)n) {
+        return OD_RADIO_SENT;
+    }
+    if (ret == MBEDTLS_ERR_SSL_WANT_WRITE || ret == MBEDTLS_ERR_SSL_WANT_READ) {
+        return OD_RADIO_RETRY;
+    }
+    if (ret > 0) {
+        return lanAbandonSession("partial TLS record desynchronised the stream");
+    }
+    return lanAbandonSession("TLS write failed");
+}
+
+static od_radio_result_t lanWriteAll(const uint8_t* buf, size_t n) {
+    return tlsMode ? lanTlsWriteAll(buf, n) : lanPlainWriteAll(buf, n);
+}
+
+od_radio_result_t opendisplay_lan_send_frame(const uint8_t* payload, uint16_t len) {
+    if (payload == nullptr || len == 0) {
+        return OD_RADIO_ERROR;
+    }
+    // Not GONE: GONE tells od_txq that every entry for this tag is undeliverable, and a LAN link
+    // that has not come up yet is a different thing from one that has died. RETRY holds the
+    // response until the session is usable.
+    if (!wifiServerConnected || !lanClientConnected()) {
+        return OD_RADIO_RETRY;
+    }
+    if (tlsMode && (!tlsSessionActive || !tlsHandshakeDone)) {
+        return OD_RADIO_RETRY;
+    }
 
     if ((uint32_t)len + 2u <= sizeof(lanTxFrame)) {
         lanTxFrame[0] = (uint8_t)(len & 0xFF);
         lanTxFrame[1] = (uint8_t)((len >> 8) & 0xFF);
         memcpy(lanTxFrame + 2, payload, len);
-        const uint16_t total = (uint16_t)(len + 2u);
-        if (tlsMode) {
-            if (mbedtls_ssl_write(&tlsSsl, lanTxFrame, total) < 0) {
-                od_log_error("TLS LAN response write failed");
-            }
-        } else if (lanClientWrite(lanTxFrame, total) != total) {
-            od_log_error("LAN response write incomplete");
-        }
-        return;
+        // One write for prefix and payload together, which is why this is the path that can report
+        // RETRY at all: there is no half-written frame to strand.
+        return lanWriteAll(lanTxFrame, (size_t)len + 2u);
     }
 
-    // Oversized fallback: header then payload. A failure between the two leaves the
-    // peer waiting on a length prefix whose payload never arrives.
-    uint8_t hdr[2] = { (uint8_t)(len & 0xFF), (uint8_t)((len >> 8) & 0xFF) };
-    if (tlsMode) {
-        if (mbedtls_ssl_write(&tlsSsl, hdr, 2) < 0 ||
-            mbedtls_ssl_write(&tlsSsl, payload, len) < 0) {
-            od_log_error("TLS LAN response write failed");
-        }
-        return;
+    // Oversized fallback: prefix, then payload. Only the FIRST write may report RETRY -- after it
+    // succeeds the peer is committed to a payload, so anything short of SENT on the second is the
+    // stranded-prefix case and takes the session with it.
+    const uint8_t hdr[2] = { (uint8_t)(len & 0xFF), (uint8_t)((len >> 8) & 0xFF) };
+    const od_radio_result_t rh = lanWriteAll(hdr, 2);
+    if (rh != OD_RADIO_SENT) {
+        return rh;
     }
-    if (lanClientWrite(hdr, 2) != 2 || lanClientWrite(payload, len) != len) {
-        od_log_error("LAN response write incomplete");
+    if (lanWriteAll(payload, len) == OD_RADIO_SENT) {
+        return OD_RADIO_SENT;
     }
+    return lanAbandonSession("length prefix sent without its payload");
 }
 
 bool wifiLanClientConnected(void) {
@@ -1441,6 +1523,7 @@ static void admitOrRefuseLanClient(int incomingFd) {
     // direct-write ACKs that lands on every frame of a transfer.
     lanSockSetNoDelay(s_lanClientFd);
     lanSockSetRcvTimeout(s_lanClientFd, 30000);
+    lanSockSetSndTimeout(s_lanClientFd, LAN_SEND_TIMEOUT_MS);
     tcpReceiveBufferPos = 0;
     wifiServerConnected = true;
 
@@ -1479,6 +1562,20 @@ bool wifiLinkIsUp(void) {
 
 void wifiLocalIpStr(char* out, size_t out_size) {
     odWifiIpStr(out, out_size);
+}
+
+/* Is a COMPLETE frame already sitting at the head of the receive buffer? The length prefix is
+ * [len:2 LE] and the frame is complete when the buffer holds the prefix plus that many bytes.
+ *
+ * The question is "can the parser make progress without reading more", which is the gate for both
+ * pausing the socket and for parsing when no new bytes arrived. One predicate for both, because
+ * they are the same condition and drifting them apart is how the deadlock came back. */
+static bool lanFrameBuffered(void) {
+    if (tcpReceiveBufferPos < 2u) {
+        return false;
+    }
+    const uint32_t flen = (uint32_t)(tcpReceiveBuffer[0] | (tcpReceiveBuffer[1] << 8));
+    return tcpReceiveBufferPos >= 2u + flen;
 }
 
 void handleWiFiServer() {
@@ -1562,7 +1659,24 @@ void handleWiFiServer() {
     uint32_t drainedBytes = 0;
     int got;
     do {
-        got = lanReadIntoBuffer();
+        /* STOP READING WHILE A FRAME IS RETAINED. od_dispatch returns DEFERRED without consuming
+         * the frame, so it stays at the head of this buffer to be re-offered unchanged -- and
+         * until it is consumed, nothing behind it can be dispatched either.
+         *
+         * Reading on regardless is not merely useless, it is fatal with a pipelining client: bytes
+         * keep accumulating behind a head that cannot move, and when the 16 KiB buffer fills
+         * lanReadIntoBuffer() reports an error and the connection is dropped -- turning ordinary
+         * backpressure into a disconnect. Skipping the read applies real TCP backpressure instead:
+         * the receive window closes and the peer stops sending, which is what the transport is for.
+         *
+         * A retained frame is also exactly the case where no new bytes will arrive -- a client
+         * waiting on its response sends nothing more -- so this is the same condition that would
+         * otherwise return early below. */
+        if (lanFrameBuffered()) {
+            got = 0;
+        } else {
+            got = lanReadIntoBuffer();
+        }
         if (got == OD_LAN_READ_CLOSED) {
             // Normal end of a push: the client finished and sent close_notify.
             od_log_info("LAN: client closed the connection");
@@ -1588,11 +1702,22 @@ void handleWiFiServer() {
             // site below, which is reached only by a framed, recognised command.
             drainedBytes += (uint32_t)got;
         } else if (drainedBytes == 0) {
-            // Nothing to read this tick. The idle DROP is not decided here any
-            // more: serviceIdleTimeout() owns it for both transports, and it must
-            // run after inbound traffic has been parsed (7d step 4) or a LAN client
-            // is dropped with its command already sitting in the buffer.
-            return;
+            // Nothing NEW to read this tick -- but a complete frame may already be buffered,
+            // and if it is, this must fall through to the parser rather than return.
+            //
+            // A DEFERRED frame is left in this buffer deliberately, to be re-offered unchanged.
+            // The client that sent it is now waiting for its response and will send nothing more,
+            // so "no new bytes" is the steady state, not a reason to stop: returning here would
+            // strand that command until the connection died. The reason it was deferred -- TX
+            // capacity, or a live CONFIG_READ -- clears from the loop, so re-parsing the same
+            // bytes on a later pass is exactly what makes progress.
+            if (!lanFrameBuffered()) {
+                // The idle DROP is not decided here any more: serviceIdleTimeout() owns it for
+                // both transports, and it must run after inbound traffic has been parsed (7d
+                // step 4) or a LAN client is dropped with its command already sitting in the
+                // buffer.
+                return;
+            }
         }
 
         while (tcpReceiveBufferPos >= 2) {
@@ -1621,9 +1746,19 @@ void handleWiFiServer() {
             // No stamp here: imageDataWritten() stamps the shared clock itself,
             // and only for a RECOGNISED command from the owner -- which is the
             // whole of R4's definition and what this site could not enforce.
-            imageDataWritten(NULL, NULL, tcpReceiveBuffer + 2, flen);
+            const od_frame_outcome_t outcome =
+                imageDataWritten(NULL, NULL, tcpReceiveBuffer + 2, flen);
             g_commandInstance = 0;
             g_commandOrigin = ORIGIN_BLE;   // restore default for any subsequent BLE drain
+            // DEFERRED means the dispatcher did not consume this frame and it must be re-offered
+            // byte-identical. Leave it at the head of the socket buffer and stop draining: the
+            // reason it was deferred -- no response capacity, or a live config read -- clears from
+            // the loop, not from another parse of the same bytes. Removing it here would be the
+            // silent command loss DEFERRED exists to prevent, and on LAN there is no retransmit
+            // behind it to cover for that.
+            if (!od_frame_policy(outcome).consume_rx) {
+                return;
+            }
             uint32_t consumed = 2u + (uint32_t)flen;
             uint32_t rem = tcpReceiveBufferPos - consumed;
             if (rem > 0) {

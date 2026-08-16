@@ -107,6 +107,60 @@ add_executable(od_config_test config_test.c)
 target_link_libraries(od_config_test od_shared)
 add_test(NAME config COMMAND od_config_test)
 
+# txq: the response queue, its capacity reservation and the drain, against a scripted radio.
+#
+# The cases that carry the weight are the ordering ones: RETRY must STOP a pass rather than skip
+# past the entry (skipping reorders the wire), GONE must drop a whole tag while preserving the
+# order of the survivors, and ERROR must retire exactly one entry -- retrying a permanent refusal
+# is how a drain becomes a spin. Plus the reservation property the token exists for: one dispatch
+# cannot spend another dispatch's capacity.
+add_executable(od_txq_test txq_test.c)
+target_link_libraries(od_txq_test od_shared)
+add_test(NAME txq COMMAND od_txq_test)
+
+# reply: the seal-or-plain decision, against a fake radio AND a fake od_session_app seam.
+#
+# The property is not "does it encrypt" but "is confidentiality chosen by the CALL". Both targets
+# used to infer it from the response bytes, and Nordic sealed its own rejection frames -- which the
+# host then decrypted and validated as an ACK for a command the device refused. The load-bearing
+# cases are the ones where the bytes would mislead: a {0x00,cmd,0xFF} rejection, a TLS-LAN frame
+# that must not be double-wrapped, and a live session with no security configured.
+add_executable(od_reply_test reply_test.c)
+target_link_libraries(od_reply_test od_session_fake)
+add_test(NAME reply COMMAND od_reply_test)
+
+# gate: one case per od_session result, checking the WIRE BYTES and the outcome.
+#
+# The compiler already proves the switches are exhaustive (od_gate.h explains the -Wswitch ratchet,
+# verified by deleting a case and watching the build fail). What it cannot prove is that each
+# member maps to the right action, which is where the consequences are: 0xFE advances the link's
+# auth-abuse run and 0xFF does not, and a replayed PIPE frame must draw SILENCE because the 0x81
+# NACK is fatal to the client's upload loop.
+add_executable(od_gate_test gate_test.c)
+target_link_libraries(od_gate_test od_session_fake)
+add_test(NAME gate COMMAND od_gate_test)
+
+# config_read: CONFIG_READ as a resumable producer, driven against a queue that keeps filling.
+#
+# The property is NO TRUNCATION AND NO DUPLICATION UNDER BACKPRESSURE. The shipped handler emitted
+# every chunk in one call and drained the ring between them, which only worked because it could
+# block the loop task it ran on. The reassembly check is what makes a dropped or repeated chunk
+# visible -- a count alone would not.
+add_executable(od_config_read_test config_read_test.c)
+target_link_libraries(od_config_read_test od_session_fake)
+add_test(NAME config_read COMMAND od_config_read_test)
+
+# dispatch: the ordering in od_dispatch.h, which IS the specification.
+#
+# Every bug these guard against is an ordering bug with a specific consequence: reserve after the
+# gate loses the gate's own FE/FF answer; reserve after the handler lets a handler mutate state it
+# cannot then report; defer after decrypt advances the replay window so the re-dispatched frame is
+# refused the second time; and a late producer-conflict check splices two configs into one
+# CRC-valid read-back.
+add_executable(od_dispatch_test dispatch_test.c)
+target_link_libraries(od_dispatch_test od_session_fake)
+add_test(NAME dispatch COMMAND od_dispatch_test)
+
 # session: the handshake, KDF, replay window and CCM envelope against a fake crypto HAL built on
 # the host AES core. DIFFERENTIAL where it matters -- the replay window is upstream Firmware's
 # own nonce_window.h, ported verbatim, so this suite exercises the shipped state machine rather
