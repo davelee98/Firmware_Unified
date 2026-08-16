@@ -21,9 +21,17 @@
  * mismatch with it. */
 void getAuthDeviceIdBytes(uint8_t* device_id);
 
+/* THIS TARGET'S ONE SESSION, and it is file-static so that it is reachable only through the seam
+ * below. An exported singleton is what lets a caller memset it, and memset is not teardown here:
+ * the key lives in an od_hal_crypto slot, so clearing the struct by hand strands a prepared key in
+ * a finite pool and loses the slot index with it. od_session_clear() is the only teardown.
+ *
+ * Zero-init == od_session_init(&s_session, 0). */
+static struct od_session s_session;
+
 struct od_session *od_session_app_state(void)
 {
-    return &g_session;
+    return &s_session;
 }
 
 const struct SecurityConfig *od_session_app_security(void)

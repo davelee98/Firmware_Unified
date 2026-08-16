@@ -180,6 +180,16 @@ add_executable(od_dispatch_route_test dispatch_route_test.c)
 target_link_libraries(od_dispatch_route_test od_session_fake)
 add_test(NAME dispatch_route COMMAND od_dispatch_route_test)
 
+# core_reset: the shared half of a teardown -- producer, egress and session, in that order.
+#
+# The cases that carry weight are the negative ones: RX must NOT be in it (its producer differs per
+# target, so a shared reset would race one and reorder the other), and the session must go through
+# od_session_clear() rather than a memset, or its prepared HAL key slot is stranded in a finite
+# pool with nothing left naming it.
+add_executable(od_core_reset_test core_reset_test.c)
+target_link_libraries(od_core_reset_test od_session_fake)
+add_test(NAME core_reset COMMAND od_core_reset_test)
+
 # session: the handshake, KDF, replay window and CCM envelope against a fake crypto HAL built on
 # the host AES core. DIFFERENTIAL where it matters -- the replay window is upstream Firmware's
 # own nonce_window.h, ported verbatim, so this suite exercises the shipped state machine rather
@@ -282,6 +292,22 @@ target_link_libraries(od_pipe_write_test od_shared)
 target_compile_options(od_pipe_write_test PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions -fno-rtti>)
 add_test(NAME pipe_write COMMAND od_pipe_write_test)
+
+# nordic_session_app: the device-id packing, which is WIRE-VISIBLE -- four bytes of the silicon id
+# feed both the KDF and the AUTHENTICATE proof, so a different selection is a different device to
+# the host and every provisioned tag in a fleet becomes one no stored key opens. C11 moved that
+# arithmetic between files, which is exactly the change that can alter it without altering anything
+# a build or a boot would notice. Expectations are hand-computed, not taken from the code.
+add_executable(od_nordic_session_app_test
+    nordic_session_app_test.c
+    ../../targets/nordic-zephyr/src/od_session_app.c)
+target_include_directories(od_nordic_session_app_test PRIVATE
+    ../../targets/nordic-zephyr/src
+    ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr)
+# od_session_fake, not od_shared: this pulls in od_session.c, which binds the crypto HAL at
+# link time. The fake is the one every other session binary already uses.
+target_link_libraries(od_nordic_session_app_test od_session_fake)
+add_test(NAME nordic_session_app COMMAND od_nordic_session_app_test)
 
 # Nordic config pin bytes are a wire contract and deliberately differ by
 # platform: nRF52840 uses absolute port*32+pin values, while nRF54 uses the

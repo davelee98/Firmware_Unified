@@ -14,6 +14,7 @@
 #include "od_txq.h"
 #include "ble_transport.h"
 #include "communication.h"
+#include "od_core.h"
 #include "od_rxq.h"
 #include "config_parser.h"
 #include "display_service.h"
@@ -127,12 +128,7 @@ void abortToKnownState(const char* reason, bool dropLink, LinkId ownerId) {
     //     prototype shipped with, because it only reset on a successful command.
     resetAuthAbuseCounter();
 
-    // 8. Crypto. NEW on the disconnect path: today crypto state survives a BLE link
-    //    drop entirely -- clearEncryptionSession() runs on session-timeout-at-command,
-    //    a new auth, config reload and LAN teardown, but no BLE disconnect path.
-    clearEncryptionSession();
-
-    // 9. Both rings. R6 requires RX and TX drained of the departed session's traffic;
+    // 8. Both rings. R6 requires RX and TX drained of the departed session's traffic;
     //    an earlier draft flushed TX only, which left the teardown window open.
     //    Draining RX is sound because callback filtering means every frame in it
     //    passed the owner check when written. A frame the owner writes AFTER this,
@@ -143,11 +139,20 @@ void abortToKnownState(const char* reason, bool dropLink, LinkId ownerId) {
         od_log_warn("[abort] dropped %u queued command(s) from the departed session",
                     (unsigned)droppedRx);
     }
-    /* Shared egress, and the producer that feeds it. Cancelling the read is not tidiness: it holds
-     * the config scratch, and od_dispatch DEFERS every config-mutating opcode while it is active --
-     * so a client that vanishes mid-read would otherwise defer every later config write forever. */
-    od_config_read_cancel();
-    od_txq_reset();
+
+    // 9. Every SHARED object that outlives a dispatch, in one call: the config-read producer,
+    //    egress, and the session. Cancelling the read is not tidiness -- it holds the config
+    //    scratch, and od_dispatch DEFERS every config-mutating opcode while it is active, so a
+    //    client that vanishes mid-read would otherwise defer every later config write forever.
+    //    The session clear was step 8 and moves here with it; nothing between the two reads it,
+    //    and it is NEW on the disconnect path either way -- crypto state used to survive a BLE
+    //    link drop entirely, cleared on session-timeout-at-command, a new auth, config reload and
+    //    LAN teardown, but never on disconnect.
+    //
+    //    RX is NOT in it, deliberately: od_core_reset() cannot own a ring whose producer differs
+    //    per target, and this target's connection policy has stricter ordering around its own --
+    //    hence step 8 above, where the drop count is also worth reporting.
+    od_core_reset();
 
     // 10. The drop, dispatched on the OWNER'S TRANSPORT. This routine is not
     //     BLE-only: the transfer watchdog that calls it is origin-agnostic, so

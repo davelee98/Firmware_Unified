@@ -10,51 +10,18 @@
 
 #include "od_cmd_config.h"
 #include "od_cmd_nfc.h"
-#include "od_config_read.h"
+#include "od_core.h"
 #include "od_dispatch.h"
 #include "od_log.h"
 #include "od_rxq.h"
 #include "od_session.h"
+#include "od_session_app.h"
 #include "od_span.h"
 #include "opendisplay_display.h"
-#include "opendisplay_pipe_internal.h"
 #include "opendisplay_pipe_write.h"
 #include "opendisplay_protocol.h"
 
-#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/kernel.h>
-
-/* ============================================================================================
- * THE SESSION ADAPTER. The handshake, KDF, replay window and CCM envelope are
- * shared/core/od_session.c; what stays here is this target's half -- the clock and the nRF device
- * identity. The logging is od_session_app.c's, and the handshake itself is od_gate's.
- * ============================================================================================ */
-
-static struct od_session s_session;
-
-struct od_session *od_pipe_session(void)
-{
-  return &s_session;
-}
-
-/* The four device-id bytes that feed both the KDF and the auth proof: the low 32 bits of the
- * 64-bit hwinfo id, big-endian. Wire-visible identity -- a different packing is a different
- * device to the host. */
-void od_pipe_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN])
-{
-  uint8_t id[8];
-  uint64_t uid = 0;
-  unsigned i;
-
-  (void)hwinfo_get_device_id(id, sizeof(id));
-  for (i = 0; i < sizeof(id); i++) {
-    uid = (uid << 8) | id[i];
-  }
-  out[0] = (uint8_t)((uid >> 24) & 0xFFu);
-  out[1] = (uint8_t)((uid >> 16) & 0xFFu);
-  out[2] = (uint8_t)((uid >> 8) & 0xFFu);
-  out[3] = (uint8_t)(uid & 0xFFu);
-}
 
 /* Bumped on every close. A frame carries the generation that produced it, so both queues can
  * discard work belonging to a connection that has gone. */
@@ -120,7 +87,7 @@ void od_core_frame_done(const od_reply_t *rp, od_frame_outcome_t outcome)
   if (rp == NULL || !p.stamp_activity) {
     return;
   }
-  od_session_touch(&s_session, k_uptime_get_32());
+  od_session_touch(od_session_app_state(), od_session_app_now_ms());
 }
 
 /* The main-thread pump. The ORDER is the design, and each step is here because leaving it out is
@@ -146,20 +113,21 @@ void opendisplay_pipe_process(void)
   uint8_t drained;
 
   if (atomic_cas(&s_close_pending, 1, 0)) {
-    /* Each command module owns its own multi-frame state and exports the one call that drops it.
-     * The alternative -- reaching into their statics from here -- is what made this file a second
-     * command subsystem in the first place. */
-    od_session_clear(&s_session);
+    /* THE SHARED HALF IS ONE CALL. od_core_reset() cancels the config-read producer, drops
+     * queued egress and clears the session -- a list that was hand-written here and would lose an
+     * entry the next time a shared object was added. Its own reasons are in od_core.h; the one
+     * worth restating is the producer: it holds the config scratch, and od_dispatch DEFERS every
+     * config-mutating opcode while a read is active, so a client that vanishes mid-read would
+     * otherwise defer every later config write for the life of the boot.
+     *
+     * The target half stays here, because these are not shared objects. Each command module owns
+     * its multi-frame state and exports the one call that drops it; reaching into their statics
+     * from this file is what made it a second command subsystem in the first place. */
+    od_core_reset();
     od_cmd_config_reset();
     od_cmd_nfc_reset();
     opendisplay_pipe_write_reset();
     opendisplay_display_abort();
-    /* The producer holds the config scratch, and od_dispatch DEFERS every config-mutating opcode
-     * while a read is active -- so a client that vanishes mid-read would otherwise defer every
-     * later config write for the life of the boot. Egress goes with it: its queued frames belong
-     * to a connection that is gone. */
-    od_config_read_cancel();
-    od_txq_reset();
   }
 
   /* BOUNDED, and the bound is not defensive tidiness. A central issuing write-without-response can

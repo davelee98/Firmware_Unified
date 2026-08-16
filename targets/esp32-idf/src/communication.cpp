@@ -27,8 +27,9 @@
 #include "od_dispatch.h"   /* od_dispatch_budget, for the migration's legacy reservations */
 #include "od_cmd_reply.h"
 
-/* The CCM envelope, both directions. g_session is this target's one session (encryption_state.h). */
+/* The CCM envelope, both directions. The session itself is od_session_app.cpp's. */
 #include "od_session.h"
+#include "od_session_app.h"
 #include "od_span.h"
 #include "encryption_state.h"
 
@@ -636,7 +637,7 @@ extern "C" void od_core_frame_done(const od_reply_t *rp, od_frame_outcome_t outc
          * encrypted BLE path, but an accepted TLS-LAN command never reaches od_session_open at all
          * (SECTION 9 rule 4 gates it out), so without this the session's activity clock would stop
          * for exactly the traffic that is keeping the link busy. */
-        od_session_touch(&g_session, od_hal_uptime_ms());
+        od_session_touch(od_session_app_state(), od_hal_uptime_ms());
     }
     /* BLE ONLY, and the origin gate is not decoration: the same auth gate is reachable from
      * plaintext LAN, and counting those would let LAN traffic drop a BLE client. */

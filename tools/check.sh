@@ -178,6 +178,12 @@ c11_structure() {
     # od_reply_t and pass it.
     scan "implicit frame context" '\b(g_commandOrigin|g_commandInstance|commandOrigin|imageDataWritten)\b' \
          "build an od_reply_t at the ingress and pass it to od_dispatch_app_frame()."
+    # The session object is private to its od_session_app translation unit. A name reachable from
+    # elsewhere is one a caller can memset -- and memset is not teardown here: the key lives in an
+    # od_hal_crypto slot, so zeroing the struct strands a prepared key in a finite pool and loses
+    # the slot index with it. od_session_clear() is the only teardown.
+    scan "exported session singleton" '\b(g_session|od_pipe_session|od_pipe_device_id)\b' \
+         "reach the session through od_session_app_state()."
     # Confidentiality is chosen at the CALL SITE. Inferring it from response bytes is how this
     # firmware once sealed its own rejection frames, which the host then validated as ACKs.
     scan "byte-inferred sealing" 'response\[(0|2)\][[:space:]]*==[[:space:]]*(RESP_NACK|0xFF)' \

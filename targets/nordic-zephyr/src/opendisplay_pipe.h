@@ -9,4 +9,13 @@ void opendisplay_pipe_on_connection_closed(void);
 void opendisplay_pipe_on_notify_changed(bool enabled);
 void opendisplay_pipe_process(void);
 
+/* The live connection generation -- this target's frame identity, incremented on every close. A
+ * queued frame carries the generation that produced it, so od_txq and od_rxq can both discard work
+ * belonging to a connection that has gone.
+ *
+ * Public rather than behind a private header because it is a fact about the TRANSPORT, which is
+ * what this file is for. The header it used to share with the session accessors is gone: those
+ * moved behind od_session_app, and what was left was a general escape hatch with one member. */
+uint32_t od_pipe_conn_gen(void);
+
 #endif
