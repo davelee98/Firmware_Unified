@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "od_cmd_reply.h"
+#include "od_config_read.h"
 #include "od_dispatch.h"
 #include "od_rxq.h"
 #include "opendisplay_pipe_internal.h"
@@ -75,9 +76,11 @@ typedef struct {
 
 static bool s_notify;
 static od_chunked_config_t s_cfg_chunk;
-static uint8_t s_cfg_read_buf[MAX_RESPONSE_DATA_SIZE];
 /* The uptime clock, defined below with the other Zephyr shims. */
-static uint32_t od_now_ms(void);
+static uint32_t od_now_ms(void)
+{
+  return k_uptime_get_32();
+}
 
 /* ============================================================================================
  * THE SESSION ADAPTER. The handshake, KDF, replay window and CCM envelope are
@@ -88,47 +91,30 @@ static uint32_t od_now_ms(void);
 
 static struct od_session s_session;
 
-/* Budgets for the nonce-rejection logs. Nonce failures deliberately do not count toward
- * integrity_failures, so nothing else throttles a peer that drives these lines, and
- * out-of-window fires routinely on a lossy link.
- *
- * One budget PER SITE, not one shared: a stale client spamming session-id mismatches must not
- * be able to silence the out-of-window line, which is the one that reports real transfer loss. */
-static uint32_t s_nonce_log_window_ms;   /* replay / out-of-window */
-static uint32_t s_nonce_log_other_ms;    /* wrong session, bad tag, malformed, engine fault */
 
-static bool nonce_log_allowed(uint32_t *last_ms)
-{
-  const uint32_t now = od_now_ms();
-
-  if (*last_ms != 0u && (uint32_t)(now - *last_ms) < 5000u) {
-    return false;
-  }
-  *last_ms = now;
-  return true;
-}
 
 static void clear_session(void)
 {
   od_session_clear(&s_session);
 }
 
-/* Mutating by design: an expired session is torn down by the act of asking, which is what every
- * call site here already relied on. */
-static bool session_alive(void)
-{
-  return od_session_alive(&s_session, od_now_ms(), NULL);
-}
-
 /* The four device-id bytes that feed both the KDF and the auth proof: the low 32 bits of the
  * 64-bit hwinfo id, big-endian. Wire-visible identity -- a different packing is a different
  * device to the host. */
 static void od_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN]);
-static void pipe_send(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len);
+
+
+void od_pipe_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN])
+{
+  od_device_id(out);
+}
 
 /* Bumped on every close. A frame carries the generation that produced it, so both queues can
  * discard work belonging to a connection that has gone. */
 static atomic_t s_conn_gen;
+/* Raised by the BT RX thread on disconnect; the cleanup it triggers runs on main, because tearing
+ * down the display and the session from a stack callback is what starved ATT in the first place. */
+static atomic_t s_close_pending;
 
 struct od_session *od_pipe_session(void)
 {
@@ -138,20 +124,6 @@ struct od_session *od_pipe_session(void)
 uint32_t od_pipe_conn_gen(void)
 {
   return (uint32_t)atomic_get(&s_conn_gen);
-}
-
-void od_pipe_legacy_send(const uint8_t *data, uint16_t len)
-{
-  /* NULL context, deliberately and safely: pipe_send() and pipe_send_raw() both (void) it -- the
-   * legacy sender routes by inference, not by context. Spelled NULL rather than 0 so it cannot be
-   * mistaken for the connection number this parameter used to be, which is how a null context
-   * reached on_pipe_write() unnoticed and would have silenced every reply. */
-  pipe_send(NULL, data, len);
-}
-
-void od_pipe_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN])
-{
-  od_device_id(out);
 }
 
 static void od_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN])
@@ -170,41 +142,8 @@ static void od_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN])
   out[3] = (uint8_t)(uid & 0xFFu);
 }
 
-static bool authenticate_handle(const uint8_t *payload, uint16_t payload_len,
-                                uint8_t *rsp, uint16_t *rsp_len)
-{
-  uint8_t device_id[OD_SESSION_DEVICE_ID_LEN];
-  struct od_session_report report;
-  enum od_session_auth r;
-
-  od_device_id(device_id);
-  r = od_session_authenticate(&s_session, od_get_parsed_security(), device_id,
-                              od_span_make(payload, payload_len), od_now_ms(),
-                              rsp, OD_SESSION_REPLY_MAX, rsp_len, &report);
-  switch (r) {
-  case OD_SESSION_AUTH_CHALLENGE:
-    od_log_info("auth: challenge sent");
-    break;
-  case OD_SESSION_AUTH_ESTABLISHED:
-    od_log_info("auth: session established");
-    break;
-  case OD_SESSION_AUTH_RATE_LIMITED:
-    od_log_warn("auth: rate limited (%u attempts in window)", (unsigned)report.attempts);
-    break;
-  case OD_SESSION_AUTH_CRYPTO_ERROR:
-    od_log_error("auth: crypto engine failure (status %d)", (int)report.crypto_status);
-    break;
-  default:
-    od_log_warn("auth: refused (rc=%d, status 0x%02X)", (int)r, (unsigned)report.status_byte);
-    break;
-  }
-  return r == OD_SESSION_AUTH_ESTABLISHED;
-}
-static uint8_t s_long_write_buf[OD_PIPE_MAX_PAYLOAD];
 static uint16_t s_long_write_len;
 static uint8_t s_long_write_conn = 0xFFu;
-static uint8_t s_plain_buf[512];
-static uint8_t s_pipe_enc_buf[544];
 static uint8_t s_nfc_rsp_buf[OD_PIPE_MAX_PAYLOAD];
 typedef struct {
   bool active;
@@ -225,156 +164,7 @@ static od_nfc_write_chunk_t s_nfc_write_chunk;
  * CCM crypto) must not run there: they starve ATT and break service discovery
  * on reconnect. Writes are queued here and drained on the main thread.
  */
-/* Inbound frames live in shared/core/od_rxq.c now -- one ring, one SPSC contract, one arrival log
- * for both targets. The 509-byte slots this replaces were sized for an ATT MTU of 512 that nothing
- * used: the dispatcher refuses anything over OD_PIPE_MAX_PAYLOAD (244), so 40 x 513 B held ~20 KB
- * to buffer frames it would then reject. */
-static atomic_t s_close_pending;
 
-#ifndef OD_ALLOW_PLAINTEXT_WITH_SECURITY
-#define OD_ALLOW_PLAINTEXT_WITH_SECURITY 0
-#endif
-
-
-static void cfg_chunk_reset(void)
-{
-  memset(&s_cfg_chunk, 0, sizeof(s_cfg_chunk));
-}
-
-static void nfc_write_chunk_reset(void)
-{
-  memset(&s_nfc_write_chunk, 0, sizeof(s_nfc_write_chunk));
-  s_nfc_write_chunk.connection = 0xFFu;
-}
-
-static bool nfc_rec_type_valid(uint8_t rec_type)
-{
-  return rec_type == OD_NFC_REC_TEXT || rec_type == OD_NFC_REC_URI || rec_type == OD_NFC_REC_WELL_KNOWN_RAW
-         || rec_type == OD_NFC_REC_MIME || rec_type == OD_NFC_REC_RAW_NDEF;
-}
-
-static uint32_t od_now_ms(void)
-{
-  return k_uptime_get_32();
-}
-
-#define OD_CRYPTO_SESSION_SLOT ((od_hal_crypto_slot_t)0u)
-
-
-/*
- * Count a replay/decrypt failure and tear the session down after 3 strikes.
- * Mirrors the nRF52840 Firmware (encryption.cpp:640-646, 678-683): every
- * failed nonce-replay check or CCM tag verification increments the counter,
- * and reaching 3 clears the session so a forced re-auth is required.
- */
-
-static bool sec_enabled(void)
-{
-  return od_session_security_enabled(od_get_parsed_security());
-}
-
-
-
-
-/*
- * Constant-time equality, for comparing a MAC against an attacker-supplied value.
- * memcmp() returns as soon as two bytes differ, so its runtime reveals how many leading
- * bytes matched -- enough to forge a 16-byte tag one byte at a time. This always reads all
- * len bytes and folds them into a single accumulator. Matches the reference's
- * constantTimeCompare() (Firmware/src/encryption.cpp).
- */
-
-static void send_auth_required_response(const od_cmd_ctx_t *ctx, uint8_t resp_byte)
-{
-  uint8_t err[] = { 0x00u, resp_byte, RESP_AUTH_REQUIRED };
-  (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-}
-
-
-
-
-static void pipe_send_raw(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len)
-{
-  (void)ctx;
-  if (!s_notify || len == 0u) {
-    return;
-  }
-  /*
-   * bt_gatt_notify() returns -ENOMEM (notify → false) when the TX buffer pool is
-   * momentarily exhausted; it never blocks. A single response almost always
-   * succeeds on the first try. A multi-chunk config read (now up to
-   * (MAX_CONFIG_SIZE+93)/94 = 44 notifications back-to-back) can outrun the pool,
-   * so retry with a short yield while the link is still up — buffers free as the
-   * BT RX thread processes completions. This keeps the pool small (prj.conf) yet
-   * lets large reads through without dropping chunks. Bail if notifications are
-   * no longer enabled (disconnected), so a dead link cannot spin here.
-   */
-  for (int attempt = 0; attempt < 200; attempt++) {
-    if (opendisplay_ble_pipe_notify(data, len)) {
-      return;
-    }
-    if (!opendisplay_ble_pipe_notify_enabled()) {
-      break;
-    }
-    k_msleep(1);
-  }
-  od_log_info("pipe notify failed len=%u", (unsigned)len);
-}
-
-static void pipe_send(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len)
-{
-  uint8_t err[3];
-  uint16_t enc_len = 0;
-  uint8_t status;
-  uint8_t cmd;
-  bool force_plain;
-
-  if (len == 0u) {
-    return;
-  }
-  if (len < 2u) {
-    pipe_send_raw(ctx, data, len);
-    return;
-  }
-  cmd = data[1];
-  /* THE STATUS IS BYTE 2, not byte 0. Every frame this file builds leads with 0x00 for an ACK or
-   * 0xFF for a hard error, and puts the FE/FF outcome in byte 2 -- {0x00, cmd, 0xFF} for a
-   * rejected decrypt, {0x00, cmd, 0xFE} for auth-required. Reading byte 0 meant neither test
-   * could ever fire for those two, so a rejected command was SEALED, and py-opendisplay decrypts
-   * any frame of 31 bytes or more and returns immediately (device.py:830), never reaching its
-   * raw[2] == 0xFF guard. The 2-byte echo then validates as an ACK and the host reports success
-   * for a command the device refused. Error frames are plaintext by contract
-   * (py-opendisplay protocol/responses.py) -- this is the same rule esp32-idf applies at
-   * communication.cpp:412.
-   *
-   * The 7-byte PIPE data ACK {0x00,0x81,highest_seen,mask:4} carries a rolling seq at byte 2, so
-   * a highest_seen of 0xFE/0xFF on any image of 255+ chunks must not be mistaken for a status;
-   * pipe ACKs encrypt normally. Other pipe shapes cannot collide: 0x80's byte 2 is a version,
-   * a pipe NACK's is an error code 0x01-0x04, and 0x82 acks are two bytes. */
-  {
-    const bool pipe_data_ack = (len == 7u && data[0] == 0x00u && data[1] == 0x81u);
-    status = (len >= 3u && !pipe_data_ack) ? data[2] : 0x00u;
-  }
-  force_plain = (status == RESP_AUTH_REQUIRED || status == RESP_NACK
-                 || data[0] == 0xFFu           /* 4-byte hard-error frames lead with 0xFF */
-                 || cmd == RESP_AUTHENTICATE || cmd == RESP_FIRMWARE_VERSION);
-  if (force_plain || !session_alive()) {
-    pipe_send_raw(ctx, data, len);
-    return;
-  }
-  /* od_session_seal takes the complete [status][cmd][payload] frame: those two leading bytes are
-   * the AAD as well as the echoed prefix, so they travel with the payload rather than separately. */
-  if (od_session_seal(&s_session, od_span_make(data, len), s_pipe_enc_buf,
-                      sizeof(s_pipe_enc_buf), &enc_len, od_now_ms(), NULL)
-      == OD_SESSION_SEAL_OK) {
-    pipe_send_raw(ctx, s_pipe_enc_buf, enc_len);
-    return;
-  }
-  err[0] = 0x00u;
-  err[1] = cmd;
-  err[2] = 0xFFu;
-  pipe_send_raw(ctx, err, sizeof(err));
-}
 
 static od_cmd_result_t reply_firmware_version(const od_cmd_ctx_t *ctx)
 {
@@ -530,17 +320,31 @@ static od_cmd_result_t handle_config_clear(const od_cmd_ctx_t *ctx)
   return OD_CMD_OK;
 }
 
+static void cfg_chunk_reset(void)
+{
+  memset(&s_cfg_chunk, 0, sizeof(s_cfg_chunk));
+}
+
+static void nfc_write_chunk_reset(void)
+{
+  memset(&s_nfc_write_chunk, 0, sizeof(s_nfc_write_chunk));
+  s_nfc_write_chunk.connection = 0xFFu;
+}
+
+static bool nfc_rec_type_valid(uint8_t rec_type)
+{
+  return rec_type == OD_NFC_REC_TEXT || rec_type == OD_NFC_REC_URI || rec_type == OD_NFC_REC_WELL_KNOWN_RAW
+         || rec_type == OD_NFC_REC_MIME || rec_type == OD_NFC_REC_RAW_NDEF;
+}
+
+
 static od_cmd_result_t handle_config_read(const od_cmd_ctx_t *ctx)
 {
+  /* File-static: the producer reads from this across many pump passes, which is exactly why
+   * od_dispatch DEFERS every config-mutating opcode while a read is active -- a write reloading
+   * through the same buffer mid-read would splice two configs into one CRC-valid read-back. */
   static uint8_t config_data[MAX_CONFIG_SIZE];
   uint32_t config_len = MAX_CONFIG_SIZE;
-  /* Derive the chunk cap from MAX_CONFIG_SIZE like the reference firmware
-   * (communication.cpp: (MAX_CONFIG_SIZE + 93) / 94). Each chunk carries at
-   * least 94 config bytes (chunk 0: 100-byte response - 2 status - 2 chunk# - 2
-   * total-len; later chunks carry 96), so 94 is the conservative per-chunk rate.
-   * The old hardcoded 10 truncated any read past ~940 bytes. Flow control in
-   * pipe_send_raw keeps the larger burst from dropping chunks on a full TX pool. */
-  const uint16_t max_chunks = (uint16_t)((MAX_CONFIG_SIZE + 93) / 94);
 
   if (!initConfigStorage()) {
     uint8_t err[] = { 0xFFu, RESP_CONFIG_READ, 0x00u, 0x00u };
@@ -549,53 +353,50 @@ static od_cmd_result_t handle_config_read(const od_cmd_ctx_t *ctx)
   }
 
   if (!loadConfig(config_data, &config_len)) {
-    uint8_t empty[] = {
-      0x00u, RESP_CONFIG_READ, 0x00u, 0x00u, 0x00u, 0x00u,
-    };
+    /* A ZERO-LENGTH ACK, not a NACK, and that is a live cross-target divergence preserved rather
+     * than harmonised here: ESP32 answers an empty read with {FF,43,00,00} and this target answers
+     * a valid read of nothing. od_config_read_start()'s own NULL-blob path emits the ESP32 shape,
+     * so passing NULL would silently change Nordic's wire. One subsystem per swap; the divergence
+     * belongs in DIVERGENCE_MATRIX, not in this commit. */
+    uint8_t empty[] = { 0x00u, RESP_CONFIG_READ, 0x00u, 0x00u, 0x00u, 0x00u };
     (void)od_cmd_reply(ctx, empty, sizeof(empty));
     return OD_CMD_OK;
   }
 
-  uint32_t remaining = config_len;
-  uint32_t offset = 0;
-  uint16_t chunk_number = 0;
-
-  while (remaining > 0 && chunk_number < max_chunks) {
-    uint16_t response_len = 0;
-    uint16_t chunk_size;
-
-    s_cfg_read_buf[response_len++] = 0x00u;
-    s_cfg_read_buf[response_len++] = RESP_CONFIG_READ;
-    s_cfg_read_buf[response_len++] = (uint8_t)(chunk_number & 0xFFu);
-    s_cfg_read_buf[response_len++] = (uint8_t)((chunk_number >> 8) & 0xFFu);
-
-    if (chunk_number == 0u) {
-      s_cfg_read_buf[response_len++] = (uint8_t)(config_len & 0xFFu);
-      s_cfg_read_buf[response_len++] = (uint8_t)((config_len >> 8) & 0xFFu);
-    }
-
-    {
-      uint16_t max_data = (uint16_t)(MAX_RESPONSE_DATA_SIZE - response_len);
-      chunk_size = (remaining < max_data) ? (uint16_t)remaining : max_data;
-    }
-
-    if (chunk_size == 0u) {
-      break;
-    }
-
-    memcpy(s_cfg_read_buf + response_len, config_data + offset, chunk_size);
-    response_len += chunk_size;
-
-    if (response_len > MAX_RESPONSE_DATA_SIZE) {
-      break;
-    }
-
-    (void)od_cmd_reply(ctx, s_cfg_read_buf, response_len);
-    offset += chunk_size;
-    remaining -= chunk_size;
-    chunk_number++;
+  /* STARTS a read; it does not perform one. Chunk 0 goes out here and od_config_read_pump() emits
+   * the rest, one slot per pass. The synchronous loop this replaces queued up to 44 frames in a
+   * single call against a one-slot reservation -- at the cutover chunk 0 (which declares the total
+   * length to the host) would have gone out and every later chunk failed silently on an exhausted
+   * token, leaving the host waiting for a config it had been promised.
+   *
+   * The reservation is TRANSFERRED; od_dispatch's release afterwards is a no-op because the token
+   * is already spent. */
+  {
+    const od_txq_status_t rc =
+      od_config_read_start(&ctx->rp, ctx->r, config_data, config_len);
+    return (rc == OD_TXQ_OK) ? OD_CMD_OK : OD_CMD_NACK;
   }
-  return OD_CMD_OK;
+}
+
+
+/* The erase that pays for the key-loss exemption, and the half od_dispatch deliberately does not
+ * own -- what "erase" means is storage policy.
+ *
+ * Runs only when this write actually arrived unauthenticated, so an ordinary authenticated write
+ * never touches it. Dropping the stored config drops the OLD KEY with it, which is what stops the
+ * exemption being used to layer a new configuration over a key the peer never proved it had. The
+ * reference erases on the single-shot path and again on the first chunk of a chunked one, for the
+ * same reason: a chunked write starts as CONFIG_WRITE and continues as CONFIG_CHUNK, and a session
+ * that expires mid-transfer must not land a new config over a retained key. */
+static void erase_before_unauthenticated_rewrite(uint16_t cmd)
+{
+  if (!od_cmd_allow_unauthenticated(cmd)) {
+    return;
+  }
+  if (od_session_authenticated(&s_session)) {
+    return;                       /* an authenticated write: nothing to pay for */
+  }
+  (void)clearStoredConfig();
 }
 
 static od_cmd_result_t handle_config_write(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len)
@@ -603,6 +404,8 @@ static od_cmd_result_t handle_config_write(const od_cmd_ctx_t *ctx, const uint8_
   od_cmd_result_t rc = OD_CMD_NACK;
   uint8_t ack[] = { 0x00u, RESP_CONFIG_WRITE, 0x00u, 0x00u };
   uint8_t err[] = { 0xFFu, RESP_CONFIG_WRITE, 0x00u, 0x00u };
+
+  erase_before_unauthenticated_rewrite(CMD_CONFIG_WRITE);
 
   if (len == 0u) {
     /* Answers NOTHING, which is the shipped behaviour and is preserved here. It is still a
@@ -708,6 +511,11 @@ static od_cmd_result_t handle_config_chunk(const od_cmd_ctx_t *ctx, const uint8_
   if (!s_cfg_chunk.active || s_cfg_chunk.connection != 0u) {
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return OD_CMD_NACK;
+  }
+  /* First continuation only, matching the reference: the CONFIG_WRITE that opened this transfer
+   * erased already, and erasing again mid-stream would discard the chunks collected so far. */
+  if (s_cfg_chunk.received_chunks == 1u) {
+    erase_before_unauthenticated_rewrite(CMD_CONFIG_CHUNK);
   }
   if (len == 0u) {
     /* Silent, as shipped -- but a refusal, not an acceptance. */
@@ -929,50 +737,6 @@ static od_cmd_result_t handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_
   return OD_CMD_NACK;
 }
 
-static od_cmd_result_t dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd,
-                                const uint8_t *payload, uint16_t payload_len)
-{
-  uint8_t auth_rsp[32];
-  uint16_t auth_rsp_len = 0;
-  if (cmd == CMD_AUTHENTICATE) {
-    (void)authenticate_handle(payload, payload_len, auth_rsp, &auth_rsp_len);
-    (void)od_cmd_reply_plain(ctx, auth_rsp, auth_rsp_len);
-    /* The handshake is answered, whatever its outcome -- the reply carries the status byte. At the
-     * cutover od_gate_authenticate() owns this and reports AUTH_CONTROL vs AUTH_ESTABLISHED, which
-     * the abuse policy needs and this gate cannot express. */
-    return OD_CMD_OK;
-  }
-  if (sec_enabled() && !session_alive()) {
-#if !OD_ALLOW_PLAINTEXT_WITH_SECURITY
-    /* Same policy as the nRF52840 Firmware: firmware version is always
-     * readable; config write/chunk pass through unauthenticated only when the
-     * rewrite flag (SecurityConfig flags bit0) is set, after erasing the
-     * stored config so the old key cannot be recovered. */
-    const struct SecurityConfig *sec = od_get_parsed_security();
-    bool rewrite_allowed = (sec != NULL) && ((sec->flags & 0x01u) != 0u);
-    bool config_rewrite = rewrite_allowed
-                          && (cmd == CMD_CONFIG_WRITE || cmd == CMD_CONFIG_CHUNK);
-    if (cmd != CMD_FIRMWARE_VERSION && !config_rewrite) {
-      send_auth_required_response(ctx, (uint8_t)(cmd & 0xFFu));
-      return OD_CMD_AUTH_REJECTED;
-    }
-    /* Erase the stored config (and thus the old key) before accepting an
-     * unauthenticated rewrite, on BOTH the single-shot and chunked paths.
-     * The reference secure-erases in handleWriteConfig (communication.cpp:372)
-     * and again on the first chunk of handleWriteConfigChunk (:435). A chunked
-     * write starts as CMD_CONFIG_WRITE (erased here) and continues as
-     * CMD_CONFIG_CHUNK; erase on that first chunk too so a session that
-     * expires mid-transfer cannot land a new config over a retained key. */
-    if (cmd == CMD_CONFIG_WRITE) {
-      (void)clearStoredConfig();
-    } else if (cmd == CMD_CONFIG_CHUNK && s_cfg_chunk.active &&
-               s_cfg_chunk.received_chunks == 1u) {
-      (void)clearStoredConfig();
-    }
-#endif
-  }
-  return od_cmd_dispatch(ctx, cmd, od_span_make(payload, payload_len));
-}
 
 /* IMPLEMENTED FOR shared/core/od_dispatch.h. One seam rather than one function per opcode: the
  * dispatch plan names a per-opcode split as C11's shrink, and doing it here would rewrite every
@@ -1114,89 +878,6 @@ od_cmd_result_t od_cmd_dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, od_span_t
   }
 }
 
-static void on_pipe_write(const od_cmd_ctx_t *ctx, const uint8_t *data, uint16_t len, bool write_cmd)
-{
-  uint16_t cmd;
-  const uint8_t *frame = data;
-  uint16_t frame_len = len;
-  uint16_t plain_len = 0;
-
-  (void)write_cmd;
-  if (frame_len < 2u) {
-    return;
-  }
-  if (frame_len > OD_PIPE_MAX_PAYLOAD) {
-    uint8_t err[] = { 0xFFu, frame[1], 0xFEu };
-    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-    return;
-  }
-
-  cmd = (uint16_t)(((uint16_t)frame[0] << 8) | frame[1]);
-  if (cmd != CMD_DIRECT_WRITE_DATA && cmd != CMD_PIPE_WRITE_DATA) {
-    od_log_info("rx cmd=0x%04X len=%u sec=%d sess=%d", (unsigned)cmd,
-           (unsigned)frame_len, (int)sec_enabled(), (int)session_alive());
-  }
-  if (sec_enabled() && cmd != CMD_AUTHENTICATE) {
-    if (frame_len >= 31u) {
-      if (!session_alive()) {
-        send_auth_required_response(ctx, frame[1]);
-        return;
-      }
-      /* The envelope [nonce:16][ciphertext][tag:12] is contiguous behind the two command bytes,
-       * so it is one span. s_plain_buf must hold the decrypted [len:1][payload] frame -- one byte
-       * more than plain_len ends up being. */
-      struct od_session_report report;
-      enum od_session_open opened =
-        od_session_open(&s_session, cmd, od_span_make(&frame[2], (size_t)(frame_len - 2u)),
-                        s_plain_buf, sizeof(s_plain_buf), &plain_len, od_now_ms(), &report);
-      if (opened != OD_SESSION_OPEN_OK) {
-        uint8_t err[] = { 0x00u, frame[1], 0xFFu };
-        /* A PIPE DATA frame refused for a NONCE reason is ordinary packet loss, and the answer
-         * is SILENCE. pipe-write-protocol.md 5.1 makes a 0x81 NACK unconditionally fatal and 5.2
-         * reserves NACKs for unrecoverable conditions, so answering here kills the upload on the
-         * first dropped frame. Saying nothing leaves the seq absent from the next SACK; the host
-         * retransmits under a fresh higher counter, which the window accepts unconditionally.
-         * This target ships PIPE_MAX_W 32, so reordering reaches the window in normal use.
-         *
-         * Deliberately narrow: a TAG failure keeps the NACK -- it is tamper evidence, not loss. */
-        const bool nonce_loss = (report.nonce_reason == (uint8_t)NONCE_OUT_OF_WINDOW ||
-                                 report.nonce_reason == (uint8_t)NONCE_REPLAY);
-        /* LOG BEFORE THE SILENT RETURN -- returning first would hide replay and out-of-window
-         * events on the one path that produces them routinely, which is the condition the
-         * throttle exists to let you observe. */
-        if (nonce_log_allowed(nonce_loss ? &s_nonce_log_window_ms : &s_nonce_log_other_ms)) {
-          od_log_warn("decrypt failed: cmd=0x%04X rc=%d nonce_reason=%u envelope=%u B",
-                      (unsigned)cmd, (int)opened, (unsigned)report.nonce_reason,
-                      (unsigned)(frame_len - 2u));
-        }
-        if (nonce_loss && cmd == CMD_PIPE_WRITE_DATA) {
-          return;   /* silence is the wire answer; the line above is the record of it */
-        }
-        (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-        return;
-      }
-      dispatch(ctx, cmd, s_plain_buf, plain_len);
-      return;
-    }
-    /*
-     * Sub-31-byte frame while security is enabled. If a session is live, an
-     * unencrypted command must be rejected (matches the reference's
-     * "Unencrypted command received when encryption is enabled",
-     * communication.cpp:502-507) so a plaintext reboot/DFU/etc. cannot slip
-     * past the auth+replay checks mid-session. Firmware-version stays always
-     * plaintext-readable (exempted at communication.cpp:488); authenticate is
-     * already excluded above. When no session is live, fall through to
-     * dispatch()'s auth gate, preserving today's behaviour exactly
-     * (fw-version + the config-rewrite path stay reachable).
-     */
-    if (session_alive() && cmd != CMD_FIRMWARE_VERSION) {
-      send_auth_required_response(ctx, frame[1]);
-      return;
-    }
-  }
-  dispatch(ctx, cmd, &frame[2], (uint16_t)(frame_len - 2u));
-}
-
 /* BT RX thread: copy into the queue only, no command processing here. */
 void opendisplay_pipe_on_write(const uint8_t *data, uint16_t len, bool write_cmd)
 {
@@ -1231,6 +912,41 @@ static bool rx_tag_is_live(uint32_t tag, void *context)
   return tag == (uint32_t)atomic_get(&s_conn_gen);
 }
 
+/* IMPLEMENTED FOR shared/core/od_cmd.h. Applies od_frame_policy() with this target's scoping.
+ *
+ * Nordic has NO exclusive-link idle clock and NO auth-abuse drop -- those are ESP32's
+ * CONNECTION_POLICY mechanisms and there is nothing here to stamp or to count. What IS applicable
+ * is the session's own activity clock: od_session_open() touches it on the encrypted path, but an
+ * accepted PLAINTEXT command (security off, or FIRMWARE_VERSION) never reaches od_session_open, so
+ * without this the clock would stop for exactly the traffic keeping the link busy. */
+void od_core_frame_done(const od_reply_t *rp, od_frame_outcome_t outcome)
+{
+  const od_frame_policy_t p = od_frame_policy(outcome);
+
+  if (rp == NULL || !p.stamp_activity) {
+    return;
+  }
+  od_session_touch(&s_session, od_now_ms());
+}
+
+/* The main-thread pump. The ORDER is the design, and each step is here because leaving it out is
+ * silent rather than loud:
+ *
+ *   1. deferred disconnect cleanup      -- before anything reads session or transfer state
+ *   2. TX progress                      -- free capacity BEFORE dispatch needs to reserve it
+ *   3. config-read producer             -- one chunk per available slot; without it a read stops
+ *                                          after chunk 0 and stays active forever, deferring every
+ *                                          later config write behind it
+ *   4. stale discard + identity recheck -- a frame must not run on an identity that has gone
+ *   5. shared dispatch                  -- validate, gate, decrypt, handler
+ *   6. outcome policy
+ *   7. RX consumption, EXCEPT DEFERRED  -- which stays at the head, byte-identical
+ *   8. TX progress again                -- so a reply queued by this pass leaves in this pass
+ *
+ * 2 before 5 is the one that is not obvious: dispatch reserves capacity before it decrypts, so
+ * draining first is what stops a frame being decrypted -- advancing the replay window -- and only
+ * then discovering there is no room to answer it. A frame deferred after decrypt is a REPLAY when
+ * it is re-offered, and the window refuses it the second time. */
 void opendisplay_pipe_process(void)
 {
   if (atomic_cas(&s_close_pending, 1, 0)) {
@@ -1241,35 +957,50 @@ void opendisplay_pipe_process(void)
     nfc_write_chunk_reset();
     opendisplay_pipe_write_reset();
     opendisplay_display_abort();
+    /* The producer holds the config scratch, and od_dispatch DEFERS every config-mutating opcode
+     * while a read is active -- so a client that vanishes mid-read would otherwise defer every
+     * later config write for the life of the boot. Egress goes with it: its queued frames belong
+     * to a connection that is gone. */
+    od_config_read_cancel();
+    od_txq_reset();
   }
+
   for (;;) {
+    od_rxq_item_t *item;
+    od_reply_t rp;
+    od_frame_outcome_t outcome;
+
+    (void)od_txq_process();
+    (void)od_config_read_pump();
+
     (void)od_rxq_discard_stale(rx_tag_is_live, NULL);
-    od_rxq_item_t *item = od_rxq_peek();
+    item = od_rxq_peek();
     if (item == NULL) {
       break;
     }
-    /* Close can advance the generation after the shared helper accepts this head. Recheck at the
-     * handler boundary; the next iteration consumes it using the new generation. */
+    /* Close can advance the generation after the shared helper accepted this head. Recheck at the
+     * handler boundary; the next iteration consumes it under the new generation. */
     if (!rx_tag_is_live(item->tag, NULL)) {
       continue;
     }
-    {
-      /* THE CONTEXT IS BUILT HERE, and it must be a real one. Passing 0 for it compiles -- it is a
-       * valid null pointer constant -- and od_cmd_reply() then returns INVARIANT for every reply,
-       * so the device would accept commands and answer NONE. Nothing in a build catches that.
-       *
-       * The tag is the frame's own generation, taken from the slot rather than re-read from
-       * s_conn_gen: a frame must be answered on the identity that sent it, not on whatever the
-       * link has become since. The reservation is empty under legacy routing, where od_cmd_reply
-       * hands frames straight to pipe_send(); the dispatcher supplies a real one at the cutover. */
-      od_tx_reservation_t r = { 0u, 0u };
-      const od_cmd_ctx_t ctx = { { OD_ORIGIN_BLE, item->tag }, &r };
-      on_pipe_write(&ctx, item->data, item->len, false);
+
+    /* The tag is the frame's OWN generation, from its slot rather than a re-read of s_conn_gen: a
+     * frame must be answered on the identity that sent it, not on whatever the link has become. */
+    rp.origin = OD_ORIGIN_BLE;
+    rp.tag = item->tag;
+    outcome = od_dispatch_frame(&rp, od_span_make(item->data, item->len));
+    od_core_frame_done(&rp, outcome);
+
+    if (!od_frame_policy(outcome).consume_rx) {
+      /* DEFERRED: not consumed, re-offered unchanged. Stop the drain too -- the head has not moved,
+       * so another pass this tick would reach the same answer. What cleared it is TX capacity or a
+       * finishing config read, and both advance at the top of the next pass. */
+      break;
     }
-    /* Stale frames were consumed above rather than retried. Peek/consume avoids a copying get, so
-     * the dispatcher decrypts in the slot instead of on a 256-byte stack frame in main. */
     od_rxq_consume();
   }
+
+  (void)od_txq_process();
 }
 
 /* IMPLEMENTED FOR shared/core/od_dispatch.h. The opcodes a live CONFIG_READ must exclude, because
@@ -1290,4 +1021,33 @@ bool od_cmd_mutates_config(uint16_t cmd)
   default:
     return false;
   }
+}
+
+/* IMPLEMENTED FOR shared/core/od_dispatch.h -- KEY-LOSS RECOVERY, and the only exemption this
+ * target grants.
+ *
+ * A device provisioned with a session key whose host has lost that key is otherwise bricked for
+ * configuration: every command answers AUTH_REQUIRED and the only route back is physical. When
+ * SecurityConfig flags bit 0 is set, the owner has said -- in the device's own stored
+ * configuration -- that an unauthenticated config REWRITE is acceptable, so the gate is skipped for
+ * the two write opcodes, and only when no session is live, which od_dispatch establishes before
+ * asking.
+ *
+ * READS ARE NEVER EXEMPT. CONFIG_READ is absent deliberately: this path exists to replace a
+ * configuration, not to disclose one, and exempting the read would hand the stored config -- and
+ * the key inside it -- to any unauthenticated peer. The handlers erase the stored config before
+ * accepting such a write, so the old key cannot survive into the new one either.
+ *
+ * The local gate this replaces had the same intent and was almost entirely unreachable: it sat
+ * behind a `frame_len >= 31` test that rejected any plaintext frame large enough to carry a real
+ * config, so only a config of 28 bytes or fewer could reach it. That shadow is gone, and the
+ * capability now works for the config sizes it was written for. */
+bool od_cmd_allow_unauthenticated(uint16_t cmd)
+{
+  const struct SecurityConfig *sec = od_get_parsed_security();
+
+  if (sec == NULL || (sec->flags & 0x01u) == 0u) {
+    return false;
+  }
+  return cmd == CMD_CONFIG_WRITE || cmd == CMD_CONFIG_CHUNK;
 }

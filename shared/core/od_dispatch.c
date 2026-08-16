@@ -45,6 +45,24 @@ uint8_t od_dispatch_budget(uint16_t cmd)
     }
 }
 
+/* KEY-LOSS RECOVERY, and the ORDER of these two tests is the whole safety argument.
+ *
+ * The liveness question comes FIRST, so the target is asked only about a frame that has no session
+ * behind it. On a live session every command still meets the gate, so this can never be used to
+ * skip decryption or to slip a plaintext command past the replay window mid-session. It is
+ * reachable exactly when the device would otherwise be permanently unreachable.
+ *
+ * od_session_alive() rather than od_session_authenticated(): the MUTATING form, which tears down an
+ * expired session as it answers. The pure predicate would leave an expired-but-uncleared session
+ * looking authenticated, and the exemption would then be judged against a session already dead. */
+static bool unauthenticated_exempt(uint16_t cmd)
+{
+    if (od_session_alive(od_session_app_state(), od_session_app_now_ms(), NULL)) {
+        return false;
+    }
+    return od_cmd_allow_unauthenticated(cmd);
+}
+
 static uint16_t origin_ceiling(od_origin_t origin)
 {
     return (origin == OD_ORIGIN_BLE) ? OD_DISPATCH_MAX_BLE : OD_DISPATCH_MAX_LAN;
@@ -140,7 +158,8 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
      * origin -- see od_session.h. Applying the session to a TLS frame would also advance the replay
      * counter on traffic the window never authenticated. */
     if (rp->origin != OD_ORIGIN_LAN_TLS &&
-        od_session_security_enabled(od_session_app_security())) {
+        od_session_security_enabled(od_session_app_security()) &&
+        !unauthenticated_exempt(cmd)) {
         const od_gate_result_t g = od_gate_open(&r, rp, cmd, body, s_plain, sizeof s_plain);
         if (g.outcome != OD_FRAME_ACCEPTED) {
             od_txq_release(&r);

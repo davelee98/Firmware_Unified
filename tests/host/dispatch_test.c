@@ -132,6 +132,16 @@ bool od_cmd_mutates_config(uint16_t cmd)
     return g_mutates_config;
 }
 
+/* The key-loss exemption, off unless a case turns it on. Defaulting it OFF is deliberate: every
+ * existing case asserts the gate's behaviour, and a fake that exempted by default would quietly
+ * make them assert nothing. */
+static bool g_allow_unauthenticated;
+
+bool od_cmd_allow_unauthenticated(uint16_t cmd)
+{
+    return g_allow_unauthenticated && cmd == CMD_CONFIG_WRITE;
+}
+
 /* --------------------------------------------------------------------------------- helpers --- */
 
 static const od_reply_t BLE = { OD_ORIGIN_BLE, 9u };
@@ -251,6 +261,53 @@ static void test_encrypted_path(void)
               OD_FRAME_AUTH_REQUIRED);
         CHECK(g_handler_calls == 0u);
     }
+    g_allow_unauthenticated = false;
+}
+
+/* KEY-LOSS RECOVERY. A device whose host lost the session key answers AUTH_REQUIRED to everything
+ * and is otherwise reachable only physically, so a target may exempt a config REWRITE. The whole
+ * safety of that rests on the two boundaries below, and neither is obvious from the call site. */
+static void test_unauthenticated_exemption(void)
+{
+    uint8_t plain[6] = { 0x00u, 0x41u, 1u, 2u, 3u, 4u };
+    uint8_t other[6] = { 0x00u, 0x77u, 1u, 2u, 3u, 4u };
+    uint8_t server_nonce[16];
+    uint8_t wire[64];
+    uint16_t n;
+
+    CASE("an exempt opcode reaches the handler unauthenticated, with its PLAINTEXT body");
+    setup(true, false);
+    g_allow_unauthenticated = true;
+    CHECK(od_dispatch_frame(&BLE, od_span_make(plain, sizeof plain)) == OD_FRAME_ACCEPTED);
+    CHECK(g_handler_calls == 1u);
+    CHECK(g_handler_body_len == 4u);
+    CHECK(memcmp(g_handler_body, plain + 2, 4u) == 0);
+
+    CASE("a NON-exempt opcode is still refused, so the exemption is per-opcode not per-device");
+    setup(true, false);
+    g_allow_unauthenticated = true;
+    CHECK(od_dispatch_frame(&BLE, od_span_make(other, sizeof other)) == OD_FRAME_AUTH_REQUIRED);
+    CHECK(g_handler_calls == 0u);
+
+    /* THE BOUNDARY THAT MATTERS. With a session live the exemption must not be consulted at all,
+     * or a peer could send the exempt opcode in the CLEAR mid-session and skip both the envelope
+     * and the replay window -- turning a recovery path into an authentication bypass. */
+    CASE("with a LIVE session the exemption is not consulted: plaintext is still refused");
+    setup(true, false);
+    g_allow_unauthenticated = true;
+    CHECK(handshake(od_session_app_state(), g_now_ms, server_nonce, false) ==
+          OD_SESSION_AUTH_ESTABLISHED);
+    CHECK(od_dispatch_frame(&BLE, od_span_make(plain, sizeof plain)) != OD_FRAME_ACCEPTED);
+    CHECK(g_handler_calls == 0u);
+
+    CASE("and a SEALED exempt frame on that live session still decrypts normally");
+    n = make_encrypted(0x0041u, plain + 2, 4u, wire);
+    CHECK(n > 0u);
+    CHECK(od_dispatch_frame(&BLE, od_span_make(wire, n)) == OD_FRAME_ACCEPTED);
+    CHECK(g_handler_calls == 1u);
+    CHECK(g_handler_body_len == 4u);
+
+    g_allow_unauthenticated = false;
 }
 
 static void test_structural_and_liveness(void)
@@ -528,6 +585,7 @@ int main(void)
 {
     test_plaintext_path();
     test_encrypted_path();
+    test_unauthenticated_exemption();
     test_structural_and_liveness();
     test_reserve_precedes_the_handler();
     test_budget_covers_the_worst_case();

@@ -30,9 +30,6 @@ void od_pipe_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN]);
  * belonging to a connection that has gone. */
 uint32_t od_pipe_conn_gen(void);
 
-/* The shipped sender, for the migration adapter only. Leaves with pipe_send() at the cutover; no
- * new caller should appear. */
-void od_pipe_legacy_send(const uint8_t *data, uint16_t len);
 
 #ifdef __cplusplus
 }

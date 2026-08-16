@@ -61,6 +61,24 @@ uint8_t od_dispatch_budget(uint16_t cmd);
  * there is nothing left for a handler to defer on. It spends units from `r` via od_reply(). */
 od_cmd_result_t od_cmd_dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, od_span_t body);
 
+/* IMPLEMENTED BY THE TARGET. May this opcode run with NO authenticated session, on a device where
+ * security IS configured?
+ *
+ * Almost always false, and a target with nothing to say here returns false for everything. It
+ * exists for one real capability: KEY-LOSS RECOVERY. A device whose host has lost the session key
+ * is otherwise unreachable -- every command answers AUTH_REQUIRED forever and the only way back is
+ * physical. A target may therefore let a config write through unauthenticated when its own
+ * configuration says so, having first erased the stored config (and with it the old key), so the
+ * exemption cannot be used to READ anything or to layer a new config over a retained key.
+ *
+ * SCOPED TIGHTLY BY THE DISPATCHER: consulted only when no session is live, so an authenticated
+ * client's sealed frame still decrypts normally and this can never bypass the envelope on a live
+ * session. The target owns the erase, because what "erase" means is storage policy; shared/ owns
+ * only the question of whether the gate is consulted at all.
+ *
+ * A target that returns true for anything beyond that is opening a hole. */
+bool od_cmd_allow_unauthenticated(uint16_t cmd);
+
 /* IMPLEMENTED BY THE TARGET. True when this opcode would MUTATE stored configuration -- the set a
  * live CONFIG_READ must exclude, because the producer reads the same scratch that a write
  * reloads through. Target-side because the opcode set differs per target (LAN-only opcodes, NFC

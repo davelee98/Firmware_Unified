@@ -22,6 +22,9 @@
 #include "opendisplay_ble.h"
 #include "opendisplay_pipe_internal.h"
 
+#include "od_log.h"
+#include "od_txq.h"
+
 od_radio_result_t od_hal_radio_send(od_origin_t origin, uint32_t tag, const uint8_t *frame,
                                     uint16_t len)
 {
@@ -53,4 +56,17 @@ bool od_hal_radio_tag_is_live(od_origin_t origin, uint32_t tag)
    * owner word, but the property od_txq needs is the same -- a frame queued by a departed
    * connection must never be delivered to whoever came after it. */
   return tag == od_pipe_conn_gen();
+}
+
+/* IMPLEMENTED FOR shared/core/od_txq.h. A queued response that will never be delivered, because
+ * the connection that asked for it is gone.
+ *
+ * Logged rather than silent, and at INFO rather than as an error: on a normal disconnect mid-upload
+ * this fires once per queued frame and is expected. What it exists to make visible is the abnormal
+ * case -- frames being discarded while a link is up, which means the tag carried by a reply stopped
+ * matching the live generation and points at an identity bug rather than a departed peer. */
+void od_txq_app_dropped(const od_reply_t *rp, uint16_t len, od_radio_result_t why)
+{
+  od_log_info("tx dropped: %u B for gen %u (rc=%d, live gen %u)", (unsigned)len,
+              (unsigned)(rp != NULL ? rp->tag : 0u), (int)why, (unsigned)od_pipe_conn_gen());
 }
