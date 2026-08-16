@@ -1112,6 +1112,12 @@ void opendisplay_pipe_on_connection_closed(void)
 }
 
 /* Main thread: run deferred cleanup and process queued writes. */
+static bool rx_tag_is_live(uint32_t tag, void *context)
+{
+  (void)context;
+  return tag == (uint32_t)atomic_get(&s_conn_gen);
+}
+
 void opendisplay_pipe_process(void)
 {
   if (atomic_cas(&s_close_pending, 1, 0)) {
@@ -1124,10 +1130,15 @@ void opendisplay_pipe_process(void)
     opendisplay_display_abort();
   }
   for (;;) {
-    (void)od_rxq_discard_stale((uint32_t)atomic_get(&s_conn_gen));
+    (void)od_rxq_discard_stale(rx_tag_is_live, NULL);
     od_rxq_item_t *item = od_rxq_peek();
     if (item == NULL) {
       break;
+    }
+    /* Close can advance the generation after the shared helper accepts this head. Recheck at the
+     * handler boundary; the next iteration consumes it using the new generation. */
+    if (!rx_tag_is_live(item->tag, NULL)) {
+      continue;
     }
     on_pipe_write(0, item->data, item->len, false);
     /* Stale frames were consumed above rather than retried. Peek/consume avoids a copying get, so

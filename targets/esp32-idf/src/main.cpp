@@ -856,16 +856,24 @@ static void serviceIdleTimeout() {
 // This is the only place commands are dispatched, on either target. Nothing may
 // call it from inside a command handler: doing so would make handlers reentrant
 // and corrupt multi-frame transfer state mid-stream.
+static bool bleRxTagIsLive(uint32_t tag, void*) {
+    return linkIsOwnerWord(tag);
+}
+
 static void serviceBleRx() {
     uint8_t drained = 0;
     uint16_t staleDropped = 0;
     while (drained < OD_RXQ_SLOTS) {
-        staleDropped = (uint16_t)(staleDropped + od_rxq_discard_stale(linkOwnerWord()));
+        staleDropped = (uint16_t)(staleDropped +
+                                  od_rxq_discard_stale(bleRxTagIsLive, nullptr));
         od_rxq_item_t* item = od_rxq_peek();
         if (item == nullptr) break;
         // CONNECTION_POLICY R3 requirement 6: od_rxq_discard_stale() leaves only a frame whose
         // writer is STILL the owner. The write callback already refused non-owner writes; this
         // catches a formerly legitimate frame left queued across disconnect and handle reuse.
+        // Recheck immediately before dispatch as well: the owner can depart after the shared
+        // helper accepts this head. The next loop iteration consumes it against fresh liveness.
+        if (!bleRxTagIsLive(item->tag, nullptr)) continue;
         // Publish the frame's identity for the dispatcher's activity-clock test.
         g_commandInstance = item->tag;
         // imageDataWritten (misleading name) actually services any BLE command.

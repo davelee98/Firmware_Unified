@@ -79,12 +79,15 @@ void od_rxq_consume(void)
     __atomic_store_n(&s_tail, (uint8_t)((tail + 1u) % OD_RXQ_SLOTS), __ATOMIC_RELEASE);
 }
 
-uint8_t od_rxq_discard_stale(uint32_t live_tag)
+uint8_t od_rxq_discard_stale(od_rxq_tag_is_live_fn is_live, void *context)
 {
     uint8_t dropped = 0u;
     od_rxq_item_t *item;
 
-    while ((item = od_rxq_peek()) != NULL && item->tag != live_tag) {
+    if (is_live == NULL) {
+        return 0u;
+    }
+    while ((item = od_rxq_peek()) != NULL && !is_live(item->tag, context)) {
         od_rxq_consume();
         ++dropped;
     }

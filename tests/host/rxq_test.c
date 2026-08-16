@@ -83,6 +83,24 @@ static bool push_marked(uint8_t mark, uint16_t len, uint32_t tag)
     return od_rxq_push(buf, len, tag);
 }
 
+struct live_tags {
+    uint32_t current;
+    uint32_t next;
+    unsigned calls;
+    unsigned switch_on_call; /* change to `next` before comparing this call; zero = never */
+};
+
+static bool test_tag_is_live(uint32_t tag, void *opaque)
+{
+    struct live_tags *live = (struct live_tags *)opaque;
+
+    ++live->calls;
+    if (live->switch_on_call != 0u && live->calls == live->switch_on_call) {
+        live->current = live->next;
+    }
+    return tag == live->current;
+}
+
 /* ----------------------------------------------------------------------------- the cases --- */
 
 static void test_order(void)
@@ -220,6 +238,7 @@ static void test_admission(void)
 static void test_stale_tags_are_discarded(void)
 {
     od_rxq_item_t *item;
+    struct live_tags live;
 
     CASE("stale heads are consumed without skipping the first live-tag frame");
     reset_all();
@@ -227,18 +246,48 @@ static void test_stale_tags_are_discarded(void)
     CHECK(push_marked(0x32u, 4u, 32u));
     CHECK(push_marked(0x77u, 4u, 77u));
     CHECK(push_marked(0x33u, 4u, 33u));
-    CHECK(od_rxq_discard_stale(77u) == 2u);
+    memset(&live, 0, sizeof(live));
+    live.current = 77u;
+    CHECK(od_rxq_discard_stale(test_tag_is_live, &live) == 2u);
     item = od_rxq_peek();
     CHECK(item != NULL && item->tag == 77u && item->data[0] == 0x77u);
 
     CASE("a live head is never consumed by stale discard");
-    CHECK(od_rxq_discard_stale(77u) == 0u);
+    CHECK(od_rxq_discard_stale(test_tag_is_live, &live) == 0u);
     CHECK(od_rxq_peek() == item);
     od_rxq_consume();
 
     CASE("stale discard drains the remainder when no live frame follows");
-    CHECK(od_rxq_discard_stale(77u) == 1u);
+    CHECK(od_rxq_discard_stale(test_tag_is_live, &live) == 1u);
     CHECK(od_rxq_peek() == NULL);
+
+    CASE("a new owner appearing between heads keeps its first queued frame");
+    reset_all();
+    CHECK(push_marked(0x31u, 4u, 31u));
+    CHECK(push_marked(0x88u, 4u, 88u));
+    memset(&live, 0, sizeof(live));
+    live.current = 77u;
+    live.next = 88u;
+    live.switch_on_call = 2u;
+    CHECK(od_rxq_discard_stale(test_tag_is_live, &live) == 1u);
+    item = od_rxq_peek();
+    CHECK(item != NULL && item->tag == 88u && item->data[0] == 0x88u);
+
+    CASE("an old owner departing before its head check cannot dispatch");
+    reset_all();
+    CHECK(push_marked(0x77u, 4u, 77u));
+    CHECK(push_marked(0x88u, 4u, 88u));
+    memset(&live, 0, sizeof(live));
+    live.current = 77u;
+    live.next = 88u;
+    live.switch_on_call = 1u;
+    CHECK(od_rxq_discard_stale(test_tag_is_live, &live) == 1u);
+    item = od_rxq_peek();
+    CHECK(item != NULL && item->tag == 88u && item->data[0] == 0x88u);
+
+    CASE("a missing liveness predicate is conservative and consumes nothing");
+    CHECK(od_rxq_discard_stale(NULL, NULL) == 0u);
+    CHECK(od_rxq_peek() == item);
 }
 
 static void test_report_depth_is_pre_push(void)

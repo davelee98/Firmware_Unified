@@ -87,10 +87,12 @@ bool od_rxq_push(const uint8_t *data, uint16_t len, uint32_t tag);
 /* Consumer side, loop/main thread only. */
 od_rxq_item_t *od_rxq_peek(void);     /* NULL = empty; the slot stays valid until consume */
 void           od_rxq_consume(void);  /* advance past the peeked slot */
-/* Consume consecutive head frames whose writer is not `live_tag`, stopping before the first live
- * frame. Returns the number discarded. Keeping this comparison in the shared consumer policy makes
- * stale-owner rejection testable once instead of relying on two target-local open-coded loops. */
-uint8_t        od_rxq_discard_stale(uint32_t live_tag);
+typedef bool (*od_rxq_tag_is_live_fn)(uint32_t tag, void *context);
+/* Consume consecutive heads whose writer is no longer live, stopping before the first live frame.
+ * `is_live` is called AFTER each head is peeked and again for every candidate: connection identity
+ * can change concurrently, so accepting one by-value "current tag" for the whole drain would drop
+ * a new owner's frames or preserve an old owner's. NULL is conservative and discards nothing. */
+uint8_t        od_rxq_discard_stale(od_rxq_tag_is_live_fn is_live, void *context);
 uint8_t        od_rxq_head(void);     /* producer-side index, for an activity poll */
 uint8_t        od_rxq_depth(void);    /* unconsumed frames */
 bool           od_rxq_pending(void);
