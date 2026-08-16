@@ -370,6 +370,37 @@ if(Python3_FOUND)
     target_link_libraries(od_dispatch_corpus_portable_test od_session_fake)
     add_dependencies(od_dispatch_corpus_portable_test od_vectors_generated)
     add_test(NAME dispatch_corpus_portable COMMAND od_dispatch_corpus_portable_test)
+
+    # The second executable, and the one whose green means "the firmware emits these bytes". It
+    # defines no hook of its own: every od_cmd_app_* comes from Nordic's production command
+    # translation units, compiled against fake drivers. That follows the rule the target lifecycle
+    # suites already set -- compile the production source, never a transcription.
+    add_executable(od_dispatch_corpus_nordic_test
+        corpus_runner.c
+        corpus_profile_nordic.c
+        fake_nordic/fake_nordic.c
+        ../../targets/nordic-zephyr/src/od_cmd_device.c
+        ../../targets/nordic-zephyr/src/od_cmd_config.c
+        ../../targets/nordic-zephyr/src/od_cmd_direct.c
+        ../../targets/nordic-zephyr/src/od_cmd_nfc.c
+        ../../targets/nordic-zephyr/src/od_cmd_reply.c
+        ../../targets/nordic-zephyr/src/opendisplay_pipe_write.cpp
+        ${OD_VEC_INC})
+    target_include_directories(od_dispatch_corpus_nordic_test PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}/generated
+        ${CMAKE_CURRENT_LIST_DIR}/fake_nordic
+        ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr
+        ../../targets/nordic-zephyr/src)
+    # The build SHA is a COMPILE-TIME macro on this target, not a runtime knob like the version and
+    # patch fields -- so the vector that pins the current 0x43 answer needs it defined here, on
+    # this executable only. Setting it globally would reach the other Nordic suites, which
+    # deliberately run against the default placeholder.
+    target_compile_definitions(od_dispatch_corpus_nordic_test PRIVATE SHA="1a2b3c4d")
+    target_compile_options(od_dispatch_corpus_nordic_test PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions -fno-rtti>)
+    target_link_libraries(od_dispatch_corpus_nordic_test od_session_fake)
+    add_dependencies(od_dispatch_corpus_nordic_test od_vectors_generated)
+    add_test(NAME dispatch_corpus_nordic COMMAND od_dispatch_corpus_nordic_test)
 else()
     message(WARNING "od: Python3 not found -- the dispatch corpus runner is NOT built and the "
                     "corpus reply half is UNCHECKED in this build.")

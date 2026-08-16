@@ -73,6 +73,17 @@ unsigned od_corpus_profile_caps(void);
 /* A human name for the report line, e.g. "portable" or "nordic-production". */
 const char *od_corpus_profile_name(void);
 
+/* True when every od_cmd_app_* hook in this executable is production target code.
+ *
+ * IT DECIDES WHAT A HISTORICAL VECTOR MEANS HERE. A `historical-fixture` expectation is a shape
+ * current production does not emit -- a pre-patch firmware-version reply, a compiled-out
+ * subsystem's NACK. A production profile CANNOT satisfy one without lying about what the firmware
+ * does, so it excludes them and says so; only the portable profile, whose fixtures can be placed
+ * in those states legitimately, executes them. Forcing one through here would mean editing either
+ * the vector or the firmware to agree, and both are the failure this classification exists to
+ * prevent. */
+bool od_corpus_profile_is_production(void);
+
 /* Put the profile's command layer in the state this vector declares, and clear everything left
  * over from the previous one. Called before every vector, never between steps. */
 void od_corpus_profile_reset(const od_vec_t *vec);

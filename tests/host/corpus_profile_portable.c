@@ -49,6 +49,10 @@ unsigned od_corpus_profile_caps(void)
     return OD_VEC_CAP_PIPE | OD_VEC_CAP_NFC;
 }
 
+/* Every hook here is a behaviour fixture, so the historical shapes are exactly
+ * what it exists to reach. */
+bool od_corpus_profile_is_production(void) { return false; }
+
 const char *od_corpus_profile_name(void) { return "portable"; }
 
 void od_corpus_profile_reset(const od_vec_t *vec)

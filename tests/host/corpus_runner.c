@@ -156,7 +156,7 @@ static bool arm(const od_vec_t *v)
 /* ----------------------------------------------------------------------------------- cases --- */
 
 struct totals {
-    unsigned discovered, executed, d2h_only, excluded;
+    unsigned discovered, executed, d2h_only, excluded, excluded_historical;
     unsigned by_proof[3];
 };
 
@@ -171,6 +171,22 @@ static void run_vector(const od_vec_t *v, struct totals *t)
         /* Counted, not skipped. A predicate exclusion is a statement about the profile, and an
          * unreported one is indistinguishable from coverage. */
         ++t->excluded;
+        /* EXCEPT for a target-production expectation in a production profile. That vector claims
+         * firmware emits those bytes, and this executable is the only thing that can show it -- so
+         * a capability predicate quietly putting it out of reach would leave the claim standing
+         * with nothing behind it. Either the predicate is wrong or the classification is. */
+        if (v->proof == OD_PROOF_TARGET_PRODUCTION && od_corpus_profile_is_production()) {
+            FAILV(v, "classified target-production but excluded by a capability predicate here; "
+                     "nothing proves its bytes");
+        }
+        return;
+    }
+
+    if (v->proof == OD_PROOF_HISTORICAL_FIXTURE && od_corpus_profile_is_production()) {
+        /* A shape current production does not emit. Running it here could only pass by making the
+         * firmware or the vector agree with the other, which is the edit this classification
+         * exists to forbid; the portable profile covers it instead. */
+        ++t->excluded_historical;
         return;
     }
 
@@ -246,8 +262,9 @@ int main(void)
     }
 
     printf("corpus[%s]: %u discovered, %u h2d steps executed, %u d2h direction-only, "
-           "%u excluded by predicate\n",
-           od_corpus_profile_name(), t.discovered, t.executed, t.d2h_only, t.excluded);
+           "%u excluded by predicate, %u historical (not production-provable)\n",
+           od_corpus_profile_name(), t.discovered, t.executed, t.d2h_only, t.excluded,
+           t.excluded_historical);
     printf("corpus[%s]: shared=%u target-production=%u historical-fixture=%u\n",
            od_corpus_profile_name(), t.by_proof[OD_PROOF_SHARED],
            t.by_proof[OD_PROOF_TARGET_PRODUCTION], t.by_proof[OD_PROOF_HISTORICAL_FIXTURE]);
