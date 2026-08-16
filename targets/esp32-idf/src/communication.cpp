@@ -379,7 +379,8 @@ void sendResponseUnencrypted(uint8_t* response, uint16_t len) {
         queueBleNotifyCopy(response, len);
     } else {
 #ifdef OPENDISPLAY_HAS_WIFI
-        opendisplay_lan_send_frame(response, len);
+        /* Legacy egress has nowhere to put a status; both sites leave with the ring at the cutover. */
+        (void)opendisplay_lan_send_frame(response, len);
 #endif
     }
 }
@@ -448,7 +449,8 @@ void sendResponse(uint8_t* response, uint16_t len) {
         queueBleNotifyCopy(response, len);
     } else {
 #ifdef OPENDISPLAY_HAS_WIFI
-        opendisplay_lan_send_frame(response, len);
+        /* Legacy egress has nowhere to put a status; both sites leave with the ring at the cutover. */
+        (void)opendisplay_lan_send_frame(response, len);
 #endif
     }
 }

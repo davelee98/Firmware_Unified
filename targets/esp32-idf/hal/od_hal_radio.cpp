@@ -26,20 +26,12 @@ extern "C" od_radio_result_t od_hal_radio_send(od_origin_t origin, uint32_t tag,
          * loses every TLS client's response silently: the send succeeds from the core's point of
          * view and nothing ever reaches the socket.
          *
-         * opendisplay_lan_send_frame() is void, so SENT is the only answer available -- but it is
-         * not an honest one and this arm BREAKS TWO CONTRACTS. It writes synchronously
-         * (mbedtls_ssl_write / lanClientWrite) on an accepted socket carrying SO_RCVTIMEO but no
-         * SO_SNDTIMEO -- O_NONBLOCK is set on the LISTEN fd only -- so a peer that stops reading
-         * parks this call indefinitely, against od_hal_radio.h's MUST NOT BLOCK. And it swallows
-         * both a negative TLS write and a short plain write, so a frame that never left is
-         * reported delivered and od_txq drops it.
-         *
-         * Inert while legacy routing is live: nothing commits to od_txq, so no LAN frame reaches
-         * here. Fixing it needs a status out of the LAN sender and a bounded send, which is a
-         * transport change, not a HAL one -- tracked as a cutover blocker in the handler-rewrite
-         * plan. Do not size a caller's timeout on the assumption that this returns promptly. */
-        opendisplay_lan_send_frame(frame, len);
-        return OD_RADIO_SENT;
+         * The sender reports its own outcome and honours MUST NOT BLOCK -- the accepted socket
+         * carries SO_SNDTIMEO -- so this arm forwards the result rather than asserting success.
+         * Its RETRY means nothing reached the wire, which is what makes re-offering the same
+         * queue head safe; anything that stranded part of a length-prefixed frame comes back GONE
+         * with the session already dropped. */
+        return opendisplay_lan_send_frame(frame, len);
 #else
         /* No LAN transport compiled in, so a LAN-origin frame is genuinely a routing bug. Never
          * retried: retrying a permanent error turns the drain into a spin. */
@@ -65,11 +57,17 @@ extern "C" bool od_hal_radio_tag_is_live(od_origin_t origin, uint32_t tag)
 {
     if (origin != OD_ORIGIN_BLE) {
 #ifdef OPENDISPLAY_HAS_WIFI
-        /* The LAN transport owns its own connection lifetime and a queued LAN frame is delivered
-         * synchronously, so there is no stale-instance window for the queue to guard against.
-         * Answering false here would make od_txq_commit() discard every TLS response as GONE. */
-        (void)tag;
-        return true;
+        /* A LAN frame can now sit in the queue across a RETRY, so the stale-instance window the
+         * synchronous sender did not have is real: the peer can go and a new one arrive before the
+         * drain, and the old client's response would land on the new client's socket.
+         *
+         * LAN commands DO carry a real owner word (wifi_service.cpp sets g_commandInstance from
+         * linkIdWord(lanOwner)), so that is checkable -- but only when there is one. The same site
+         * uses 0 whenever the link owner is not OWNER_LAN, and linkIsOwnerWord(0) is false, so
+         * testing unconditionally would discard those responses as GONE. Absent a word, staleness
+         * is unprovable and the frame goes; that is the pre-existing behaviour, now confined to
+         * the case that actually requires it. */
+        return tag == 0u ? true : linkIsOwnerWord(tag);
 #else
         return false;
 #endif
