@@ -165,6 +165,24 @@ omission below is silent rather than loud:
   `0x0052` ack is delivered today. After the cutover it sits in `od_txq`, and the loop that would
   drain it never runs again — a regression from "delivered" to "never sent". BLE is unaffected
   because that ack was already best-effort.
+- **The ESP32 LAN arm of `od_hal_radio_send()` breaks the HAL's two load-bearing promises, and the
+  cutover is the moment that starts to matter.** `opendisplay_lan_send_frame()` writes synchronously
+  on an accepted socket that carries `SO_RCVTIMEO` and no `SO_SNDTIMEO` (`O_NONBLOCK` is set on the
+  *listen* fd only), so it can block past any deadline — against `od_hal_radio.h`'s MUST NOT BLOCK,
+  which every bounded drain in the system is sized on, the step-7 barrier included. And it is `void`:
+  a negative `mbedtls_ssl_write` or a short `lanClientWrite` is logged and swallowed, so the HAL
+  returns `OD_RADIO_SENT` for a frame that never left and `od_txq` drops it. Today no LAN frame
+  reaches this code — nothing commits to the queue — so both are inert. The fix is a status out of
+  the LAN sender plus a bounded send, mapping a would-block to `OD_RADIO_RETRY`; that is a transport
+  change and belongs in its own commit ahead of the cutover, not inside it.
+- **Removing the legacy ring must stay atomic, and step 7's double drain is why.** The ring has
+  exactly two producers, `sendResponse` and `sendResponseUnencrypted` (`communication.cpp:379,448`),
+  so the ring and `od_txq` are never both non-empty: before the cutover `od_txq` is empty, after it
+  the ring is gone. That is what makes the full-image path's `serviceBleTx()` and
+  `od_cmd_flush_before_refresh()` sitting side by side correct rather than a reordering hazard.
+  Leave one producer behind and the two drains interleave two live queues with no ordering between
+  them — `serviceBleTx()` stops on backpressure after at most 16 frames and leaves the rest queued,
+  so the barrier can put a newer END ACK on air ahead of an older legacy frame.
 
 ## Tests
 

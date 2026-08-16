@@ -54,6 +54,11 @@ od_txq_status_t od_cmd_reply_plain(const od_cmd_ctx_t *ctx, const uint8_t *frame
  * after the refresh, late rather than dropped -- so there is nothing here to report and no caller
  * decision to make. Hence void.
  *
+ * The bound holds only as far as od_hal_radio.h's MUST NOT BLOCK does. It does on BLE. It does NOT
+ * on the ESP32 LAN arm, whose synchronous socket write has no send timeout, so one stalled TLS peer
+ * can park the first flush past any deadline this helper sets -- see od_hal_radio.cpp. Unreachable
+ * under legacy routing and a cutover blocker, not something a longer deadline here would fix.
+ *
  * The deadline is half the host's tail-flush read, so a delayed ack still beats the first PTO probe
  * rather than racing it; at a slow 30 ms connection interval it also covers ~8 notification
  * opportunities against a deepest tail of 3 frames.

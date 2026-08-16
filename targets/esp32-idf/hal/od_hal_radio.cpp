@@ -26,8 +26,18 @@ extern "C" od_radio_result_t od_hal_radio_send(od_origin_t origin, uint32_t tag,
          * loses every TLS client's response silently: the send succeeds from the core's point of
          * view and nothing ever reaches the socket.
          *
-         * opendisplay_lan_send_frame() is void and does its own buffering, so there is no
-         * backpressure to report -- SENT is the only honest answer available. */
+         * opendisplay_lan_send_frame() is void, so SENT is the only answer available -- but it is
+         * not an honest one and this arm BREAKS TWO CONTRACTS. It writes synchronously
+         * (mbedtls_ssl_write / lanClientWrite) on an accepted socket carrying SO_RCVTIMEO but no
+         * SO_SNDTIMEO -- O_NONBLOCK is set on the LISTEN fd only -- so a peer that stops reading
+         * parks this call indefinitely, against od_hal_radio.h's MUST NOT BLOCK. And it swallows
+         * both a negative TLS write and a short plain write, so a frame that never left is
+         * reported delivered and od_txq drops it.
+         *
+         * Inert while legacy routing is live: nothing commits to od_txq, so no LAN frame reaches
+         * here. Fixing it needs a status out of the LAN sender and a bounded send, which is a
+         * transport change, not a HAL one -- tracked as a cutover blocker in the handler-rewrite
+         * plan. Do not size a caller's timeout on the assumption that this returns promptly. */
         opendisplay_lan_send_frame(frame, len);
         return OD_RADIO_SENT;
 #else
