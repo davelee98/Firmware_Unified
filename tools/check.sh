@@ -153,6 +153,30 @@ session_constant_time() {
 }
 check "shared boundary: od_session uses no memcmp"  session_constant_time
 
+# ARCHITECTURE, RATCHETED BY SYMBOL. Each name below is one whose ABSENCE is the property: a
+# second opcode map, an implicit frame context, an exported session singleton. Grepping for them
+# is crude but it is what stops a well-meaning "just for now" reintroduction, and unlike a line
+# count it says what is actually wrong when it fires.
+#
+# Scoped to targets/*/src and targets/*/hal so a build directory's .map files cannot trip it.
+c11_structure() {
+    local rc=0 hits
+    scan() {
+        local what="$1" pattern="$2" why="$3"
+        hits=$(grep -rInE "$pattern" targets/*/src targets/*/hal shared/ 2>/dev/null || true)
+        if [ -n "$hits" ]; then
+            echo "$hits"; echo; echo "$what: $why"; echo
+            rc=1
+        fi
+    }
+    # The opcode map is od_dispatch.c's. A target definition of this is a second map, and two maps
+    # is how one target answers an opcode the other treats as unknown.
+    scan "od_cmd_dispatch" '\bod_cmd_dispatch[[:space:]]*\(' \
+         "the per-command seam is od_cmd_app.h; the opcode map is shared."
+    return $rc
+}
+check "structure: no second opcode map"  c11_structure
+
 # ================================================================================== host suites ==
 # The real boundary enforcement: shared/ compiled for the host at -std=c99 -Wall -Wextra -Werror
 # under BOTH compilers. A GNU-ism gcc accepts is a failure discovered later on a target instead.

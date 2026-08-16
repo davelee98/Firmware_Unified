@@ -140,16 +140,6 @@ HOOK(od_cmd_app_led_stop,         HOOK_LED_STOP)
 HOOK(od_cmd_app_buzzer,           HOOK_BUZZER)
 HOOK(od_cmd_app_nfc,              HOOK_NFC)
 
-/* C11.0 ONLY. od_dispatch.c still routes through the single od_cmd_dispatch() seam, so the tree
- * needs a definition to link -- and because this one records nothing, every routing assertion
- * above fails, which is what makes this a failing test for its named reason rather than a
- * compile error. It goes with the seam at C11.2. */
-od_cmd_result_t od_cmd_dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, od_span_t body)
-{
-    (void)ctx; (void)cmd; (void)body;
-    return g_hook_result;
-}
-
 /* --------------------------------------------------------------------------------- helpers --- */
 
 static const od_reply_t BLE = { OD_ORIGIN_BLE, 9u };

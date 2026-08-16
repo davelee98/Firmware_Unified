@@ -690,8 +690,8 @@ od_frame_outcome_t imageDataWritten(BLEConnHandle conn_hdl, BLECharPtr chr, uint
     const od_reply_t rp = { (od_origin_t)g_commandOrigin, g_commandInstance };
 
     // Single per-command banner for the whole dispatch, emitted before the dispatcher so a frame
-    // it refuses structurally is still attributable. Named via commandName(); unknown opcodes
-    // (nullptr) get no banner and are reported by od_cmd_dispatch()'s default. Handlers must not
+    // it refuses structurally is still attributable. Named via commandName(); an opcode the shared
+    // map does not route (nullptr) gets no banner and no reply at all. Handlers must not
     // log their own banner. Carries no encryption token: the ERX/URX line from od_rxq_push()
     // already reports it for this frame, and stating it twice is how the two spellings drift.
     if (len < 2) {

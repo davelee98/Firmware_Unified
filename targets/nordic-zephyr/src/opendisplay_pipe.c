@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "od_cmd_app.h"
 #include "od_cmd_reply.h"
 #include "od_config_read.h"
 #include "od_dispatch.h"
@@ -782,144 +783,220 @@ static od_cmd_result_t handle_nfc_endpoint(const od_cmd_ctx_t *ctx, const uint8_
 }
 
 
-/* IMPLEMENTED FOR shared/core/od_dispatch.h. One seam rather than one function per opcode: the
- * dispatch plan names a per-opcode split as C11's shrink, and doing it here would rewrite every
- * handler signature at the same moment the ordering changes underneath them.
- *
- * The opcode-to-handler mapping and its comments are the shipped ones. What changes is that the
- * caller now asks for a VERDICT instead of inferring acceptance from a flag set behind it. */
-od_cmd_result_t od_cmd_dispatch(const od_cmd_ctx_t *ctx, uint16_t cmd, od_span_t body)
+/* ---------------------------------------------------------------------------------------------
+ * shared/core/od_cmd_app.h -- one function per canonical opcode. The opcode MAP is od_dispatch.c's;
+ * what is here is what THIS target does about each command. A capability this target lacks still
+ * gets a definition, because a missing one is a link error -- which is how an opcode cannot be
+ * added to the shared map without every target stating its answer.
+ * ------------------------------------------------------------------------------------------ */
+
+static const uint8_t *pl(od_span_t body)
 {
-  const uint8_t *payload = body.p;
-  const uint16_t payload_len = (uint16_t)body.n;
+  return body.p;
+}
 
-  switch (cmd) {
-    case CMD_FIRMWARE_VERSION:
-      return reply_firmware_version(ctx);
-    case CMD_READ_MSD:
-      return reply_read_msd(ctx);
-    case CMD_CONFIG_READ:
-      return handle_config_read(ctx);
-    case CMD_CONFIG_CLEAR:
-      return handle_config_clear(ctx);
-    case CMD_CONFIG_WRITE:
-      return handle_config_write(ctx, payload, payload_len);
-    case CMD_CONFIG_CHUNK:
-      return handle_config_chunk(ctx, payload, payload_len);
-    case CMD_REBOOT:
-      od_log_info("reboot");
-      for (volatile uint32_t i = 0; i < 800000u; i++) {
-      }
-      NVIC_SystemReset();
-      return OD_CMD_OK;                 /* not reached: the reset does not return */
-    case CMD_ENTER_DFU:
-      {
-        uint8_t ok[] = { 0x00u, RESP_ENTER_DFU };
-        (void)od_cmd_reply(ctx, ok, sizeof(ok));
-      }
-      opendisplay_ble_schedule_dfu();
-      return OD_CMD_OK;
-    case CMD_DEEP_SLEEP:
-      /* Match the reference nRF52840 build (device_control.cpp:691-705): the
-       * command is recognized and logged but NO response is sent, so clients do
-       * not treat deep sleep as supported on this target. (Composes with the
-       * separate DFU-honesty question for 0x0051, handled elsewhere.)
-       *
-       * OPCODE CHANGED 0x0052 -> 0x0053 when this target adopted the canonical
-       * protocol header. The subset header it used to carry still had the value
-       * from before the split that made 0x0052 CMD_POWER_OFF -- a hard rail-cut --
-       * and left deep sleep on 0x0053, which is what Firmware and Firmware_Silabs
-       * already answer. 0x0052 now falls through to the unknown-opcode path here,
-       * which is the safe direction: a host that has not moved gets no deep sleep
-       * rather than an unintended power-off.
-       *
-       * py-opendisplay still sends 0x0052 (protocol/commands.py DEEP_SLEEP), so
-       * deep sleep from that client stops working against this target until the
-       * host library is updated. That is the known cost of the alignment, and it
-       * MUST be fixed before anything implements CMD_POWER_OFF on 0x0052 here --
-       * at that point an un-updated host asking for deep sleep would cut the rail. */
-      opendisplay_ble_schedule_deep_sleep();
-      return OD_CMD_OK;
-    case CMD_LED_ACTIVATE: {
-      uint8_t ok[] = { 0x00u, RESP_LED_ACTIVATE_ACK, 0x00u, 0x00u };
-      uint8_t e1[] = { 0xFFu, RESP_LED_ACTIVATE_ACK, 0x01u, 0x00u };
-      uint8_t e2[] = { 0xFFu, RESP_LED_ACTIVATE_ACK, 0x02u, 0x00u };
+static uint16_t pl_len(od_span_t body)
+{
+  return (uint16_t)body.n;
+}
 
-      if (payload_len < 1u) {
-        (void)od_cmd_reply_plain(ctx, e1, sizeof(e1));
-        return OD_CMD_NACK;
-      }
-      if (opendisplay_led_activate(payload[0], payload + 1u,
-                                  (uint16_t)(payload_len - 1u)) != 0) {
-        (void)od_cmd_reply_plain(ctx, e2, sizeof(e2));
-        return OD_CMD_NACK;
-      }
-      (void)od_cmd_reply(ctx, ok, sizeof(ok));
-      return OD_CMD_OK;
-    }
-    case CMD_LED_STOP: {
-      uint8_t ok[] = { 0x00u, RESP_LED_STOP_ACK, 0x00u, 0x00u };
-      uint8_t e2[] = { 0xFFu, RESP_LED_STOP_ACK, 0x02u, 0x00u };
-      int rc;
-
-      if (payload_len >= 1u) {
-        rc = opendisplay_led_stop(payload[0], true);
-      } else {
-        rc = opendisplay_led_stop(0, false);
-      }
-      if (rc != 0) {
-        (void)od_cmd_reply_plain(ctx, e2, sizeof(e2));
-        return OD_CMD_NACK;
-      }
-      (void)od_cmd_reply(ctx, ok, sizeof(ok));
-      return OD_CMD_OK;
-    }
-    case CMD_BUZZER: {
-      int rc = opendisplay_buzzer_activate(payload, payload_len);
-
-      if (rc == 0) {
-        uint8_t ok[] = { 0x00u, RESP_BUZZER_ACK, 0x00u, 0x00u };
-        (void)od_cmd_reply(ctx, ok, sizeof(ok));
-        return OD_CMD_OK;
-      }
-      {
-        uint8_t err[] = { 0xFFu, RESP_BUZZER_ACK, (uint8_t)rc, 0x00u };
-        (void)od_cmd_reply_plain(ctx, err, sizeof(err));
-      }
-      return OD_CMD_NACK;
-    }
-    case CMD_NFC_ENDPOINT:
-      return handle_nfc_endpoint(ctx, payload, payload_len);
-    case CMD_DIRECT_WRITE_START:
-      return handle_direct_write_start(ctx, payload, payload_len);
-    case CMD_DIRECT_WRITE_DATA:
-      return handle_direct_write_data(ctx, payload, payload_len);
-    case CMD_DIRECT_WRITE_END:
-      return handle_direct_write_end(ctx, payload, payload_len);
-    case CMD_PARTIAL_WRITE_START:
-      return handle_partial_write_start(ctx, payload, payload_len);
-    case CMD_PIPE_WRITE_START:
-      opendisplay_pipe_write_start(ctx, payload, payload_len);
-      /* The PIPE-write module answers for itself and does not yet
-       * report a verdict; C11 gives it one with its own header. */
-      return OD_CMD_OK;
-    case CMD_PIPE_WRITE_DATA:
-      opendisplay_pipe_write_data(ctx, payload, payload_len);
-      /* The PIPE-write module answers for itself and does not yet
-       * report a verdict; C11 gives it one with its own header. */
-      return OD_CMD_OK;
-    case CMD_PIPE_WRITE_END:
-      opendisplay_pipe_write_end(ctx, payload, payload_len);
-      /* The PIPE-write module answers for itself and does not yet
-       * report a verdict; C11 gives it one with its own header. */
-      return OD_CMD_OK;
-    default:
-      /* NOT a NACK. An unrecognised opcode must not stamp activity or reset the abuse run, or
-       * unknown-command traffic keeps the exclusive link alive -- od_frame_policy gives
-       * UNKNOWN_OPCODE neither. The log line is the whole of the response, as shipped. */
-      od_log_info("unknown cmd 0x%04X", (unsigned)cmd);
-      return OD_CMD_UNKNOWN;
+od_cmd_result_t od_cmd_app_reboot(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  (void)ctx;
+  (void)body;
+  od_log_info("reboot");
+  for (volatile uint32_t i = 0; i < 800000u; i++) {
   }
+  NVIC_SystemReset();
+  return OD_CMD_OK;                   /* not reached: the reset does not return */
+}
+
+od_cmd_result_t od_cmd_app_firmware_version(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  (void)body;
+  return reply_firmware_version(ctx);
+}
+
+od_cmd_result_t od_cmd_app_read_msd(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  (void)body;
+  return reply_read_msd(ctx);
+}
+
+od_cmd_result_t od_cmd_app_enter_dfu(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  uint8_t ok[] = { 0x00u, RESP_ENTER_DFU };
+
+  (void)body;
+  (void)od_cmd_reply(ctx, ok, sizeof(ok));
+  opendisplay_ble_schedule_dfu();
+  return OD_CMD_OK;
+}
+
+/* NO POWER LATCH ON THIS TARGET, and it says so rather than staying silent. Before C11 the opcode
+ * fell through to the unknown arm, so a host could not distinguish "this device has no rail cut"
+ * from "this firmware is older than the command" -- and 0x0052 is exactly the opcode where that
+ * ambiguity is expensive, because the client's alternative is to keep retrying. The canonical
+ * header defines OD_ERR_POWER_OFF_UNSUPPORTED for this answer.
+ *
+ * NACK, not UNKNOWN: the frame WAS recognised. It still must not stamp activity, and it does not
+ * -- od_frame_policy gives HANDLER_NACK no stamp either. */
+od_cmd_result_t od_cmd_app_power_off(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  uint8_t err[] = { 0xFFu, RESP_POWER_OFF, OD_ERR_POWER_OFF_UNSUPPORTED, 0x00u };
+
+  (void)body;
+  (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+  return OD_CMD_NACK;
+}
+
+od_cmd_result_t od_cmd_app_deep_sleep(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  /* RECOGNISED AND SILENT, matching the reference nRF52840 build
+   * (device_control.cpp:691-705): the command is acted on but NO response is sent, so clients do
+   * not treat deep sleep as supported on this target.
+   *
+   * OPCODE CHANGED 0x0052 -> 0x0053 when this target adopted the canonical protocol header. The
+   * subset header it used to carry still had the value from before the split that made 0x0052
+   * CMD_POWER_OFF -- a hard rail-cut -- and left deep sleep on 0x0053, which is what Firmware and
+   * Firmware_Silabs already answer.
+   *
+   * py-opendisplay still sends 0x0052 (protocol/commands.py DEEP_SLEEP), so deep sleep from that
+   * client stops working against this target until the host library is updated. That is the known
+   * cost of the alignment, and 0x0052 now answers the unsupported NACK above rather than falling
+   * silent -- which tells such a host something, where silence told it nothing. It MUST be fixed
+   * before anything implements a real CMD_POWER_OFF here: at that point an un-updated host asking
+   * for deep sleep would cut the rail. */
+  (void)ctx;
+  (void)body;
+  opendisplay_ble_schedule_deep_sleep();
+  return OD_CMD_OK;
+}
+
+od_cmd_result_t od_cmd_app_config_read(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  (void)body;
+  return handle_config_read(ctx);
+}
+
+od_cmd_result_t od_cmd_app_config_write(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  return handle_config_write(ctx, pl(body), pl_len(body));
+}
+
+od_cmd_result_t od_cmd_app_config_chunk(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  return handle_config_chunk(ctx, pl(body), pl_len(body));
+}
+
+od_cmd_result_t od_cmd_app_config_clear(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  (void)body;
+  return handle_config_clear(ctx);
+}
+
+od_cmd_result_t od_cmd_app_direct_start(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  return handle_direct_write_start(ctx, pl(body), pl_len(body));
+}
+
+od_cmd_result_t od_cmd_app_direct_data(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  return handle_direct_write_data(ctx, pl(body), pl_len(body));
+}
+
+od_cmd_result_t od_cmd_app_direct_end(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  return handle_direct_write_end(ctx, pl(body), pl_len(body));
+}
+
+od_cmd_result_t od_cmd_app_partial_start(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  return handle_partial_write_start(ctx, pl(body), pl_len(body));
+}
+
+od_cmd_result_t od_cmd_app_pipe_start(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  opendisplay_pipe_write_start(ctx, pl(body), pl_len(body));
+  /* The PIPE-write module answers for itself and does not yet report a verdict; C11.3 gives it
+   * one. Until then a PIPE NACK is followed by an unconditional OK here, which is wrong and is
+   * the next commit's subject. */
+  return OD_CMD_OK;
+}
+
+od_cmd_result_t od_cmd_app_pipe_data(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  opendisplay_pipe_write_data(ctx, pl(body), pl_len(body));
+  return OD_CMD_OK;
+}
+
+od_cmd_result_t od_cmd_app_pipe_end(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  opendisplay_pipe_write_end(ctx, pl(body), pl_len(body));
+  return OD_CMD_OK;
+}
+
+od_cmd_result_t od_cmd_app_led_activate(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  uint8_t ok[] = { 0x00u, RESP_LED_ACTIVATE_ACK, 0x00u, 0x00u };
+  uint8_t e1[] = { 0xFFu, RESP_LED_ACTIVATE_ACK, 0x01u, 0x00u };
+  uint8_t e2[] = { 0xFFu, RESP_LED_ACTIVATE_ACK, 0x02u, 0x00u };
+  const uint8_t *payload = pl(body);
+  const uint16_t payload_len = pl_len(body);
+
+  if (payload_len < 1u) {
+    (void)od_cmd_reply_plain(ctx, e1, sizeof(e1));
+    return OD_CMD_NACK;
+  }
+  if (opendisplay_led_activate(payload[0], payload + 1u,
+                               (uint16_t)(payload_len - 1u)) != 0) {
+    (void)od_cmd_reply_plain(ctx, e2, sizeof(e2));
+    return OD_CMD_NACK;
+  }
+  (void)od_cmd_reply(ctx, ok, sizeof(ok));
+  return OD_CMD_OK;
+}
+
+od_cmd_result_t od_cmd_app_led_stop(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  uint8_t ok[] = { 0x00u, RESP_LED_STOP_ACK, 0x00u, 0x00u };
+  uint8_t e2[] = { 0xFFu, RESP_LED_STOP_ACK, 0x02u, 0x00u };
+  const uint8_t *payload = pl(body);
+  const uint16_t payload_len = pl_len(body);
+  int rc;
+
+  if (payload_len >= 1u) {
+    rc = opendisplay_led_stop(payload[0], true);
+  } else {
+    rc = opendisplay_led_stop(0, false);
+  }
+  if (rc != 0) {
+    (void)od_cmd_reply_plain(ctx, e2, sizeof(e2));
+    return OD_CMD_NACK;
+  }
+  (void)od_cmd_reply(ctx, ok, sizeof(ok));
+  return OD_CMD_OK;
+}
+
+od_cmd_result_t od_cmd_app_buzzer(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  int rc = opendisplay_buzzer_activate(pl(body), pl_len(body));
+
+  if (rc == 0) {
+    uint8_t ok[] = { 0x00u, RESP_BUZZER_ACK, 0x00u, 0x00u };
+    (void)od_cmd_reply(ctx, ok, sizeof(ok));
+    return OD_CMD_OK;
+  }
+  {
+    uint8_t err[] = { 0xFFu, RESP_BUZZER_ACK, (uint8_t)rc, 0x00u };
+    (void)od_cmd_reply_plain(ctx, err, sizeof(err));
+  }
+  return OD_CMD_NACK;
+}
+
+od_cmd_result_t od_cmd_app_nfc(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+  return handle_nfc_endpoint(ctx, pl(body), pl_len(body));
 }
 
 /* BT RX thread: copy into the queue only, no command processing here. */
@@ -1043,6 +1120,13 @@ void opendisplay_pipe_process(void)
     rp.tag = item->tag;
     outcome = od_dispatch_frame(&rp, od_span_make(item->data, item->len));
     od_core_frame_done(&rp, outcome);
+    /* The unknown-opcode line, kept where both the bytes and the verdict are visible. The opcode
+     * map is shared now and shared/ cannot log; this is the one place that has the frame and the
+     * dispatcher's conclusion at the same time. */
+    if (outcome == OD_FRAME_UNKNOWN_OPCODE && item->len >= 2u) {
+      od_log_info("unknown cmd 0x%04X",
+                  (unsigned)(((uint16_t)item->data[0] << 8) | item->data[1]));
+    }
 
     if (!od_frame_policy(outcome).consume_rx) {
       /* DEFERRED: not consumed, re-offered unchanged. Stop the drain too -- the head has not moved,

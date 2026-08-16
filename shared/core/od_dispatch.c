@@ -2,6 +2,7 @@
 
 #include "od_dispatch.h"
 
+#include "od_cmd_app.h"
 #include "od_config_read.h"
 #include "od_gate.h"
 #include "od_reply.h"
@@ -85,6 +86,60 @@ static void refuse(const od_reply_t *rp, uint16_t cmd, uint8_t status)
     od_txq_release(&r);
 }
 
+/* THE OPCODE MAP, and it is here rather than in each target for a reason that is not tidiness.
+ * Two copies of this switch is how one target answers an opcode the other treats as unknown -- and
+ * "unknown" is wire-visible: od_frame_policy() gives OD_FRAME_UNKNOWN_OPCODE no activity stamp, so
+ * a recognised opcode holds an exclusive link open where an unrecognised one does not. A target
+ * supplies the BEHAVIOUR of a command (od_cmd_app.h); it does not get to invent the routing.
+ *
+ * Every target defines every hook, so a capability a target lacks is a hook returning
+ * OD_CMD_UNKNOWN rather than an absent case -- and adding an opcode here without every target
+ * stating what it does about it is a LINK ERROR. That is the enforcement.
+ *
+ * AUTHENTICATE and FIRMWARE_VERSION are absent: both are routed by od_dispatch_frame() before this
+ * point, the first into od_gate and the second pre-gate. */
+static od_cmd_result_t dispatch_plain(const od_cmd_ctx_t *ctx, uint16_t cmd, od_span_t body)
+{
+    switch (cmd) {
+    case CMD_REBOOT:              return od_cmd_app_reboot(ctx, body);
+    case CMD_CONFIG_READ:         return od_cmd_app_config_read(ctx, body);
+    case CMD_CONFIG_WRITE:        return od_cmd_app_config_write(ctx, body);
+    case CMD_CONFIG_CHUNK:        return od_cmd_app_config_chunk(ctx, body);
+    case CMD_READ_MSD:            return od_cmd_app_read_msd(ctx, body);
+    case CMD_CONFIG_CLEAR:        return od_cmd_app_config_clear(ctx, body);
+    case CMD_ENTER_DFU:           return od_cmd_app_enter_dfu(ctx, body);
+    case CMD_POWER_OFF:           return od_cmd_app_power_off(ctx, body);
+    case CMD_DEEP_SLEEP:          return od_cmd_app_deep_sleep(ctx, body);
+    case CMD_DIRECT_WRITE_START:  return od_cmd_app_direct_start(ctx, body);
+    case CMD_DIRECT_WRITE_DATA:   return od_cmd_app_direct_data(ctx, body);
+    case CMD_DIRECT_WRITE_END:    return od_cmd_app_direct_end(ctx, body);
+    case CMD_LED_ACTIVATE:        return od_cmd_app_led_activate(ctx, body);
+    case CMD_LED_STOP:            return od_cmd_app_led_stop(ctx, body);
+    case CMD_PARTIAL_WRITE_START: return od_cmd_app_partial_start(ctx, body);
+    case CMD_BUZZER:              return od_cmd_app_buzzer(ctx, body);
+    case CMD_PIPE_WRITE_START:    return od_cmd_app_pipe_start(ctx, body);
+    case CMD_PIPE_WRITE_DATA:     return od_cmd_app_pipe_data(ctx, body);
+    case CMD_PIPE_WRITE_END:      return od_cmd_app_pipe_end(ctx, body);
+    case CMD_NFC_ENDPOINT:        return od_cmd_app_nfc(ctx, body);
+    default:                      return OD_CMD_UNKNOWN;
+    }
+}
+
+/* Turn a handler's verdict into the dispatcher's conclusion. One place, because the mapping is
+ * policy: UNKNOWN is NOT folded into NACK -- an unrecognised opcode must not stamp activity, or
+ * unknown-command traffic keeps an exclusive link alive. */
+static od_frame_outcome_t outcome_of(od_cmd_result_t rc)
+{
+    switch (rc) {
+    case OD_CMD_OK:            return OD_FRAME_ACCEPTED;
+    case OD_CMD_NACK:          return OD_FRAME_HANDLER_NACK;
+    case OD_CMD_AUTH_REJECTED: return OD_FRAME_AUTH_REQUIRED;
+    case OD_CMD_UNKNOWN:       return OD_FRAME_UNKNOWN_OPCODE;
+    }
+    /* No default above, so -Wswitch fails the build on a new od_cmd_result_t. Unreachable. */
+    return OD_FRAME_HANDLER_NACK;
+}
+
 od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
 {
     od_tx_reservation_t r;
@@ -144,9 +199,9 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
      * hold the exclusive link indefinitely. */
     if (cmd == CMD_FIRMWARE_VERSION) {
         const od_cmd_ctx_t ctx = { *rp, &r };
-        const od_cmd_result_t rc = od_cmd_dispatch(&ctx, cmd, body);
+        const od_cmd_result_t rc = od_cmd_app_firmware_version(&ctx, body);
         od_txq_release(&r);
-        return (rc == OD_CMD_OK) ? OD_FRAME_DISCOVERY : OD_FRAME_HANDLER_NACK;
+        return (rc == OD_CMD_OK) ? OD_FRAME_DISCOVERY : outcome_of(rc);
     }
 
     /* ORIGIN-GATED DECRYPT, SECTION 9 rule 4. A frame on the TLS-PSK LAN channel is already
@@ -171,18 +226,8 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
     /* ---- handler ---- */
     {
         const od_cmd_ctx_t ctx = { *rp, &r };
-        const od_cmd_result_t rc = od_cmd_dispatch(&ctx, cmd, body);
+        const od_cmd_result_t rc = dispatch_plain(&ctx, cmd, body);
         od_txq_release(&r);
-        switch (rc) {
-        case OD_CMD_OK:            return OD_FRAME_ACCEPTED;
-        case OD_CMD_NACK:          return OD_FRAME_HANDLER_NACK;
-        case OD_CMD_AUTH_REJECTED: return OD_FRAME_AUTH_REQUIRED;
-        /* NOT folded into NACK: an unrecognised opcode must not stamp activity, or unknown-command
-         * traffic keeps the exclusive link alive. od_frame_policy() gives UNKNOWN_OPCODE no
-         * activity and no abuse movement. */
-        case OD_CMD_UNKNOWN:       return OD_FRAME_UNKNOWN_OPCODE;
-        }
+        return outcome_of(rc);
     }
-    /* No default above, so -Wswitch fails the build on a new od_cmd_result_t. Unreachable. */
-    return OD_FRAME_HANDLER_NACK;
 }
