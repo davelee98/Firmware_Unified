@@ -309,6 +309,52 @@ static void test_chunks_are_sealed_when_a_session_is_live(void)
             g_sent[0].data[4] == (uint8_t)(300u & 0xFFu)));
 }
 
+static void test_a_seal_failure_ends_the_read(void)
+{
+    od_tx_reservation_t r;
+    uint8_t server_nonce[16];
+    unsigned passes = 0u;
+    unsigned nacks = 0u;
+    unsigned i;
+
+    /* THE MECHANISM THAT ACTUALLY BIT, and it is not the dead-tag one. A session that expires
+     * mid-read leaves the producer emitting into od_reply with security still enabled and no
+     * session: it substitutes a plaintext hard NACK and reports SEAL_FAILED. Treated as retryable,
+     * that is an unbounded NACK flood -- one per loop pass, forever -- while od_dispatch defers
+     * every config read and write behind the read that will never finish.
+     *
+     * A dead tag cannot show this: od_reply returns GONE without ever queueing a frame. */
+    CASE("a session that dies mid-read ends the read instead of flooding NACKs");
+    setup(true);
+    CHECK(handshake(&g_app_session, g_now_ms, server_nonce, false) == OD_SESSION_AUTH_ESTABLISHED);
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    CHECK(od_config_read_start(&BLE, &r, g_blob, 4096u) == OD_TXQ_OK);
+    (void)od_txq_process();
+    CHECK(g_sent_n == 1u);                       /* chunk 0 went out sealed */
+    CHECK(od_config_read_active());
+
+    od_session_clear(&g_app_session);            /* the session expires mid-read */
+    CHECK(od_config_read_pump() == OD_TXQ_SEAL_FAILED);
+    CHECK(!od_config_read_active());             /* terminal, not pending */
+
+    CASE("and the host gets exactly ONE hard NACK, not one per pass");
+    for (passes = 0u; passes < 50u; ++passes) {
+        (void)od_txq_process();
+        (void)od_config_read_pump();             /* idle: must stay silent */
+    }
+    (void)od_txq_process();
+    for (i = 0u; i < g_sent_n; ++i) {
+        if (g_sent[i].len >= 2u && g_sent[i].data[0] == RESP_NACK &&
+            g_sent[i].data[1] == RESP_CONFIG_READ) {
+            ++nacks;
+        }
+    }
+    CHECK(nacks == 1u);
+
+    CASE("and nothing is left reserved");
+    CHECK(od_txq_reserved() == 0u);
+}
+
 /* A chunk that could not be QUEUED must not advance the read. Reserve-then-emit means the usual
  * failure is FULL, which returns before the frame is built -- so the only way to exercise
  * emit_chunk's own failure path is to make the reply itself fail, which a dead link does. Without
@@ -358,6 +404,7 @@ int main(void)
 {
     test_full_read_unimpeded();
     test_backpressure_never_truncates();
+    test_a_seal_failure_ends_the_read();
     test_a_terminal_failure_ends_the_read();
     test_load_failure();
     test_second_read_is_refused();

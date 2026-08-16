@@ -1564,6 +1564,20 @@ void wifiLocalIpStr(char* out, size_t out_size) {
     odWifiIpStr(out, out_size);
 }
 
+/* Is a COMPLETE frame already sitting at the head of the receive buffer? The length prefix is
+ * [len:2 LE] and the frame is complete when the buffer holds the prefix plus that many bytes.
+ *
+ * The question is "can the parser make progress without reading more", which is the gate for both
+ * pausing the socket and for parsing when no new bytes arrived. One predicate for both, because
+ * they are the same condition and drifting them apart is how the deadlock came back. */
+static bool lanFrameBuffered(void) {
+    if (tcpReceiveBufferPos < 2u) {
+        return false;
+    }
+    const uint32_t flen = (uint32_t)(tcpReceiveBuffer[0] | (tcpReceiveBuffer[1] << 8));
+    return tcpReceiveBufferPos >= 2u + flen;
+}
+
 void handleWiFiServer() {
     // Execute a queued roam (RSSI dropped below OD_LAN_ROAM_RSSI_THRESHOLD) before any
     // other work; it self-gates on idle, so this is a no-op mid-transfer.
@@ -1645,7 +1659,24 @@ void handleWiFiServer() {
     uint32_t drainedBytes = 0;
     int got;
     do {
-        got = lanReadIntoBuffer();
+        /* STOP READING WHILE A FRAME IS RETAINED. od_dispatch returns DEFERRED without consuming
+         * the frame, so it stays at the head of this buffer to be re-offered unchanged -- and
+         * until it is consumed, nothing behind it can be dispatched either.
+         *
+         * Reading on regardless is not merely useless, it is fatal with a pipelining client: bytes
+         * keep accumulating behind a head that cannot move, and when the 16 KiB buffer fills
+         * lanReadIntoBuffer() reports an error and the connection is dropped -- turning ordinary
+         * backpressure into a disconnect. Skipping the read applies real TCP backpressure instead:
+         * the receive window closes and the peer stops sending, which is what the transport is for.
+         *
+         * A retained frame is also exactly the case where no new bytes will arrive -- a client
+         * waiting on its response sends nothing more -- so this is the same condition that would
+         * otherwise return early below. */
+        if (lanFrameBuffered()) {
+            got = 0;
+        } else {
+            got = lanReadIntoBuffer();
+        }
         if (got == OD_LAN_READ_CLOSED) {
             // Normal end of a push: the client finished and sent close_notify.
             od_log_info("LAN: client closed the connection");
@@ -1680,11 +1711,7 @@ void handleWiFiServer() {
             // strand that command until the connection died. The reason it was deferred -- TX
             // capacity, or a live CONFIG_READ -- clears from the loop, so re-parsing the same
             // bytes on a later pass is exactly what makes progress.
-            const bool frameBuffered =
-                tcpReceiveBufferPos >= 2u &&
-                tcpReceiveBufferPos >= 2u + (uint32_t)(tcpReceiveBuffer[0] |
-                                                       (tcpReceiveBuffer[1] << 8));
-            if (!frameBuffered) {
+            if (!lanFrameBuffered()) {
                 // The idle DROP is not decided here any more: serviceIdleTimeout() owns it for
                 // both transports, and it must run after inbound traffic has been parsed (7d
                 // step 4) or a LAN client is dropped with its command already sitting in the
