@@ -323,6 +323,41 @@ target_include_directories(od_nordic_cmd_device_test PRIVATE
 target_link_libraries(od_nordic_cmd_device_test od_shared)
 add_test(NAME nordic_cmd_device COMMAND od_nordic_cmd_device_test)
 
+# --------------------------------------------------------------------------------------------
+# dispatch_corpus: tests/vectors/dispatch.json replayed through the production od_dispatch_frame().
+#
+# This is the OTHER END of a contract that has only ever been checked from one side.
+# replay_vectors.py drives the same corpus through py-opendisplay's public API and says outright
+# that firmware replies are "never checkable here" (replay_vectors.py:18) -- so every h2d
+# expect.reply has been unchecked against firmware since the corpus was authored. Same file, same
+# vectors, the device side.
+#
+# The table is GENERATED into the build directory and never committed: a checked-in copy is the
+# second corpus TEST_OWNERSHIP.md forbids, and it permits a stale green. Regenerating depends on the
+# JSON, so editing a vector rebuilds the table.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_FOUND)
+    set(OD_VEC_TOOL ${CMAKE_CURRENT_LIST_DIR}/vectors_tool.py)
+    set(OD_VEC_DIR  ${CMAKE_CURRENT_LIST_DIR}/../vectors)
+    set(OD_VEC_INC  ${CMAKE_CURRENT_BINARY_DIR}/generated/dispatch_vectors.inc)
+    file(GLOB OD_VEC_JSON ${OD_VEC_DIR}/*.json)
+    add_custom_command(
+        OUTPUT ${OD_VEC_INC}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/generated
+        COMMAND ${Python3_EXECUTABLE} ${OD_VEC_TOOL} --emit ${OD_VEC_DIR} ${OD_VEC_INC}
+        DEPENDS ${OD_VEC_TOOL} ${OD_VEC_JSON}
+        COMMENT "od: generating the dispatch vector table from tests/vectors/")
+    add_custom_target(od_vectors_generated DEPENDS ${OD_VEC_INC})
+
+    # The schema gate, as its own test: a malformed or under-specified vector must fail loudly
+    # rather than be silently dropped by whatever consumes it next.
+    add_test(NAME vectors_schema
+             COMMAND ${Python3_EXECUTABLE} ${OD_VEC_TOOL} --check ${OD_VEC_DIR})
+
+else()
+    message(WARNING "od: Python3 not found -- the vector schema is UNCHECKED in this build.")
+endif()
+
 # Nordic config pin bytes are a wire contract and deliberately differ by
 # platform: nRF52840 uses absolute port*32+pin values, while nRF54 uses the
 # compact packed form. Keep the pure decoder checked without a Zephyr build.
