@@ -61,7 +61,12 @@ uint32_t od_session_app_now_ms(void)
  * KDF and the auth proof, so a different one is a different device to the host. */
 void od_session_app_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN])
 {
-  uint8_t id[8];
+  /* ZEROED, and that is the whole of the fix. hwinfo's status is ignored -- a device that cannot
+   * report an id still has to answer AUTHENTICATE with something -- but an uninitialised buffer
+   * makes that something STACK RESIDUE, so the identity could differ between two boots of the
+   * same board. A host keys its stored session key on this: a changing id is a device that
+   * silently stops being the one that was provisioned. Zero is at least the same answer twice. */
+  uint8_t id[8] = {0};
   uint64_t uid = 0;
   unsigned i;
 

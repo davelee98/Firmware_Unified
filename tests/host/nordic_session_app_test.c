@@ -129,15 +129,17 @@ static void test_device_id_packing(void)
     CHECK(id[2] == 0x40u);
     CHECK(id[3] == 0x80u);
 
-    /* A FAILING hwinfo is UNSPECIFIED here, and deliberately unasserted: the production code
-     * ignores the return value and folds a stack buffer it never initialised, so the answer is
-     * whatever was there. That is a defect -- a wire-visible identity that can differ between
-     * boots of the same board -- and it is fixed in its own commit rather than smuggled into a
-     * file move. All this case pins today is that the call completes and writes four bytes. */
-    CASE("a failing hwinfo still returns, writing four bytes of something");
+    /* hwinfo's status is ignored, deliberately: a device that cannot report an id still has to
+     * answer AUTHENTICATE with something rather than refuse to exist. What it must NOT be is
+     * stack residue -- the host keys its stored session key on this, so an identity that differs
+     * between two boots of the same board is a device that silently stops being the one that was
+     * provisioned. The buffer is zeroed, so the answer is deterministic. */
+    CASE("a failing hwinfo yields the zero id, not whatever was on the stack");
     set_hw(0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22);
     g_hw_rc = -5;
+    memset(id, 0x5A, sizeof id);
     od_session_app_device_id(id);
+    CHECK(id[0] == 0u && id[1] == 0u && id[2] == 0u && id[3] == 0u);
     g_hw_rc = 0;
 }
 
