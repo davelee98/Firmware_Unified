@@ -130,7 +130,29 @@ The only shipped implementation (Silabs) sends **four**. The corpus follows the 
 on the §1.1 precedent that a spec disagreeing with unanimous shipped behaviour is the thing
 that gets corrected. Fix the `@targets` line when the freeze lifts.
 
-### 2.2 The auth-required shape is documented backwards
+### 2.2 `0x0040` never says what an UNPROVISIONED device answers
+
+**verified 2026-08-16** — `opendisplay_protocol.h:293-301` describes two cases and the field has a
+third:
+
+| The header says | Covers |
+|---|---|
+| `@response` — "Empty config yields a single `[0x00][0x40][0x00 0x00][0x00 0x00]`" | a config that IS stored, of length zero |
+| `@errors` — `[0xFF][0x40][0x00][0x00]` "on storage-init failure" | storage that will not initialise |
+
+Neither covers **nothing stored** — an unprovisioned device, or one whose config failed
+validation — which is the case that actually occurs. `Firmware` answers the 4-byte error frame for
+it, and `py-opendisplay` tests for exactly that (`device.py:1111`), raising "Device has no stored
+configuration". Its comment names the failure the test prevents: without it the `{00,00}` of an
+error frame reads as a zero-length config *instead of* "no config".
+
+So the shipped answer is unambiguous even though the prose is not, and the §1.1 precedent applies —
+a spec that does not describe unanimous shipped behaviour is the thing that gets corrected. Add an
+`@response` clause for "no stored configuration" when the freeze lifts. Until then the header must
+not be read as authorising the zero-length ACK for an absent config: `nordic-zephyr` did read it
+that way, and an unprovisioned board reported itself as provisioned-with-nothing.
+
+### 2.3 The auth-required shape is documented backwards
 
 **verified** — `opendisplay_protocol.h:190` and `:222` both state `[0xFE][cmd_echo]`. All three
 implementations ship `[0x00][echo][0xFE]`, with `0xFE` as *data* in a 3-byte frame. Already

@@ -378,14 +378,23 @@ static od_cmd_result_t handle_config_read(const od_cmd_ctx_t *ctx)
   }
 
   if (!loadConfig(config_data, &config_len)) {
-    /* A ZERO-LENGTH ACK, not a NACK, and that is a live cross-target divergence preserved rather
-     * than harmonised here: ESP32 answers an empty read with {FF,43,00,00} and this target answers
-     * a valid read of nothing. od_config_read_start()'s own NULL-blob path emits the ESP32 shape,
-     * so passing NULL would silently change Nordic's wire. One subsystem per swap; the divergence
-     * belongs in DIVERGENCE_MATRIX, not in this commit. */
-    uint8_t empty[] = { 0x00u, RESP_CONFIG_READ, 0x00u, 0x00u, 0x00u, 0x00u };
-    (void)od_cmd_reply(ctx, empty, sizeof(empty));
-    return OD_CMD_OK;
+    /* NO CONFIG STORED answers the 4-byte ERROR frame, not a zero-length ACK, and the difference
+     * is one the host acts on. py-opendisplay tests for {FF,40,..} explicitly and raises "Device
+     * has no stored configuration"; its comment names the exact failure the test prevents --
+     * without it, the {00,00} of an error frame reads as a zero-length config "instead of no
+     * config". This target used to answer a valid read of nothing, so an UNPROVISIONED device
+     * reported as provisioned-with-nothing, and a corrupt config did too.
+     *
+     * The canonical header's prose does not settle this and should not be read as if it did: it
+     * describes an EMPTY config (stored, length zero) and reserves 0xFF for storage-init failure,
+     * and neither sentence covers "nothing stored" -- which is the case that actually occurs.
+     * Firmware and the host agree on the answer; FOLLOWUPS.md carries the header wording.
+     *
+     * Passing NULL rather than hand-building the frame: od_config_read_start() emits exactly this
+     * shape for a NULL blob, so both targets now get it from one place. */
+    const od_txq_status_t rc = od_config_read_start(&ctx->rp, ctx->r, NULL, 0u);
+    (void)rc;
+    return OD_CMD_NACK;
   }
 
   /* STARTS a read; it does not perform one. Chunk 0 goes out here and od_config_read_pump() emits
