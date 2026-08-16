@@ -188,10 +188,9 @@ static void onDisconnectCb(uint16_t conn_handle, uint8_t reason) {
     __atomic_store_n(&s_disconnectedEvent, true, __ATOMIC_RELEASE);
 }
 
-// Adapter: Bluefruit's write_callback_t is BLECharacteristic*-shaped, whereas the
-// shared dispatcher takes an opaque pointer (it ignores both leading arguments on
-// every target). Adapting here is what keeps Bluefruit types out of
-// communication.cpp.
+// Adapter: Bluefruit's write_callback_t is BLECharacteristic*-shaped and neither of
+// its leading arguments reaches the queue. Adapting here is what keeps Bluefruit
+// types out of communication.cpp.
 static void onWriteCb(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
     (void)chr;
     // Same owner filter as ESP32, so the two targets read identically. Latent

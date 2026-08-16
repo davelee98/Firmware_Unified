@@ -173,9 +173,18 @@ c11_structure() {
     # is how one target answers an opcode the other treats as unknown.
     scan "od_cmd_dispatch" '\bod_cmd_dispatch[[:space:]]*\(' \
          "the per-command seam is od_cmd_app.h; the opcode map is shared."
+    # A frame context stored in a global outlives its frame: any nested or later path can read it
+    # after the caller has moved on, and no compiler can catch that. Both ESP32 ingresses build an
+    # od_reply_t and pass it.
+    scan "implicit frame context" '\b(g_commandOrigin|g_commandInstance|commandOrigin|imageDataWritten)\b' \
+         "build an od_reply_t at the ingress and pass it to od_dispatch_app_frame()."
+    # Confidentiality is chosen at the CALL SITE. Inferring it from response bytes is how this
+    # firmware once sealed its own rejection frames, which the host then validated as ACKs.
+    scan "byte-inferred sealing" 'response\[(0|2)\][[:space:]]*==[[:space:]]*(RESP_NACK|0xFF)' \
+         "call od_reply_plain() explicitly; never inspect the frame to decide."
     return $rc
 }
-check "structure: no second opcode map"  c11_structure
+check "structure: ownership ratchets"  c11_structure
 
 # ================================================================================== host suites ==
 # The real boundary enforcement: shared/ compiled for the host at -std=c99 -Wall -Wextra -Werror

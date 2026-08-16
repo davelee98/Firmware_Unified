@@ -580,7 +580,7 @@ void checkTransferTimeouts(void) {
     // and the failure it guards against (dropping an innocent client's link over
     // another transport's stuck transfer) is invisible from the log.
     const LinkId owner = linkOwnerId();
-    const bool lanOwnsTransfer = (transferSessionOrigin() != 0);   // != ORIGIN_BLE
+    const bool lanOwnsTransfer = (transferSessionOrigin() != OD_ORIGIN_BLE);
     const bool dropOwnersLink =
         (lanOwnsTransfer && owner.who == OWNER_LAN) ||
         (!lanOwnsTransfer && owner.who == OWNER_BLE);
@@ -2028,28 +2028,31 @@ static void directWriteActivatePanel(void) {
 
 // ------------------------------------------------------- session ownership ---
 // Transfer state (directWriteActive, the zlib window, pipeState, partialCtx, panel
-// power) is a single global set, while g_commandOrigin is per-FRAME. Without an
+// power) is a single global set, while a frame's origin is per-FRAME. Without an
 // owner recorded at START, a frame from the other transport joins the in-flight
 // session -- feeding a BLE chunk into a LAN transfer's zlib stream corrupts it
 // silently, and its ack goes back to the injector rather than the owning client.
 // The same gap lets a BLE disconnect tear down a live LAN transfer (see
 // transferSessionOrigin() use in main.cpp's serviceBleDisconnectCleanup).
-static uint8_t sessionOrigin = 0;   // ORIGIN_BLE
+static od_origin_t sessionOrigin = OD_ORIGIN_BLE;
 
-uint8_t transferSessionOrigin(void) { return sessionOrigin; }
+od_origin_t transferSessionOrigin(void) { return sessionOrigin; }
 
 // True when the frame being dispatched belongs to the transport that opened the
-// session. Logs once per rejected frame: silent discard is what made this class of
-// corruption invisible in the first place.
-static bool frameOwnsSession(const char* what) {
-    if (commandOrigin() == sessionOrigin) return true;
+// session. The origin comes from the frame's own reply context rather than from a
+// global the ingress set behind us -- which is what makes this answerable at all
+// once a nested or deferred path can run between the two. Logs once per rejected
+// frame: silent discard is what made this class of corruption invisible in the
+// first place.
+static bool frameOwnsSession(const od_cmd_ctx_t *ctx, const char* what) {
+    if (ctx->rp.origin == sessionOrigin) return true;
     od_log_warn("WARNING: %s frame from origin %d dropped; session owned by origin %d",
-                what, (int)commandOrigin(), (int)sessionOrigin);
+                what, (int)ctx->rp.origin, (int)sessionOrigin);
     return false;
 }
 
 od_cmd_result_t handleDirectWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
-    sessionOrigin = commandOrigin();
+    sessionOrigin = ctx->rp.origin;
     if (partialCtx.active) cleanup_partial_write_state();
     if (directWriteActive) {
         cleanupDirectWriteState(false);
@@ -2091,7 +2094,7 @@ od_cmd_result_t handleDirectWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, u
 }
 
 od_cmd_result_t handlePartialWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
-    sessionOrigin = commandOrigin();
+    sessionOrigin = ctx->rp.origin;
     if (directWriteActive) cleanupDirectWriteState(false);
     if (partialCtx.active) cleanup_partial_write_state();
     resetPipeWriteState();
@@ -2198,7 +2201,7 @@ od_cmd_result_t handleDirectWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, ui
     if (pipeState.active) return OD_CMD_OK;   /* silent discard */
     if (partialCtx.active) {
         if (len == 0) return OD_CMD_OK;   /* silent discard */
-        if (!frameOwnsSession("0x0071 (partial)")) return OD_CMD_OK;   /* silent discard */
+        if (!frameOwnsSession(ctx, "0x0071 (partial)")) return OD_CMD_OK;   /* silent discard */
         imageWriteLogChunk(data, len);
         if (!partial_consume_bytes(data, (uint32_t)len)) {
             send_direct_write_nack(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true);
@@ -2210,7 +2213,7 @@ od_cmd_result_t handleDirectWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, ui
         return OD_CMD_OK;
     }
     if (!directWriteActive || len == 0) return OD_CMD_OK;
-    if (!frameOwnsSession("0x0071")) return OD_CMD_OK;
+    if (!frameOwnsSession(ctx, "0x0071")) return OD_CMD_OK;
     imageWriteLogChunk(data, len);
     if (directWriteCompressed) {
         if (!handleDirectWriteCompressedData(data, len)) {
@@ -2258,7 +2261,7 @@ od_cmd_result_t handleDirectWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uin
     // finalize/refresh a pipe-owned session (partial would commit new_etag==0 and
     // leave pipeState zombied; full-frame would refresh with pipeState still active).
     if (pipeState.active) return OD_CMD_OK;   /* silent discard */
-    if ((directWriteActive || partialCtx.active) && !frameOwnsSession("0x0072")) return OD_CMD_OK;   /* silent discard */
+    if ((directWriteActive || partialCtx.active) && !frameOwnsSession(ctx, "0x0072")) return OD_CMD_OK;   /* silent discard */
     if (partialCtx.active) {
         if (data != nullptr && len > 1) {
             send_direct_write_nack(ctx, RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true);
@@ -2642,7 +2645,7 @@ static bool pipeConsumePayload(uint8_t* data, uint16_t len) {
 }
 
 od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
-    sessionOrigin = commandOrigin();
+    sessionOrigin = ctx->rp.origin;
     // A new START aborts any in-flight transfer of any family and resets pipe state
     // (mirrors legacy START). Reset happens up-front so even a malformed START is safe.
     if (partialCtx.active) cleanup_partial_write_state();
@@ -2818,7 +2821,7 @@ od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uin
 od_cmd_result_t handlePipeWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
     if (!pipeState.active || pipeState.error) return OD_CMD_OK;   /* silent discard */   // silent discard
     if (len < 1) return OD_CMD_OK;   /* silent discard */
-    if (!frameOwnsSession("0x0081")) return OD_CMD_OK;   /* silent discard */
+    if (!frameOwnsSession(ctx, "0x0081")) return OD_CMD_OK;   /* silent discard */
     uint8_t  seq     = data[0];
     uint8_t* payload = data + 1;
     uint16_t plen    = (uint16_t)(len - 1);
@@ -2942,7 +2945,7 @@ od_cmd_result_t handlePipeWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint
 }
 
 od_cmd_result_t handlePipeWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
-    if (pipeState.active && !frameOwnsSession("0x0082")) return OD_CMD_NACK;
+    if (pipeState.active && !frameOwnsSession(ctx, "0x0082")) return OD_CMD_NACK;
     if (!pipeState.active) {
         uint8_t n[2] = {RESP_NACK, 0x82};   // no active pipe transfer
         (void)od_cmd_reply_plain(ctx, n, sizeof(n));

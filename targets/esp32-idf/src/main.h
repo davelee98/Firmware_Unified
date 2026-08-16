@@ -207,8 +207,6 @@ extern bool advertising_timeout_active;
 extern uint32_t advertising_start_time;
 #endif
 void getChipIdHex(char* out, size_t out_size);   // see encryption.h for the contract
-
-// imageDataWritten + its opaque parameter typedefs come from communication.h.
 void secureEraseConfig();
 void checkResetPin();
 void reboot();

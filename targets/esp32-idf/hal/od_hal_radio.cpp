@@ -88,7 +88,7 @@ extern "C" bool od_hal_radio_tag_is_live(od_origin_t origin, uint32_t tag)
          * synchronous sender did not have is real: the peer can go and a new one arrive before the
          * drain, and the old client's response would land on the new client's socket.
          *
-         * LAN commands DO carry a real owner word (wifi_service.cpp sets g_commandInstance from
+         * LAN commands DO carry a real owner word (wifi_service.cpp builds the reply context from
          * linkIdWord(lanOwner)), so that is checkable -- but only when there is one. The same site
          * uses 0 whenever the link owner is not OWNER_LAN, and linkIsOwnerWord(0) is false, so
          * testing unconditionally would discard those responses as GONE. Absent a word, staleness

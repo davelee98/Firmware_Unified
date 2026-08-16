@@ -101,22 +101,27 @@ enum hook_id {
 static enum hook_id g_ran;
 static unsigned     g_hook_calls;
 static uint16_t     g_body_len;
+/* The reply context the hook was handed. A handler decides real things from it -- which transport
+ * owns an in-flight transfer, whether a config write may proceed on an authenticated TLS link --
+ * so dispatch passing through anything other than what the ingress built is a defect. */
+static od_reply_t   g_hook_rp;
 
 /* Result the next hook returns. Set per case so the outcome mapping can be checked alongside the
  * route -- a hook that runs but whose verdict is dropped is as wrong as one that never runs. */
 static od_cmd_result_t g_hook_result;
 
-static od_cmd_result_t record(enum hook_id id, od_span_t body)
+static od_cmd_result_t record(enum hook_id id, const od_cmd_ctx_t *ctx, od_span_t body)
 {
     g_ran = id;
     ++g_hook_calls;
     g_body_len = (uint16_t)body.n;
+    g_hook_rp = ctx->rp;
     return g_hook_result;
 }
 
 #define HOOK(fn, id)                                                     \
     od_cmd_result_t fn(const od_cmd_ctx_t *ctx, od_span_t body)          \
-    { (void)ctx; return record(id, body); }
+    { return record(id, ctx, body); }
 
 HOOK(od_cmd_app_reboot,           HOOK_REBOOT)
 HOOK(od_cmd_app_firmware_version, HOOK_FIRMWARE_VERSION)
@@ -157,6 +162,7 @@ static void setup(void)
     g_hook_calls = 0u;
     g_body_len = 0u;
     g_hook_result = OD_CMD_OK;
+    memset(&g_hook_rp, 0, sizeof g_hook_rp);
 }
 
 /* Security is OFF for the whole suite (od_session_app_security() returns NULL), so every frame is
@@ -284,9 +290,36 @@ static void test_body_excludes_the_opcode(void)
     CHECK(g_body_len == 7u);
 }
 
+/* THE FRAME CONTEXT IS AN ARGUMENT, NOT A GLOBAL, and this is what says so from the shared side.
+ * ESP32 used to reconstruct it inside the dispatcher from a pair of globals the ingress had set
+ * immediately beforehand -- a per-frame fact with a lifetime longer than its frame, readable by
+ * any nested or later path after the caller had moved on. Both ingresses now build an od_reply_t
+ * and hand it over, and dispatch must deliver exactly that. */
+static void test_reply_context_reaches_the_hook_unchanged(void)
+{
+    static const od_reply_t ORIGINS[] = {
+        { OD_ORIGIN_BLE,       0x11223344u },
+        { OD_ORIGIN_LAN_PLAIN, 0x00000000u },
+        { OD_ORIGIN_LAN_TLS,   0xDEADBEEFu },
+    };
+    uint8_t frame[4] = { 0x00u, 0x77u, 0xA0u, 0xA1u };
+    unsigned i;
+
+    CASE("every origin and tag arrives at the hook exactly as the ingress built it");
+    for (i = 0u; i < sizeof ORIGINS / sizeof ORIGINS[0]; ++i) {
+        setup();
+        CHECK(od_dispatch_frame(&ORIGINS[i], od_span_make(frame, sizeof frame))
+              == OD_FRAME_ACCEPTED);
+        CHECK(g_ran == HOOK_BUZZER);
+        CHECK(g_hook_rp.origin == ORIGINS[i].origin);
+        CHECK(g_hook_rp.tag == ORIGINS[i].tag);
+    }
+}
+
 int main(void)
 {
     test_every_opcode_reaches_its_own_hook();
+    test_reply_context_reaches_the_hook_unchanged();
     test_authenticate_never_reaches_a_hook();
     test_unknown_opcode_reaches_nothing();
     test_hook_verdicts_map_to_outcomes();
