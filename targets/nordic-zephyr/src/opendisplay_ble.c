@@ -23,6 +23,8 @@
 #include <string.h>
 
 #include "od_rxq.h"
+#include "od_hal_adv.h"
+#include "od_adv_control.h"
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/gap.h>
@@ -188,40 +190,58 @@ static uint8_t dynamic_return[OD_ADVERT_DYNAMIC_LEN];
 static char s_dev_name[16];
 static struct bt_conn *s_conn;
 static bool s_notify_enabled;
-static bool s_adv_active;
 static uint32_t s_adv_boost_start_ms;
 static bool s_adv_boost_on;
 static uint8_t s_msd_loop_counter;
-static uint32_t s_last_adv_retry_ms;
 static uint8_t s_reboot_flag = 1; /* set after boot, cleared on first BLE connect */
 static uint8_t s_connection_requested; /* MSD status bit2; see opendisplay_ble_set_connection_requested */
-static uint8_t s_last_published_msd[MSD_PAYLOAD_LEN];
-static bool s_msd_published;
-static bool s_adv_was_boosted;
 static struct bt_le_adv_param s_adv_param = BT_LE_ADV_PARAM_INIT(
 	BT_LE_ADV_OPT_CONN,
 	OD_ADV_INTERVAL_MIN, OD_ADV_INTERVAL_MAX, NULL);
 
-static struct k_work_delayable s_adv_restart_work;
 static struct k_work_delayable s_dfu_work;
 static struct k_work s_boot_display_work;
 static struct k_work_q s_display_work_q;
 static K_THREAD_STACK_DEFINE(s_display_wq_stack, 8192);
 static bool s_display_wq_started;
 /* Gives once the boot-display work item returns, success or failure. opendisplay_ble_init()
- * blocks on this before start_advertising() -- see its call site for why. */
+ * blocks on this before od_adv_request_start() -- see its call site for why. */
 static struct k_sem s_boot_display_done;
-static bool s_adv_work_msd_publish;
 /* When encryption is on, SMP stays hidden until CMD_ENTER_DFU unlocks it
  * for this boot (Adafruit bledfu.begin() gating). */
 static bool s_ota_unlocked;
 
-static int start_advertising(void);
-static bool publish_msd_to_advertising(void);
+/* ---- advertising ownership (F4): loop-thread-only state, touched from exactly one context
+ * (opendisplay_ble_process(), called only from main.c's superloop). Nothing below this point
+ * may be touched from BT_CONN_CB_DEFINE callbacks (BT RX thread) or from the NFC driver's
+ * callback (HAL_NFC/ISR context) -- see opendisplay_ble_boost_advertising() for why that
+ * constraint is load-bearing here and not just a style preference. */
+static struct od_adv_control s_adv;
+static bool s_adv_interval_is_boost;   /* which interval was last SUCCESSFULLY applied */
+static bool s_adv_restart_pending;     /* see request_adv_restart() */
+
+/* The facts a callback may publish about advertising/MSD: edges, drained on the loop thread. */
+static volatile uint8_t s_adv_ended_pending = 0;
+static volatile uint8_t s_msd_publish_pending = 0;
+
+/* Separate from msd_payload[]: this is the ONLY buffer ad[] points at, and it is written
+ * exclusively by od_hal_adv_program(), which the shared controller calls only from the loop
+ * thread and only while advertising is inactive. msd_payload[] remains the free-running staging
+ * buffer update_msd_payload() writes into from any context (unchanged, pre-existing behavior) --
+ * decoupling the two means the live-on-air bytes can never be torn by a concurrent write. */
+static uint8_t s_programmed_msd[MSD_PAYLOAD_LEN];
+
+BUILD_ASSERT(MSD_PAYLOAD_LEN == OD_ADV_MSD_LEN,
+	     "opendisplay_ble.c and od_adv_control.h disagree on the MSD length");
+
 static void apply_tx_power(uint8_t handle_type, uint16_t handle);
 static void od_smp_sync(void);
-static void schedule_adv_restart(uint32_t delay_ms);
 static void request_fast_link(struct bt_conn *conn);
+static void compute_device_name(void);
+static bool apply_adv_interval(void);
+static uint8_t connected_count(void);
+static bool ble_service_advertising(bool start_allowed);
+static void request_adv_restart(void);
 
 /* Mirror Adafruit ble_nrf_request_fast_link(): ask for 2M + max DLE; central may decline. */
 static void request_fast_link(struct bt_conn *conn)
@@ -298,8 +318,6 @@ static void dfu_work_handler(struct k_work *work)
 	od_smp_sync();
 	if (s_conn != NULL) {
 		(void)bt_conn_disconnect(s_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-	} else {
-		schedule_adv_restart(0);
 	}
 }
 
@@ -331,39 +349,6 @@ static void schedule_boot_display_apply(void)
 		s_display_wq_started = true;
 	}
 	(void)k_work_submit_to_queue(&s_display_work_q, &s_boot_display_work);
-}
-
-static void adv_work_handler(struct k_work *work)
-{
-	ARG_UNUSED(work);
-	if (s_conn != NULL) {
-		s_adv_work_msd_publish = false;
-		return;
-	}
-	if (s_adv_work_msd_publish) {
-		s_adv_work_msd_publish = false;
-		(void)publish_msd_to_advertising();
-		return;
-	}
-	int err = start_advertising();
-	if (err != 0) {
-		od_log_info("adv restart retry (err %d)", err);
-		(void)k_work_schedule(&s_adv_restart_work, K_MSEC(200));
-	}
-}
-
-static void schedule_adv_restart(uint32_t delay_ms)
-{
-	s_adv_work_msd_publish = false;
-	(void)k_work_cancel_delayable(&s_adv_restart_work);
-	(void)k_work_schedule(&s_adv_restart_work, K_MSEC(delay_ms));
-}
-
-static void schedule_msd_publish(void)
-{
-	s_adv_work_msd_publish = true;
-	(void)k_work_cancel_delayable(&s_adv_restart_work);
-	(void)k_work_schedule(&s_adv_restart_work, K_NO_WAIT);
 }
 
 uint32_t opendisplay_ble_chip_id_last24(void)
@@ -525,7 +510,7 @@ BT_GATT_SERVICE_DEFINE(
 
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-	BT_DATA(BT_DATA_MANUFACTURER_DATA, msd_payload, MSD_PAYLOAD_LEN),
+	BT_DATA(BT_DATA_MANUFACTURER_DATA, s_programmed_msd, MSD_PAYLOAD_LEN),
 };
 
 static struct bt_data sd_name = BT_DATA(BT_DATA_NAME_COMPLETE, s_dev_name, 0);
@@ -549,53 +534,34 @@ static unsigned sd_prepare(void)
 	return count;
 }
 
-static bool publish_msd_to_advertising(void)
-{
-	if (s_conn != NULL) {
-		return false;
-	}
-	if (s_msd_published && memcmp(s_last_published_msd, msd_payload, MSD_PAYLOAD_LEN) == 0) {
-		return false;
-	}
-	memcpy(s_last_published_msd, msd_payload, MSD_PAYLOAD_LEN);
-	s_msd_published = true;
-	log_msd(OD_LOG_INFO, "publish");
-
-	if (s_adv_active) {
-		unsigned sd_count = sd_prepare();
-
-		if (bt_le_adv_update_data(ad, ARRAY_SIZE(ad), sd_buf, sd_count) == 0) {
-			return true;
-		}
-		/* Fall through to restart only if update_data failed. */
-	}
-	return start_advertising() == 0;
-}
-
 void opendisplay_ble_update_msd(bool refresh_advertising)
 {
-	update_msd_payload();
+	update_msd_payload();   /* unchanged: already called from any context in the old code too */
 	if (!refresh_advertising) {
 		return;
 	}
-	/* Matches ESP32 Firmware: skip redundant adv refresh when payload unchanged. */
-	if (s_msd_published && memcmp(s_last_published_msd, msd_payload, MSD_PAYLOAD_LEN) == 0) {
-		return;
-	}
-	schedule_msd_publish();
+	/* ISR-safe: only sets a flag. od_adv_set_payload() itself -- and its own memcmp-based
+	 * dedup against the currently-programmed payload -- runs on the next
+	 * ble_service_advertising() pass, never here. Reachable from opendisplay_nfc.c's
+	 * nfc_callback(), which nfc_t2t_lib.h documents as running in HAL_NFC callback context. */
+	__atomic_store_n(&s_msd_publish_pending, (uint8_t)1, __ATOMIC_RELEASE);
 }
 
 static void connected(struct bt_conn *conn, uint8_t err)
 {
+	/* A connection attempt -- successful or not -- means Zephyr's single legacy-advertiser
+	 * instance was engaged by the CONNECT_IND. A non-zero err here is documented for the
+	 * peripheral-role directed-high-duty-cycle-advertising-timeout case; publishing "ended"
+	 * either way is the conservative, correct choice, mirroring ESP32's
+	 * od_ble_note_adv_ended(). */
+	__atomic_store_n(&s_adv_ended_pending, (uint8_t)1, __ATOMIC_RELEASE);
+
 	if (err != 0) {
 		od_log_info("connect failed: %u", (unsigned)err);
 		opendisplay_ble_boost_advertising();
-		schedule_adv_restart(150);
 		return;
 	}
-	(void)k_work_cancel_delayable(&s_adv_restart_work);
 	s_conn = bt_conn_ref(conn);
-	s_adv_active = false;
 	s_reboot_flag = 0;
 	request_fast_link(conn);
 	if (opendisplay_cs_config_enabled(&s_od_global_config)) {
@@ -622,23 +588,21 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 		bt_conn_unref(s_conn);
 		s_conn = NULL;
 	}
-	s_adv_active = false;
+	/* THE FIX: no restart call here. od_adv_control's `desired` intent was never withdrawn,
+	 * and ble_service_advertising() re-reads connected_count() fresh on the very next
+	 * opendisplay_ble_process() pass. Replaces the blind 150ms k_work_schedule() that was
+	 * the reported bug -- see docs on od_adv_control.h / shared/hal/od_hal_adv.h for the
+	 * reconcile-every-pass design this now follows. */
 	opendisplay_ble_boost_advertising();
-	schedule_adv_restart(150);
 }
 
-static void recycled(void)
-{
-	/* Runs in ISR-like context: only queue work, no BT API calls here. */
-	if (s_conn == NULL) {
-		(void)k_work_schedule(&s_adv_restart_work, K_NO_WAIT);
-	}
-}
-
+/* .recycled is gone -- it was structurally dead code (scheduling an already-pending work item
+ * with K_NO_WAIT is a silent Zephyr no-op). Its job is now just connected_count()'s level read
+ * every pass; safe because a transient -ENOMEM from bt_le_adv_start() is mapped to RETRY, not
+ * ERROR (see od_hal_adv_start() below), so the loop keeps retrying on its own. */
 BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,
-	.recycled = recycled,
 };
 
 const struct od_config *opendisplay_get_global_config(void)
@@ -778,49 +742,165 @@ static bool adv_boost_active(uint32_t now)
 	return s_adv_boost_on && ((now - s_adv_boost_start_ms) < OD_ADV_BOOST_MS);
 }
 
-static void apply_adv_interval(void)
+static bool apply_adv_interval(void)
 {
 	if (adv_boost_active(k_uptime_get_32())) {
 		s_adv_param.interval_min = OD_ADV_BOOST_INTERVAL_MIN;
 		s_adv_param.interval_max = OD_ADV_BOOST_INTERVAL_MAX;
-	} else {
-		s_adv_boost_on = false;
-		s_adv_param.interval_min = OD_ADV_INTERVAL_MIN;
-		s_adv_param.interval_max = OD_ADV_INTERVAL_MAX;
+		return true;
 	}
+	s_adv_boost_on = false;
+	s_adv_param.interval_min = OD_ADV_INTERVAL_MIN;
+	s_adv_param.interval_max = OD_ADV_INTERVAL_MAX;
+	return false;
 }
 
-static int start_advertising(void)
+/* ------------------------------------------------- shared advertising HAL (od_hal_adv.h) ---
+ * The target side of shared/core/od_adv_control.c (docs/F4_PORTABLE_BLE_LIFECYCLE_PLAN.md).
+ * Lives here, not in a separate hal/od_hal_adv.c, for the same reason
+ * targets/esp32-idf/ble/od_ble_nimble.cpp gives: it needs this file's statics (s_adv_param,
+ * ad[], sd_buf[], sd_prepare()) and a second home for advertising state would be the defect F4
+ * exists to remove, not a cleanup of it.
+ */
+
+static void compute_device_name(void)
 {
 	char hex[7];
-	int err;
-
-	if (s_conn != NULL) {
-		return 0;
-	}
 
 	chip_id_hex6(hex);
 	snprintf(s_dev_name, sizeof(s_dev_name), "%s%s", OD_NAME_PREFIX, hex);
-	unsigned sd_count = sd_prepare();
-	/* MSD payload is updated only via opendisplay_ble_update_msd(), not on every
-	 * adv stop/start (disconnect restart, boost end, retry fallback). */
+}
 
-	apply_adv_interval();
-	(void)bt_le_adv_stop();
+/* Thread-safe LEVEL read of connections, per od_adv_control.h's contract ("from the transport
+ * instance table, not counted callback edges") -- NOT s_conn != NULL, which is written by
+ * connected()/disconnected() on the BT RX thread with no synchronization against the loop
+ * thread reading it. */
+static void count_connected_cb(struct bt_conn *conn, void *user_data)
+{
+	struct bt_conn_info info;
+	uint8_t *count = user_data;
+
+	if (bt_conn_get_info(conn, &info) == 0 && info.state == BT_CONN_STATE_CONNECTED) {
+		(*count)++;
+	}
+}
+
+static uint8_t connected_count(void)
+{
+	uint8_t count = 0;
+
+	bt_conn_foreach(BT_CONN_TYPE_LE, count_connected_cb, &count);
+	return count;
+}
+
+enum od_hal_adv_result od_hal_adv_program(const uint8_t msd[16])
+{
+	memcpy(s_programmed_msd, msd, MSD_PAYLOAD_LEN);
+	return OD_HAL_ADV_OK;
+}
+
+enum od_hal_adv_result od_hal_adv_start(void)
+{
+	int err;
+	unsigned sd_count;
+	bool boost;
+
+	compute_device_name();
+	sd_count = sd_prepare();
+	boost = apply_adv_interval();   /* mutates s_adv_param; commit decision only on success below */
+
 	err = bt_le_adv_start(&s_adv_param, ad, ARRAY_SIZE(ad), sd_buf, sd_count);
-	s_adv_active = (err == 0);
-	if (err != 0) {
-		od_log_info("adv start failed: %d (will retry)", err);
-	} else {
-		if (!s_msd_published) {
-			memcpy(s_last_published_msd, msd_payload, MSD_PAYLOAD_LEN);
-			s_msd_published = true;
-		}
+	if (err == 0) {
+		/* Commit the interval marker ONLY on confirmed success -- an -EALREADY result must
+		 * not claim the requested interval is on air when Zephyr never actually re-applied
+		 * s_adv_param to an already-running advertiser, or the corrective restart in
+		 * opendisplay_ble_advertising_tick() would be silently suppressed. */
+		s_adv_interval_is_boost = boost;
+		apply_tx_power(BT_HCI_VS_LL_HANDLE_TYPE_ADV, 0);
 		od_log_info("advertising as %s (interval=%u-%u ms)", s_dev_name,
 		       (unsigned)BT_GAP_ADV_INTERVAL_TO_MS(s_adv_param.interval_min),
 		       (unsigned)BT_GAP_ADV_INTERVAL_TO_MS(s_adv_param.interval_max));
+		return OD_HAL_ADV_OK;
 	}
-	return err;
+	if (err == -EALREADY) {
+		return OD_HAL_ADV_ALREADY;
+	}
+	/* Verified against zephyr/subsys/bluetooth/host/adv.c directly, not assumed by analogy
+	 * to NimBLE:
+	 *   -ENOMEM       no free bt_conn object (this board has exactly one connection slot)
+	 *   -ECONNREFUSED max simultaneous connections already established
+	 *   -EAGAIN       BT_DEV_READY not set (unreachable in practice: od_adv_stack_ready() is
+	 *                 only asserted after bt_enable() returns, which blocks until ready --
+	 *                 mapped anyway rather than asserted against)
+	 *   -ENOBUFS      HCI command buffer exhausted before the command was even issued -- no
+	 *                 state changed, a textbook RETRY
+	 *   -EACCES       HCI "Command Disallowed" -- can occur transiently while the controller
+	 *                 is mid-transition around a connection event; treated as retryable
+	 *                 rather than a permanent fault */
+	if (err == -ENOMEM || err == -ECONNREFUSED || err == -EAGAIN ||
+	    err == -ENOBUFS || err == -EACCES) {
+		return OD_HAL_ADV_RETRY;
+	}
+	od_log_info("adv start failed: %d", err);
+	return OD_HAL_ADV_ERROR;
+}
+
+enum od_hal_adv_result od_hal_adv_stop(void)
+{
+	int err = bt_le_adv_stop();
+
+	/* Zephyr folds "never started" and "exists but not enabled" into rc==0 -- there is no
+	 * -EALREADY-shaped case to map to OD_HAL_ADV_NOT_ACTIVE here, unlike NimBLE. */
+	if (err == 0) {
+		return OD_HAL_ADV_OK;
+	}
+	/* -ENOBUFS means advertising was NOT disabled -- RETRY, not a latched fault. */
+	if (err == -ENOBUFS) {
+		return OD_HAL_ADV_RETRY;
+	}
+	od_log_info("adv stop failed: %d", err);
+	return OD_HAL_ADV_ERROR;
+}
+
+/* Loop-thread only, called from opendisplay_ble_process(). Mirrors od_ble_service_advertising()
+ * in targets/esp32-idf/ble/od_ble_nimble.cpp: publish facts as level reads (connection count) or
+ * drained edges (ended, MSD), then run exactly one reconciliation step. */
+static bool ble_service_advertising(bool start_allowed)
+{
+	od_adv_set_connection_count(&s_adv, connected_count());
+	if (__atomic_exchange_n(&s_adv_ended_pending, (uint8_t)0, __ATOMIC_ACQUIRE)) {
+		od_adv_observe_ended(&s_adv);
+	}
+	if (__atomic_exchange_n(&s_msd_publish_pending, (uint8_t)0, __ATOMIC_ACQUIRE)) {
+		log_msd(OD_LOG_INFO, "publish");
+		od_adv_set_payload(&s_adv, msd_payload);
+	}
+
+	const enum od_adv_process_result r = od_adv_process(&s_adv, start_allowed);
+
+	if (s_adv_restart_pending) {
+		if (s_adv.faulted) {
+			/* A latched fault needs a stack reset, not more restarts -- stop asking. */
+			s_adv_restart_pending = false;
+		} else if (!s_adv.active) {
+			od_adv_request_start(&s_adv);
+			s_adv_restart_pending = false;
+		}
+		/* else: still active (stop hasn't completed this pass, e.g. a RETRY) -- leave the
+		 * flag set and let the next pass's od_adv_process() call finish the stop, one step
+		 * at a time, exactly as RETRY's contract requires. */
+	}
+	return r == OD_ADV_ACTED;
+}
+
+/* Withdraws intent (forcing a stop), and remembers to reassert it once the controller confirms
+ * inactive. Used wherever the OLD code forced a stop/start cycle to pick up changed target
+ * parameters (interval, config) that od_adv_control itself has no concept of -- it only owns
+ * desired/payload/connection-count, never s_adv_param. Loop-thread only. */
+static void request_adv_restart(void)
+{
+	od_adv_request_stop(&s_adv);
+	s_adv_restart_pending = true;
 }
 
 /* Put a configured external SPI NOR flash into deep power-down after every
@@ -866,45 +946,34 @@ void opendisplay_ble_reload_config_from_nvm(void)
 	opendisplay_nfc_apply_config(&s_od_global_config);
 	/* Re-apply advertising TX power in case the new config changed it. */
 	apply_tx_power(BT_HCI_VS_LL_HANDLE_TYPE_ADV, 0);
-	if (s_conn == NULL) {
-		schedule_adv_restart(0);
+	/* Called from od_cmd_config.c's handlers, which run on the loop thread -- safe to request
+	 * a restart directly. Only meaningful if something is actually on-air to refresh; if not
+	 * yet active the next natural start already picks up the new config. */
+	if (s_adv.active) {
+		request_adv_restart();
 	}
 }
 
-void opendisplay_ble_restart_advertising(void)
-{
-	schedule_adv_restart(0);
-}
-
+/* ISR-SAFE, unchanged in spirit from before -- reachable from opendisplay_nfc.c's
+ * nfc_callback() (HAL_NFC callback context, confirmed) as well as the main loop
+ * (button/touch). MUST NOT touch s_adv or call any bt_le_adv_ or od_adv_ function -- those
+ * are loop-thread-only by od_adv_control's single-owner contract. May only set plain flags. */
 void opendisplay_ble_boost_advertising(void)
 {
-	uint32_t now = k_uptime_get_32();
-	const bool already_boosting = adv_boost_active(now);
-
-	s_adv_boost_start_ms = now;
+	s_adv_boost_start_ms = k_uptime_get_32();
 	s_adv_boost_on = true;
-	/* Only restart advertising when entering boost (interval must change).
-	 * Refreshing boost while already boosted must not stop/start ADV — NFC
-	 * field chatter was spamming start_advertising(). */
-	if (s_conn == NULL && !already_boosting) {
-		schedule_adv_restart(0);
-	}
 }
 
+/* Loop-thread only. Detects a mismatch between the interval currently wanted (boost window
+ * open or not) and the interval last SUCCESSFULLY applied, and requests a restart to correct
+ * it -- covers both edges (boost engaging, boost expiring) with one comparison. If advertising
+ * isn't active yet, nothing to do -- the next natural start already reads
+ * apply_adv_interval() fresh. */
 void opendisplay_ble_advertising_tick(void)
 {
-	if (adv_boost_active(k_uptime_get_32())) {
-		s_adv_was_boosted = true;
-		return;
+	if (s_adv.active && (adv_boost_active(k_uptime_get_32()) != s_adv_interval_is_boost)) {
+		request_adv_restart();
 	}
-	if (!s_adv_was_boosted || s_conn != NULL || !s_adv_active) {
-		s_adv_was_boosted = false;
-		s_adv_boost_on = false;
-		return;
-	}
-	s_adv_was_boosted = false;
-	s_adv_boost_on = false;
-	schedule_adv_restart(0);
 }
 
 void opendisplay_ble_init(void)
@@ -937,12 +1006,9 @@ void opendisplay_ble_init(void)
 	opendisplay_led_init();
 	opendisplay_buzzer_init();
 
-	/* Before bt_enable(): its failure path returns early, and the main loop keeps
-	 * calling opendisplay_ble_process(), whose adv fallback schedules this work.
-	 * A work item scheduled before k_work_init() runs a NULL handler. */
-	k_work_init_delayable(&s_adv_restart_work, adv_work_handler);
 	k_work_init_delayable(&s_dfu_work, dfu_work_handler);
 	k_work_init(&s_boot_display_work, boot_display_work_handler);
+	od_adv_control_init(&s_adv);
 
 	od_log_info("enabling Bluetooth");
 	err = bt_enable(NULL);
@@ -953,10 +1019,13 @@ void opendisplay_ble_init(void)
 	if (IS_ENABLED(CONFIG_SETTINGS)) {
 		(void)settings_load();
 	}
+	/* bt_enable(NULL) BLOCKS until ready -- unlike NimBLE's async on_sync, there's no later
+	 * "ready" event to poll for, so this is asserted once here. */
+	od_adv_stack_ready(&s_adv);
 
 	opendisplay_button_init();
 	opendisplay_touch_init();
-	/* After SoftDevice + adv work init (NFC field MSD uses schedule_msd_publish). */
+	/* After SoftDevice + advertising controller init (NFC field MSD uses the pending flag). */
 	opendisplay_nfc_apply_config(&s_od_global_config);
 	/* Match Adafruit: hide SMP when encryption is on until CMD_ENTER_DFU. */
 	od_smp_sync();
@@ -978,20 +1047,17 @@ void opendisplay_ble_init(void)
 			     (unsigned)OD_BOOT_DISPLAY_WAIT_MS);
 	}
 
-	err = start_advertising();
-	if (err != 0) {
-		od_log_info("initial adv failed: %d (will retry)", err);
-		schedule_adv_restart(0);
-	} else {
-		apply_tx_power(BT_HCI_VS_LL_HANDLE_TYPE_ADV, 0);
-	}
-	od_log_info("BLE ready as %s", s_dev_name);
+	od_adv_set_payload(&s_adv, msd_payload);
+	od_adv_request_start(&s_adv);
+	/* Advertising itself, device-name computation, and the TX-power apply all happen inside
+	 * od_hal_adv_start() on the first opendisplay_ble_process() pass (called from main.c
+	 * immediately after this function returns), not synchronously here -- so s_dev_name is
+	 * not yet valid at this log line, unlike the old "BLE ready as %s" line it replaces. */
+	od_log_info("BLE init complete, advertising requested");
 }
 
 void opendisplay_ble_process(void)
 {
-	uint32_t now = k_uptime_get_32();
-
 	opendisplay_pipe_process();
 	opendisplay_led_process();
 	opendisplay_buzzer_process();
@@ -999,12 +1065,15 @@ void opendisplay_ble_process(void)
 	opendisplay_touch_process();
 	opendisplay_nfc_process();
 	opendisplay_ble_advertising_tick();
+	/* No display-refresh gating exists on this target today (unlike ESP32's
+	 * !epdRefreshInProgress) -- start_allowed unconditionally true, preserving current
+	 * behavior. */
+	(void)ble_service_advertising(true);
+}
 
-	/* Fallback if the delayed work restart fails or was cancelled. */
-	if (s_conn == NULL && !s_adv_active && (now - s_last_adv_retry_ms) >= 500u) {
-		s_last_adv_retry_ms = now;
-		schedule_adv_restart(0);
-	}
+bool opendisplay_ble_advertising_active(void)
+{
+	return s_adv.active;
 }
 
 void opendisplay_ble_schedule_dfu(void)

@@ -92,7 +92,7 @@ get_filename_component(OD_SHARED_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
 #
 # WHY THE SPLIT EXISTS. A target part-way through migration can consume the sources whose HAL it
 # has and add the rest as each HAL lands, instead of waiting to take all of shared/ at once. That
-# is a real state — targets/nordic-zephyr implements HAL_WDT but not HAL_ADV, and
+# is a real state — targets/nordic-zephyr implements HAL_WDT and HAL_ADV but not every tier, and
 # targets/efr32bg22-slc implements neither — and the alternative was
 # a target that consumes nothing from shared/ for as long as one unimplemented HAL exists.
 #

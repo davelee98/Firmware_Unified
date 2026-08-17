@@ -15,10 +15,10 @@ void opendisplay_ble_process(void);
 void opendisplay_ble_boost_advertising(void);
 void opendisplay_ble_advertising_tick(void);
 bool opendisplay_ble_is_connected(void);
+bool opendisplay_ble_advertising_active(void);
 
 const struct od_config *opendisplay_get_global_config(void);
 void opendisplay_ble_reload_config_from_nvm(void);
-void opendisplay_ble_restart_advertising(void);
 
 uint16_t opendisplay_ble_get_app_version(void);
 uint8_t opendisplay_ble_get_app_version_patch(void);

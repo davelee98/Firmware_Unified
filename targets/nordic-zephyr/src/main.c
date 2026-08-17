@@ -73,10 +73,17 @@ int main(void)
 			continue;
 		}
 
-		/* Matches nRF52840 Firmware: MSD refreshes once per sleep_timeout_ms
-		 * idle cycle; without a configured timeout there is no periodic MSD
-		 * update (buttons and adv restarts still refresh it). */
-		if (cfg != NULL && cfg->loaded && cfg->power_option.sleep_timeout_ms > 0u) {
+		if (!opendisplay_ble_advertising_active()) {
+			/* Advertising not yet confirmed running -- e.g. a RETRY right after a
+			 * disconnect (shared/core/od_adv_control.c). Poll promptly instead of the
+			 * full idle chunk below, so a delayed restart attempt doesn't stall
+			 * rediscovery for up to ~1s. Resolves in one or two passes in the ordinary
+			 * case; not a standing battery cost since it only applies transiently. */
+			idle_delay_ms(50u);
+		} else if (cfg != NULL && cfg->loaded && cfg->power_option.sleep_timeout_ms > 0u) {
+			/* Matches nRF52840 Firmware: MSD refreshes once per sleep_timeout_ms
+			 * idle cycle; without a configured timeout there is no periodic MSD
+			 * update (buttons and adv restarts still refresh it). */
 			idle_delay_ms(cfg->power_option.sleep_timeout_ms);
 			opendisplay_ble_update_msd(true);
 		} else {
