@@ -177,6 +177,13 @@ Option 2 of the three previously listed here. The two numbers must agree, so the
 moves to meet the size bound rather than the size bound being quietly reinterpreted as storage-
 only.
 
+> **DO NOT LAND THIS WITHOUT § 3.8's BOUND.** `od_config_asm_start()` bounds a declared total
+> against `MAX_CONFIG_CHUNKS * CONFIG_CHUNK_SIZE` and never against the buffer. At 20 chunks that
+> ceiling is 4000, below the 4096 buffer, so it is the tighter bound and the module is safe. Raising
+> the count to 21 makes it **4200 — larger than the buffer** — so a declared total of 4097..4200
+> would be accepted and overflow, at the DEFAULT cap, on every target. The fix below and the clause
+> in § 3.8 must land together, in that order or the same commit.
+
 **The required change:** `MAX_CONFIG_CHUNKS` `20` → **`21`**. That is exact, not padded —
 the header specifies `expectedChunks = ceil(total / 200)` (`opendisplay_protocol.h:320`), and
 `ceil(4096 / 200) = 21`. The count includes the START frame's 200-byte payload, which is why 20
@@ -213,6 +220,51 @@ ceiling, and the whole 4096 figure is headroom rather than a live constraint.
 
 **Still to do:** add the `MAX_CONFIG_CHUNKS = 21` change to the queue of canonical-header edits
 that land when the freeze lifts (DIVERGENCE_MATRIX §8), sequenced with the other pending ones.
+
+### 3.8 `od_config_asm` never bounds the declared total against its own buffer — *latent; becomes high severity the moment any target lowers the cap*
+
+**Not exploitable today, and safe only by coincidence.** `od_config_asm_start()` rejects a declared
+total above `OD_CONFIG_ASM_MAX_TRANSFERABLE` — `MAX_CONFIG_CHUNKS * CONFIG_CHUNK_SIZE` = 20 x 200 =
+**4000** — and against nothing else (`shared/core/od_config_asm.c:63`). The buffer it fills is
+`uint8_t buffer[OD_CONFIG_MAX_SIZE]`, currently **4096** (`od_config_asm.h:67,85`). The two numbers
+are never compared. Because 4096 > 4000, the transferable ceiling happens to be the tighter bound
+and the chunk copy at `:110` cannot overrun.
+
+**The module therefore depends on an invariant nothing states or asserts:**
+
+```
+OD_CONFIG_MAX_SIZE >= OD_CONFIG_ASM_MAX_TRANSFERABLE
+```
+
+Lower `OD_CONFIG_MAX_SIZE` below 4000 and a declared total between the new cap and 4000 is accepted
+at the start frame, then written past the end of the buffer at `:110` — driven by a two-byte
+little-endian length field in the first `CONFIG_WRITE` frame, i.e. remote and pre-authentication on
+any target whose gate admits `0x0040`.
+
+**This is not hypothetical.** `plans/PLAN_SILABS_C13_2026-08-16.md` § 2.5 proposes exactly that for
+the EFR32BG22 (cap 2048, 32 KB of RAM), and justified it by stating that `od_config_asm` already
+refuses oversize declarations — the plan has been corrected, and C13.0a now lands the bound before
+the cap moves. Filed here as well because the hole is in **shared** code and outlives that plan: the
+next person to touch `OD_CONFIG_MAX_SIZE` for any reason meets it.
+
+**The fix, and it is cheap:**
+
+```c
+/* od_config_asm.c -- the buffer bound the transferable ceiling only implied. */
+if (total <= CONFIG_CHUNK_SIZE || total > OD_CONFIG_ASM_MAX_TRANSFERABLE ||
+    total > OD_CONFIG_MAX_SIZE) {
+    return OD_CONFIG_ASM_REJECTED;
+}
+```
+
+At 4096 the added clause is unreachable, so ESP32 and Nordic images should come out
+**byte-identical** — which is how the change is shown to be inert until a cap actually moves. A host
+test at cap+1 must be shown failing on the pre-fix tree; note § 3.1 above separately raises
+`MAX_CONFIG_CHUNKS` to 21, which lifts the transferable ceiling to 4200 and **inverts the
+relationship**, making the missing bound live at the default 4096 cap. Whichever lands first, the
+other must not be merged without this clause.
+
+Found 2026-08-17 reviewing the C13 plan.
 
 ### 3.2 Corpus schema gaps — **ALL DECIDED, C12.0, 2026-08-16**
 
