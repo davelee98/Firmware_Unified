@@ -12,7 +12,6 @@ set(OD_PARTITION_CSV partitions/default_16MB.csv)
 set(OD_SDKCONFIG_FRAGMENTS sdkconfig.defaults.esp32c3 boards/c3-n16.sdkconfig)
 
 set(OD_BOARD_DEFINES
-    TARGET_ESP32
     # -DOPENDISPLAY_ENABLE_WIFI deliberately absent: no PSRAM here. BLE-only (no LAN push,
     # mDNS or TLS-PSK), and the inflate engine falls back to uzlib.
     #

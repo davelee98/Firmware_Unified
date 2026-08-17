@@ -1,4 +1,4 @@
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
 
 #include "display_fastepd.h"
 #include "display_service.h"

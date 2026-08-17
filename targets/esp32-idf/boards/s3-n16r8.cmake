@@ -8,7 +8,6 @@ set(OD_SDKCONFIG_FRAGMENTS sdkconfig.defaults.esp32s3 boards/s3-n16r8.sdkconfig)
 # (CONFIG_ESP_CONSOLE_USB_CDC), so it lives in the fragment, not here. Carrying the Arduino
 # spelling across would be exactly the "build_flags idiom" CLAUDE.md forbids.
 set(OD_BOARD_DEFINES
-    TARGET_ESP32
     OPENDISPLAY_ENABLE_WIFI
     OPENDISPLAY_ZLIB_USE_HEAP_WINDOW=1
     BOARD_HAS_PSRAM

@@ -14,7 +14,7 @@
 #include "logo_bitmap.h"
 #define BOOT_HAS_LOGO
 #endif
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
 #include "display_fastepd.h"
 #endif
 
@@ -558,7 +558,7 @@ static bool bootGray4PanelUsesLutV2(uint16_t panelIc) {
 
 static void bootGray4FillSwatchCodes(uint16_t panelIc, uint8_t out[4]) {
     const uint8_t* stored = bootGray4PanelUsesLutV2(panelIc) ? kGray4StoredV2 : kGray4StoredBase;
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     const bool direct2bpp = fastepd_driver_used();
 #else
     const bool direct2bpp = false;
@@ -930,7 +930,7 @@ bool writeBootScreenWithQr() {
     // 1-bit controller planes, so render the frame once per plane and
     // de-interleave. Every other scheme writes a single packed plane in one pass.
     const bool gray4Split = (colorScheme == OD_COLOR_SCHEME_GRAY4)
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
         && !fastepd_driver_used()
 #endif
         ;
@@ -945,7 +945,7 @@ bool writeBootScreenWithQr() {
         const int targetPlane = gray4Split ? (pass == 0 ? PLANE_0 : PLANE_1)
                                            : (colorSwatchPlane1 ? (pass == 0 ? PLANE_0 : PLANE_1)
                                                                  : (useBitplanes ? PLANE_0 : getplane()));
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
         if (!fastepd_driver_used()) {
             bbepSetAddrWindow(&bbep, 0, 0, w, h);
             bbepStartWrite(&bbep, targetPlane);
@@ -1018,7 +1018,7 @@ bool writeBootScreenWithQr() {
                     if (si >= 0) setBootPixelCode(row, x_native, pitch, bitsPerPixel, swatchCode[si]);
                 }
             }
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
             if (fastepd_driver_used()) {
                 fastepd_boot_write_row(y_native, row, pitch);
             } else if (gray4Split) {
@@ -1036,7 +1036,7 @@ bool writeBootScreenWithQr() {
         }
     }
 
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) {
         fastepd_boot_skip_planes();
     } else

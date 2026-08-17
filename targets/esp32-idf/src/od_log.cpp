@@ -3,14 +3,12 @@
 #include <stdio.h>
 #include <string.h>
 
-#ifdef TARGET_ESP32
 #include "od_hal_log.h"
 #include "od_hal_time.h"
 
 // The clock comes from od_hal_time. This was a private esp_timer_get_time()/1000 helper when it
 // was written (phase C step 1, before the time HAL existed) -- same arithmetic, one place now.
 static inline uint32_t od_log_millis(void) { return od_hal_uptime_ms(); }
-#endif
 
 
 // Implemented in main.cpp: RTC-persisted wake cycle count on ESP32, always 0 on nRF52840.
@@ -145,9 +143,7 @@ static void od_count_drop(bool feedBackoff) {
 
 // Free space in the port's TX buffer, without blocking on either target.
 static int od_port_room(void) {
-#ifdef TARGET_ESP32
     return od_hal_log_room();
-#endif
 }
 
 // The only place the two targets differ. All-or-nothing by contract: the caller has
@@ -160,20 +156,16 @@ static int od_port_room(void) {
 // so its FIFO always drains at the baud rate) and whose short-write behaviour is
 // deliberately left exactly as it is today -- see od_emit().
 static bool od_port_write(const uint8_t *b, size_t n) {
-#ifdef TARGET_ESP32
     return od_hal_log_write(b, n) == n;
-#endif
 }
 
 // True once the port can take `need` bytes, false if the budget ran out first.
 static bool od_port_wait_ready(int need, TickType_t start, TickType_t budget) {
-#ifdef TARGET_ESP32
     // Short-circuit by design. Neither ESP32 log port can block on host
     // backpressure, so there is nothing to wait for and nothing to protect
     // against: always write.
     (void)need; (void)start; (void)budget;
     return true;
-#endif
 }
 
 // The single write choke point. Emits one log record as a run of writes covered by a
@@ -255,13 +247,11 @@ static void od_emit(const char *text, int tagAt, bool newline) {
         ok = od_port_write((const uint8_t *)"\r\n", 2) && ok;
     }
 
-#ifdef TARGET_ESP32
     (void)ok;                 // see the comment above; ESP32 never counts a drop
     s_loopConsecutiveDrops = 0;
     if (reported > 0) {
         __atomic_fetch_sub(&s_dropped, reported, __ATOMIC_RELAXED);
     }
-#endif
 
     if (s_txLock != NULL) {
         xSemaphoreGive(s_txLock);
@@ -342,9 +332,7 @@ void od_log_flush(void) {
     // nothing that the next flush will not fix.
     const bool locked = (s_txLock != NULL) &&
                         (xSemaphoreTake(s_txLock, pdMS_TO_TICKS(OD_LOG_BUDGET_MS)) == pdTRUE);
-#ifdef TARGET_ESP32
     od_hal_log_flush();
-#endif
     if (locked) {
         xSemaphoreGive(s_txLock);
     }

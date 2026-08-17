@@ -10,17 +10,15 @@
 #include <stdio.h>
 #include <string.h>
 
-#ifdef TARGET_ESP32
 /* ESP32: config lives in NVS, not LittleFS (decided 2026-07-25). The three-function seam
  * is od_hal_nvs, shaped per docs/SHARED_API_DESIGN.md so the eventual promotion of this
  * subsystem into shared/core is a repoint rather than a rewrite. */
 #include "od_hal_nvs.h"
 /* The one network thing this file needs: the STA address, for a status log line. Included
- * under TARGET_ESP32 rather than OPENDISPLAY_HAS_WIFI because the log line itself is not
+ * unconditionally rather than under OPENDISPLAY_HAS_WIFI, because the log line itself is not
  * gated on WiFi being compiled in -- on a board without it, the lookup simply returns NULL
  * and the line prints "?". esp_netif is part of IDF regardless. */
 #include "esp_netif.h"
-#endif
 
 #ifndef COMM_MODE_BLE
 #define COMM_MODE_BLE (1 << 0)
@@ -45,13 +43,11 @@ extern char wifiSsid[33];
 extern char wifiPassword[33];
 extern uint8_t wifiEncryptionType;
 extern bool wifiConfigured;
-#ifdef TARGET_ESP32
 extern char wifiServerUrl[65];
 extern uint16_t wifiServerPort;
 // extern bool wifiServerConfigured;  // dead -- see the 0x26 wifi_config parse
 extern bool wifiConnected;
 extern bool wifiInitialized;
-#endif
 
 void xiaoinit();
 void powerDownExternalFlashFromConfig(void);
@@ -72,20 +68,16 @@ void resetChunkedWriteState(void) {
 }
 
 bool initConfigStorage(){
-    #ifdef TARGET_ESP32
     if (od_hal_nvs_init() != OD_HAL_NVS_OK) {
         od_log_error("ERROR: Failed to initialise NVS config storage");
         return false;
     }
     return true;
-    #endif
     return false; // Should never reach here
 }
 
 void formatConfigStorage(){
-    #ifdef TARGET_ESP32
     (void)od_hal_nvs_erase();
-    #endif
 }
 
 // See getConfigScratch() in config_parser.h for the sharing contract. Replaces a
@@ -114,7 +106,6 @@ bool saveConfig(uint8_t* configData, uint32_t len){
     header.version = CONFIG_STORAGE_VERSION;
     header.crc = calculateConfigCRC(configData, len);
     header.data_len = len;
-    #ifdef TARGET_ESP32
     /* NVS stores one opaque blob, so header and payload are staged contiguously. The
      * LittleFS path wrote them as two sequential file writes; the bytes on the medium are
      * the same record either way, which keeps loadConfig's validation unchanged.
@@ -134,17 +125,14 @@ bool saveConfig(uint8_t* configData, uint32_t len){
         od_log_error("ERROR: Failed to write config to NVS");
         return false;
     }
-    #endif
     return true;
 }
 
 bool clearStoredConfig(void) {
-    #if defined(TARGET_ESP32)
     if (od_hal_nvs_erase() != OD_HAL_NVS_OK) {
         od_log_error("ERROR: Failed to remove stored config");
         return false;
     }
-    #endif
     /* One memset, not two: securityConfig is a member of globalConfig now, so zeroing the
      * config zeroes the key as well. */
     od_config_reset(&globalConfig);
@@ -160,7 +148,6 @@ bool loadConfig(uint8_t* configData, uint32_t* len){
         return false;
     }
     config_header_t header;
-#ifdef TARGET_ESP32
     /* One blob out of NVS, then the same validation the LittleFS path applied. Reading the
      * record whole rather than header-then-payload is the one behavioural difference, and it
      * is the safer order: the length check below happens before anything is copied into the
@@ -194,7 +181,6 @@ bool loadConfig(uint8_t* configData, uint32_t* len){
         return false;
     }
     memcpy(configData, blob + sizeof(config_header_t), header.data_len);
-#endif
     uint32_t calculatedCRC = calculateConfigCRC(configData, header.data_len);
     if (header.crc != calculatedCRC) {
         od_log_error("ERROR: Config CRC mismatch");
@@ -205,13 +191,11 @@ bool loadConfig(uint8_t* configData, uint32_t* len){
 }
 
 bool hasValidStoredConfig(void) {
-#if defined(TARGET_ESP32)
     /* No presence probe on ESP32. The obvious one -- load into a sizeof(config_header_t)
      * buffer and check for ENOENT -- cannot work: any real record is header + payload, so
      * the HAL returns E2BIG and logs "stored config is N B, buffer is 12 B" at ERROR level
      * on EVERY boot of a perfectly healthy device. The probe never told us anything either,
      * since loadConfig() below already returns false on ENOENT. */
-#endif
     uint32_t len = MAX_CONFIG_SIZE;
     return loadConfig(getConfigScratch(), &len);
 }
@@ -255,7 +239,6 @@ static void applyWifiConfig(const struct WifiConfig &wc) {
 
     wifiEncryptionType = wc.encryption_type;
 
-#ifdef TARGET_ESP32
     memcpy(wifiServerUrl, wc.server_host, 64);
     wifiServerUrl[64] = '\0';
 
@@ -317,7 +300,6 @@ static void applyWifiConfig(const struct WifiConfig &wc) {
                  (unsigned)lanActivePort(), (unsigned)wifiServerPort);
 #else
     od_log_debug("LAN: transport not compiled in (server_port %u)", (unsigned)wifiServerPort);
-#endif
 #endif
     wifiConfigured = true;
     od_log_info("=== WiFi Configuration Loaded ===");
@@ -453,7 +435,6 @@ void printConfigSummary(){
     od_log_debug("  BLE: %s", (globalConfig.system_config.communication_modes & COMM_MODE_BLE) ? "enabled" : "disabled");
     od_log_debug("  OEPL: %s", (globalConfig.system_config.communication_modes & COMM_MODE_OEPL) ? "enabled" : "disabled");
     od_log_debug("  WiFi: %s", (globalConfig.system_config.communication_modes & COMM_MODE_WIFI) ? "enabled" : "disabled");
-    #ifdef TARGET_ESP32
     if (globalConfig.system_config.communication_modes & COMM_MODE_WIFI) {
         if (wifiConfigured) {
             od_log_debug("  WiFi SSID: (configured)");  // credential; not logged verbatim
@@ -480,7 +461,6 @@ void printConfigSummary(){
             od_log_debug("  WiFi Status: Configured but not loaded");
         }
     }
-    #endif
     od_log_debug("Device Flags: 0x%02X", globalConfig.system_config.device_flags);
     od_log_debug("  PWR_PIN flag: %s", (globalConfig.system_config.device_flags & DEVICE_FLAG_PWR_PIN) ? "enabled" : "disabled");
     od_log_debug("  WS_PP_INIT flag: %s", (globalConfig.system_config.device_flags & DEVICE_FLAG_WS_PP_INIT) ? "enabled" : "disabled");

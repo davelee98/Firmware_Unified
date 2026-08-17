@@ -9,9 +9,15 @@ survives rather than a live one being removed.
     drop_dead_arms.py --undef TARGET_NRF --define TARGET_ESP32 FILE...
 
 `--undef X` deletes branches guarded by X. `--define X` marks X as always present, which makes the
-#else after `#ifdef X` unreachable and removes it -- while KEEPING the guard, because it still says
-"this is target-specific" to whoever ports the next target. Collapsing the guard too would be a
-different and much larger change.
+#else after `#ifdef X` unreachable and removes it, while KEEPING the guard. `--collapse X` is
+`--define X` plus removing the guard as well, splicing its body into the surrounding text: for a
+symbol every build of the target defines, `#ifdef X` is an always-true conditional, and one of
+those is worse than none -- it tells a reader there is another configuration when there is not.
+
+Which of the two you want depends on whether the symbol still distinguishes anything. A compound
+condition is NEITHER: `#if defined(X) && defined(Y)` is left alone even under --collapse, because
+the answer still depends on Y. Simplifying it to `#if defined(Y)` is an expression rewrite rather
+than a deletion, and this tool does not do those.
 
 USED ONCE, and kept because the next target migration will want it. It is not part of any build.
 
@@ -49,7 +55,7 @@ class Unknown:
 UNKNOWN = Unknown()
 
 
-def evaluate(expr: str, undefined: set[str]) -> bool | Unknown:
+def evaluate(expr: str, undefined: set[str], defined: set[str] = frozenset()) -> bool | Unknown:
     """True/False when the expression is built ONLY from defined() over symbols we know about.
 
     THE GRAMMAR IS THE SAFETY PROPERTY, and it is narrow on purpose. An earlier version tokenized
@@ -78,7 +84,7 @@ def evaluate(expr: str, undefined: set[str]) -> bool | Unknown:
     if not re.fullmatch(r"[\s!&|()]*(?:_\d+[\s!&|()]*)*", body) or "defined" in body:
         return UNKNOWN
 
-    unresolved = sorted({n for n in names if n not in undefined})
+    unresolved = sorted({n for n in names if n not in undefined and n not in defined})
     if len(unresolved) > 8:
         return UNKNOWN                              # too wide to enumerate; do not guess
 
@@ -89,8 +95,14 @@ def evaluate(expr: str, undefined: set[str]) -> bool | Unknown:
     py = body.replace("&&", " and ").replace("||", " or ").replace("!", " not ")
     results = set()
     for bits in range(1 << len(unresolved)):
-        env = {f"_{i}": (0 if n in undefined else (bits >> unresolved.index(n)) & 1)
-               for i, n in enumerate(names)}
+        env = {}
+        for i, n in enumerate(names):
+            if n in undefined:
+                env[f"_{i}"] = 0
+            elif n in defined:
+                env[f"_{i}"] = 1
+            else:
+                env[f"_{i}"] = (bits >> unresolved.index(n)) & 1
         try:
             results.add(bool(eval(py, {"__builtins__": {}}, env)))   # noqa: S307
         except Exception:
@@ -111,10 +123,11 @@ def condition_of(kind: str, rest: str, undefined: set[str], defined: set[str]) -
         if name in undefined:
             return True
         return False if name in defined else UNKNOWN
-    return evaluate(rest, undefined)
+    return evaluate(rest, undefined, defined)
 
 
-def process(lines: list[str], undefined: set[str], defined: set[str] = frozenset()) -> list[str]:
+def process(lines: list[str], undefined: set[str], defined: set[str] = frozenset(),
+            collapse: set[str] = frozenset()) -> list[str]:
     out: list[str] = []
     i = 0
     while i < len(lines):
@@ -124,7 +137,7 @@ def process(lines: list[str], undefined: set[str], defined: set[str] = frozenset
             i += 1
             continue
         chain, endif, end = collect(lines, i)
-        out.extend(rewrite(chain, endif, undefined, defined))
+        out.extend(rewrite(chain, endif, undefined, defined, collapse))
         i = end
     return out
 
@@ -167,9 +180,26 @@ def collect(lines: list[str], start: int) -> tuple[list[Branch], str, int]:
     return chain, "#endif\n", i
 
 
+def collapses(branch: Branch, collapse: set[str]) -> bool:
+    """Is this branch guarded by nothing but a bare test of a collapse symbol?
+
+    `#ifdef X` and `#if defined(X)` qualify. `#if defined(X) && defined(Y)` does NOT, however
+    certainly X is defined: the surviving condition is `defined(Y)`, and producing it would be an
+    expression rewrite. The guard stays and reads slightly redundantly, which is the cheaper error.
+    """
+    kind, rest, _, _ = branch
+    if kind == "ifdef":
+        name = rest.strip().split()[0] if rest.strip() else ""
+        return name in collapse
+    if kind in ("if", "elif"):
+        m = re.fullmatch(r"\s*defined\s*\(\s*(\w+)\s*\)\s*|\s*defined\s+(\w+)\s*", rest)
+        return bool(m) and (m.group(1) or m.group(2)) in collapse
+    return False
+
+
 def rewrite(chain: list[Branch], endif: str, undefined: set[str],
-            defined: set[str] = frozenset()) -> list[str]:
-    conds = [condition_of(k, r, undefined, defined) if k != "else" else True
+            defined: set[str] = frozenset(), collapse: set[str] = frozenset()) -> list[str]:
+    conds = [condition_of(k, r, undefined, defined | collapse) if k != "else" else True
              for k, r, _, _ in chain]
 
     # A branch whose condition is definitely TRUE makes every later branch unreachable. Dropping
@@ -189,9 +219,12 @@ def rewrite(chain: list[Branch], endif: str, undefined: set[str],
     if not kept:
         return []                                    # every branch was false: the chain vanishes
 
-    # A chain whose only survivor is its #else has no condition left to test.
-    if len(kept) == 1 and kept[0][0] == "else":
-        return process(kept[0][2], undefined, defined)
+    # A chain whose only survivor is its #else has no condition left to test. Under --collapse the
+    # same is true of a lone survivor whose condition is a bare test of a collapse symbol: the
+    # directives carry no information, so the body is spliced in and they go.
+    if len(kept) == 1 and (kept[0][0] == "else"
+                           or (conds[0] is True and collapses(kept[0], collapse))):
+        return process(kept[0][2], undefined, defined, collapse)
 
     out: list[str] = []
     for n, (kind, rest, body, line) in enumerate(kept):
@@ -202,9 +235,46 @@ def rewrite(chain: list[Branch], endif: str, undefined: set[str],
             out.append(f"{indent}#if{rest}".rstrip() + "\n")
         else:
             out.append(line)
-        out.extend(process(body, undefined, defined))
+        out.extend(process(body, undefined, defined, collapse))
     out.append(endif)
     return out
+
+
+COLLAPSE_SELFTEST = [
+    # (why, source, expected) -- run with --collapse TARGET_ESP32
+    (
+        "A bare always-true guard carries no information: body spliced, directives gone.",
+        "before\n#ifdef TARGET_ESP32\nbody\n#endif\nafter\n",
+        "before\nbody\nafter\n",
+    ),
+    (
+        "The defined() spelling collapses the same way.",
+        "#if defined(TARGET_ESP32)\nbody\n#endif\n",
+        "body\n",
+    ),
+    (
+        "A COMPOUND condition is left alone. The answer still depends on Y, and rewriting the "
+        "expression to `#if defined(Y)` is not a deletion. This is the case that must not move.",
+        "#if defined(TARGET_ESP32) && defined(Y)\na\n#else\nb\n#endif\n",
+        "#if defined(TARGET_ESP32) && defined(Y)\na\n#else\nb\n#endif\n",
+    ),
+    (
+        "A guard with a dead #else collapses to its body -- the #else is unreachable either way.",
+        "#ifdef TARGET_ESP32\nesp\n#else\nother\n#endif\n",
+        "esp\n",
+    ),
+    (
+        "Nested guards collapse at every level, and an inner chain that stays UNKNOWN survives "
+        "with its indentation and trailing comments untouched.",
+        "#ifdef TARGET_ESP32\n#  if defined(Y)\na\n#  endif  // Y\n#endif  // TARGET_ESP32\n",
+        "#  if defined(Y)\na\n#  endif  // Y\n",
+    ),
+    (
+        "#ifndef of a collapse symbol is false, so its body goes and nothing is spliced.",
+        "#ifndef TARGET_ESP32\ndead\n#endif\nkept\n",
+        "kept\n",
+    ),
+]
 
 
 SELFTEST = [
@@ -273,13 +343,15 @@ def selftest() -> int:
     it on a new target, and keep comparing sizes anyway.
     """
     failures = 0
-    for why, src, want in SELFTEST:
+    cases = ([(w, s, e, {"TARGET_ESP32"}, set()) for w, s, e in SELFTEST]
+             + [(w, s, e, set(), {"TARGET_ESP32"}) for w, s, e in COLLAPSE_SELFTEST])
+    for why, src, want, defd, coll in cases:
         got = "".join(process(src.splitlines(keepends=True),
-                              {"TARGET_NRF", "ARDUINO_ARCH_NRF52"}, {"TARGET_ESP32"}))
+                              {"TARGET_NRF", "ARDUINO_ARCH_NRF52"}, defd, coll))
         if got != want:
             failures += 1
             print(f"FAIL: {why}\n  want: {want!r}\n  got:  {got!r}")
-    print(f"drop_dead_arms selftest: {len(SELFTEST)} cases, {failures} failures")
+    print(f"drop_dead_arms selftest: {len(cases)} cases, {failures} failures")
     return 1 if failures else 0
 
 
@@ -289,6 +361,7 @@ def main(argv: list[str]) -> int:
 
     undefined: set[str] = set()
     defined: set[str] = set()
+    collapse: set[str] = set()
     files: list[str] = []
     i = 1
     while i < len(argv):
@@ -298,16 +371,19 @@ def main(argv: list[str]) -> int:
         elif argv[i] == "--define":
             defined.add(argv[i + 1])
             i += 2
+        elif argv[i] == "--collapse":
+            collapse.add(argv[i + 1])
+            i += 2
         else:
             files.append(argv[i])
             i += 1
-    if not (undefined or defined) or not files:
+    if not (undefined or defined or collapse) or not files:
         print(__doc__, file=sys.stderr)
         return 64
     for path in files:
         with open(path) as fh:
             lines = fh.readlines()
-        new = process(lines, undefined, defined)
+        new = process(lines, undefined, defined, collapse)
         if new != lines:
             with open(path, "w") as fh:
                 fh.writelines(new)

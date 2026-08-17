@@ -16,7 +16,6 @@
 #include "od_config_read.h"
 #include "od_txq.h"
 
-#ifdef TARGET_ESP32
 /* The log port itself lives in hal/od_hal_log.c now -- including the UART-number choice and
  * the reason for it, which moved there with the code it describes. This file used to hold a
  * `static HardwareSerial LogSerialPort` and hand it to od_log_init() as a `Stream *`; the
@@ -25,12 +24,10 @@
 /* od_ble_service_advertising(): the loop-side advertising pump (F4). ESP32-only -- the nRF
  * target's stack re-arms advertising itself and has no equivalent seam yet. */
 #include "od_ble.h"
-#endif
 #include "od_hal_i2c.h"
 #include "od_hal_gpio.h"
 #include "od_hal_time.h"
 
-#ifdef TARGET_ESP32
 // Distinguishes a hidden mid-cycle reset (PANIC/WDT/BROWNOUT/SW) from a real
 // power-on or deep-sleep wake; any reset here clears the wake cause, so the
 // next boot takes the NORMAL BOOT branch and redraws the boot screen.
@@ -53,7 +50,6 @@ static const char* resetReasonName(esp_reset_reason_t reason) {
 // Defined with the sleep helpers below loop()'s activity poller; setup() logs
 // the window length when arming the button-wake hold.
 static uint32_t minWakeTimeMs();
-#endif
 
 /* One heap report, two lines, DRAM and PSRAM measured identically.
  *
@@ -77,7 +73,6 @@ static uint32_t minWakeTimeMs();
  * which documents why they are MALLOC_CAP_INTERNAL and not MALLOC_CAP_DEFAULT). Two of the four
  * fields on each line already called heap_caps_* directly, so this also stops one log line
  * sourcing the same pool through two different spellings. */
-#ifdef TARGET_ESP32
 static void logHeapUsage(const char *when)
 {
     od_log_info("Heap %s DRAM : free=%u min=%u largest=%u of %u", when,
@@ -96,25 +91,22 @@ static void logHeapUsage(const char *when)
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
                 (unsigned)psram_total);
 }
-#endif  /* TARGET_ESP32 */
 
 void setup() {
-    #if defined(TARGET_ESP32) && defined(OPENDISPLAY_LOG_UART)
+    #if defined(OPENDISPLAY_LOG_UART)
     od_hal_log_open();
     od_hal_delay_ms(100);
     #elif !defined(DISABLE_USB_SERIAL)
     delay(100);
     #endif
-    #if defined(TARGET_ESP32) && defined(OPENDISPLAY_LOG_UART)
+    #if defined(OPENDISPLAY_LOG_UART)
     od_log_init();
     #elif !defined(DISABLE_USB_SERIAL)
-    #ifdef TARGET_ESP32
     /* The USB-CDC port needs no begin() -- the IDF console driver is already up, which is why
      * the Serial.begin(115200) above was a no-op too -- but od_hal_log still has to be told it
      * may write, so that a DISABLE_USB_SERIAL build (which reaches neither branch) stays a
      * genuine no-op rather than writing to a port nobody asked for. */
     od_hal_log_open();
-    #endif
     od_log_init();
     #endif
     // Immediately after od_log_init(), so the boot lines below are not emitted at a
@@ -149,7 +141,6 @@ void setup() {
     // Set only by the ESP32 wake-cause check below; NRF has no deep-sleep wake path.
     bool is_deep_sleep_wake = false;
     bool woke_by_button = false;
-    #ifdef TARGET_ESP32
     esp_reset_reason_t reset_reason = esp_reset_reason();
     const char* resetReasonStr = resetReasonName(reset_reason);
     od_log_info("Reset reason: %s (%d)", resetReasonStr, (int)reset_reason);
@@ -171,7 +162,6 @@ void setup() {
         // in docs/FINDINGS_DEEP_SLEEP_WAKE_BOOT_SCREEN_2026-07-07.md).
         od_log_info("Deep sleep count (RTC): %u", (unsigned)deep_sleep_count);
     }
-    #endif
     /* Before anything can touch the panel, and before the watchdog is armed: this decides
      * whether the previous run ended in a watchdog reset, and whether three of them in a row
      * mean this boot must skip the panel entirely. */
@@ -208,7 +198,6 @@ void setup() {
         initDisplay();
         od_log_info("Display initialized");
     }
-#ifdef TARGET_ESP32
     // Full BLE after display: ESP32 queues commands for loop() until setup returns.
     if (is_deep_sleep_wake) { od_log_info("[wake] >> ble_begin"); od_log_flush(); }
     {
@@ -225,7 +214,6 @@ void setup() {
         }
     }
     if (is_deep_sleep_wake) { od_log_info("[wake] << ble_begin"); od_log_flush(); }
-#endif
     #ifdef OPENDISPLAY_HAS_WIFI
     if (!is_deep_sleep_wake) {
         initWiFi(false);  // wake: WiFi stays deferred to fullSetupAfterConnection()
@@ -236,7 +224,6 @@ void setup() {
     initButtons();
     if (is_deep_sleep_wake) { od_log_info("[wake] >> initTouchInput"); od_log_flush(); }
     initTouchInput();
-    #ifdef TARGET_ESP32
     if (is_deep_sleep_wake) {
         // Arm the awake window LAST so buttons/GT911 bring-up doesn't shrink the
         // host's connection window. Without this, loop() falls into the idle
@@ -261,17 +248,12 @@ void setup() {
     }
     // Both sleep paths measure quiet time from here, not from power-on.
     lastActivityMs = od_hal_uptime_ms();
-    #endif
     od_log_info("=== Setup completed successfully ===");
-#ifdef TARGET_ESP32
     logHeapUsage("(setup done)");
-#endif
 }
 
 uint32_t getDeepSleepCount() {
-#ifdef TARGET_ESP32
     return deep_sleep_count;
-#endif
 }
 
 // Deferred work, serviced by loop(). File-static on purpose: these encode
@@ -313,7 +295,6 @@ void requestAdvertisingRestart(void) {
     s_advertisingRestartPending = true;
 }
 
-#ifdef TARGET_ESP32
 // Minimum awake window (first boot / button wake). A floor layered UNDER the
 // quiet-window logic, not a replacement: sleep requires both the existing
 // idle/advertising quiet condition AND this hold expired, so interaction keeps
@@ -387,7 +368,6 @@ static void pollActivity() {
     prevLanSession = lanSession;
     memcpy(prevDynamic, dynamicreturndata, sizeof(prevDynamic));
 }
-#endif  // TARGET_ESP32 -- deep-sleep activity tracking is ESP32-only
 
 // The BLE session helpers below are portable as of Phase 3: both targets now
 // dispatch commands and service connect/disconnect from loop().
@@ -792,7 +772,6 @@ static void serviceBleRx() {
 // window is a real capability difference, so the plan says hook it rather than
 // merge it. Returns true when the pass is finished and loop() must return.
 static bool platformLoopPrologue() {
-#ifdef TARGET_ESP32
     pollActivity();
     // THIS IS THE MAIN (FIRST) LOOP FOR A DEEP SLEEP ENABLED ESP32
     if (woke_from_deep_sleep && advertising_timeout_active) {
@@ -842,7 +821,6 @@ static bool platformLoopPrologue() {
         idleDelay(50); // idleDelay() polls touch and buttons while waiting
         return true;
     }
-#endif
     return false;
 }
 
@@ -850,7 +828,6 @@ static bool platformLoopPrologue() {
 // ESP32 owns the deep-sleep decision; nRF just idles at its configured cadence.
 // Never reached while work is outstanding -- loop() handles that case itself.
 static void platformIdle() {
-#ifdef TARGET_ESP32
     if (globalConfig.power_option.deep_sleep_time_seconds > 0 && globalConfig.power_option.power_mode == 1) {
         uint32_t idleHoldMs = globalConfig.power_option.sleep_timeout_ms;
         if (idleHoldMs == 0) {
@@ -878,7 +855,6 @@ static void platformIdle() {
         lastMsdUpdate = od_hal_uptime_ms();
         updatemsdata();
     }
-#endif
 }
 
 // One loop body for both targets. The per-target policy that genuinely differs
@@ -892,13 +868,11 @@ void loop() {
     epdSessionTick();   // od_hal_uptime_ms()-poll: power the panel down screen_timeout_seconds after last release
     buzzerService();
 
-#ifdef TARGET_ESP32
     // Reconcile advertising before any branch can claim the pass: this is the only path to
     // ble_gap_adv_start(), so a policy branch that returns early must not be able to skip it.
     // Policy belongs in the argument -- while a refresh runs a NEW start waits, but a running
     // advertisement is never withdrawn for one.
     (void)od_ble_service_advertising(!epdRefreshInProgress);
-#endif
 
     if (platformLoopPrologue()) return;
 
@@ -1088,13 +1062,12 @@ void idleDelay(uint32_t delayMs) {
 }
 
 
-#ifdef TARGET_ESP32
 void fullSetupAfterConnection() {
     od_log_info("=== Full Setup After Connection ===");
 #ifdef OPENDISPLAY_HAS_WIFI
     initWiFi(false);
 #endif
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     if (globalConfig.display_count > 0 && fastepd_driver_used()) {
         od_log_info("Panel: FastEPD (bb_epaper not used)");
         od_log_info("=== Full setup completed ===");
@@ -1213,7 +1186,6 @@ void enterDeepSleep(bool force, uint16_t overrideSleepSeconds) {
     powerLatchHoldForSleep();
     esp_deep_sleep_start();
 }
-#endif
 
 // Panel rail is cut after this — drive control lines LOW; BUSY stays an input.
 static void configureDisplayPinsLowPower() {
@@ -1280,7 +1252,7 @@ void pwrmgm(bool onoff){
             od_hal_gpio_config_output(48, true);
         }
     }
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     const bool fastepd_driver_spi = fastepd_driver_used();
 #else
     const bool fastepd_driver_spi = false;

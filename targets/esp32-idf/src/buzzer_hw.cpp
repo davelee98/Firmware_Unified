@@ -1,6 +1,5 @@
 #include "buzzer_hw.h"
 
-#if defined(TARGET_ESP32)
 
 // ---------------------------------------------------------------------------
 // ESP32 -- IDF's LEDC driver, directly.
@@ -102,6 +101,3 @@ void buzzer_hw_tone_stop(uint8_t pin) {
 }
 
 // ---------------------------------------------------------------------------
-#else
-#error "buzzer_hw: unsupported platform (needs TARGET_ESP32)"
-#endif

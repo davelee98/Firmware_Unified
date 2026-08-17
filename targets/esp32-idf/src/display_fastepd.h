@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
 
 #ifdef __cplusplus
 extern "C" {

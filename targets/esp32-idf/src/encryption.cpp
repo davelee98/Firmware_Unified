@@ -6,39 +6,30 @@
 #include "encryption_state.h"
 #include "od_log.h"
 
-#ifdef TARGET_ESP32
 #include "esp_mac.h"       // esp_efuse_mac_get_default -- was ESP.getEfuseMac() via the shim
 #include "od_hal_crypto.h"
 #include "od_hal_gpio.h"
 #include "od_hal_time.h"
-#endif
 #include <stdio.h>
 #include <string.h>
 
-#ifdef TARGET_ESP32
 /* ESP32: config storage is NVS, not LittleFS -- see config_parser.cpp and
  * hal/od_hal_nvs.h. This file only needs to invalidate the stored record. */
 #include "od_hal_nvs.h"
 #include <esp_system.h>
-#endif
 
 
 /* Same split for the two other Arduino primitives this file uses, both in checkResetPin(). */
 static inline void od_delay_ms(uint32_t ms) {
-#ifdef TARGET_ESP32
     od_hal_delay_ms(ms);
-#endif
 }
 
 static inline int od_read_pin(uint8_t pin) {
-#ifdef TARGET_ESP32
     return od_hal_gpio_read(pin);
-#endif
 }
 
 void getAuthDeviceIdBytes(uint8_t* device_id) {
     if (device_id == nullptr) return;
-#if defined(TARGET_ESP32)
     uint8_t macb[6] = {0};
     esp_efuse_mac_get_default(macb);
     /* ESP.getEfuseMac() returns the six factory bytes packed little-endian into a uint64_t,
@@ -49,9 +40,6 @@ void getAuthDeviceIdBytes(uint8_t* device_id) {
                    ((uint64_t)macb[2] << 16) | ((uint64_t)macb[3] << 24) |
                    ((uint64_t)macb[4] << 32) | ((uint64_t)macb[5] << 40);
     uint32_t id = (uint32_t)(mac >> 16);
-#else
-    uint32_t id = 0x00000001;
-#endif
     device_id[0] = (uint8_t)(id >> 24);
     device_id[1] = (uint8_t)(id >> 16);
     device_id[2] = (uint8_t)(id >> 8);
@@ -114,7 +102,6 @@ void getChipIdHex(char* out, size_t out_size) {
         out[0] = '\0';
         return;
     }
-#if defined(TARGET_ESP32)
     uint8_t macb[6] = {0};
     esp_efuse_mac_get_default(macb);
     /* Same little-endian packing as getAuthDeviceIdBytes() above -- see the note there. The
@@ -127,15 +114,11 @@ void getChipIdHex(char* out, size_t out_size) {
     od_log_debug("Chip ID: %06X", (unsigned)chipId);
     od_log_debug("Using chip ID: %s", out);
     return;
-#else
-    out[0] = '\0';
-#endif
 }
 
 void secureEraseConfig() {
     od_log_info("=== SECURE ERASE CONFIG ===");
 
-#if defined(TARGET_ESP32)
     /* Was: open the stored config file, zero its bytes, then remove it. The NVS port briefly
      * reduced this to a plain od_hal_nvs_erase(), which drops the overwrite entirely --
      * nvs_erase_key() only marks the entry deleted, so the AES-128 master key in config
@@ -146,7 +129,6 @@ void secureEraseConfig() {
      * overwrite. The overwrite stays inside the HAL rather than here, so this file is not a
      * second writer of the config record's byte format. */
     (void)od_hal_nvs_secure_erase();
-#endif
     od_log_info("Config securely erased");
 }
 
@@ -163,12 +145,10 @@ void checkResetPin() {
     od_log_debug("Checking reset pin %u (polarity: %s, pullup: %d, pulldown: %d)",
                  pin, polarity ? "HIGH" : "LOW", pullup, pulldown);
 
-#ifdef TARGET_ESP32
     /* One call where Arduino needed two: pinMode(INPUT) then a conditional re-pinMode with the
      * pull. Asking for neither pull IS the plain-INPUT case, so the intermediate configuration
      * disappears and the pad ends in the same state. */
     od_hal_gpio_config_input(pin, pullup, pulldown);
-#endif
 
     od_delay_ms(100);
     bool pinState = (od_read_pin(pin) != 0);
