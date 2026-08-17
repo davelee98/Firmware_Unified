@@ -3,7 +3,18 @@
 **Status:** NOT STARTED. Written 2026-08-16, after C12's software half landed. C12's hardware rows
 (H1-H3) remain ACCEPTED-UNRUN and do **not** block this plan.
 
-**REVISED THREE TIMES ON 2026-08-17.** The last pass replaced the ad-hoc `OD_DISPATCH_PIPE_ENABLED`
+**REVISED FOUR TIMES ON 2026-08-17.** The fourth pass corrected seven material errors and six
+accreted coherence errors left by the third. The host capability build now uses separately compiled shared variants rather than two
+translation-unit-local assertions that cannot compare ABIs. Opcode routing and reservation budgets
+now come from one metadata table, and BG22 explicitly declines PIPE, PARTIAL and RXQ with a corpus
+check that those macros match its profile. Event retention now has a target-level maximum lifetime
+that drops, logs and resets stuck command transport state. C13.7 now waits for bounded Bluetooth
+notification completion rather than mistaking stack acceptance for transmission. The same pass
+accounts for the PSA pool expansion and connection/deadline state, closes C13.3's prepared-key
+lifecycle seam, and moves the untouched-device capture deadline before C13.0b because widening the
+characteristic makes a previously transport-refused request reach the dispatcher.
+
+**REVISED THREE TIMES ON 2026-08-17.** The third pass replaced the ad-hoc `OD_DISPATCH_PIPE_ENABLED`
 with `shared/core/od_caps.h` — targets declare capabilities, `shared/` derives what follows — because
 three of this plan's four shared changes exist for the same reason (declining a subsystem is a fact
 `shared/` cannot learn) and each was becoming its own macro. It also records that **CCM is
@@ -71,9 +82,10 @@ recorded defects, five of them security- or availability-relevant. The third cop
 parser and the second copy of hand-rolled CCM are deleted.
 
 **It does this while reducing the target's static RAM**, which is the fact that makes the plan
-viable at all: net **roughly −0.6 KB static** (§ 4.6 — an earlier draft said −236 B and a −544 B
-stack saving; both were wrong, and the stack claim is withdrawn). The shared egress ring is not an
-addition — it replaces more staging than it costs.
+viable at all: net **roughly −0.5 KB static with the selected one-user-slot PSA pool, or −0.4 KB if
+the SDK-default four user slots prove necessary** (§ 4.6 — earlier drafts said −236 B, then −0.6 KB,
+and claimed a −544 B stack saving; all three figures were wrong, and the stack claim is withdrawn).
+The shared egress ring is not an addition — it replaces more staging than it costs.
 
 Four owner decisions, taken 2026-08-16, shape the scope and are settled inputs:
 
@@ -90,8 +102,9 @@ Four owner decisions, taken 2026-08-16, shape the scope and are settled inputs:
 Four shared changes, and the fourth is a mechanism rather than a macro. Two are forced by the cap
 reversal (§ 2.5): `OD_CONFIG_MAX_SIZE` gains an `#ifndef` guard, and `od_config_asm_start()` gains
 the bound that makes the guard safe. Two are forced by declining PIPE (§ 2.3): a new
-`shared/core/od_caps.h` where targets declare capabilities and `shared/` derives their consequences,
-and `od_dispatch_budget()` consulting `OD_CAP_PIPE`. No other shared source changes.
+`shared/core/od_caps.h` where targets declare capabilities, and one opcode metadata table generating
+both routing and `od_dispatch_budget()` with PIPE rows consulting `OD_CAP_PIPE`. No other shared
+source changes.
 
 **`od_caps.h` is deliberately more than this plan needs.** Three of the four shared changes so far
 exist because declining a subsystem is a fact `shared/` has no way to learn, and each was about to
@@ -129,18 +142,21 @@ C13 therefore has three options:
       document it as this target's "unsupported" marker;
   (b) keep 0x0080 silent, matching 0x0081/0x0082, and close the gap host-side; or
   (c) leave it and file the missing "unsupported PIPE" code as the protocol defect it is.
-The canonical header is frozen, so inventing a code is out.
+The canonical header is frozen, so adding a protocol-wide code is out; documenting an unused value
+as a target-specific marker remains option (a).
 
-**The evidence to choose already exists, and it points at (a).** In the plain `_negotiate_pipe`
+**Decision: take (a), using the currently unused PIPE-start value `0x04` as BG22's target-specific
+unsupported marker and recording it in FOLLOWUPS and the divergence matrix.** This does not add a
+canonical error symbol or reinterpret a defined PIPE error; a future protocol-wide unsupported code
+would supersede it. In the plain `_negotiate_pipe`
 path any NACK returns `None` (`../py-opendisplay/src/opendisplay/device.py:2504-2510`) and the
 caller caches `_pipe_supported = False` for the connection (`:2301-2313`) — so (a) costs one
 round-trip and is then remembered, whereas (b) costs a `TIMEOUT_PIPE_START` wait on **every**
 connection (`:2498-2502`). The earlier note that "py-opendisplay caches no capability" is true of
 the *partial* path only (`:2607-2611`). Note also that 0x0080 is config-gated by `transmission_modes`
 bit 0x10 (`:2477-2481`), so a BG22 that never sets it never sees the opcode at all — which is what
-makes (a) cheap rather than merely correct. **Record the choice and its host consequence in
-FOLLOWUPS either way.** `0x0081`/`0x0082` return `OD_CMD_UNKNOWN` and stay silent — a NACK to a DATA frame is fatal to
-an upload loop, and there is no upload here to protect.
+makes (a) cheap rather than merely correct. `0x0081`/`0x0082` return `OD_CMD_UNKNOWN` and stay
+silent — a NACK to a DATA frame is fatal to an upload loop, and there is no upload here to protect.
 
 ### 2.2 No RX queue — and the BGAPI event queue is what makes `OD_FRAME_DEFERRED` safe
 
@@ -192,11 +208,27 @@ That is a real RX queue, in RAM the BT stack already charges for (`SL_BT_CONFIG_
 3,150 B). **It is NOT drop-free, and an earlier draft said it was.** The buffer is finite, and the
 SDK reports discarded buffers, allocation failures and message-creation failures precisely for the
 case where the application stops draining events. Holding events is backpressure with a floor, not
-storage: § 8's requirement to bound the producer's run is what keeps the hold short enough for the
-floor not to be reached, and the hardware rows must include an event flood during CONFIG_READ. A frame is only ever offered to dispatch when dispatch can complete it, so
-DEFERRED becomes unreachable in normal operation — and if it is ever returned anyway, that is an
-invariant violation the target must **log loudly**, not swallow. Add the log; do not add a retry
-buffer.
+storage, so the hardware rows must include an event flood during CONFIG_READ.
+
+**The third revision then claimed the hold was bounded by the CONFIG_READ producer deadline. That
+was also false.** A head entry for which `od_hal_radio_send()` returns `OD_RADIO_RETRY` remains
+queued indefinitely (`shared/core/od_txq.c:187-189`), and `sl_bt_can_process_event()` refuses every
+event while it does. Cancelling the producer neither retires that head nor releases the hold.
+
+C13.5 therefore adds one **target-level maximum event-hold / TX-retry lifetime**. Stamp the start
+when the predicate first changes from processable to held; clear it only when both the producer and
+queue are idle. On expiry, log the connection-instance tag and queue depth, call `od_core_reset()`
+to cancel the producer, drop the stuck queue and clear its session, then admit events again. This is
+the selected fail action: a visible command-transport reset is preferable to an unbounded BGAPI
+hold, and it does not require the disconnect event that the hold may itself be starving. The BLE
+link may remain up and re-authenticate; if hardware shows that insufficient, closing that exact
+connection instance is the escalation, not a longer unbounded wait. The deadline is target policy,
+wrap-safe and comfortably below the connection supervision timeout; record the chosen milliseconds
+beside the implementation rather than deriving it from CONFIG_READ size.
+
+A frame is only ever offered to dispatch when dispatch can complete it, so DEFERRED becomes
+unreachable in normal operation — and if it is ever returned anyway, that is an invariant violation
+the target must **log loudly**, not swallow. Add the log; do not add a retry buffer.
 
 ### 2.3 A bounded 3-slot arena, drained synchronously, that costs less than what it replaces
 
@@ -264,13 +296,13 @@ peer writes  00 81          2 bytes, plaintext, no session
 becomes a log storm any unauthenticated peer can drive two bytes at a time.
 
 **THE FIX IS TO STATE THE FACT WHERE THE TABLE CAN SEE IT**, and C13 introduces the mechanism this
-repo will need three more times: **`shared/core/od_caps.h`, where TARGETS DECLARE FACTS AND `shared/`
-DERIVES CONSEQUENCES.** The inversion is the point. An earlier draft had the target assert a
-consequence (`OD_DISPATCH_BUDGET_MAX_NO_PIPE 2u`) and that is precisely why it could not track the
-table: a new opcode budgeted at 3 would have passed it.
+repo will need three more times: **`shared/core/od_caps.h`, where TARGETS DECLARE FACTS**, plus one
+opcode metadata table from which `shared/` generates both routing and budgets. The inversion is the
+point. An earlier draft had the target assert a consequence
+(`OD_DISPATCH_BUDGET_MAX_NO_PIPE 2u`) and that is precisely why it could not track the table.
 
 ```c
-/* shared/core/od_caps.h -- the only place a capability is read or derived. */
+/* shared/core/od_caps.h -- the only place capability defaults are declared. */
 
 /* DECLARED by the target, via target_compile_definitions. The default is PRESENT, so a target
  * that says nothing behaves exactly as today and DECLINING IS ALWAYS EXPLICIT -- the same rule
@@ -285,51 +317,63 @@ table: a new opcode budgeted at 3 would have passed it.
 #define OD_CAP_RXQ 1
 #endif
 
-/* DERIVED. Targets never set these. A target that compiles PIPE out answers 0x0080 with one NACK
- * and 0x0081/0x0082 with nothing, and the gate's own [00][cmd][FE] / [00][cmd][FF] are one frame
- * each -- so one slot covers every path it can take. */
-#define OD_DISPATCH_BUDGET_MAX (OD_CAP_PIPE ? 3u : 2u)
-
-/* Cross-capability invariants, once, here. */
-OD_STATIC_ASSERT(OD_TXQ_SLOTS - 1u >= OD_DISPATCH_BUDGET_MAX,
-                 "the arena must cover the largest reservation the table can charge");
-OD_STATIC_ASSERT(OD_CONFIG_MAX_SIZE >= 2u * CONFIG_CHUNK_SIZE,
-                 "a cap below two chunks makes every chunked write unreachable");
+/* No routing decision belongs here. A capability may only parameterise metadata values and
+ * assertions. The corpus profile must prove that these compiled facts match its predicates. */
 ```
 ```c
-/* shared/core/od_dispatch.c -- the table consults the capability, never a second constant. */
-    case CMD_PIPE_WRITE_DATA:  return OD_CAP_PIPE ? 3u : 1u;
-    case CMD_PIPE_WRITE_END:   return OD_CAP_PIPE ? 3u : 1u;
+/* Schematic shared/core/od_dispatch_ops.h -- every ordinary routed hook; the two special paths
+ * below remain explicit. */
+#define OD_DISPATCH_OPCODE_ROWS(X) \
+    X(CMD_REBOOT,             od_cmd_app_reboot,      1u) \
+    /* ... every other routed opcode exactly once ... */   \
+    X(CMD_DIRECT_WRITE_END,   od_cmd_app_direct_end,  2u) \
+    X(CMD_PIPE_WRITE_DATA,    od_cmd_app_pipe_data,   (OD_CAP_PIPE ? 3u : 1u)) \
+    X(CMD_PIPE_WRITE_END,     od_cmd_app_pipe_end,    (OD_CAP_PIPE ? 3u : 1u))
 ```
 
-`0x0080` already falls to `default: 1u`, which is correct — its answer is a single NACK.
+Expand that table once into `dispatch_plain()`'s cases, once into `od_dispatch_budget()`'s cases,
+and once into a per-row compile-time assertion that the row's reservation is at most
+`OD_TXQ_SLOTS - 1u`. `0x0080` has an explicit one-unit row — its answer is one NACK. AUTHENTICATE
+and FIRMWARE_VERSION remain explicit special paths with one-unit assertions because they bypass
+`dispatch_plain()`. Only truly unknown opcodes take `default: return 1u`, and they cannot reach a
+handler.
+
+**The third revision's `OD_DISPATCH_BUDGET_MAX` plus max-walk test was not sufficient.** It caught a
+new explicit budget of 4, but a developer could add a multi-reply routing case and omit its budget
+case; `od_dispatch_budget()` would return the one-unit default and the maximum would stay green.
+Generating both switches and every per-row capacity assertion from one row makes that omission
+unrepresentable. Keep behavioural reply-spend tests for the multi-reply handlers as defence in
+depth, but the metadata table — not a hand-maintained maximum — is the structural guarantee.
 
 **Four design rules, and they are what keep this from becoming a config maze:**
 
 1. **No target-supplied header.** `-D` on the compile line, exactly as `OD_TXQ_SLOTS` already works.
    A `od_target_caps.h` that `shared/` includes would add a new include contract across three build
    systems and buy nothing.
-2. **Capabilities affect SIZING AND ASSERTIONS, never ROUTING.** It is tempting to `#if OD_CAP_PIPE`
-   the three pipe hooks out of `od_cmd_app.h`. Do not: that destroys what C11 bought, which is that
-   adding an opcode is a link error on *every* target. All 21 hooks stay mandatory and a declining
-   target answers with a refusal in its hook, so `od_dispatch.c` stays free of `#if` (§ 8).
+2. **Capabilities affect SIZING, BUDGET VALUES AND ASSERTIONS, never ROUTING.** It is tempting to
+   `#if OD_CAP_PIPE` the three pipe hooks out of `od_cmd_app.h`. Do not: that destroys what C11
+   bought, which is that adding an opcode is a link error on *every* target. All 21 hooks stay
+   mandatory and a declining target answers with a refusal in its hook; every metadata row emits
+   its route unconditionally (§ 8).
 3. **Assert what MUST hold; runtime-check what may legitimately differ.**
    `OD_CONFIG_MAX_SIZE >= OD_CONFIG_ASM_MAX_TRANSFERABLE` cannot be an assert, because § 2.5
    deliberately violates it — which is exactly why `od_config_asm_start()` needs a runtime bound.
    Confusing the two is how the overflow in § 2.5 came to be written down as safe.
-4. **Pin every derivation with a host test, not with review.** § 6.1's test walks every opcode the
-   map knows, calls `od_dispatch_budget()`, and asserts the observed maximum equals
-   `OD_DISPATCH_BUDGET_MAX`, under each capability set. Without it `od_caps.h` is only a tidier
-   place to keep the same unchecked claims.
+4. **Pin the generated rows and actual reply spending with host tests, not review.** § 6.1 checks
+   every metadata row under each capability set and drives every known multi-reply handler through
+   its maximum-emission path. A handler that spends more units than its row reserves must fail.
 
 **This is COMPILE-TIME ABSENT, not RUNTIME DISABLED.** A PIPE-capable target with PIPE switched off
 through `transmission_modes` keeps its arena sized for 3 and over-reserves harmlessly; the budget is
 an upper bound. Only compiling the subsystem out changes what the target can ever emit, and only
 that may lower the number.
 
-**Reuse the corpus's names.** C12's vectors already carry `forbids: ["cap_pipe"]` predicates
-(§ 6.2). `OD_CAP_PIPE` and `cap_pipe` naming the same fact lets a profile's capability set be
-checked against the compiled one instead of hand-maintained.
+**Reuse the corpus's names, and REQUIRE equality.** C12's vectors already carry
+`forbids: ["cap_pipe"]` predicates (§ 6.2). `OD_CAP_PIPE`, `OD_CAP_PARTIAL` and `OD_CAP_RXQ` name the
+same facts as their corpus bits. Every corpus executable statically or at startup asserts that its
+profile bits equal the compiled macros. Default-present is defensible only because every declining
+target defines every absence and this equality check makes an omitted `-D` fail rather than silently
+exercise the present profile. BG22 therefore compiles with all three set to **0**, not PIPE alone.
 
 The depth of 3 is unchanged, so § 4.6's `+804 B` stands. Raising the arena to 4 would also work and
 costs 268 B; it buys nothing that declaring the fact does not.
@@ -391,15 +435,18 @@ Under C13 the producer emits one chunk per superloop pass as capacity frees, `sl
 holds incoming commands while it runs (§ 2.2), and a RETRY re-sends the held bytes rather than
 losing them. No reorder and no transfer resume is introduced.
 
-**The producer needs a deadline, and shared code does not give it one.** `od_config_read_pump()`
+**The producer needs its own deadline, and shared code does not give it one.** `od_config_read_pump()`
 treats `OD_TXQ_FULL` as "try again next pass" and stays active indefinitely
 (`shared/core/od_config_read.c:113,130`). On the other two targets that is harmless. Here it is the
 predicate holding every BGAPI event, so an egress that never drains means an application that never
 processes an event — against a finite 3,150 B stack buffer with a documented drop path (§ 2.2).
 **C13.6 must bound the producer's lifetime in the target** — a deadline stamped at start, checked in
-the pump, cancelling the read and logging on expiry. § 8 previously said to bound it "if holding
-events stalls the connection"; that is backwards. Bound it from the start and treat any observed
-stall as a second defect.
+the pump, cancelling the read and logging on expiry. This protects producer state, but an earlier
+revision wrongly treated it as the bound on event retention: a queued RETRY survives producer
+cancellation. C13.5's independent maximum event-hold / TX-retry lifetime (§ 2.2) is the outer bound
+and resets the stuck command transport state. § 8 previously said to bound the producer only "if
+holding events stalls the connection"; that is backwards. Bound both lifetimes from the start and
+treat any observed BGAPI exhaustion as a second defect.
 
 ### 2.5 `MAX_CONFIG_SIZE` 2048 on BG22 — accepted, with two hard conditions
 
@@ -460,10 +507,16 @@ if (total <= CONFIG_CHUNK_SIZE || total > OD_CONFIG_ASM_MAX_TRANSFERABLE ||
 }
 ```
 ```c
-/* od_config_asm.h -- so a future cap cannot silently re-create the hole. */
+/* od_config_asm.h -- one policy assertion, kept with the setting it constrains. */
 OD_STATIC_ASSERT(OD_CONFIG_MAX_SIZE >= CONFIG_CHUNK_SIZE * 2u,
-                 "a cap below two chunks makes every chunked write unreachable");
+                 "project policy requires at least 400-byte config capacity");
 ```
+
+**An earlier draft put this assertion in both `od_caps.h` and `od_config_asm.h`, called it "once",
+and gave it a false diagnostic.** At a cap of 250, chunked totals 201..250 are reachable, so two
+chunks is not a state-machine invariant. C13 retains 400 as a deliberate minimum-capacity policy,
+asserted once in `od_config_asm.h`; `od_caps.h` has no config-size assertion. The runtime
+`total > OD_CONFIG_MAX_SIZE` check above is the memory-safety mechanism.
 
 The `#ifndef` guard on `OD_CONFIG_MAX_SIZE` is therefore **not** a lone constant change: it is a
 constant change that requires a logic change to be safe at any value below 4,000. Sections 1 and
@@ -474,8 +527,8 @@ own (below). What does not stand is "adopting the shared assembler is itself the
 safety comes from a bound this plan has to add. If that bound is not landed in the same commit as
 the cap, **stop**: 2,048 is strictly more dangerous than 4,096 until it exists.
 
-**Shared changes required: this one and its bound above, plus § 2.3's `od_caps.h` and the budget
-table's use of it — four in total.** (`OD_TXQ_SLOTS` is NOT among them: it is already `#ifndef`-guarded at
+**Shared changes required: this one and its bound above, plus § 2.3's `od_caps.h` and one-source
+routing/budget metadata — four in total.** (`OD_TXQ_SLOTS` is NOT among them: it is already `#ifndef`-guarded at
 `shared/core/od_txq.h:43`, so § 2.3's depth of 3 is a `target_compile_definitions` setting.)
 `OD_CONFIG_MAX_SIZE` is a hard `4096u` at `shared/core/od_config_asm.h:67`, and `struct od_config_asm` embeds
 `uint8_t buffer[OD_CONFIG_MAX_SIZE]`. It becomes an `#ifndef`-guarded target macro with a documented
@@ -532,10 +585,10 @@ All eight are recorded or verified in the source; none is speculative.
 | # | Defect | Evidence | Closed by |
 |---|---|---|---|
 | **D1** | **Short plaintext commands bypass CCM mid-session.** Once any client authenticates, a <31-byte plaintext command — REBOOT (2 B), DEEP_SLEEP, DIRECT_WRITE_END — executes unencrypted: the length gate only refuses when there is *no* live session | `DIVERGENCE_MATRIX:171` (1.5a); `opendisplay_pipe.c:1242-1255` | the shared gate — `od_session_security_enabled()`, never frame length. Structural, not a hand fix |
-| **D2** | **Session never cleared after a config save.** Change the encryption key over an old session and the old session keeps working | `DIVERGENCE_MATRIX:207` (2.4) — `clear_session` sites `:118,431,625,677,1267`, none post-save | **`od_session_clear()`, in Nordic's order** — seal and queue the ACK under the OLD session, save, reload, then clear. **NOT `od_core_reset()`**: it calls `od_txq_reset()` (`od_core.c:20`), which would drop the ACK it just queued, or invalidate the handler's reservation if called earlier. `od_core_reset()` is disconnect teardown. Template: `targets/nordic-zephyr/src/od_cmd_config.c:218-224` |
+| **D2** | **Session never cleared after a config save.** Change the encryption key over an old session and the old session keeps working | `DIVERGENCE_MATRIX:207` (2.4) — `clear_session` sites `:118,431,625,677,1267`, none post-save | **`od_session_clear()`, in Nordic's order** — seal and queue the ACK under the OLD session, save, reload, then clear. **NOT `od_core_reset()`**: it calls `od_txq_reset()` (`od_core.c:20`), which would drop the ACK it just queued, or invalidate the handler's reservation if called earlier. `od_core_reset()` is teardown/failure reset for disconnect and event-hold expiry, never config save. Template: `targets/nordic-zephyr/src/od_cmd_config.c:218-224` |
 | **D3** | **Timeout is idle-based**, so a continuously active session never expires | `DIVERGENCE_MATRIX:295` (6.2); `opendisplay_pipe.c:117` | `od_session` — absolute, ms-domain, wrap-safe |
 | **D4** | **Replay hole at `diff == 0`.** An exact replay of the last-seen counter skips the window check entirely | `opendisplay_pipe.c:383` — `nonce_counter <= last_seen && diff != 0` | `od_nonce_window` — 256-bit backward bitmap |
-| **D5** | **END ack arrives up to 60 s late** — refresh blocks first, acks follow, so clients that time out on the END ack see false failures | `DIVERGENCE_MATRIX:221` (3.3); `opendisplay_display.cpp:863-889` then `opendisplay_pipe.c:719-725` | the § 3.5 pre-refresh drain barrier, via `od_txq_flush()` |
+| **D5** | **END ack arrives up to 60 s late** — refresh blocks first, acks follow, so clients that time out on the END ack see false failures | `DIVERGENCE_MATRIX:221` (3.3); `opendisplay_display.cpp:863-889` then `opendisplay_pipe.c:719-725` | § 4.5's prepare/refresh split, stack-acceptance drain and bounded zero-pending TX-status barrier |
 | **D6** | **Notifications dropped on stack-buffer exhaustion**, invisibly to the host — `pipe_send_raw()` does log the failure locally, so "silently" means on the wire, not absent device logging. The 22-frame CONFIG_READ burst is the suspected trigger; that it *reliably* exhausts this SDK configuration is **unverified and needs the § 7 row to establish it** | `opendisplay_pipe.c:502-512`, burst at `:758-792` | `od_hal_radio`'s `OD_RADIO_RETRY` arm + `od_config_read`'s one-chunk-per-pass producer |
 | **D7** | **`0x45 CONFIG_CLEAR` has no case** — silent drop, though the spec lists Silabs | `DIVERGENCE_MATRIX:186` | `od_cmd_app_config_clear` is a required hook, so the *gap* cannot recur. **Link success is not closure**: a defined hook may legally `return OD_CMD_UNKNOWN` and stay silent, so C13.6 also needs corpus vectors asserting a successful clear and its persistence. Record separately that the canonical header contradicts itself — the target legend at `:238` says Silabs has no 0x45, the opcode block at `:367` lists it |
 | **D8** | **An NFC read can build a response that cannot be sealed.** `max_out` is `OD_PIPE_MAX_PAYLOAD - 6` = 238, so a 244-byte plaintext frame seals to 273 B — above the 253-byte BLE frame | `opendisplay_pipe.c:928-941`; Nordic capped its equivalent at 218 for exactly this reason (CLAUDE.md § Status) | cap read data at 218 B, matching Nordic (6 + 218 = 224 = `OD_SESSION_PLAIN_FRAME_MAX`, exactly). **Lowering the cap alone is NOT enough**: several record builders truncate to `out_max` and return success (`opendisplay_ble.c:1252,1293,1335,1352`), so a 219-byte record would silently become a truncated 218-byte one rather than erroring. The builders must fail on overflow, or the § 6.1 "219 errors" test asserts something the code never does. Note also that a 253-byte sealed frame still exceeds the characteristic's 244-byte declaration (§ 2.3) |
@@ -556,6 +609,11 @@ decides at the call site, and `tools/check.sh` already ratchets it by symbol on 
 BG22 takes **PURE + HAL_CRYPTO + HAL_RADIO + APP_SESSION**, and declines **APP_RXQ** (§ 2.2),
 **HAL_ADV** and **HAL_WDT**.
 
+Its compiled profile separately declares every protocol/storage absence:
+`OD_CAP_PIPE=0`, `OD_CAP_PARTIAL=0`, and `OD_CAP_RXQ=0`. The first two describe unsupported command
+families; the third agrees with the declined source tier. An earlier C13.0b row set PIPE alone and
+therefore contradicted this section and § 9.
+
 **HAL_WDT is declined by choice, not by absence, and the record must say so.** The part HAS a
 hardware watchdog: `WDOG_PRESENT` / `WDOG_COUNT 1`, `WDOG0` at `0x4A018000`, `WDOG0_IRQn 43`, 16
 `PERSEL` periods over `LFRCO`/`LFXO`/`ULFRCO`/`HCLKDIV1024` — long enough on ULFRCO to span the
@@ -568,12 +626,12 @@ depends on it being a conscious one.
 That is a new combination: Nordic's, minus WDT and RXQ. Add it to `shared/sources.cmake`'s consumer
 note. No new tier is created — declining is what the tiers are for.
 
-**Four shared edits, two of them logic.** `OD_CONFIG_MAX_SIZE` gains an `#ifndef` guard;
+**Four shared changes, two of them logic.** `OD_CONFIG_MAX_SIZE` gains an `#ifndef` guard;
 `od_config_asm_start()` gains the buffer bound that makes any cap below 4,000 safe (§ 2.5 — the
 memory-safety item, not a sizing nicety); **`shared/core/od_caps.h` is added** as the one place a
-target declares a capability and `shared/` derives what follows (§ 2.3); and `od_dispatch_budget()`
-consults `OD_CAP_PIPE` so a target that compiles PIPE out is charged 1 slot rather than 3 — without
-which a 3-slot arena defers every PIPE frame before the gate.
+target declares capabilities (§ 2.3); and the dispatch routing/budget switches become generated
+from one metadata table whose PIPE rows consult `OD_CAP_PIPE`, so a target that compiles PIPE out is
+charged 1 slot rather than 3 — without which a 3-slot arena defers every PIPE frame before the gate.
 `OD_TX_FRAME_MAX` remains the fleet-wide 256-byte storage width, and `OD_TXQ_SLOTS` is already
 `#ifndef`-guarded, so neither is an edit. Nothing else in `shared/` changes.
 
@@ -604,6 +662,9 @@ in place:
   **prepared slot for the life of a session**, unlike today's transient opens in `aes_cmac_16`
   (`opendisplay_pipe.c:124-130`). C13.3 must raise this count, and the SDK config warns that
   exceeding the declared number risks a race that "could preclude the stack from functioning".
+  **Set it to 1**, the one long-lived application slot this design uses, and exercise LE Secure
+  Connections concurrently on hardware. If that test proves the SDK requires its default reserve,
+  move to 4 and accept the additional 120 B over the selected setting (§ 4.6); do not guess silently.
 - **The tag policy.** `PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 12)`; plain `PSA_ALG_CCM` pins
   a 16-byte tag and returns `NOT_PERMITTED` on every operation. Nordic proved the shortened form on
   silicon (nRF52840, 2026-08-15) — copy it.
@@ -617,16 +678,33 @@ length that is 4..16 and even. **12 qualifies**, so the exact policy Nordic prov
 here rather than falling back to software. Nothing about the shortened tag needs re-deriving; what
 needs doing is the enabling below.
 
+**Net `.text` is not proof of the backend.** An earlier draft said a large C13.3 increase meant PSA
+had fallen back to software. Enabling the CRYPTOACC AEAD driver can itself retain substantial code.
+C13.3 must inspect the linked symbols/map for the transparent CRYPTOACC AEAD path and keep
+`MBEDTLS_CCM_C` absent; record net size only as a budget measurement, never infer hardware versus
+software from the delta.
+
 (The `sli_ccm_encrypt_and_tag_ble()` path over `RADIOAES` is the BLE link layer's own CCM — evidence
 that the silicon does CCM, but not a path the application may use: it is protocol-specific.)
 
 Prepared **key slots**, not a key in the struct: the target clears sessions with `memset`, which
-would strand a live PSA handle in that 4-entry pool.
+would strand a live PSA handle in that pool. **The third revision warned about this and assigned no
+bridging work; that was wrong.** C13.3 still leaves legacy authentication deriving into
+`s_session.session_key` (`opendisplay_pipe.c:651-652`) and legacy clear as raw `memset` (`:92-95`)
+while repointing the CCM callers to a prepared-slot HAL. Therefore C13.3 must finish the server-proof
+CMAC, install the derived key with `od_hal_crypto_key_set()`, and only then mark the legacy session
+authenticated; `clear_session()` must call the idempotent `od_hal_crypto_key_clear()` before the
+memset; and every failure after session-key derivation, plus timeout, replacement and disconnect,
+must go through that clear. Show key-set failure and each clear path in the host lifecycle test. C13.4 may then
+replace the bridge with `od_session`, which already owns this lifecycle (`od_session.c:184,450`).
 
 **AND THE ENABLING IS A HAND-EDIT OF AUTOGENERATED FILES.** `slc generate` is unregistered for this
 project and `cmake_gcc/opendisplay-bg22.cmake` is hand-maintained (workspace `CLAUDE.md`), so
-selecting an AEAD means editing files headed *"any changes to this file will be overwritten"* plus
-the source list. **A later successful `slc generate` silently reverts them and disables every
+selecting an AEAD means editing files headed *"any changes to this file will be overwritten"*.
+**An earlier draft also said to add the AEAD driver source; that was false:**
+`sli_cryptoacc_transparent_driver_aead.c` is already in
+`cmake_gcc/opendisplay-bg22.cmake:205`. **A later successful `slc generate` can still silently revert
+the capability selection and disable every
 encrypted path.** C13.3 must therefore also add a config ratchet to `tools/check.sh` that fails when
 `PSA_WANT_ALG_CCM` is absent from the built configuration — the failure mode otherwise is
 "encryption stopped working after someone regenerated the project", discovered on hardware.
@@ -646,11 +724,16 @@ app_process_action()
   └─ opendisplay_ble_process()
        ├─ od_txq_process()             ← retries a held RETRY entry
        ├─ od_config_read_pump()        ← one chunk per pass; cancels at its deadline (§ 2.4)
-       └─ display_refresh_if_pending() ← the second half of the END split (§ 4.5)
+       └─ event-hold deadline check    ← resets stuck command transport state (§ 2.2)
 ```
 
 `od_dispatch_frame()` is still called from the BGAPI event handler, because on this target that *is*
 consumer context. Nothing moves to a thread; there is none.
+
+**An earlier diagram scheduled `display_refresh_if_pending()` here after § 4.5 had already rejected
+return-and-defer.** That was incoherent. Direct END prepare, completion wait, refresh and final status
+all remain in the same handler invocation; there is no pending-refresh pump in
+`app_process_action()`.
 
 **`sl_power_manager_sleep()` closes every pass** (`main.c:68-80`), and C13 newly makes forward
 progress depend on repeated passes — one CONFIG_READ chunk per pass, one RETRY drain per pass. Two
@@ -662,8 +745,9 @@ the next connection-interval wake rather than spinning. Neither is fatal; both w
 handler is what empties the arena in the common case, so the next event is admitted immediately. The
 one in `app_process_action()` is the only thing that can clear a RETRY — and while that entry is
 held, the hook admits no events at all. Every RETRY classification therefore has to be escapable
-WITHOUT an application event (§ 4.2), and the producer has to give up on its own (§ 2.4). Those two
-rules are what keep this diagram from being a deadlock.
+WITHOUT an application event (§ 4.2), the producer has to give up on its own (§ 2.4), and the outer
+event-hold deadline must reset even a transport that remains retryable forever (§ 2.2). Those three
+rules are what keep this diagram from becoming an unbounded hold.
 
 ### 4.4 What the pipe file becomes
 
@@ -701,16 +785,19 @@ not change that. Shared dispatch already declares it legal: `od_dispatch_frame()
 never to block — an END blocks through a panel refresh of up to 60 s inside a target handler"
 (`shared/core/od_dispatch.h:18-20`).
 
-What changes is **ordering** (D5). `od_txq_flush()` is the mechanism and it is already
+What changes is **ordering** (D5). `od_txq_flush()` supplies the first barrier and is already
 superloop-shaped: one drain attempt per call, `BUSY` if not yet empty, `TIMEOUT` at the deadline with
-entries left queued (`shared/core/od_txq.c:209-229`). The END handler loops on it until `OK` or
-`TIMEOUT`, then starts the refresh.
+entries left queued (`shared/core/od_txq.c:209-229`). But it is only a **stack-acceptance barrier**:
+the queue retires an entry as soon as `od_hal_radio_send()` returns `OD_RADIO_SENT`
+(`od_txq.c:187,202-204`), and that result is defined as "accepted by the stack"
+(`shared/hal/od_hal_radio.h:41`). It does not establish transmission.
 
 **The barrier is a busy-loop on a target with the watchdog switched off, and that pairing is
 deliberate.** `od_txq_flush()` makes one drain attempt per call precisely so the caller keeps
 control, and its own comment gives the reason: it "keeps the waiting in the loop that also feeds
 the watchdog" (`shared/core/od_txq.c:222`). ESP32 and Nordic have that loop; BG22 declines
-HAL_WDT (§ 4.1), so it is the one target using this API with no recovery path.
+HAL_WDT (§ 4.1), so it is the one target using this API with no hardware recovery path. The
+wrap-safe software deadline handles ordinary non-progress, not a wedged CPU or vendor call.
 
 **TWO EARLIER DRAFTS GOT THIS WRONG IN OPPOSITE DIRECTIONS, and the resolution is Nordic's shape.**
 The first said the loop was safe because `sl_bt_run()` precedes the can-process gate — true of the
@@ -719,7 +806,7 @@ a stack that cannot make progress" and replaced it with return-and-defer. **That
 `sl_bt_run()` is a PUBLIC API** — `sl_bt_api.h:16637-16641`, "Run the Bluetooth stack to process
 scheduled tasks" — and calling it from inside the handler advances the stack without popping an
 event or re-entering `sl_bt_on_event()`. A barrier of `{ od_txq_process(); sl_bt_run(); }` against a
-deadline drains.
+deadline drains the application queue **into the stack**, no farther.
 
 **Nordic is the template, and the second draft misdescribed it.** `od_cmd_direct.c:73-120` does NOT
 return from the handler between prepare and refresh. It calls
@@ -744,22 +831,38 @@ Return-and-defer must be rejected for two further reasons the plan would otherwi
    cannot ACK first without acknowledging an END it has not validated;
 2. queue the `0x72` ACK after a successful prepare;
 3. drain it with a BG22 `od_cmd_flush_before_refresh()` of `{ od_txq_process(); sl_bt_run(); }`
-   against a deadline, in the handler;
-4. refresh, then emit `0x73`/`0x74` from the reservation still held.
+   against a deadline, in the handler, until the ACK is accepted by the stack;
+4. wait against the same bounded deadline until the stack reports no data packets waiting to be
+   transmitted for that exact connection instance, then refresh;
+5. emit `0x73`/`0x74` from the reservation still held.
 
 That is a target-local change to a target-local API — not the `od_hal_panel`
 `refresh_start`/`refresh_busy` rework, which stays out of scope.
 
-**And "sent" is not "on air".** A successful `sl_bt_gatt_server_send_notification()` means the stack
-accepted the buffer. The event that reports transmission is
-`sl_bt_evt_gatt_server_notification_tx_completed`, and it is **disabled by default** — the plan
-previously named `sl_bt_evt_gatt_server_procedure_completed`, which is not the relevant event. § 7's
-"ACK observed on air before refresh begins" row must therefore either enable that event and assert
-on it, or be satisfied by a sniffer capture. An enqueue log satisfies nothing.
+**The third revision noticed that "sent" is not "on air", then still closed D5 with a sniffer or
+completion event while the software waited only for acceptance. That was wrong.** A one-run hardware
+observation cannot repair a missing software guarantee, and
+`sl_bt_evt_gatt_server_notification_tx_completed` cannot be consumed normally while the current
+handler is blocking.
 
-The § 2.2 hold is still bounded — by § 2.4's producer deadline. If C13.7 wants a belt as well,
-arming WDOG0 at a period above the refresh bound is an SLC component away (§ 4.1) — a decision,
-not a prerequisite.
+**Decision: add a bounded polling completion barrier; do not weaken D5.** Include
+`bluetooth_feature_resource_report`, call
+`sl_bt_resource_enable_connection_tx_report(packet_count)` before any connection is established,
+and after ACK acceptance loop on `sl_bt_run()` plus
+`sl_bt_resource_get_connection_tx_status()` (`sl_bt_api.h:1956-1991`). The SDK defines its returned
+`packet_count` as data packets "waiting to be transmitted". Proceed to refresh only when it is zero,
+the report flags contain neither `ERROR_PACKET_OVERFLOW` nor `ERROR_CORRUPT`, and the connection
+instance tag/epoch is still the one that issued END. Timeout, report error or instance change means
+**do not refresh**: log, reset command transport state and close that exact connection. This is the
+recommendation because it makes the on-air ordering a repeatable software property without popping
+and re-entering arbitrary application events. A weakened D5 — "accepted by the stack before
+refresh" plus a proof that BG22 transmits throughout the blocking panel call — remains the fallback
+only if the SDK feature cannot fit; taking it requires an explicit plan revision and evidence of that
+platform guarantee, not one observed run.
+
+The completion event may be enabled in a diagnostic build as corroborating § 7 evidence, and a
+sniffer remains valuable, but neither substitutes for the polling barrier. Arming WDOG0 at a period
+above the refresh bound remains an SLC component away (§ 4.1) — a decision, not a prerequisite.
 
 Converting refresh to `refresh_start`/`refresh_busy` remains the right eventual design and is
 explicitly out of scope — an `od_hal_panel` change affecting three targets.
@@ -777,7 +880,7 @@ the first draft and were added on 2026-08-17 from the linker map
 | `s_session` 640 B → `od_session` 112 B | **−528** | measured on both other targets |
 | `s_crypto_payload_buf[513]` retired | **−513** | PSA AEAD seals in one shot |
 | `od_txq` @ 3 slots × 268 B | **+804** | § 2.3; 256-byte storage width, 253-byte BLE value ceiling |
-| `s_od_global_config` 844 B → `od_config` gated | **+1** | **only** with `OD_CONFIG_WITH_{TOUCH,BUZZER,WIFI,DATA_EXTENDED}=0`; ungated is +709 against 484 B of slack |
+| `s_od_global_config` 844 B → `od_config` gated | **+1** | **only** with `OD_CONFIG_WITH_{TOUCH,BUZZER,WIFI,DATA_EXTENDED}=0`; this arithmetic also retires the separate 64-byte `s_od_security_parsed` — without that retirement the row is +65. Ungated is +709 against 484 B of slack |
 | `od_config_asm` buffer @ 2048 | **+2,064 / −20** | existing storage + chunk state is 2,064 + 20 B, so retiring both is a small CREDIT, not zero — and only if they are retired in the same commit (§ 2.5) |
 | `od_rxq` | **0** | declined; the BGAPI event queue serves instead |
 | `MAX_CONFIG_SIZE` staying 2048 | **±0** | vs **+4,096** had 4096 been adopted |
@@ -785,14 +888,21 @@ the first draft and were added on 2026-08-17 from the linker map
 | `s_cfg_read_buf[100]` → ~32 B of producer state | **−68** | added 2026-08-17; was missing |
 | `od_txq` indices and state beyond the ring | **+6** | before alignment; the ring is not the whole module |
 | PSA key-slot/readiness state vs `s_crypto_ready` | **+5** | Nordic-shaped adapter |
+| PSA pool, user slots 0 → 1 | **+40** | selected C13.3 setting; current four-slot `global_data` is 0xA4 (`opendisplay-bg22.map:29345-29348`), approximately 40 B per added slot |
+| PSA pool if hardware forces SDK default 4 | **+160 instead** | alternative, not additive: +120 B over the selected one-slot setting |
+| CONFIG_READ producer deadline stamp | **+4** | required by § 2.4; omitted by the previous ledger |
+| event-hold / TX-retry deadline stamp | **+4** | independent outer bound from § 2.2 |
+| BLE connection-instance epoch | **+4** | raw 8-bit handles are reused and cannot be queue/completion tags (§ 4.2/4.5) |
 | session report throttling, if Nordic's is copied | **+8** | BG22 may choose otherwise |
 | characteristic/long-write widening 244 → 253 (§ 2.3) | **+9** | forced, not optional |
 | `enc[544]` stack local | — | see the stack note below |
 
-**Net: roughly −0.6 KB static, and the earlier "−236 B" was wrong** — it omitted the six lines added
-above, four of which are credits. The direction is unchanged and the margin is larger, but **only
-the final linker map settles it**; treat every figure here as a prediction to be checked, not a
-result.
+**Net from the quantified rows: −533 B (roughly −0.5 KB) with one user slot, or −413 B (roughly
+−0.4 KB) with four.** The earlier "−236 B" and
+later "−0.6 KB" were both wrong: the latter omitted PSA pool growth plus the producer deadline and
+connection epoch. The C13.7 resource-report feature may also pull vendor bookkeeping not visible
+from source-level field sums; record its map delta separately. The direction remains negative, but
+**only the final linker map settles it**; treat every figure here as a prediction, not a result.
 
 **THE −544 B STACK CLAIM WAS WRONG and is withdrawn.** Retiring `enc[544]` does not free 544 bytes
 of peak stack, because what replaces it is live simultaneously: `od_reply()` holds a 253-byte local
@@ -805,8 +915,8 @@ The 10,576 B heap figure this ledger is stated against comes from `docs/MEMORY_C
 current map reports `heap_size = 0x2958` = **10,584 B**. An 8-byte discrepancy changes no decision,
 but the map is the authority — reconcile the doc in C13.8.
 
-Net if unification fails: **+1,828 B**, and two 2 KB config buffers coexist — a design failure
-whether or not it links. That is the § 8 stop condition.
+Net if unification fails is approximately **+1.9 KB** with the selected slot setting, and two 2 KB
+config buffers coexist — a design failure whether or not it links. That is the § 8 stop condition.
 
 **Measure `.bss`/`.text` with `arm-none-eabi-size` after every commit** and record it in the commit
 message. It is the MIGRATION.md verification bar for this target and the only early warning here.
@@ -821,18 +931,19 @@ Each commit builds headless, leaves all three targets link-complete, and finishe
 | Commit | Content | Required proof |
 |---|---|---|
 | **C13.0a** | **`od_config_asm_start()` gains the `OD_CONFIG_MAX_SIZE` bound (§ 2.5), before any cap moves.** Shared logic change; no target behaviour change at 4096 | The new test FAILS on the pre-fix tree at a simulated 2048 cap and passes after: a declared total of 2,049 is REJECTED with nothing stored. ESP32/Nordic images **byte-identical** — at 4096 the added bound is unreachable |
-| **C13.0b** | `OD_CONFIG_MAX_SIZE` becomes an `#ifndef` target macro with a documented floor; BG22 sets 2048 and ESP32/Nordic assert 4096. Retain `OD_TX_FRAME_MAX=256`. Raise the dynamic characteristic's maximum value length 244 → 253 (so the 245..253 oversize NACK is reachable) and decide the long-write staging width (§ 2.3). Configure `SL_BGAPI_MAX_PAYLOAD_SIZE >= 263`; set maximum ATT MTU 256 during system boot before advertising and require the selected maximum to equal 256. Add `shared/core/od_caps.h` with `OD_CAP_{PIPE,PARTIAL,RXQ}`, the derived `OD_DISPATCH_BUDGET_MAX`, its cross-capability asserts, and the host test that pins the derivation to the table (§ 2.3); point `od_dispatch_budget()` at `OD_CAP_PIPE`; BG22 sets `OD_CAP_PIPE=0`. Amend CLAUDE.md decision 12 and `DIVERGENCE_MATRIX` 2.7; add D8 to the matrix; record the § 2.1 error-code choice | Host test: oversize declared total REJECTED at the start frame with **nothing stored**, at both caps, and specifically at cap+1; a 253-byte BLE reply is queued and 254 is refused while the TX slot remains 256; ESP32/Nordic builds unchanged; boot log records selected MTU 256; no wire byte moved |
+| **C13.0b** | `OD_CONFIG_MAX_SIZE` becomes an `#ifndef` target macro with the once-only 400-byte **policy** floor in `od_config_asm.h`; BG22 sets 2048 and ESP32/Nordic assert 4096. Retain `OD_TX_FRAME_MAX=256`. Raise the dynamic characteristic's maximum value length 244 → 253 (so the 245..253 oversize NACK is reachable) and decide the long-write staging width (§ 2.3). Configure `SL_BGAPI_MAX_PAYLOAD_SIZE >= 263`; set maximum ATT MTU 256 during system boot before advertising and require the selected maximum to equal 256. Add `shared/core/od_caps.h` and the one-source routing/budget metadata (§ 2.3); BG22 sets `OD_CAP_PIPE=0`, `OD_CAP_PARTIAL=0` and `OD_CAP_RXQ=0`. Amend CLAUDE.md decision 12 and `DIVERGENCE_MATRIX` 2.7; add D8 to the matrix; record 0x04 as § 2.1's target-specific unsupported-PIPE marker | **Untouched-device capture or conscious skip is already recorded before this commit.** Host: oversize declared total REJECTED at the start frame with nothing stored at both caps; 253-byte BLE reply queued and 254 refused while the TX slot remains 256; metadata row/capability tests green; ESP32/Nordic builds unchanged; boot log records selected MTU 256. **This commit changes the reachable wire surface:** a 245..253-byte write now reaches dispatch and gets its oversize NACK instead of transport refusal |
 | **C13.1** | Add the Silabs build to `tools/check.sh` as a fourth target gate (`DO_SILABS`, folded into `--targets`), under the same skip-is-not-a-pass rule | `--targets` reports 14/0/0 with the toolchain present, and a **skip** without it |
 | **C13.2** | Swap config: `od_config_tlv` + `od_config_asm` + `od_config` replace `opendisplay_config_parser.c` and `s_cfg_chunk`; retire `opendisplay_config_buf()` in the same commit — which is an **NVM3 record layout** change, not a buffer deletion (§ 2.5); feature gates off | Host differential vs the retired parser over the corpus; `.bss` delta within § 4.6; **hardware Gate 2, including read-back of a config written by the PREVIOUS layout if any board carries one** |
-| **C13.3** | Enable an AEAD in the SLC/PSA config (**none is selected today**, § 4.2) and raise `SL_PSA_KEY_USER_SLOT_COUNT` from 0; add the `PSA_WANT_ALG_CCM` ratchet to `tools/check.sh`; implement `od_hal_crypto` over PSA with the shortened-tag policy and **repoint the existing `od_ccm_encrypt`/`od_ccm_decrypt` call sites at it** (`opendisplay_pipe.c:442,491`) before deleting the hand-rolled CCM — deleting first leaves those callers unresolved and the commit does not link | Differential green against `tests/host/session_ccm_reference.inc`; the ratchet shown FAILING with the AEAD removed from config; `.text` delta recorded — and **check it against the hand-rolled CCM being deleted**: the CRYPTOACC driver should make this a net reduction, and a large increase means PSA fell back to software rather than the accelerator (§ 4.2); the commit links standalone; **hardware: authenticate + one encrypted command** |
+| **C13.3** | Enable CCM in the SLC/PSA config (**none is selected today**, § 4.2), set `SL_PSA_KEY_USER_SLOT_COUNT=1`, and add the `PSA_WANT_ALG_CCM` ratchet; implement `od_hal_crypto` with the shortened-tag policy and **repoint the existing `od_ccm_encrypt`/`od_ccm_decrypt` callers** (`opendisplay_pipe.c:442,491`) before deleting hand-rolled CCM. Bridge the legacy lifecycle in this commit: finish derivation/server proof, call `od_hal_crypto_key_set()`, then mark authenticated; make every post-derivation failure and every clear/timeout/replacement/disconnect call idempotent `od_hal_crypto_key_clear()` before memset. The AEAD driver source is already listed at `cmake_gcc/opendisplay-bg22.cmake:205` | Differential green against `session_ccm_reference.inc`; key-set failure and every key-clear path tested; ratchet shown FAILING with AEAD removed; commit links standalone. Inspect linked symbols/map for the CRYPTOACC transparent AEAD driver and prove `MBEDTLS_CCM_C` absent — **do not infer backend from net `.text`**. Hardware: authenticate + encrypted command while LE Secure Connections also succeeds; map confirms the selected +~40 B pool expansion |
 | **C13.4** | Implement `od_session_app`; swap `od_session` in; delete `struct EncryptionSession`. Closes **D3, D4** | Host session suite incl. the `diff == 0` case, shown failing first; `.bss` −528 confirmed; **hardware Gate 2 incl. reconnect and key replacement** |
-| **C13.5** | Implement `od_hal_radio` **including `od_txq_app_dropped()`**; link `od_txq` at `OD_TXQ_SLOTS=3` via `target_compile_definitions`; add the § 2.3 capacity `OD_STATIC_ASSERT`; synchronous drain in the event handler plus a loop-pass drain. Closes the send half of **D6** | Host TXQ suite; RETRY arm exercised against a fake radio, incl. that a retry re-sends identical bytes and spends no nonce; **`!s_notify` classified ERROR, with the write-before-subscribe sequence shown NOT to deadlock**; `.bss` delta recorded; the assert shown FAILING at `OD_TXQ_SLOTS=2`; negotiated-MTU enforcement tested |
-| **C13.6** | Split commands into `od_cmd_{device,config,direct,nfc}.c`; define all 21 hooks **plus `od_core_frame_done()`, `od_cmd_allow_unauthenticated()` and `od_cmd_mutates_config()`** (§ 4.4); adopt `od_dispatch_frame()`; `od_core_reset()` on **disconnect only**, with D2 closed by ordered `od_session_clear()` on the save path (§ 3); add `od_config_read` **with the § 2.4 producer deadline** and the `sl_bt_can_process_event()` override. Delete the opcode switch (`:1089-1195`) and byte-inferred sealing. Closes **D1, D2, D6, D7** and settles 0x0080 | A missing hook is a link error — that is the enforcement; corpus gains `dispatch_corpus_silabs` (§ 6.2), incl. CONFIG_CLEAR success/persistence vectors and BG22's unauthenticated/mutates-config answers; DEFERRED-is-logged assertion; producer deadline expiry tested; **hardware Gate 2 full** |
-| **C13.7** | Split BG22's display END into prepare/refresh, queue the ACK, and drain it in-handler with `{ od_txq_process(); sl_bt_run(); }` against a deadline — Nordic's shape, keeping the 2-unit reservation across the refresh (**D5**, § 4.5); the NFC 218-byte cap **plus making the record builders fail rather than truncate** (**D8**, § 3) | **hardware: END ack observed on air before refresh begins**, evidenced by `..._notification_tx_completed` (enabled for the test) or a sniffer capture, never an enqueue log; the post-refresh `0x73`/`0x74` arrives from the held reservation; 218 arrives whole, 219 **errors rather than truncating** |
+| **C13.5** | Implement `od_hal_radio` **including `od_txq_app_dropped()`** and a monotonic connection-instance epoch used in every queue tag; link `od_txq` at `OD_TXQ_SLOTS=3`; generated per-row capacity assertions replace the old single maximum assert. Add synchronous and loop-pass drains plus § 2.2's target-level maximum event-hold/TX-retry lifetime; expiry logs tag/depth and calls `od_core_reset()` so a RETRY head cannot retain all events forever. Closes the send half of **D6** | Host TXQ suite; RETRY re-sends identical bytes without spending a nonce; raw BLE handle reuse cannot validate an old tag; `!s_notify` is ERROR and write-before-subscribe does not deadlock; stuck RETRY expires, logs and empties queue/session/hold; row assertion shown FAILING at `OD_TXQ_SLOTS=2`; `.bss` and negotiated-MTU enforcement recorded |
+| **C13.6** | Split commands into `od_cmd_{device,config,direct,nfc}.c`; define all 21 hooks **plus `od_core_frame_done()`, `od_cmd_allow_unauthenticated()` and `od_cmd_mutates_config()`** (§ 4.4); adopt `od_dispatch_frame()`. Use `od_core_reset()` for **disconnect and § 2.2 event-hold expiry only**, never config save; D2 uses ordered `od_session_clear()` on the save path (§ 3). Add `od_config_read` **with the § 2.4 producer deadline** and the `sl_bt_can_process_event()` override. Delete the opcode switch (`:1089-1195`) and byte-inferred sealing. Closes **D1, D2, D6, D7** and settles 0x0080 | A missing hook is a link error — that is the enforcement; corpus gains `dispatch_corpus_silabs` (§ 6.2), incl. CONFIG_CLEAR success/persistence vectors and BG22's unauthenticated/mutates-config answers; DEFERRED-is-logged assertion; producer deadline expiry tested; **hardware Gate 2 full** |
+| **C13.7** | Split BG22 display END into prepare/refresh, queue the ACK, drain it to stack acceptance in-handler, then use `bluetooth_feature_resource_report` and `sl_bt_resource_get_connection_tx_status()` against the same deadline to wait for zero packets pending on the exact connection instance before refresh. On timeout/report error/tag change, do not refresh: log, reset transport state and close that instance. Keep the 2-unit reservation across refresh (**D5**, § 4.5). Also cap NFC at 218 and make builders fail rather than truncate (**D8**) | Host fake proves acceptance alone cannot satisfy the barrier and covers zero-pending, timeout, corrupt/overflow flags and tag replacement. Hardware/sniffer: END ACK observed on air before refresh; resource report corroborates zero pending; post-refresh `0x73`/`0x74` arrives from held reservation; failure injection does not refresh. 218 arrives whole; 219 errors rather than truncates. Record resource-report `.bss`/`.text` cost |
 | **C13.8** | Extend the C11 ownership ratchets to this target; update CLAUDE.md status, `DIVERGENCE_MATRIX` resolutions, `docs/TEST_OWNERSHIP.md` | Clean-tree `--targets` at 14/0/0; every closed matrix row edited to say so |
 
-**C13.0a is a prerequisite for everything and touches no target behaviour** — land it first and
-alone. C13.0b-C13.2 are then independent of the rest. C13.5 must precede C13.6, because dispatch
+**The untouched-device capture (or its conscious skip) precedes C13.0b.** C13.0a is a prerequisite
+for everything and touches no target behaviour — land it first and alone. C13.0b-C13.2 are then
+independent of the rest. C13.5 must precede C13.6, because dispatch
 cannot link without the egress it reserves against. C13.7 depends on the display API split, which
 has no earlier home.
 
@@ -859,6 +970,9 @@ fix proves nothing.
 - **BLE sizes:** a 253-byte BLE reply is queued; 254 is `OD_TXQ_TOO_LARGE`; the backing TX slot
   remains 256 bytes. Pins transport admission, generation and storage as three distinct bounds.
 - **Crypto:** the Silabs arm of the CCM differential against `session_ccm_reference.inc`.
+- **Legacy prepared-key bridge:** C13.3 key-set failure never authenticates; every failure after raw
+  session-key derivation, plus timeout, replacement, disconnect and every legacy `clear_session()`,
+  calls the idempotent PSA key clear before clearing RAM.
 - **Session:** D4 explicitly — an exact replay of the last-seen counter is refused.
 - **Egress:** `NO_MORE_RESOURCE` → RETRY → the same entry re-offered and eventually sent, with
   **byte-identical** bytes and no second nonce spent; a dropped connection → GONE → every entry for
@@ -870,11 +984,15 @@ fix proves nothing.
 - **D8:** a 219-byte NFC record errors; 218 seals within 253. The cap is exact rather than
   conservative — `6 + 218 = 224 = OD_SESSION_PLAIN_FRAME_MAX` — so pin 219 as the first failure,
   not merely "some large value".
-- **Budget vs arena, the derived form (§ 2.3):** a test walks every opcode the map knows, calls
-  `od_dispatch_budget()`, and asserts the observed maximum equals `OD_DISPATCH_BUDGET_MAX` — run
-  under `OD_CAP_PIPE` both 1 and 0. Adding an opcode budgeted above the maximum must
-  fail this test; that is what makes the constant a consequence of the table rather than a claim
-  about it. Separately, `OD_TXQ_SLOTS=2` fails the target's static assert at compile time.
+- **Routing/budget metadata (§ 2.3):** build the generated rows under all-present and BG22
+  capability sets. Every known routed opcode has exactly one row; the row generates both hook route
+  and budget; every multi-reply handler is driven through its maximum-emission path and cannot spend
+  more than its reservation. A row above usable capacity fails its generated compile-time assert;
+  `OD_TXQ_SLOTS=2` therefore fails the BG22 build. This replaces the insufficient
+  `OD_DISPATCH_BUDGET_MAX` max-walk test.
+- **Capability/profile identity:** each corpus executable asserts `cap_pipe`, `cap_partial` and
+  `cap_rxq` exactly equal its compiled `OD_CAP_*` macros. Show BG22 failing when any one of its three
+  explicit zero definitions is removed.
 - **PIPE opcodes on a PIPE-less build:** with `OD_CAP_PIPE=0`, a `0x0081` frame reaches
   `od_cmd_app_pipe_data()` and draws silence rather than returning `OD_FRAME_DEFERRED`. Shown failing
   before the budget fix — it is the whole reason for it.
@@ -882,16 +1000,32 @@ fix proves nothing.
   retained. With `!s_notify → ERROR` the queue drains; with the rejected `→ RETRY` mapping the fake
   deadlocks. Assert the deadlock exists under the wrong mapping, or the test proves nothing.
 - **Producer deadline:** a `od_config_read` whose egress never drains is cancelled and logged at the
-  § 2.4 deadline rather than holding events indefinitely.
+  § 2.4 deadline; separately, a RETRY head that survives that cancellation reaches the target-level
+  event-hold deadline, is dropped and logged through command-transport reset, and events resume.
+- **D5 completion:** a fake TX report proves stack acceptance alone leaves packets pending; refresh
+  begins only at zero pending with a live matching instance, and never begins on deadline,
+  overflow/corrupt flags or tag replacement.
 - **NFC truncation:** a record builder handed a too-small `out_max` **errors**; it must not return
   success with truncated bytes (§ 3, D8).
 
 **One host-build hazard to close in the same commit.** `struct od_config_asm` changes size with
-`OD_CONFIG_MAX_SIZE` (§ 2.5), so a build that compiles Silabs command translation units at 2048
-while linking shared `od_config_asm.c` at 4096 has an ODR violation that corrupts memory rather than
-failing. `dispatch_corpus_silabs` (§ 6.2) is exactly such a build. Add a cross-TU assert — a
-`sizeof(struct od_config_asm)` check in a shared function the target calls, or an explicit
-`OD_STATIC_ASSERT` on the macro in both — so a mismatch is a build error.
+`OD_CONFIG_MAX_SIZE` (§ 2.5), so compiling Silabs command translation units at 2048 while linking
+`od_config_asm.c` at 4096 is a cross-translation-unit ABI mismatch that corrupts memory. The earlier
+draft called it an ODR violation and proposed either a runtime `sizeof` check or
+`OD_STATIC_ASSERT`s in both translation units. **Neither is a cross-TU guard:** independent static
+assertions cannot compare compile environments, and a runtime check is after the incompatible code
+has already been built and linked.
+
+`tests/host/CMakeLists.txt:42-45` currently compiles shared code once into `od_shared`; both
+production corpus executables consume that same library (`:381-405`). A PRIVATE definition on
+`dispatch_corpus_silabs` therefore does not recompile `od_config_asm.c` or `od_dispatch.c`. C13.0b
+must create separately compiled shared variants from the same source list: the existing
+all-capabilities/4096 variant, and `od_shared_silabs` compiled with
+`OD_CONFIG_MAX_SIZE=2048`, `OD_TXQ_SLOTS=3`, and
+`OD_CAP_{PIPE,PARTIAL,RXQ}=0`. Link the Silabs corpus and no-PIPE budget tests only to that variant,
+and apply the same definitions to their production target translation units. This is the selected
+mechanism. A link-time ABI token whose symbol name encodes the cap would also fail safely, but adds
+machinery the isolated host variant does not need.
 
 ### 6.2 The corpus gains a third profile
 
@@ -905,20 +1039,26 @@ radio. They belong to § 7, not here.
 
 This is where BG22's deliberate divergences stop being prose and become assertions — 0x0052 NACK
 unsupported, 0x0076/0x0077 fail-fast, 0x0080 refused, 0x0081/0x0082 silent, the 2048 cap. Each needs
-a corpus capability predicate; `cap_pipe` and `cap_config_4k` are new negative predicates under the
-`forbids` mechanism C12.0 adopted. C12's rules carry over unchanged: **a `target-production` vector
+a corpus capability predicate. **C12 already introduced `cap_pipe`; an earlier draft incorrectly
+called it new.** C13 adds `cap_config_4k` and the profile identity bit for `cap_rxq`, and uses the
+existing `cap_partial`, under the `forbids` mechanism C12.0 adopted. The Silabs runner asserts these
+profile facts match `OD_CAP_{PIPE,PARTIAL,RXQ}=0`. C12's rules carry over unchanged: **a
+`target-production` vector
 excluded by a predicate is a failure, not a skip**, and no fake may see an expected reply.
 
-### 6.3 Capture before C13.6 — the time-sensitive item
+### 6.3 Capture before C13.0b — the time-sensitive item
 
-C12 § 2.5 records this and it expires at C13.6, the first commit that changes BG22's dispatch
-behaviour: **capture the untouched dispatcher on a board first**, with complete provenance (target,
-SHA, protocol version, panel, host version, transport, date). After that, a shipped BG22's
-pre-migration behaviour is no longer observable from this tree.
+C12 § 2.5 records this, and an earlier draft set the deadline at C13.6 because it claimed C13.0b
+moved "no wire byte". **That was false.** Widening the characteristic and MTU in C13.0b admits a
+245..253-byte write that transport rejects today; the existing handler then emits its oversize NACK
+(`opendisplay_pipe.c:1235`). The deadline therefore expires **before C13.0b**: capture the untouched
+dispatcher on a board first, with complete provenance (target, SHA, protocol version, panel, host
+version, transport, date). Include one 245-byte write so the transport-refusal baseline is explicit.
+After C13.0b, a shipped BG22's pre-migration behaviour is no longer observable from this tree.
 
 With no board, that capture cannot happen. Then **record the deadline as consciously skipped** in
-`docs/TEST_OWNERSHIP.md` and proceed. What is forbidden is beginning C13.6 under a claim the gate was
-met.
+`docs/TEST_OWNERSHIP.md` and proceed. What is forbidden is beginning C13.0b under a claim that the
+capture gate was met.
 
 ### 6.4 Full gate
 
@@ -938,17 +1078,17 @@ independently.
 | Boot, advertise, MSD decode | host decodes the MSD with correct battery and temperature | the import itself / nothing about commands |
 | Config single write, chunked write, read-back, reboot | ACK precedes reload; bytes survive reboot | C13.2 / not the cap |
 | **Oversize config refused** | a declared total of 4096 draws a NACK at the start frame and **stored config is unchanged after** | § 2.5's condition — the row that proves 2048 is safe rather than merely small |
-| Authenticate, encrypted command, reconnect, re-authenticate | new session succeeds after reconnect | C13.3 + C13.4 / not the timeout |
+| Authenticate, encrypted command, reconnect, re-authenticate, pair concurrently | new session succeeds after reconnect and LE Secure Connections does not exhaust the one-user-slot PSA pool | C13.3 lifecycle/pool + C13.4 / not the timeout |
 | **Session expiry under continuous traffic** | a session driven continuously past the timeout **expires** | D3 — the pre-C13.4 code never expires, so this row fails by construction before the swap |
 | **Config save clears the session** | after a config write changing the key, the previous session no longer works | D2 / not key derivation |
 | No-session and decrypt failure | `{00,cmd,FE}` and `{00,cmd,FF}` visible in plaintext | the gate and explicit confidentiality |
 | **Short plaintext mid-session** | a 2-byte plaintext REBOOT sent while a session is live is **refused** | D1 — the highest-value row here; the old code executes it |
-| Unknown opcode; 0x0080; 0x0076 | silence for unknown; `{FF,80,07,00}`; `{FF,76,07,00}` | § 2.1's wire change |
+| Unknown opcode; 0x0080; 0x0076 | silence for unknown; `{FF,80,04,00}` target-specific unsupported marker; `{FF,76,07,00}` partial-unsupported | § 2.1's wire change without misreporting PIPE rectangle-invalid |
 | **CONFIG_READ delivers 22/22 under notification pressure** | every chunk arrives, in order, with no gap, at 2048 bytes stored | D6 — the RETRY arm and the producer together |
-| **Direct END ack before refresh** | ACK observed **on air**, timestamped, before the panel begins | D5 — not inferable from an enqueue log; photograph or video the refresh and correlate timestamps |
+| **Direct END ack before refresh** | TX report reaches zero pending for the same connection instance, and a sniffer observes the ACK **on air** before the panel begins; injected report timeout/corruption/tag replacement prevents refresh | D5's software guarantee plus on-air corroboration — neither an enqueue nor stack-acceptance log is sufficient |
 | **MTU and NFC 218 / 219** | the connection reports negotiated ATT MTU 256; 218 bytes arrive whole in a 253-byte sealed notification; 219 returns an NFC error without truncation | the settled 256/253 link contract and D8. Requires the § 2.3 characteristic widening — at 244 this row cannot pass |
 | **Write before subscribing** | a command written before CCC enable is **either answered after CCC enable or dropped and logged** — `OD_RADIO_ERROR` drops the entry and calls `od_txq_app_dropped()` (`od_txq.c:196-204`), so "answered" is not the guarantee — and the link does not wedge | the § 2.2 hold against the § 4.2 `!s_notify` classification — the deadlock an earlier draft would have shipped |
-| **Event flood during CONFIG_READ** | a 22-chunk read under concurrent writes and a disconnect completes or fails cleanly; no BGAPI buffer exhaustion | § 2.2's hold has a floor, not infinite storage |
+| **Event flood during CONFIG_READ and stuck RETRY** | a 22-chunk read under concurrent writes and disconnect completes or fails cleanly; then force a RETRY head beyond the producer deadline and observe the target-level hold deadline log, command-state reset and resumed event processing; no BGAPI buffer exhaustion | § 2.2: producer cancellation alone does not retire a RETRY head |
 | **Oversize config at cap+1** | a declared total of 2,049 draws a NACK and stored config is unchanged | the § 2.5 bound specifically, not merely "some large value" |
 
 **OD-S1 replay injection does not apply** — it is a PIPE test and BG22 has no PIPE. Do not substitute
@@ -963,9 +1103,13 @@ per-row PASS/FAIL. A build or a host suite is not on-air evidence.
 
 - **Two config buffers must never coexist.** If `opendisplay_config_buf()` and `s_cfg_chunk` cannot
   be retired in the commit that introduces `od_config_asm`, stop — the ledger inverts from roughly
-  −0.6 KB to about +1.5 KB and the plan is wrong about the storage path. Note that the first is an NVM3 record field
+  −0.5 KB to about +1.9 KB and the plan is wrong about the storage path. Note that the first is an NVM3 record field
   rather than a standalone buffer (§ 2.5), so this stop condition is also the plan's largest piece of
   unestimated work.
+- **The final static delta must remain negative.** The quantified prediction is −533 B at one PSA
+  user slot or −413 B at four, before any unquantified resource-report bookkeeping. If the final map
+  is non-negative, stop and revise the architecture; static RAM reduction is the premise that makes
+  this migration viable, not a decorative estimate.
 - **Stop if the § 2.5 bound is not in place before the cap moves.** `od_config_asm` does not enforce
   `OD_CONFIG_MAX_SIZE` today; at 2048 without C13.0a, a declared total of 2,049..4,000 overflows the
   buffer. This is the plan's one memory-safety stop condition and it is not conditional on anything.
@@ -973,33 +1117,48 @@ per-row PASS/FAIL. A build or a host suite is not on-air evidence.
   to prevent, and it is invisible to the host.
 - **Nothing whose only escape is an application event may map to `OD_RADIO_RETRY`.** § 2.2's hook is
   all-or-nothing, so such a mapping deadlocks by construction (§ 4.2).
+- **A producer deadline is not an event-hold bound.** Stop if the target-level maximum
+  event-hold/TX-retry lifetime is absent, or if expiry cancels only CONFIG_READ while leaving the
+  RETRY head queued. Expiry must log, reset the stuck command transport state and admit events.
 - **`OD_FRAME_DEFERRED` must never be dropped.** § 2.2's `sl_bt_can_process_event()` override is what
   makes it unreachable; if it is returned anyway, the target logs it as an invariant violation. Do
   not add a retry buffer, and do not swallow it.
-- **A capability may change SIZING and ASSERTIONS; it may never change ROUTING** (§ 2.3). The moment
-  `OD_CAP_*` appears in `od_cmd_app.h` or in `od_dispatch.c`'s opcode map, adding an opcode stops
-  being a link error everywhere and C11's guarantee is gone.
-- **Do not `#if` inside shared dispatch, and do not write a Silabs-local `od_txq`.** The
-  `OD_CONFIG_MAX_SIZE` `#ifndef` sizing guard in C13.0 is the only shared concession this plan makes;
-  anything beyond it is a fork wearing a config flag.
+- **A capability may change SIZING, BUDGET VALUES and ASSERTIONS; it may never change ROUTING**
+  (§ 2.3). Every metadata row generates its hook call regardless of `OD_CAP_*`; the moment a
+  capability selects whether a row or hook exists, adding an opcode stops being a link error on
+  every target and C11's guarantee is gone.
+- **Do not `#if` routes inside shared dispatch, and do not write a Silabs-local `od_txq`.** An earlier
+  draft called the config guard the plan's "only shared concession" while §§ 1/4.1 listed four; that
+  was false. The four allowed shared changes are exactly the config guard, assembler bound,
+  capability declarations, and one-source routing/budget metadata. Anything beyond them requires a
+  plan revision; a target-local fork wearing a config flag is not allowed.
 - **PSA CCM fails closed if the tag policy is wrong.** Plain `PSA_ALG_CCM` pins 16 bytes and returns
   `NOT_PERMITTED` on every operation. Copy Nordic's proven shortened-tag form.
 - **Stop if the AEAD enabling cannot be ratcheted.** It lives in hand-edited autogenerated files
   (§ 4.2); without a check that fails when `PSA_WANT_ALG_CCM` is absent, a future `slc generate`
   disables all session encryption silently and the next evidence is a device that will not
   authenticate.
-- **Do not let the PSA key pool run out.** Four slots total, shared with the BT stack's LE Secure
-  Connections. A prepared session slot is a long-lived claim on a pool the radio also draws from.
+- **Do not let the PSA key pool run out.** The selected count is five total (the existing four plus
+  one application user slot), shared with the BT stack's LE Secure Connections. A prepared session
+  slot is a long-lived claim; if concurrent pairing fails, move explicitly to the SDK-default four
+  user slots and update the ledger to roughly −0.4 KB.
 - **`sl_bt_can_process_event()` is a stack contract, not a free hook.** The producer's run is
   bounded from the start (§ 2.4), not bounded reactively once a stall is observed — the BGAPI buffer
   is finite and documented to discard. If a stall is observed anyway, treat it as a second defect;
   never raise the supervision timeout to hide it.
 - **A retry must re-send, never re-seal.** Re-sealing spends a nonce counter for bytes already on the
   wire. The host test in § 6.1 exists for this specifically.
+- **Stack acceptance is not D5 completion.** Stop if C13.7 refreshes when
+  `sl_bt_resource_get_connection_tx_status()` still reports pending packets, report corruption or a
+  changed connection instance. A sniffer-only pass cannot replace the software barrier.
+- **Do not share cap-sensitive host objects across profiles.** `od_shared_silabs` must compile
+  `od_config_asm.c` and `od_dispatch.c` with the same cap macros as its target command units;
+  translation-unit-local asserts and runtime `sizeof` checks do not protect this ABI.
 - **The corpus must not become its own oracle.** The Silabs profile obeys C12's rule: fakes get
   semantic knobs, never expected bytes.
-- Stop and revise if implementation requires a canonical protocol-header edit, a new opcode or error
-  code, or transfer state machines under `shared/`.
+- Stop and revise if implementation requires a canonical protocol-header edit, a new opcode or
+  protocol-wide error code beyond § 2.1's documented target-specific 0x04 marker, or transfer state
+  machines under `shared/`.
 
 ---
 
@@ -1013,9 +1172,11 @@ per-row PASS/FAIL. A build or a host suite is not on-air evidence.
   is target-local (§ 4.5);
 - no transfer, NFC or compression state-machine promotion to `shared/` — that is the unit after C13,
   and it carries the required re-argument of the plain-C decision;
-- no change to ESP32 or Nordic BEHAVIOUR. They gain the `OD_CONFIG_MAX_SIZE` assert, and their
-  images must come out byte-identical across C13.0a — at a 4,096 cap the new bound in
-  `od_config_asm_start()` is unreachable, and that is how the change is shown to be Silabs-only;
+- no change to ESP32 or Nordic BEHAVIOUR. They gain the `OD_CONFIG_MAX_SIZE` policy assert,
+  default-present capability declarations and metadata-generated routing/budgets. Their images must
+  come out byte-identical across C13.0a — at a 4,096 cap the new bound in
+  `od_config_asm_start()` is unreachable — and their route/corpus behaviour must remain identical
+  across C13.0b;
 - no hardware-verified label derived from build, host, corpus or sanitizer evidence.
 
 ---
@@ -1032,24 +1193,37 @@ per-row PASS/FAIL. A build or a host suite is not on-air evidence.
   recorded in CLAUDE.md and `DIVERGENCE_MATRIX`;
 - Silabs selects maximum ATT MTU 256 before advertising, a connection negotiates 256 on hardware,
   and a 253-byte sealed notification is observed intact;
-- `.bss`/`.text` are recorded per commit and the final figure matches § 4.6's **negative** net;
+- `.bss`/`.text` are recorded per commit and the final figure matches § 4.6's predicted roughly
+  **−0.5 KB** net at one PSA user slot (or the explicitly justified roughly −0.4 KB alternative);
 - `od_config_asm_start()` bounds the declared total against `OD_CONFIG_MAX_SIZE`, and a cap+1 test
   is shown failing on the pre-fix tree — the plan's one memory-safety item;
-- the arena depth is a consequence of `od_dispatch_budget()`'s maximum, pinned by a host test that
-  walks the table — not a constant asserted to track it;
-- capabilities are declared in one place (`shared/core/od_caps.h`) and appear nowhere in the opcode
-  map or the hook declarations;
+- routing and reservation budgets are generated from one opcode metadata table, each row has a
+  capacity assertion, and behavioural tests prove every multi-reply handler spends no more than its
+  row — there is no hand-maintained `OD_DISPATCH_BUDGET_MAX`;
+- capabilities are declared in one place (`shared/core/od_caps.h`), never select routing or hook
+  declarations, and each corpus profile proves its bits equal the compiled macros; BG22 explicitly
+  sets PIPE, PARTIAL and RXQ to 0;
+- the Silabs corpus/budget executables link `od_shared_silabs`, whose cap-sensitive shared sources
+  are compiled with the same `OD_CONFIG_MAX_SIZE` and `OD_CAP_*` values as target command units;
 - `0x0081` on a PIPE-less build reaches its hook and draws silence, rather than being deferred
   before the gate;
 - no `OD_RADIO_RETRY` mapping exists whose escape is an application event;
+- a target-level maximum event-hold/TX-retry lifetime retires a stuck RETRY head by logging and
+  resetting command transport state; CONFIG_READ cancellation alone is not claimed as the bound;
 - the dynamic characteristic admits 253-byte values, and a 253-byte sealed notification is observed;
-- D5 is closed by a prepare/refresh split with the ACK queued between, evidenced on air rather than
-  from an enqueue log;
-- `HAL_WDT` is recorded as declined **by choice**, with the § 4.5 argument for why the flush barrier
-  is safe without it stated in the plan rather than assumed;
+- D5 is closed by a prepare/refresh split plus a bounded zero-pending TX-status barrier on the exact
+  connection instance; timeout/error/tag change prevents refresh, and on-air evidence corroborates
+  rather than substitutes for that software guarantee;
+- C13.3's compatibility bridge prepares the PSA session key and destroys it on every legacy
+  clear/failure/timeout/replacement/disconnect path; the linked map selects CRYPTOACC AEAD and keeps
+  `MBEDTLS_CCM_C` absent without inferring the backend from `.text` size;
+- `HAL_WDT` is recorded as declined **by choice**, with § 4.5's bounded software failure policy and
+  the residual absence of hardware recovery stated rather than calling the barrier unconditionally
+  safe;
 - `dispatch_corpus_silabs` runs every `target-production` vector this target owns, with no
   predicate-excluded production vector;
-- the pre-C13.6 capture was taken, or its skip was recorded as conscious;
+- the pre-C13.0b capture, including the old transport refusal of a 245-byte write, was taken, or its
+  skip was recorded as conscious;
 - `tools/check.sh --targets` reports 14 passed, 0 failed, 0 skipped from a clean tree;
 - every hardware row has a provenance-backed PASS/FAIL, and no row is inferred.
 
