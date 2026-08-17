@@ -479,6 +479,58 @@ corpus:
 - **Compile-time invariants.** The `_Static_assert`s coupling `PIPE_MAX_W`, the replay window,
   and reorder-slot count.
 
+## BLE ATT MTU and frame-size contract — settled
+
+**The fleet BLE ATT MTU is 256 bytes.** This is the complete ATT PDU: opcode (1 byte), attribute
+handle (2 bytes), and characteristic value (at most 253 bytes). It is not 247, 249, or 512, and it
+is not inferred from a vendor SDK default, an ACL buffer size, or the width of a firmware queue.
+The decision was settled by [`PLAN_OD_DISPATCH_2026-08-14.md`](../plans/PLAN_OD_DISPATCH_2026-08-14.md)
+§2 and [`OD_SESSION_PLAN_2026-08-15.md`](../plans/OD_SESSION_PLAN_2026-08-15.md); those two plans use
+the following limits as one contract:
+
+| Quantity | Contents | Maximum |
+|---|---|---:|
+| ATT MTU / complete ATT PDU | `[opcode:1][handle:2][value]` | **256** |
+| GATT characteristic value / transport admission | application bytes after ATT overhead | **253** |
+| RX storage width | firmware slot backing one inbound BLE frame | **256** |
+| TX storage width (`OD_TX_FRAME_MAX`) | firmware slot backing one outbound BLE frame | **256** |
+| Shared BLE dispatcher input | complete command value handed to dispatch | **244** |
+| PIPE frame | complete PIPE command value | **244** |
+| Response/session payload | bytes after the two command/response bytes | **222** |
+| Complete plain response frame | `[cmd:2][payload]` | **224** |
+| CCM plaintext | `[len:1][payload]` | **223** |
+| Envelope after the command bytes | `[nonce:16][ciphertext][tag:12]` | **251** |
+| Complete sealed application value | `[cmd:2][envelope]` | **253** |
+| CONFIG_READ notification frame | header plus config bytes | **100** |
+| NFC read tag data | 218 data + 4 NFC metadata + 2 response bytes | **218** |
+
+The bounds deliberately describe different layers. Values of 245 through 253 fit the transport
+but exceed the shared dispatcher ceiling, so the application can return its explicit oversize
+NACK. A value of 254 or more does not fit ATT MTU 256 and is rejected at the ATT layer. Storage is
+256 bytes wide so it can represent the complete BLE/ATT frame budget; that spare width does not
+authorize a 256-byte characteristic value.
+
+Sealing adds exactly 29 bytes to a complete plain response frame: nonce (16), encrypted inner
+length (1), and tag (12). Therefore a 224-byte plain response seals to exactly 253 bytes. The
+one-byte inner length can represent a larger number, but it is not a supported producer or
+transport ceiling. NFC is the largest supported producer: 218 bytes of tag data plus 4 bytes of
+NFC metadata form the 222-byte session payload.
+
+Every target must realize the same link contract in its vendor stack:
+
+| Target | Required realization |
+|---|---|
+| ESP32/NimBLE | request preferred ATT MTU 256 with `ble_att_set_preferred_mtu()` and enforce value admission at 253 |
+| Nordic/Zephyr | configure `CONFIG_BT_L2CAP_TX_MTU=256`, 260-byte ACL buffers (256 + 4-byte L2CAP header), and enforce value admission at 253 |
+| EFR32BG22/Silabs | set `SL_BGAPI_MAX_PAYLOAD_SIZE` to at least 263, call `sl_bt_gatt_server_set_max_mtu(256, &selected)` before advertising, require `selected == 256`, and enforce value admission at 253 |
+
+Negotiation is still peer-dependent: a connection may settle below 256, and a sender must not
+emit a notification larger than that connection's negotiated ATT MTU minus 3. The architectural
+maximum remains 256/253; a lower vendor default is an incomplete target integration, not a new
+fleet size decision. For the Silabs API specifically, the configured maximum MTU is bounded by
+`SL_BGAPI_MAX_PAYLOAD_SIZE - 7`, so a target that leaves `SL_BGAPI_MAX_PAYLOAD_SIZE` at 256 cannot
+realize this contract.
+
 ## One execution model: run-to-completion, for threaded and single-threaded alike
 
 **There is no separate architecture for RTOS targets and bare-metal targets.** `shared/core` is
