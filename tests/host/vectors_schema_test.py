@@ -155,6 +155,36 @@ def test_the_five_the_review_found() -> None:
         "a new captured-unattributed side outside the frozen legacy allowlist")
 
 
+def test_source_paths_must_resolve() -> None:
+    """A source reference nothing resolves is a claim nothing enforces -- the pattern this corpus
+    keeps having to unlearn."""
+    rejects(base_vector(provenance={"frame": "authored",
+                                    "frame_source": "shared/core/od_gate_typo.c",
+                                    "reply": "authored", "reply_source": "fixture/spec"}),
+            "an authored source naming a file that does not exist")
+    accepts(base_vector(provenance={"frame": "authored",
+                                    "frame_source": "shared/core/od_gate.c",
+                                    "reply": "authored", "reply_source": "fixture/spec"}),
+            "an authored source naming a file that does exist")
+
+    # A reference that is not path-shaped is a document or a spec section, and demanding it be a
+    # file would push the honest answer into a shape that fits the check rather than the truth.
+    accepts(base_vector(provenance={"frame": "authored",
+                                    "frame_source": "DIVERGENCE_MATRIX 1.1",
+                                    "reply": "authored", "reply_source": "fixture/spec"}),
+            "a source that names a document rather than a file")
+
+    # captured-unattributed points into a SIBLING repository that may not be checked out, so the
+    # gate must not depend on somebody's workspace layout.
+    accepts(base_vector(provenance={
+        "frame": "captured-unattributed",
+        "frame_source": "py-opendisplay/tests/fixtures/real_protocol_data/02_read_firmware_response.bin",
+        "limitation": "legacy capture, unattributable",
+        "reply": "authored", "reply_source": "fixture/spec"},
+        id="dispatch/firmware-version-response-no-patch"),
+        "an external fixture path on a captured-unattributed side")
+
+
 def test_other_structural_rules() -> None:
     rejects(base_vector(frame="007"), "odd-length hex")
     rejects(base_vector(frame="00AA"), "uppercase hex")
@@ -198,6 +228,7 @@ def main() -> int:
     test_the_real_corpus_validates()
     test_positive_shapes()
     test_the_five_the_review_found()
+    test_source_paths_must_resolve()
     test_other_structural_rules()
     print(f"vectors_schema: {CHECKS} checks, {len(FAILURES)} failures")
     return 0 if not FAILURES else 1

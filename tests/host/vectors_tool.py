@@ -33,6 +33,9 @@ import json
 import pathlib
 import sys
 
+# The repository root, for resolving provenance source paths: tests/host/vectors_tool.py -> up two.
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
 SCHEMA = "opendisplay-wire-vectors/1"
 
 # Capability predicates a vector may name in `requires` / `forbids`. A closed set on purpose: an
@@ -93,6 +96,35 @@ STATE_KEYS = {
 
 class Bad(Exception):
     """A schema violation, reported with the vector id already attached."""
+
+
+def _source_is_path(value: str) -> bool:
+    """A source reference that LOOKS like a file, as opposed to a document or spec name.
+
+    The test is a slash plus an extension on the last segment. Deliberately loose: the field is a
+    reference for a human first, and demanding every source be a file would push the honest answer
+    -- "the canonical header's prose", "a DIVERGENCE_MATRIX row" -- into a shape that fits the
+    check rather than the truth."""
+    return "/" in value and "." in value.rsplit("/", 1)[-1]
+
+
+def _check_source_path(side: str, kind: str, value: str) -> None:
+    """A path-shaped source on an in-repo side must RESOLVE.
+
+    Nothing checked these until now, so `shared/core/od_gate.c` and a typo of it were equally
+    acceptable -- a claim recorded in the data that nothing enforced, which is the pattern this
+    corpus keeps having to unlearn. A refactor that moves a file now fails here instead of leaving
+    a reference that quietly points nowhere.
+
+    NOT applied to captured-unattributed: those name fixtures in a SIBLING repository
+    (py-opendisplay), which is not guaranteed to be checked out beside this one, and a gate that
+    depended on somebody's workspace layout would fail on a fresh clone. Their limitation string
+    already records that they cannot be attributed, which is the stronger statement anyway."""
+    if kind == "captured-unattributed" or not _source_is_path(value):
+        return
+    if not (REPO_ROOT / value).exists():
+        raise Bad(f"`provenance.{side}_source` names {value!r}, which does not exist in this "
+                  "repository")
 
 
 def _hex(field: str, value: str) -> bytes:
@@ -217,6 +249,8 @@ def _check_vector(raw: dict) -> dict:
         source = prov.get(f"{side}_source")
         if kind == "authored" and (not isinstance(source, str) or not source.strip()):
             raise Bad(f"`provenance.{side}` is authored but has no {side}_source reference")
+        if isinstance(source, str) and source.strip():
+            _check_source_path(side, kind, source.strip())
         if kind == "captured":
             # TEST_OWNERSHIP.md's capture plan lists what a capture must carry to be a regression
             # baseline. A `captured` label without them is an unattributed capture wearing a better
