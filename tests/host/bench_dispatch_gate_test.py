@@ -223,11 +223,15 @@ def test_evidence_redacts_secrets() -> None:
         "master_key": "00112233445566778899aabbccddeeff",
         "address": "AA:BB:CC:DD:EE:FF",
         "nested": {"session_nonce": "deadbeef", "harmless": 1},
+        "frames": [{"session_token": "secret", "hex": "001122"}],
         "phases": "kept",
     })
     check(record["master_key"] == "<redacted>", "a key is redacted")
     check(record["address"] == "<redacted>", "an address is redacted")
     check(record["nested"]["session_nonce"] == "<redacted>", "redaction reaches nested objects")
+    check(record["frames"][0]["session_token"] == "<redacted>",
+          "redaction reaches dictionaries inside lists")
+    check(record["frames"][0]["hex"] == "001122", "declared raw-wire evidence survives")
     check(record["nested"]["harmless"] == 1, "ordinary fields survive")
     check(record["phases"] == "kept", "the result itself survives")
 
@@ -254,10 +258,24 @@ def make_device_ctx() -> tuple[cli._BleCtx, FakeDevice]:
 
 def gate_args(**over: object) -> argparse.Namespace:
     base = dict(phase="all", total_size=192, window=4, max_frame=244, chunk_bytes=64,
-                settle=0.0, observe=0.0, withhold=0.0, timeout=1.0, frame_gap=0.0,
-                refresh_wait=0.0, device_log=None, target=None, firmware_sha=None, output=None)
+                settle=0.0, observe=0.0, telemetry_wait=0.0, withhold=0.0,
+                timeout=1.0, frame_gap=0.0,
+                refresh_wait=0.0, device_log=None, target=None, firmware_sha=None, output=None,
+                key="00" * 16, address="fake")
     base.update(over)
     return argparse.Namespace(**base)
+
+
+def _attach_live_log(dev: FakeDevice, path: str) -> None:
+    """Mirror a live RTT capture: refresh the file after every host write."""
+    dev.write_log(path)
+    original = dev.write_gatt_char
+
+    async def logging_write(uuid: str, data: bytes) -> None:
+        await original(uuid, data)
+        dev.write_log(path)
+
+    dev.write_gatt_char = logging_write
 
 
 def run_replay(dev_setup=None, **over) -> dict:
@@ -266,7 +284,10 @@ def run_replay(dev_setup=None, **over) -> dict:
         dev_setup(dev)
     log = cli._FrameLog()
     ctx.raw_log = log
-    return asyncio.run(cli._bench_replay(ctx, log, gate_args(**over)))
+    with tempfile.TemporaryDirectory() as d:
+        path = str(pathlib.Path(d) / "device.log")
+        _attach_live_log(dev, path)
+        return asyncio.run(cli._bench_replay(ctx, log, gate_args(device_log=path, **over)))
 
 
 def test_replay_workflow_passes_against_a_conforming_device() -> None:
@@ -274,9 +295,28 @@ def test_replay_workflow_passes_against_a_conforming_device() -> None:
     check(out["start_acked"], "START was acked")
     check(out["first_frame_acked"], "the first DATA frame was acked")
     check(out["replay_drew_silence"], "the replay drew silence")
+    check(out["replay_telemetry"]["found"], "fresh nonce_reason=3 replay telemetry was found")
     check(out["control_answered_exactly"], "the control drew exactly 0081ff")
     check(out["end_acked"] and out["refresh_reported"], "the transfer completed through refresh")
+    check(not any(r["hex"] == "ff82" for r in out["continuation_replies"]),
+          "automatic completion did not send a second, invalid END")
     check(out["pass"], "a conforming device passes the replay phase")
+
+    uneven = run_replay(total_size=193)
+    check(uneven["pass"], "a non-divisible final chunk completes without padding past total_size")
+
+
+def test_replay_parameters_enforce_the_complete_on_wire_frame() -> None:
+    """The protocol's 244-byte limit includes the encrypted envelope, not only image bytes."""
+    too_large = gate_args(phase="replay", device_log="unused", chunk_bytes=213)
+    check(cli.cmd_dispatch_gate(too_large) == 2,
+          "213 data bytes plus the 32-byte envelope is rejected before connecting")
+    not_live = gate_args(phase="replay", device_log="unused", total_size=64, chunk_bytes=64)
+    check(cli.cmd_dispatch_gate(not_live) == 2,
+          "the first DATA frame may not auto-complete before it is replayed")
+    no_log = gate_args(phase="replay", device_log=None)
+    check(cli.cmd_dispatch_gate(no_log) == 2,
+          "the replay phase refuses to run without device-side telemetry")
 
 
 def test_replay_fails_when_pipe_never_opened() -> None:
@@ -299,6 +339,23 @@ def test_replay_fails_when_the_device_answers_a_replay() -> None:
     out = run_replay(lambda d: setattr(d, "answer_replays", True))
     check(not out["replay_drew_silence"], "an answered replay is observed")
     check(not out["pass"], "and it fails the phase")
+
+
+def test_replay_fails_without_fresh_device_telemetry() -> None:
+    """Wire silence plus survival is not the complete OD-S1 row: the target must classify and
+    report the rejection as NONCE_REPLAY, not become silent for an unrelated reason."""
+    out = run_replay(lambda d: setattr(d, "report_replays", False))
+    check(out["replay_drew_silence"], "the unreported replay was still silent on the wire")
+    check(not out["replay_telemetry"]["found"], "no fresh replay report was invented")
+    check(not out["pass"], "missing replay telemetry fails the phase")
+
+    def stale_only(dev: FakeDevice) -> None:
+        dev.log_lines.append("decrypt failed (0x0081, rc=4, nonce_reason=3)")
+        dev.report_replays = False
+
+    stale = run_replay(stale_only)
+    check(not stale["replay_telemetry"]["found"], "pre-checkpoint replay telemetry was ignored")
+    check(not stale["pass"], "a prior run's replay line cannot satisfy this run")
 
 
 def test_replay_fails_when_the_transfer_dies() -> None:
@@ -334,19 +391,10 @@ def run_withhold(dev_setup=None, **over) -> dict:
         dev_setup(dev)
     log = cli._FrameLog()
     ctx.raw_log = log
-    with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as fh:
-        path = fh.name
-
-    # The device's log grows as it dispatches, exactly as an operator's RTT capture would during a
-    # run. Flushing it on every write keeps the file current when the phase reads it.
-    original = dev.write_gatt_char
-
-    async def logging_write(uuid: str, data: bytes) -> None:
-        await original(uuid, data)
-        dev.write_log(path)
-
-    dev.write_gatt_char = logging_write
-    return asyncio.run(cli._bench_withhold(ctx, log, gate_args(device_log=path, **over)))
+    with tempfile.TemporaryDirectory() as d:
+        path = str(pathlib.Path(d) / "device.log")
+        _attach_live_log(dev, path)
+        return asyncio.run(cli._bench_withhold(ctx, log, gate_args(device_log=path, **over)))
 
 
 def test_withhold_workflow_passes_against_a_conforming_device() -> None:
@@ -377,9 +425,37 @@ def test_withhold_fails_when_the_device_defers_processing() -> None:
     check(not out.get("pass"), "so the phase fails")
 
 
+def test_withhold_ignores_a_stale_canary_line() -> None:
+    """A previous run's line cannot prove that this run reached dispatch before re-enable."""
+    def setup(dev: FakeDevice) -> None:
+        dev.log_lines.append("unknown cmd 0x0060")
+        dev.dispatch_while_unsubscribed = False
+
+    out = run_withhold(setup)
+    check(not out.get("canary", {}).get("found"), "the pre-checkpoint canary was ignored")
+    check(out.get("bytes_match_baseline"), "deferred processing can still deliver exact bytes later")
+    check(not out.get("pass"), "stale log evidence cannot turn deferred processing into a pass")
+
+
 def test_withhold_fails_when_queued_frames_are_dropped() -> None:
     out = run_withhold(lambda d: setattr(d, "drop_while_unsubscribed", True))
     check(not out.get("pass"), "dropped frames fail the phase")
+
+
+def test_combined_production_workflow_aggregates_both_phases() -> None:
+    """Exercise the public bench workflow, including phase aggregation and list redaction."""
+    ctx, dev = make_device_ctx()
+    with tempfile.TemporaryDirectory() as d:
+        path = str(pathlib.Path(d) / "device.log")
+        _attach_live_log(dev, path)
+        args = gate_args(phase="all", device_log=path, target="fake-board", firmware_sha="abc1234")
+        out = asyncio.run(cli._do_dispatch_gate(ctx, args))
+    check([p["phase"] for p in out["phases"]] == ["od-s1-replay", "withhold-notify"],
+          "the combined workflow ran both production phases in order")
+    check(all(p["pass"] for p in out["phases"]), "both production phases passed")
+    check(out["pass"], "the evidence record aggregates both phase results")
+    check(out["target"] == "fake-board" and out["firmware_sha"] == "abc1234",
+          "non-secret evidence provenance survives redaction")
 
 
 def main() -> int:
@@ -390,15 +466,19 @@ def main() -> int:
     test_raw_log_records_before_decryption()
     test_evidence_redacts_secrets()
     test_replay_workflow_passes_against_a_conforming_device()
+    test_replay_parameters_enforce_the_complete_on_wire_frame()
     test_replay_fails_when_pipe_never_opened()
     test_replay_fails_when_first_frame_refused()
     test_replay_fails_when_the_device_answers_a_replay()
+    test_replay_fails_without_fresh_device_telemetry()
     test_replay_fails_when_the_transfer_dies()
     test_replay_control_requires_the_exact_nack()
     test_withhold_workflow_passes_against_a_conforming_device()
     test_withhold_fails_without_the_device_log()
     test_withhold_fails_when_the_device_defers_processing()
+    test_withhold_ignores_a_stale_canary_line()
     test_withhold_fails_when_queued_frames_are_dropped()
+    test_combined_production_workflow_aggregates_both_phases()
     print(f"bench_dispatch_gate: {CHECKS} checks, {len(FAILURES)} failures")
     return 0 if not FAILURES else 1
 

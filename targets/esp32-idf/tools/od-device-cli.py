@@ -1061,6 +1061,10 @@ async def _ble_read_modify_write(
 
 PIPE_VERSION = 1
 PIPE_ACK_EVERY = 1
+PIPE_MAX_ON_WIRE = 244
+# [cmd:2][session id + counter:16][plaintext length:1][PIPE seq:1][CCM tag:12].
+# `--chunk-bytes` is only the DATA bytes, while PIPE_MAX_FRAME is the complete sealed value.
+PIPE_ENCRYPTED_DATA_OVERHEAD = 32
 
 
 class _FrameLog:
@@ -1146,7 +1150,12 @@ async def _bench_replay(ctx: _BleCtx, log: _FrameLog, args: argparse.Namespace) 
         out["stopped_at"] = "first-data-not-acked"
         return out
 
-    # --- 3. the replay: identical bytes, and it must draw nothing ----------------------------
+    # --- 3. the replay: identical bytes, no wire reply, and a FRESH device-side report --------
+    # The target rate-limits replay/out-of-window telemetry in a five-second bucket. Waiting it
+    # out makes a missing line a failure of this stimulus rather than residue from an earlier event.
+    _status("OD-S1: waiting beyond the replay telemetry throttle...")
+    await asyncio.sleep(args.telemetry_wait)
+    replay_log_mark = _device_log_checkpoint(args.device_log) if args.device_log else {}
     _status("OD-S1: re-sending the IDENTICAL sealed bytes...")
     t_replay = log.now_ms()
     await ctx.send_raw(wire)                      # same session id, same counter, same tag
@@ -1154,6 +1163,10 @@ async def _bench_replay(ctx: _BleCtx, log: _FrameLog, args: argparse.Namespace) 
     replay_replies = log.since(t_replay)
     out["replay_replies"] = replay_replies
     out["replay_drew_silence"] = (len(replay_replies) == 0)
+    out["replay_telemetry"] = (
+        _device_log_match(args.device_log, replay_log_mark,
+                          ("0x0081", "decrypt failed", "nonce_reason=3"), "replay")
+        if args.device_log else {"found": False, "error": "no --device-log supplied"})
 
     # --- 4. the control, matched exactly -----------------------------------------------------
     # A tag failure is tamper evidence and keeps its NACK, so the gate answers [00][81][FF]
@@ -1171,12 +1184,19 @@ async def _bench_replay(ctx: _BleCtx, log: _FrameLog, args: argparse.Namespace) 
     # --- 5. continuation: the transfer must still be alive -----------------------------------
     # THE HALF THAT PROVES SURVIVAL. Silence is the required behaviour only if the upload then
     # completes; a device that went quiet because the transfer died would pass steps 3 and 4.
-    _status(f"OD-S1: continuing with fresh counters ({frames_total - 1} frame(s)) through END...")
+    _status(f"OD-S1: continuing with fresh counters ({frames_total - 1} frame(s)) "
+            "through automatic END...")
     t_cont = log.now_ms()
-    for seq in range(1, frames_total):
-        await ctx.send_command(0x00, 0x81, bytes([seq & 0xFF]) + chunk)
+    remaining = args.total_size - args.chunk_bytes
+    seq = 1
+    while remaining > 0:
+        part = chunk[:min(args.chunk_bytes, remaining)]
+        await ctx.send_command(0x00, 0x81, bytes([seq & 0xFF]) + part)
         await asyncio.sleep(args.frame_gap)
-    await ctx.send_command(0x00, 0x82)
+        remaining -= len(part)
+        seq += 1
+    # Uncompressed full-frame PIPE auto-completes on the final DATA and emits 0x82 itself. Sending
+    # another explicit END after that is a protocol error and receives a hard [FF][82] NACK.
     await asyncio.sleep(args.refresh_wait)
     out["end_acked"] = len(_replies_matching(log, t_cont, bytes([0x00, 0x82]))) > 0
     # 0x73 refresh complete, 0x74 refresh timed out. Both mean the panel was driven; only their
@@ -1186,7 +1206,8 @@ async def _bench_replay(ctx: _BleCtx, log: _FrameLog, args: argparse.Namespace) 
     out["continuation_replies"] = log.since(t_cont)
 
     out["pass"] = bool(out["start_acked"] and out["first_frame_acked"]
-                       and out["replay_drew_silence"] and out["control_answered_exactly"]
+                       and out["replay_drew_silence"] and out["replay_telemetry"].get("found")
+                       and out["control_answered_exactly"]
                        and out["end_acked"] and out["refresh_reported"]
                        and out["counter_delta_for_one_frame"] == 1)
     return out
@@ -1197,8 +1218,45 @@ async def _read_config_bytes(ctx: _BleCtx, timeout: float) -> bytes:
     return await _do_read_config(ctx, timeout)
 
 
-def _canary_in_device_log(path: str, canary_hex: str) -> dict[str, Any]:
-    """Scan an operator-captured device log for the unknown-opcode line.
+def _device_log_checkpoint(path: str) -> dict[str, int | None]:
+    """Identify the end of the log before a stimulus, so old evidence cannot satisfy a new run."""
+    try:
+        with open(path, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            fh.seek(0, os.SEEK_END)
+            return {"device": st.st_dev, "inode": st.st_ino, "offset": fh.tell()}
+    except OSError:
+        # A capture process may create the file only after the run starts. In that case every byte
+        # in the eventual file is new evidence.
+        return {"device": None, "inode": None, "offset": 0}
+
+
+def _device_log_match(path: str, mark: dict[str, int | None], required: tuple[str, ...],
+                      label: str) -> dict[str, Any]:
+    """Find a line appended after `mark` containing every case-insensitive required fragment."""
+    out: dict[str, Any] = {"log_path": path, f"{label}_line": None, "found": False}
+    try:
+        with open(path, "r", errors="replace") as fh:
+            st = os.fstat(fh.fileno())
+            offset = int(mark.get("offset") or 0)
+            same_file = (mark.get("device") == st.st_dev and mark.get("inode") == st.st_ino)
+            # A replaced or truncated capture starts a new epoch; none of its content predates the
+            # checkpoint. Otherwise only scan the appended suffix.
+            if same_file and st.st_size >= offset:
+                fh.seek(offset)
+            needles = tuple(s.lower() for s in required)
+            for line in fh:
+                if all(s in line.lower() for s in needles):
+                    out[f"{label}_line"] = line.strip()
+                    out["found"] = True
+                    break
+    except OSError as exc:
+        out["error"] = str(exc)
+    return out
+
+
+def _canary_in_device_log(path: str, mark: dict[str, int | None], canary_hex: str) -> dict[str, Any]:
+    """Scan NEW operator-captured device-log bytes for the unknown-opcode line.
 
     THIS IS THE ONLY EVIDENCE THAT THE CANARY REACHED DISPATCH, and it cannot come from the wire:
     an unknown opcode is answered with silence by design, and the host is unsubscribed anyway. RX
@@ -1207,18 +1265,11 @@ def _canary_in_device_log(path: str, canary_hex: str) -> dict[str, Any]:
 
     Without the log the phase cannot pass. A tool that inferred it from a complete config read
     afterwards would be unable to tell "queued after dispatch" from "processed late", and those are
-    the two outcomes the row exists to separate."""
-    out: dict[str, Any] = {"log_path": path, "canary_line": None, "found": False}
-    try:
-        with open(path, "r", errors="replace") as fh:
-            for line in fh:
-                if canary_hex.lower() in line.lower() and "unknown" in line.lower():
-                    out["canary_line"] = line.strip()
-                    out["found"] = True
-                    break
-    except OSError as exc:
-        out["error"] = str(exc)
-    return out
+    the two outcomes the row exists to separate.
+
+    A line from an earlier run is not evidence. `mark` is captured before the commands are sent and
+    the scan is restricted to the suffix appended after it."""
+    return _device_log_match(path, mark, (canary_hex, "unknown"), "canary")
 
 
 async def _bench_withhold(ctx: _BleCtx, log: _FrameLog, args: argparse.Namespace) -> dict[str, Any]:
@@ -1255,6 +1306,7 @@ async def _bench_withhold(ctx: _BleCtx, log: _FrameLog, args: argparse.Namespace
             done.set()
 
     _status("backpressure: disabling notifications...")
+    log_mark = _device_log_checkpoint(args.device_log) if args.device_log else {}
     await ctx.set_notify(False)
     t_withheld = log.now_ms()
 
@@ -1265,7 +1317,7 @@ async def _bench_withhold(ctx: _BleCtx, log: _FrameLog, args: argparse.Namespace
 
     # The device log is captured by the operator over RTT/serial; the tool reads it rather than
     # taking anyone's word for it.
-    out["canary"] = (_canary_in_device_log(args.device_log, "0x0060") if args.device_log
+    out["canary"] = (_canary_in_device_log(args.device_log, log_mark, "0x0060") if args.device_log
                      else {"found": False, "error": "no --device-log supplied"})
 
     _status("backpressure: re-enabling notifications...")
@@ -1364,18 +1416,29 @@ def cmd_dispatch_gate(args: argparse.Namespace) -> int:
     # mismatched total is rejected by production PIPE START, and the replay phase would then be
     # measuring the session gate with no transfer open -- silent, and meaningless.
     if args.phase in ("all", "replay"):
-        if args.total_size <= 0:
+        if args.total_size <= 0 or args.total_size > 0xFFFFFFFF:
             _status("dispatch-gate: --total-size must be the panel's expected transfer size. "
                     "A START whose total does not match is rejected, and the replay phase would "
                     "then prove nothing.")
             return 2
-        if args.chunk_bytes <= 0 or args.chunk_bytes > args.max_frame:
-            _status("dispatch-gate: --chunk-bytes must be positive and within --max-frame.")
+        if args.max_frame <= PIPE_ENCRYPTED_DATA_OVERHEAD or args.max_frame > 0xFFFF:
+            _status("dispatch-gate: --max-frame cannot carry an encrypted PIPE DATA frame.")
             return 2
-    if args.phase in ("all", "withhold") and not args.device_log:
-        _status("dispatch-gate: --device-log is required for the withhold phase. An unknown opcode "
-                "is answered with silence, so only the device's own log shows the canary reached "
-                "dispatch before notifications were re-enabled.")
+        wire_limit = min(args.max_frame, PIPE_MAX_ON_WIRE)
+        if (args.chunk_bytes <= 0
+                or args.chunk_bytes + PIPE_ENCRYPTED_DATA_OVERHEAD > wire_limit):
+            _status("dispatch-gate: encrypted PIPE DATA is --chunk-bytes plus 32 bytes of "
+                    "opcode/session/length/sequence/tag overhead; the complete frame must fit "
+                    f"the negotiated {wire_limit}-byte on-wire ceiling.")
+            return 2
+        if args.total_size <= args.chunk_bytes:
+            _status("dispatch-gate: --total-size must exceed --chunk-bytes so the first accepted "
+                    "DATA frame leaves the transfer live for the replay stimulus.")
+            return 2
+    if not args.device_log:
+        _status("dispatch-gate: --device-log is required. The replay phase must observe a fresh "
+                "nonce-replay report, and the withhold phase must observe its dispatch canary; "
+                "neither property is visible on the wire.")
         return 2
 
     async def run() -> dict[str, Any]:
@@ -1625,7 +1688,8 @@ Examples:
     p_gate = sub.add_parser(
         "dispatch-gate",
         help="BENCH ONLY: drive the two hardware rows nothing else can produce\n"
-        "  e.g. od-device-cli.py dispatch-gate --addr AA:BB:CC:DD:EE:FF --key <hex> --total-size 48000\n",
+        "  e.g. od-device-cli.py dispatch-gate --addr AA:BB:CC:DD:EE:FF --key <hex> "
+        "--total-size 48000 --device-log device.log\n",
         description="Run the C12 exit-matrix rows that need deliberate stimulus rather than a "
         "normal session: the OD-S1 encrypted-replay silence path, and egress backpressure driven "
         "by withholding notifications. Writes a JSON evidence record with secrets redacted.",
@@ -1643,15 +1707,15 @@ WHY IT EXISTS. Both rows fail quietly when driven approximately:
     the retained bytes twice.
 
   * Silence is not evidence on its own: a disconnected notify path is also silent. The replay phase
-    therefore ends with a deliberately corrupted tag, which MUST draw a plaintext NACK. If that
-    control is quiet, the run is void rather than passing.
+    therefore requires a fresh device-side nonce-replay report and uses a deliberately corrupted
+    tag that MUST draw a plaintext NACK. If either control is absent, the run fails.
 
 Examples:
     od-device-cli.py dispatch-gate --addr AA:BB:CC:DD:EE:FF --key <hex> --total-size 48000 \\
-        --target xiao_nrf52840 --firmware-sha ab4ff36 -o evidence.json
+        --device-log device.log --target xiao_nrf52840 --firmware-sha ab4ff36 -o evidence.json
         Both phases, recording provenance for the evidence commit.
 
-    od-device-cli.py dispatch-gate --addr ... --key <hex> --phase withhold
+    od-device-cli.py dispatch-gate --addr ... --key <hex> --phase withhold --device-log device.log
         Backpressure only; needs no transfer and no --total-size.
 """,
     )
@@ -1669,6 +1733,9 @@ Examples:
     p_gate.add_argument("--observe", type=float, default=2.0,
                         help="bounded window for a reply that must NOT arrive; too short turns a "
                              "slow device into a false pass")
+    p_gate.add_argument("--telemetry-wait", type=float, default=5.1,
+                        help="seconds to wait before replaying, beyond the target's 5-second "
+                             "replay-log throttle")
     p_gate.add_argument("--withhold", type=float, default=2.0,
                         help="seconds to hold notifications off while commands are dispatched")
     p_gate.add_argument("--timeout", type=float, default=15.0, help="config reassembly timeout")
@@ -1678,9 +1745,8 @@ Examples:
                         help="seconds to wait for END ack and the refresh status; a panel refresh "
                              "can take a minute, and a short wait reads as a failed transfer")
     p_gate.add_argument("--device-log", default=None,
-                        help="operator-captured RTT/serial log, scanned for the unknown-opcode "
-                             "canary. The withhold phase CANNOT pass without it: an unknown opcode "
-                             "is silent by design, so nothing on the wire shows it reached dispatch")
+                        help="operator-captured RTT/serial log, scanned only after per-phase "
+                             "checkpoints for fresh replay telemetry and the unknown-opcode canary")
     p_gate.add_argument("--target", default=None, help="board id, recorded in the evidence file")
     p_gate.add_argument("--firmware-sha", default=None, help="firmware SHA under test, recorded")
     p_gate.add_argument("-o", "--output", help="write the JSON evidence record to a file")

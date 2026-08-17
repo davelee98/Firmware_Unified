@@ -56,7 +56,8 @@ def base_vector(**over) -> dict:
         "frame": "0070",
         "proof": "shared",
         "expect": {"reply": "007000"},
-        "provenance": {"frame": "authored", "reply": "authored"},
+        "provenance": {"frame": "authored", "frame_source": "fixture/spec",
+                       "reply": "authored", "reply_source": "fixture/spec"},
     }
     v.update(over)
     return v
@@ -91,7 +92,8 @@ def test_positive_shapes() -> None:
     accepts(base_vector(forbids=["cap_buzzer"]), "a negative capability predicate")
     accepts(base_vector(requires=["cap_pipe"]), "a positive capability predicate")
     accepts({"id": "dispatch/seq", "proof": "shared",
-             "provenance": {"frame": "authored", "reply": "authored"},
+             "provenance": {"frame": "authored", "frame_source": "fixture/spec",
+                            "reply": "authored", "reply_source": "fixture/spec"},
              "steps": [{"dir": "h2d", "origin": "ble", "frame": "0070",
                         "expect": {"reply": "0070"}},
                        {"dir": "h2d", "origin": "ble", "frame": "0072",
@@ -109,27 +111,48 @@ def test_the_five_the_review_found() -> None:
 
     rejects(base_vector(expect={"reply": "007000", "parsed": {}}),
             "an empty expect.parsed")
+    rejects(base_vector(expect={"replies": ["007000"], "parsed": {}}),
+            "an empty expect.parsed alongside expect.replies")
     rejects(base_vector(expect={"reply": "007000", "parsed": {"a..b": 1}}),
             "an expect.parsed path with an empty segment")
     rejects(base_vector(expect={"reply": "007000", "parsed": {"a.b": {"nested": 1}}}),
             "an expect.parsed value that is not a scalar")
 
-    rejects(base_vector(provenance={"frame": "captured", "reply": "authored"}),
+    rejects(base_vector(provenance={"frame": "captured", "reply": "authored",
+                                    "reply_source": "fixture/spec"}),
             "`captured` with no capture metadata")
     rejects(base_vector(provenance={"frame": "captured-unattributed",
-                                    "frame_source": "x.bin", "reply": "authored"}),
+                                    "frame_source": "x.bin", "reply": "authored",
+                                    "reply_source": "fixture/spec"}),
             "`captured-unattributed` with no limitation")
     rejects(base_vector(provenance={"frame": "captured-unattributed",
-                                    "limitation": "y", "reply": "authored"}),
+                                    "limitation": "y", "reply": "authored",
+                                    "reply_source": "fixture/spec"}),
             "`captured-unattributed` with no source")
-    rejects(base_vector(provenance={"frame": "authored", "reply": "authored", "bogus": 1}),
+    rejects(base_vector(provenance={"frame": "authored", "frame_source": "fixture/spec",
+                                    "reply": "authored", "reply_source": "fixture/spec",
+                                    "bogus": 1}),
             "an unknown provenance field")
 
     accepts(base_vector(provenance={
         "frame": "captured", "frame_target": "xiao_nrf52840", "frame_firmware_sha": "abc1234",
         "frame_protocol_version": "2.2", "frame_panel": "GDEY075", "frame_host_version": "7.14.0",
-        "frame_transport": "ble", "frame_date": "2026-08-16", "reply": "authored"}),
+        "frame_transport": "ble", "frame_date": "2026-08-16", "reply": "authored",
+        "reply_source": "fixture/spec"}),
         "`captured` WITH complete metadata")
+
+    missing = base_vector()
+    del missing["provenance"]
+    rejects(missing, "a vector with no provenance")
+    rejects(base_vector(provenance={"frame": "authored", "reply": "authored"}),
+            "authored sides without source references")
+    rejects(base_vector(provenance={"frame": "authored", "frame_source": 7,
+                                    "reply": "authored", "reply_source": "fixture/spec"}),
+            "an authored source reference that is not a string")
+    rejects(base_vector(provenance={
+        "frame": "captured-unattributed", "frame_source": "new.bin", "limitation": "unknown",
+        "reply": "authored", "reply_source": "fixture/spec"}),
+        "a new captured-unattributed side outside the frozen legacy allowlist")
 
 
 def test_other_structural_rules() -> None:
@@ -154,7 +177,8 @@ def test_other_structural_rules() -> None:
             "a d2h observation that expects a reply")
     rejects({"id": "dispatch/x", "proof": "shared", "dir": "h2d", "origin": "ble",
              "frame": "0070", "expect": {"reply": None},
-             "provenance": {"frame": "authored", "reply": "authored"},
+             "provenance": {"frame": "authored", "frame_source": "fixture/spec",
+                            "reply": "authored", "reply_source": "fixture/spec"},
              "steps": [{"dir": "h2d", "frame": "0070", "expect": {"reply": None}}]},
             "a vector with both `steps` and a top-level frame")
     rejects(base_vector(state={"nonsense": 1}), "an unknown state key")
