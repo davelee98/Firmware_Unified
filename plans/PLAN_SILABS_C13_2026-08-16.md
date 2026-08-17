@@ -3,6 +3,14 @@
 **Status:** NOT STARTED. Written 2026-08-16, after C12's software half landed. C12's hardware rows
 (H1-H3) remain ACCEPTED-UNRUN and do **not** block this plan.
 
+**REVISED THREE TIMES ON 2026-08-17.** The last pass replaced the ad-hoc `OD_DISPATCH_PIPE_ENABLED`
+with `shared/core/od_caps.h` — targets declare capabilities, `shared/` derives what follows — because
+three of this plan's four shared changes exist for the same reason (declining a subsystem is a fact
+`shared/` cannot learn) and each was becoming its own macro. It also records that **CCM is
+hardware-backed on this part at a 12-byte tag**: `CRYPTOACC_PRESENT`, and the PSA transparent driver
+accepts any even tag length 4..16, so Nordic's proven policy runs on the accelerator once an AEAD is
+selected. That is the one part of C13.3 already de-risked.
+
 **REVISED TWICE ON 2026-08-17, after three reviews.** The third — an independent pass that had not
 seen the other two — found that **a 3-slot arena cannot service the PIPE opcodes**, which both
 earlier rounds had blessed. `od_dispatch_budget()` charges 3 for `0x0081`/`0x0082` on every target,
@@ -79,11 +87,16 @@ Four owner decisions, taken 2026-08-16, shape the scope and are settled inputs:
 4. **`MAX_CONFIG_SIZE` stays 2048 on BG22**, deliberately re-opening the fleet-wide-4096 decision
    for this target.
 
-Four shared changes. Two are forced by the cap reversal (§ 2.5): `OD_CONFIG_MAX_SIZE` gains an
-`#ifndef` guard, and `od_config_asm_start()` gains the bound that makes the guard safe. Two are
-forced by declining PIPE (§ 2.3): `od_dispatch_budget()` learns `OD_DISPATCH_PIPE_ENABLED`, and
-`od_dispatch.h` gains the `OD_DISPATCH_BUDGET_MAX` the arena asserts against. No other shared source
-changes.
+Four shared changes, and the fourth is a mechanism rather than a macro. Two are forced by the cap
+reversal (§ 2.5): `OD_CONFIG_MAX_SIZE` gains an `#ifndef` guard, and `od_config_asm_start()` gains
+the bound that makes the guard safe. Two are forced by declining PIPE (§ 2.3): a new
+`shared/core/od_caps.h` where targets declare capabilities and `shared/` derives their consequences,
+and `od_dispatch_budget()` consulting `OD_CAP_PIPE`. No other shared source changes.
+
+**`od_caps.h` is deliberately more than this plan needs.** Three of the four shared changes so far
+exist because declining a subsystem is a fact `shared/` has no way to learn, and each was about to
+become its own ad-hoc macro. Silabs is the first target to decline anything substantial; it will not
+be the last, and the transfer promotion after C13 will decline more.
 
 ---
 
@@ -250,47 +263,76 @@ peer writes  00 81          2 bytes, plaintext, no session
 "DEFERRED becomes unreachable" would be false, and § 8's "log it loudly as an invariant violation"
 becomes a log storm any unauthenticated peer can drive two bytes at a time.
 
-**THE FIX IS TO STATE THE FACT WHERE THE TABLE CAN SEE IT.** A target that compiles PIPE out will
-answer 0x0080 with one NACK and 0x0081/0x0082 with nothing; the gate's own `[00][cmd][FE]` and
-`[00][cmd][FF]` are one frame each. One slot covers every path, so the budget is 1:
+**THE FIX IS TO STATE THE FACT WHERE THE TABLE CAN SEE IT**, and C13 introduces the mechanism this
+repo will need three more times: **`shared/core/od_caps.h`, where TARGETS DECLARE FACTS AND `shared/`
+DERIVES CONSEQUENCES.** The inversion is the point. An earlier draft had the target assert a
+consequence (`OD_DISPATCH_BUDGET_MAX_NO_PIPE 2u`) and that is precisely why it could not track the
+table: a new opcode budgeted at 3 would have passed it.
 
 ```c
-/* shared/core/od_dispatch.c */
-#ifndef OD_DISPATCH_PIPE_ENABLED
-#define OD_DISPATCH_PIPE_ENABLED 1
+/* shared/core/od_caps.h -- the only place a capability is read or derived. */
+
+/* DECLARED by the target, via target_compile_definitions. The default is PRESENT, so a target
+ * that says nothing behaves exactly as today and DECLINING IS ALWAYS EXPLICIT -- the same rule
+ * the source tiers already follow. */
+#ifndef OD_CAP_PIPE
+#define OD_CAP_PIPE 1
 #endif
-    case CMD_PIPE_WRITE_DATA:  return OD_DISPATCH_PIPE_ENABLED ? 3u : 1u;
-    case CMD_PIPE_WRITE_END:   return OD_DISPATCH_PIPE_ENABLED ? 3u : 1u;
+#ifndef OD_CAP_PARTIAL
+#define OD_CAP_PARTIAL 1
+#endif
+#ifndef OD_CAP_RXQ
+#define OD_CAP_RXQ 1
+#endif
+
+/* DERIVED. Targets never set these. A target that compiles PIPE out answers 0x0080 with one NACK
+ * and 0x0081/0x0082 with nothing, and the gate's own [00][cmd][FE] / [00][cmd][FF] are one frame
+ * each -- so one slot covers every path it can take. */
+#define OD_DISPATCH_BUDGET_MAX (OD_CAP_PIPE ? 3u : 2u)
+
+/* Cross-capability invariants, once, here. */
+OD_STATIC_ASSERT(OD_TXQ_SLOTS - 1u >= OD_DISPATCH_BUDGET_MAX,
+                 "the arena must cover the largest reservation the table can charge");
+OD_STATIC_ASSERT(OD_CONFIG_MAX_SIZE >= 2u * CONFIG_CHUNK_SIZE,
+                 "a cap below two chunks makes every chunked write unreachable");
+```
+```c
+/* shared/core/od_dispatch.c -- the table consults the capability, never a second constant. */
+    case CMD_PIPE_WRITE_DATA:  return OD_CAP_PIPE ? 3u : 1u;
+    case CMD_PIPE_WRITE_END:   return OD_CAP_PIPE ? 3u : 1u;
 ```
 
 `0x0080` already falls to `default: 1u`, which is correct — its answer is a single NACK.
+
+**Four design rules, and they are what keep this from becoming a config maze:**
+
+1. **No target-supplied header.** `-D` on the compile line, exactly as `OD_TXQ_SLOTS` already works.
+   A `od_target_caps.h` that `shared/` includes would add a new include contract across three build
+   systems and buy nothing.
+2. **Capabilities affect SIZING AND ASSERTIONS, never ROUTING.** It is tempting to `#if OD_CAP_PIPE`
+   the three pipe hooks out of `od_cmd_app.h`. Do not: that destroys what C11 bought, which is that
+   adding an opcode is a link error on *every* target. All 21 hooks stay mandatory and a declining
+   target answers with a refusal in its hook, so `od_dispatch.c` stays free of `#if` (§ 8).
+3. **Assert what MUST hold; runtime-check what may legitimately differ.**
+   `OD_CONFIG_MAX_SIZE >= OD_CONFIG_ASM_MAX_TRANSFERABLE` cannot be an assert, because § 2.5
+   deliberately violates it — which is exactly why `od_config_asm_start()` needs a runtime bound.
+   Confusing the two is how the overflow in § 2.5 came to be written down as safe.
+4. **Pin every derivation with a host test, not with review.** § 6.1's test walks every opcode the
+   map knows, calls `od_dispatch_budget()`, and asserts the observed maximum equals
+   `OD_DISPATCH_BUDGET_MAX`, under each capability set. Without it `od_caps.h` is only a tidier
+   place to keep the same unchecked claims.
 
 **This is COMPILE-TIME ABSENT, not RUNTIME DISABLED.** A PIPE-capable target with PIPE switched off
 through `transmission_modes` keeps its arena sized for 3 and over-reserves harmlessly; the budget is
 an upper bound. Only compiling the subsystem out changes what the target can ever emit, and only
 that may lower the number.
 
-**Then DERIVE the arena floor rather than asserting it.** Keep the maximum beside the table:
-
-```c
-/* shared/core/od_dispatch.h */
-#define OD_DISPATCH_BUDGET_MAX (OD_DISPATCH_PIPE_ENABLED ? 3u : 2u)
-```
-```c
-/* targets/efr32bg22-slc/ -- usable capacity is SLOTS - 1. */
-OD_STATIC_ASSERT(OD_TXQ_SLOTS - 1u >= OD_DISPATCH_BUDGET_MAX,
-                 "the largest reservation must fit the arena");
-```
-
-and pin the two together with a **host test that walks every opcode the map knows, calls
-`od_dispatch_budget()` on each, and asserts the observed maximum equals `OD_DISPATCH_BUDGET_MAX`
-under both settings of the flag** (§ 6.1). Without that test the constant is a second number
-asserted to track the table — which is exactly what an earlier draft of this section proposed
-(`OD_DISPATCH_BUDGET_MAX_NO_PIPE 2u`) and why it was wrong: a new opcode budgeted at 3 would have
-passed it. With the test, adding one breaks the build for whoever adds it.
+**Reuse the corpus's names.** C12's vectors already carry `forbids: ["cap_pipe"]` predicates
+(§ 6.2). `OD_CAP_PIPE` and `cap_pipe` naming the same fact lets a profile's capability set be
+checked against the compiled one instead of hand-maintained.
 
 The depth of 3 is unchanged, so § 4.6's `+804 B` stands. Raising the arena to 4 would also work and
-costs 268 B; it buys nothing that saying the fact out loud does not.
+costs 268 B; it buys nothing that declaring the fact does not.
 
 **The GATT characteristic caps values at 244 today, and the reason that matters is INBOUND.** The
 dynamic characteristic is declared with maximum value length `OD_PIPE_MAX_PAYLOAD` = 244
@@ -432,7 +474,8 @@ own (below). What does not stand is "adopting the shared assembler is itself the
 safety comes from a bound this plan has to add. If that bound is not landed in the same commit as
 the cap, **stop**: 2,048 is strictly more dangerous than 4,096 until it exists.
 
-**Shared changes required: this one and its bound above, plus § 2.3's two — four in total.** (`OD_TXQ_SLOTS` is NOT among them: it is already `#ifndef`-guarded at
+**Shared changes required: this one and its bound above, plus § 2.3's `od_caps.h` and the budget
+table's use of it — four in total.** (`OD_TXQ_SLOTS` is NOT among them: it is already `#ifndef`-guarded at
 `shared/core/od_txq.h:43`, so § 2.3's depth of 3 is a `target_compile_definitions` setting.)
 `OD_CONFIG_MAX_SIZE` is a hard `4096u` at `shared/core/od_config_asm.h:67`, and `struct od_config_asm` embeds
 `uint8_t buffer[OD_CONFIG_MAX_SIZE]`. It becomes an `#ifndef`-guarded target macro with a documented
@@ -527,10 +570,10 @@ note. No new tier is created — declining is what the tiers are for.
 
 **Four shared edits, two of them logic.** `OD_CONFIG_MAX_SIZE` gains an `#ifndef` guard;
 `od_config_asm_start()` gains the buffer bound that makes any cap below 4,000 safe (§ 2.5 — the
-memory-safety item, not a sizing nicety); `od_dispatch_budget()` gains `OD_DISPATCH_PIPE_ENABLED` so
-a target that compiles PIPE out is charged 1 slot rather than 3 (§ 2.3 — without this a 3-slot arena
-defers every PIPE frame); and `od_dispatch.h` gains `OD_DISPATCH_BUDGET_MAX`, pinned to the table by
-a host test rather than by assertion.
+memory-safety item, not a sizing nicety); **`shared/core/od_caps.h` is added** as the one place a
+target declares a capability and `shared/` derives what follows (§ 2.3); and `od_dispatch_budget()`
+consults `OD_CAP_PIPE` so a target that compiles PIPE out is charged 1 slot rather than 3 — without
+which a 3-slot arena defers every PIPE frame before the gate.
 `OD_TX_FRAME_MAX` remains the fleet-wide 256-byte storage width, and `OD_TXQ_SLOTS` is already
 `#ifndef`-guarded, so neither is an edit. Nothing else in `shared/` changes.
 
@@ -564,6 +607,18 @@ in place:
 - **The tag policy.** `PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 12)`; plain `PSA_ALG_CCM` pins
   a 16-byte tag and returns `NOT_PERMITTED` on every operation. Nordic proved the shortened form on
   silicon (nRF52840, 2026-08-15) — copy it.
+
+**ONCE ENABLED, CCM RUNS ON THE ACCELERATOR, INCLUDING AT A 12-BYTE TAG.** This is the one piece of
+C13.3 that is already de-risked, and it is worth stating because the rest of this section is not.
+The part is `CRYPTOACC_PRESENT`, and the PSA transparent driver
+(`sli_cryptoacc_transparent_driver_aead.c`, compiled under `#if defined(CRYPTOACC_PRESENT)`) handles
+CCM through the wildcard `PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 0)` case and accepts any tag
+length that is 4..16 and even. **12 qualifies**, so the exact policy Nordic proved is hardware-backed
+here rather than falling back to software. Nothing about the shortened tag needs re-deriving; what
+needs doing is the enabling below.
+
+(The `sli_ccm_encrypt_and_tag_ble()` path over `RADIOAES` is the BLE link layer's own CCM — evidence
+that the silicon does CCM, but not a path the application may use: it is protocol-specific.)
 
 Prepared **key slots**, not a key in the struct: the target clears sessions with `memset`, which
 would strand a live PSA handle in that 4-entry pool.
@@ -766,10 +821,10 @@ Each commit builds headless, leaves all three targets link-complete, and finishe
 | Commit | Content | Required proof |
 |---|---|---|
 | **C13.0a** | **`od_config_asm_start()` gains the `OD_CONFIG_MAX_SIZE` bound (§ 2.5), before any cap moves.** Shared logic change; no target behaviour change at 4096 | The new test FAILS on the pre-fix tree at a simulated 2048 cap and passes after: a declared total of 2,049 is REJECTED with nothing stored. ESP32/Nordic images **byte-identical** — at 4096 the added bound is unreachable |
-| **C13.0b** | `OD_CONFIG_MAX_SIZE` becomes an `#ifndef` target macro with a documented floor; BG22 sets 2048 and ESP32/Nordic assert 4096. Retain `OD_TX_FRAME_MAX=256`. Raise the dynamic characteristic's maximum value length 244 → 253 (so the 245..253 oversize NACK is reachable) and decide the long-write staging width (§ 2.3). Configure `SL_BGAPI_MAX_PAYLOAD_SIZE >= 263`; set maximum ATT MTU 256 during system boot before advertising and require the selected maximum to equal 256. Add `OD_DISPATCH_PIPE_ENABLED` + `OD_DISPATCH_BUDGET_MAX` and the host test that pins them to the table (§ 2.3); BG22 sets `OD_DISPATCH_PIPE_ENABLED=0`. Amend CLAUDE.md decision 12 and `DIVERGENCE_MATRIX` 2.7; add D8 to the matrix; record the § 2.1 error-code choice | Host test: oversize declared total REJECTED at the start frame with **nothing stored**, at both caps, and specifically at cap+1; a 253-byte BLE reply is queued and 254 is refused while the TX slot remains 256; ESP32/Nordic builds unchanged; boot log records selected MTU 256; no wire byte moved |
+| **C13.0b** | `OD_CONFIG_MAX_SIZE` becomes an `#ifndef` target macro with a documented floor; BG22 sets 2048 and ESP32/Nordic assert 4096. Retain `OD_TX_FRAME_MAX=256`. Raise the dynamic characteristic's maximum value length 244 → 253 (so the 245..253 oversize NACK is reachable) and decide the long-write staging width (§ 2.3). Configure `SL_BGAPI_MAX_PAYLOAD_SIZE >= 263`; set maximum ATT MTU 256 during system boot before advertising and require the selected maximum to equal 256. Add `shared/core/od_caps.h` with `OD_CAP_{PIPE,PARTIAL,RXQ}`, the derived `OD_DISPATCH_BUDGET_MAX`, its cross-capability asserts, and the host test that pins the derivation to the table (§ 2.3); point `od_dispatch_budget()` at `OD_CAP_PIPE`; BG22 sets `OD_CAP_PIPE=0`. Amend CLAUDE.md decision 12 and `DIVERGENCE_MATRIX` 2.7; add D8 to the matrix; record the § 2.1 error-code choice | Host test: oversize declared total REJECTED at the start frame with **nothing stored**, at both caps, and specifically at cap+1; a 253-byte BLE reply is queued and 254 is refused while the TX slot remains 256; ESP32/Nordic builds unchanged; boot log records selected MTU 256; no wire byte moved |
 | **C13.1** | Add the Silabs build to `tools/check.sh` as a fourth target gate (`DO_SILABS`, folded into `--targets`), under the same skip-is-not-a-pass rule | `--targets` reports 14/0/0 with the toolchain present, and a **skip** without it |
 | **C13.2** | Swap config: `od_config_tlv` + `od_config_asm` + `od_config` replace `opendisplay_config_parser.c` and `s_cfg_chunk`; retire `opendisplay_config_buf()` in the same commit — which is an **NVM3 record layout** change, not a buffer deletion (§ 2.5); feature gates off | Host differential vs the retired parser over the corpus; `.bss` delta within § 4.6; **hardware Gate 2, including read-back of a config written by the PREVIOUS layout if any board carries one** |
-| **C13.3** | Enable an AEAD in the SLC/PSA config (**none is selected today**, § 4.2) and raise `SL_PSA_KEY_USER_SLOT_COUNT` from 0; add the `PSA_WANT_ALG_CCM` ratchet to `tools/check.sh`; implement `od_hal_crypto` over PSA with the shortened-tag policy and **repoint the existing `od_ccm_encrypt`/`od_ccm_decrypt` call sites at it** (`opendisplay_pipe.c:442,491`) before deleting the hand-rolled CCM — deleting first leaves those callers unresolved and the commit does not link | Differential green against `tests/host/session_ccm_reference.inc`; the ratchet shown FAILING with the AEAD removed from config; `.text` delta recorded (CCM is new code); the commit links standalone; **hardware: authenticate + one encrypted command** |
+| **C13.3** | Enable an AEAD in the SLC/PSA config (**none is selected today**, § 4.2) and raise `SL_PSA_KEY_USER_SLOT_COUNT` from 0; add the `PSA_WANT_ALG_CCM` ratchet to `tools/check.sh`; implement `od_hal_crypto` over PSA with the shortened-tag policy and **repoint the existing `od_ccm_encrypt`/`od_ccm_decrypt` call sites at it** (`opendisplay_pipe.c:442,491`) before deleting the hand-rolled CCM — deleting first leaves those callers unresolved and the commit does not link | Differential green against `tests/host/session_ccm_reference.inc`; the ratchet shown FAILING with the AEAD removed from config; `.text` delta recorded — and **check it against the hand-rolled CCM being deleted**: the CRYPTOACC driver should make this a net reduction, and a large increase means PSA fell back to software rather than the accelerator (§ 4.2); the commit links standalone; **hardware: authenticate + one encrypted command** |
 | **C13.4** | Implement `od_session_app`; swap `od_session` in; delete `struct EncryptionSession`. Closes **D3, D4** | Host session suite incl. the `diff == 0` case, shown failing first; `.bss` −528 confirmed; **hardware Gate 2 incl. reconnect and key replacement** |
 | **C13.5** | Implement `od_hal_radio` **including `od_txq_app_dropped()`**; link `od_txq` at `OD_TXQ_SLOTS=3` via `target_compile_definitions`; add the § 2.3 capacity `OD_STATIC_ASSERT`; synchronous drain in the event handler plus a loop-pass drain. Closes the send half of **D6** | Host TXQ suite; RETRY arm exercised against a fake radio, incl. that a retry re-sends identical bytes and spends no nonce; **`!s_notify` classified ERROR, with the write-before-subscribe sequence shown NOT to deadlock**; `.bss` delta recorded; the assert shown FAILING at `OD_TXQ_SLOTS=2`; negotiated-MTU enforcement tested |
 | **C13.6** | Split commands into `od_cmd_{device,config,direct,nfc}.c`; define all 21 hooks **plus `od_core_frame_done()`, `od_cmd_allow_unauthenticated()` and `od_cmd_mutates_config()`** (§ 4.4); adopt `od_dispatch_frame()`; `od_core_reset()` on **disconnect only**, with D2 closed by ordered `od_session_clear()` on the save path (§ 3); add `od_config_read` **with the § 2.4 producer deadline** and the `sl_bt_can_process_event()` override. Delete the opcode switch (`:1089-1195`) and byte-inferred sealing. Closes **D1, D2, D6, D7** and settles 0x0080 | A missing hook is a link error — that is the enforcement; corpus gains `dispatch_corpus_silabs` (§ 6.2), incl. CONFIG_CLEAR success/persistence vectors and BG22's unauthenticated/mutates-config answers; DEFERRED-is-logged assertion; producer deadline expiry tested; **hardware Gate 2 full** |
@@ -817,10 +872,10 @@ fix proves nothing.
   not merely "some large value".
 - **Budget vs arena, the derived form (§ 2.3):** a test walks every opcode the map knows, calls
   `od_dispatch_budget()`, and asserts the observed maximum equals `OD_DISPATCH_BUDGET_MAX` — run
-  under `OD_DISPATCH_PIPE_ENABLED` both 1 and 0. Adding an opcode budgeted above the maximum must
+  under `OD_CAP_PIPE` both 1 and 0. Adding an opcode budgeted above the maximum must
   fail this test; that is what makes the constant a consequence of the table rather than a claim
   about it. Separately, `OD_TXQ_SLOTS=2` fails the target's static assert at compile time.
-- **PIPE opcodes on a PIPE-less build:** with `OD_DISPATCH_PIPE_ENABLED=0`, a `0x0081` frame reaches
+- **PIPE opcodes on a PIPE-less build:** with `OD_CAP_PIPE=0`, a `0x0081` frame reaches
   `od_cmd_app_pipe_data()` and draws silence rather than returning `OD_FRAME_DEFERRED`. Shown failing
   before the budget fix — it is the whole reason for it.
 - **Write-before-subscribe:** a command answered while `s_notify` is false must not leave an entry
@@ -921,6 +976,9 @@ per-row PASS/FAIL. A build or a host suite is not on-air evidence.
 - **`OD_FRAME_DEFERRED` must never be dropped.** § 2.2's `sl_bt_can_process_event()` override is what
   makes it unreachable; if it is returned anyway, the target logs it as an invariant violation. Do
   not add a retry buffer, and do not swallow it.
+- **A capability may change SIZING and ASSERTIONS; it may never change ROUTING** (§ 2.3). The moment
+  `OD_CAP_*` appears in `od_cmd_app.h` or in `od_dispatch.c`'s opcode map, adding an opcode stops
+  being a link error everywhere and C11's guarantee is gone.
 - **Do not `#if` inside shared dispatch, and do not write a Silabs-local `od_txq`.** The
   `OD_CONFIG_MAX_SIZE` `#ifndef` sizing guard in C13.0 is the only shared concession this plan makes;
   anything beyond it is a fork wearing a config flag.
@@ -979,6 +1037,8 @@ per-row PASS/FAIL. A build or a host suite is not on-air evidence.
   is shown failing on the pre-fix tree — the plan's one memory-safety item;
 - the arena depth is a consequence of `od_dispatch_budget()`'s maximum, pinned by a host test that
   walks the table — not a constant asserted to track it;
+- capabilities are declared in one place (`shared/core/od_caps.h`) and appear nowhere in the opcode
+  map or the hook declarations;
 - `0x0081` on a PIPE-less build reaches its hook and draws silence, rather than being deferred
   before the gate;
 - no `OD_RADIO_RETRY` mapping exists whose escape is an application event;
