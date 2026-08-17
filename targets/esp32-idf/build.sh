@@ -2,10 +2,16 @@
 #
 # Build ESP32 boards and deliver merged, ready-to-flash images to <repo>/release/.
 #
-#   ./build.sh                     # every board in boards/
-#   ./build.sh s3-n16r8 c6-n4      # just these
+#   ./build.sh                     # every board in boards/, including -debug ones
+#   ./build.sh --release           # every board EXCEPT -debug ones -- what actually ships
+#   ./build.sh s3-n16r8 c6-n4      # just these (bypasses --release filtering)
 #   ./build.sh --list              # what boards exist
 #   ./build.sh --clean             # wipe each board's build dir first
+#
+# -debug boards (OD_LOG_LEVEL=OD_LOG_DEBUG compiled in, per their boards/*-debug.cmake) are
+# bench builds, not shipping ones -- see boards/*-debug.cmake. They are ordinary board
+# fragments, so the default (no args) build already includes them; --release is the one that
+# has to opt OUT, by name suffix, since nothing else marks a fragment as debug-only.
 #
 # Each board produces ONE file, release/opendisplay-<board>-merged.bin, flashed at offset 0:
 #
@@ -45,18 +51,33 @@ all_boards() {
 }
 
 CLEAN=0
+RELEASE_ONLY=0
 BOARDS=()
 for arg in "$@"; do
     case "$arg" in
         --list)  all_boards; exit 0 ;;
         --clean) CLEAN=1 ;;
-        -h|--help) sed -n '2,30p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        --release) RELEASE_ONLY=1 ;;
+        -h|--help) sed -n '2,32p' "$0" | sed 's/^# \?//'; exit 0 ;;
         -*) echo "unknown option: $arg" >&2; exit 2 ;;
         *)  BOARDS+=("$arg") ;;
     esac
 done
 if [ ${#BOARDS[@]} -eq 0 ]; then
     mapfile -t BOARDS < <(all_boards)
+    if [ "$RELEASE_ONLY" = 1 ]; then
+        # Filter by name, not a separate registry: -debug is the only marker a board fragment
+        # carries today (see boards/*-debug.cmake), so this is where "what ships" is decided.
+        release=()
+        for b in "${BOARDS[@]}"; do
+            [[ "$b" == *-debug ]] && continue
+            release+=("$b")
+        done
+        BOARDS=("${release[@]}")
+    fi
+elif [ "$RELEASE_ONLY" = 1 ]; then
+    echo "--release has no effect with explicit board names -- drop it or the board list" >&2
+    exit 2
 fi
 
 # Validate up front rather than failing on board 7 of 10 after ten minutes of building.
