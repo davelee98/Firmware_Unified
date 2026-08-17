@@ -11,7 +11,7 @@
  */
 #include "od_hal_panel.h"
 
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
 
 #include "display_fastepd.h"
 #include "opendisplay_structs.h"
@@ -185,4 +185,4 @@ extern "C" const struct od_panel_ops od_panel_ops_fastepd = {
     fastepd_ops_mark_deinitialized,
 };
 
-#endif /* TARGET_ESP32 && OPENDISPLAY_FASTEPD */
+#endif /* OPENDISPLAY_FASTEPD */

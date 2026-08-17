@@ -17,7 +17,6 @@ set(OD_SDKCONFIG_FRAGMENTS sdkconfig.defaults.esp32c6 boards/c6-n4.sdkconfig)
 # 1 310 720 slot -- a 187 536-byte overflow. See partitions/min_spiffs_4MB.csv for the numbers.
 # ARDUINO_USB_* become a console choice in sdkconfig.defaults.esp32c6, not a define.
 set(OD_BOARD_DEFINES
-    TARGET_ESP32
     # -DOPENDISPLAY_ENABLE_WIFI deliberately absent: no PSRAM here. BLE-only (no LAN push,
     # mDNS or TLS-PSK), and the inflate engine falls back to uzlib.
     #

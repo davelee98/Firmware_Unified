@@ -27,7 +27,7 @@
 #include "session_guard.h"
 #include "touch_input.h"
 #include "uzlib.h"
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
 #include "display_fastepd.h"
 #endif
 
@@ -55,10 +55,8 @@
 #endif
 
 
-#ifdef TARGET_ESP32
 #include "wifi_service.h"
 #include "od_bbep_stream.h"
-#endif
 
 #include "ble_transport.h"
 #include "od_rxq.h"
@@ -240,7 +238,7 @@ static bool epdSessionInitWasPartial = false;
 static bool epdPlanesPrepared = false;
 
 static bool epdSessionUsesFastepd(void) {
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     return fastepd_driver_used();
 #else
     return false;
@@ -298,7 +296,7 @@ static void epdSessionForceOffLocked(void) {
     if (pwrmgmState == PWR_OFF) return;   // idempotent
     od_log_info("[EPD session] force off");
     if (epdSessionUsesFastepd()) {
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
         fastepd_direct_sleep();
         // Rail is about to drop: force the next push to fully re-init the TCON
         // rather than wake() a power-cycled IT8951 (garbled refresh otherwise).
@@ -707,7 +705,7 @@ int mapEpd(int id){
 }
 
 bool fastepd_driver_used(void) {
-#if !defined(TARGET_ESP32) || !defined(OPENDISPLAY_FASTEPD)
+#if !defined(OPENDISPLAY_FASTEPD)
     return false;
 #else
     if (globalConfig.display_count < 1) return false;
@@ -725,7 +723,7 @@ bool fastepd_driver_used(void) {
 }
 
 bool waitforrefresh(int timeout){
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) return fastepd_wait_refresh(timeout);
 #endif
     // Poll at 10 ms (was 100 ms) so a ~0.5 s refresh returns up to ~90 ms sooner.
@@ -750,7 +748,6 @@ bool waitforrefresh(int timeout){
     return false;
 }
 
-#ifdef TARGET_ESP32
 static bool s_wire_open_display_ready = false;
 static int8_t s_wire_sda_pin = -1;
 static int8_t s_wire_scl_pin = -1;
@@ -803,7 +800,6 @@ static bool wireBeginForOpenDisplay(int sda, int scl, uint32_t hz) {
     od_log_error("ERROR: I2C bus init failed (SDA=GPIO%d SCL=GPIO%d)", sda, scl);
     return false;
 }
-#endif
 
 static bool i2cDataBusValid(uint8_t bus_id) {
     if (bus_id >= globalConfig.data_bus_count) {
@@ -823,16 +819,13 @@ bool openDisplayI2cBusConfigured(void) {
 }
 
 void invalidateOpenDisplayWire(void) {
-#ifdef TARGET_ESP32
     if (s_wire_open_display_ready) {
         od_hal_i2c_deinit();
     }
     s_wire_open_display_ready = false;
-#endif
 }
 
 bool initOrRestoreWireForBus(uint8_t bus_id) {
-#ifdef TARGET_ESP32
     if (bus_id == 0xFF) {
         bus_id = 0;
     }
@@ -855,11 +848,9 @@ bool initOrRestoreWireForBus(uint8_t bus_id) {
         return false;
     }
     return true;
-#endif
 }
 
 void initOrRestoreWireForOpenDisplay(void) {
-#ifdef TARGET_ESP32
     if (globalConfig.data_bus_count > 0 && i2cDataBusValid(0)) {
         (void)initOrRestoreWireForBus(0);
         return;
@@ -869,7 +860,6 @@ void initOrRestoreWireForOpenDisplay(void) {
             s_wire_open_display_ready = true;
         }
     }
-#endif
 }
 
 void initDataBuses(){
@@ -888,9 +878,7 @@ void initDataBuses(){
             }
             uint32_t busSpeed = (bus->bus_speed_hz > 0) ? bus->bus_speed_hz : 100000;
             if(i == 0){
-                #ifdef TARGET_ESP32
                 initOrRestoreWireForOpenDisplay();
-                #endif
                 od_log_info("I2C bus %u initialized: SCL=pin%u, SDA=pin%u, Speed=%uHz", i, bus->pin_1, bus->pin_2, (unsigned)busSpeed);
             } else {
                 od_log_info("I2C bus %u configured (init on demand): SCL=pin%u, SDA=pin%u, Speed=%uHz",
@@ -1478,7 +1466,7 @@ void initDisplay(){
      * a watchdog reset can then say whether the panel or something else stopped the last run. */
     od_watchdog_app_phase(OD_WDT_PHASE_BOOT_REFRESH);
     if(globalConfig.display_count > 0){
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) {
         pwrmgm(true);
         int bitsPerPixel = getBitsPerPixel();
@@ -1559,7 +1547,7 @@ int getplane() {
 }
 
 int getBitsPerPixel() {
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     if (globalConfig.display_count > 0 &&
         globalConfig.displays[0].panel_ic_type == OD_PANEL_IC_ED103TC2_1872X1404_4GRAY) {
         return 4;
@@ -1618,9 +1606,7 @@ float readBatteryVoltage() {
 }
 
 float readChipTemperature() {
-#ifdef TARGET_ESP32
     return od_hal_adc_die_temp_c();
-#endif
 }
 
 void updatemsdata(){
@@ -1672,7 +1658,6 @@ void updatemsdata(){
     }
     ble.setManufacturerData(msd_payload, 16);
 #ifdef OPENDISPLAY_HAS_WIFI
-    // (Implies TARGET_ESP32; the enclosing target guard is gone with the split.)
     opendisplay_mdns_update_msd_txt();
 #endif
     mloopcounter = od_advert_advance_counter(mloopcounter);
@@ -1816,7 +1801,7 @@ bool handleDirectWriteCompressedData(uint8_t* data, uint16_t len) {
 // controller planes). The FastEPD IT8951 path has its own 4bpp handling.
 static inline bool directWriteIsGray4(void) {
     return (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_GRAY4)
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
         && !fastepd_driver_used()
 #endif
         ;
@@ -1930,7 +1915,7 @@ static void directWriteActivatePanel(void) {
     // full-frame direct write does not preserve partial plane consistency.
     epdSessionAcquire(false);
     epdPlanesPrepared = false;
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) {
         fastepd_direct_write_reset();
     } else
@@ -1979,7 +1964,7 @@ od_cmd_result_t handleDirectWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, u
     imageWriteLogReset();
     touchSuspendForEpdRefresh();
     directWriteTouchSuspended = true;
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) {
         fastepd_prepare_hardware();
     }
@@ -2149,7 +2134,7 @@ od_cmd_result_t handleDirectWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, ui
     uint32_t remainingBytes = (directWriteBytesWritten < directWriteTotalBytes) ? (directWriteTotalBytes - directWriteBytesWritten) : 0;
     uint16_t bytesToWrite = (len > remainingBytes) ? remainingBytes : len;
     if (bytesToWrite > 0) {
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
         if (fastepd_driver_used()) {
             fastepd_direct_write_chunk(data, bytesToWrite);
             directWriteBytesWritten += bytesToWrite;
@@ -2294,7 +2279,7 @@ static od_cmd_result_t directWriteFinishAndRefresh(const od_cmd_ctx_t *ctx, uint
     uint32_t newEtag = 0;
     bool hasNewEtag = data != nullptr && len >= 5;
     if (hasNewEtag) newEtag = parse_be_u32(data + 1);
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) {
         fastepd_direct_refresh(refreshMode);
         refreshSuccess = waitforrefresh(60);
@@ -2546,7 +2531,7 @@ static bool pipeConsumePayload(uint8_t* data, uint16_t len) {
                        ? (directWriteTotalBytes - directWriteBytesWritten) : 0;
     uint16_t toWrite = (len > remaining) ? (uint16_t)remaining : len;
     if (toWrite > 0) {
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
         if (fastepd_driver_used()) {
             fastepd_direct_write_chunk(data, toWrite);
             directWriteBytesWritten += toWrite;
@@ -2726,7 +2711,7 @@ od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uin
     imageWriteLogReset();
     touchSuspendForEpdRefresh();
     directWriteTouchSuspended = true;
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) {
         fastepd_prepare_hardware();
     }
@@ -3122,7 +3107,7 @@ static bool zlib_stream_to_direct_write(const uint8_t* data, uint32_t len, bool 
         size_t bytesOut = 0;
         status = od_zlib_stream_poll(decompressionChunk, OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE, &bytesOut);
         if (bytesOut > 0) {
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
             if (fastepd_driver_used()) {
                 fastepd_direct_write_chunk(decompressionChunk, (uint32_t)bytesOut);
                 directWriteBytesWritten += (uint32_t)bytesOut;
@@ -3178,7 +3163,7 @@ static bool zlib_stream_to_partial_write(const uint8_t* data, uint32_t len, bool
 }
 
 static bool partial_write_stream_bytes(uint8_t* data, uint32_t len) {
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) {
         if (partialCtx.bytes_written > partialCtx.expected_stream_size ||
             len > partialCtx.expected_stream_size - partialCtx.bytes_written) {
@@ -3236,7 +3221,7 @@ static void partial_prepare_panel_ram(void) {
     // Warm re-acquire skips the ~900 ms rail bring-up + bbepInitIO (Phase 1).
     bool cold = epdSessionAcquire(true);
     od_log_debug("[+%ums] after epdSessionAcquire (%s)", (unsigned)(od_hal_uptime_ms() - t0), cold ? "cold" : "warm");
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) {
         fastepd_partial_prepare(partialCtx.x, partialCtx.y, partialCtx.width, partialCtx.height);
         od_log_debug("[+%ums] FastEPD partial prepare done", (unsigned)(od_hal_uptime_ms() - t0));
@@ -3267,7 +3252,7 @@ static bool partial_write_to_panel(int refreshMode) {
     if (partialCtx.bytes_written != partialCtx.expected_stream_size) return false;
     epdRefreshInProgress = true;
     bool refreshSuccess = false;
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) {
         refreshSuccess = fastepd_partial_refresh(refreshMode);
     } else

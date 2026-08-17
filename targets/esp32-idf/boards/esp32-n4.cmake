@@ -13,7 +13,6 @@ set(OD_PARTITION_CSV partitions/min_spiffs_4MB.csv)
 set(OD_SDKCONFIG_FRAGMENTS sdkconfig.defaults.esp32 boards/esp32-n4.sdkconfig)
 
 set(OD_BOARD_DEFINES
-    TARGET_ESP32
     PIPE_SMALL_DRAM_WINDOW
     # Egress depth follows the window it has to cover: PIPE_MAX_W + 2, so usable capacity
     # (SLOTS - 1) holds a full window plus its END. Sized here rather than left at the shared

@@ -1,7 +1,4 @@
-// ESP32 implementation of BleTransport.
-//
-// The whole file is gated on TARGET_ESP32, so an nRF build compiles it to an
-// empty translation unit.
+// ESP32 implementation of BleTransport, and this target's only one.
 //
 // PORTED FROM THE REFERENCE FIRMWARE, WITH ONE SUBSTITUTION. Upstream this file
 // drives NimBLE-Arduino (h2zero) and keeps "every NimBLE object as file-static
@@ -28,7 +25,6 @@
 //
 // The claim is the one thing beyond "copy and flag", and it belongs here because
 // the write filter must be able to test ownership before any loop pass runs.
-#ifdef TARGET_ESP32
 
 #include <string.h>
 
@@ -634,4 +630,3 @@ const char* BleTransport::addressString() {
     return cached;
 }
 
-#endif  // TARGET_ESP32

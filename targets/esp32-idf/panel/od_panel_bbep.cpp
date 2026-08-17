@@ -19,7 +19,6 @@
  */
 #include "od_hal_panel.h"
 
-#ifdef TARGET_ESP32
 
 #include "bb_epaper.h"
 #include "od_bbep_stream.h"
@@ -211,4 +210,3 @@ extern "C" const struct od_panel_ops od_panel_ops_bbep = {
     bbep_ops_mark_deinitialized,
 };
 
-#endif /* TARGET_ESP32 */

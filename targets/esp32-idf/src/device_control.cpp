@@ -6,11 +6,8 @@
 #include "od_log.h"
 #include <string.h>
 
-#ifdef TARGET_ESP32
 void enterDeepSleep(bool force = false, uint16_t overrideSleepSeconds = 0);
-#endif
 
-#ifdef TARGET_ESP32
 #include <esp_system.h>
 #include "driver/gpio.h"
 #include "od_hal_adc.h"
@@ -18,7 +15,6 @@ void enterDeepSleep(bool force = false, uint16_t overrideSleepSeconds = 0);
 #include "od_hal_time.h"
 #include "od_txq.h"
 #include "wifi_service.h"      // OPENDISPLAY_HAS_WIFI + opendisplay_lan_teardown()
-#endif
 
 #include "ble_transport.h"
 
@@ -39,11 +35,9 @@ void resetPipeWriteState(void);
 
 extern ButtonState buttonStates[MAX_BUTTONS];
 
-// No target guard: every line below is portable Arduino GPIO, and the two
-// powerLatch*Configured() predicates return false unless the board actually declares
-// a latch (DEVICE_FLAG_BATTERY_LATCH / DEVICE_FLAG_PWR_LATCH_DFF plus the pins). The
-// old #ifdef TARGET_ESP32 was inherited from power_latch.cpp being ESP32-gated as a
-// whole; that gate is gone, because the latch is a board feature, not a SoC feature.
+// The two powerLatch*Configured() predicates return false unless the board actually
+// declares a latch (DEVICE_FLAG_BATTERY_LATCH / DEVICE_FLAG_PWR_LATCH_DFF plus the
+// pins), so this runs on every board and does nothing on those without one.
 static bool s_pwrOffReleased[MAX_BUTTONS];
 static bool s_pwrOffPressing[MAX_BUTTONS];
 static bool s_pwrOffDone[MAX_BUTTONS];
@@ -91,12 +85,8 @@ static void pollConfiguredPowerOffButtons() {
 // voltage. They have no edge interrupt, so they are polled. Reported through
 // the same MSD button byte as digital buttons for a uniform host contract.
 //
-// No target guard. Everything here is analogRead/pinMode/millis; the single
-// SoC-specific call (input range) is shimmed in adcLadderConfigurePin() below.
-// Gating the whole block on TARGET_ESP32 did not merely disable the feature on nRF,
-// it MIS-handled it: the `continue` that skips ladder inputs in initButtons() was
-// inside the same guard, so a BINARY_INPUT_TYPE_ADC_LADDER entry fell through to the
-// digital-button path and had a CHANGE interrupt attached to the ladder pin.
+// The single SoC-specific call (input range) is shimmed in adcLadderConfigurePin()
+// below. Everything else is the HAL's ADC, GPIO and clock.
 #define MAX_ADC_LADDERS     4
 #define MAX_LADDER_BUTTONS  4    // reserved[] holds at most N+1 = 5 LE uint16 thresholds
 #define ADC_LADDER_POLL_MS  5
@@ -135,14 +125,9 @@ static uint8_t   adcLadderCount = 0;
 // voltages still differ, so thresholds remain a per-board calibration carried in
 // BinaryInputs.reserved[]; this only makes the SCALE comparable.
 static void adcLadderConfigurePin(uint8_t pin) {
-#if defined(TARGET_ESP32)
     // 12 dB, which is what Arduino's ADC_11db mapped to: IDF 5.x deprecated ADC_ATTEN_DB_11 in
     // favour of DB_12 -- the same setting under a name that matches the silicon.
     od_hal_adc_set_atten(pin, OD_ADC_ATTEN_12DB);
-#else
-    (void)pin;
-    analogReadResolution(12);
-#endif
 }
 
 // Returns button index 0..num_buttons-1, or -1 when nothing is pressed.
@@ -255,7 +240,6 @@ static void pollAdcButtons() {
 // mid-refresh and LAN-ownership guards live. nRF used to run that teardown
 // inline on the SoftDevice callback task with neither guard.
 
-#ifdef TARGET_ESP32
 // Tear NimBLE down before esp_restart(): esp_restart() resets the CPU but NOT the
 // BT controller hardware, so on the next (software-reset) boot BLEDevice::init()
 // tries to enable an already-enabled controller and aborts -> PANIC boot loop that
@@ -284,15 +268,12 @@ static void esp32_ble_deinit_before_restart() {
     }
     od_hal_delay_ms(100);
 }
-#endif
 
 void reboot(){
     // Banner logged by the dispatcher (commandName() in communication.cpp).
     od_hal_delay_ms(100);
-#ifdef TARGET_ESP32
     esp32_ble_deinit_before_restart();
     esp_restart();
-#endif
 }
 
 #define LED_DELAY_FACTOR_MS 100u
@@ -710,9 +691,7 @@ void flashLed(uint8_t color, uint8_t brightness) {
     }
 }
 
-#ifdef TARGET_ESP32
 void IRAM_ATTR handleButtonISR(uint8_t buttonIndex) {
-#endif
     if (buttonIndex >= MAX_BUTTONS || !buttonStates[buttonIndex].initialized) return;
     ButtonState* btn = &buttonStates[buttonIndex];
     bool pinState = (od_hal_gpio_read(btn->pin) != 0);
@@ -726,12 +705,10 @@ void IRAM_ATTR handleButtonISR(uint8_t buttonIndex) {
     }
 }
 
-#ifdef TARGET_ESP32
 void IRAM_ATTR buttonISR(void* arg) {
     uint8_t buttonIndex = (uint8_t)(uintptr_t)arg;
     handleButtonISR(buttonIndex);
 }
-#endif
 
 void initButtons() {
     od_log_info("=== Initializing Buttons ===");
@@ -751,10 +728,9 @@ void initButtons() {
     if (globalConfig.binary_input_count == 0) return;
     for (uint8_t instanceIdx = 0; instanceIdx < globalConfig.binary_input_count; instanceIdx++) {
         struct BinaryInputs* input = &globalConfig.binary_inputs[instanceIdx];
-        // The `continue` is the load-bearing half. It used to be inside
-        // #ifdef TARGET_ESP32 along with registerAdcLadder(), so on nRF a ladder
-        // input did not merely go unregistered -- it fell through to the digital
-        // path below and got a CHANGE interrupt attached to the ladder pin.
+        // The `continue` is the load-bearing half: a ladder input that falls through
+        // to the digital path below gets a CHANGE interrupt attached to the ladder
+        // pin, which is worse than the feature simply not working.
         if (input->input_type == BINARY_INPUT_TYPE_ADC_LADDER) {
             registerAdcLadder(input);
             continue;
@@ -789,7 +765,6 @@ void initButtons() {
             btn->power_off = (input->power_off_flags & (1 << pinIdx)) != 0;
             btn->power_off_hold_ms = instanceHoldMs;
             bool hasPullup = (input->pullups & (1 << pinIdx)) != 0;
-#ifdef TARGET_ESP32
             bool hasPulldown = (input->pulldowns & (1 << pinIdx)) != 0;
             // One call where Arduino needed two: pinMode(INPUT) followed by a conditional
             // re-pinMode with the pull. od_hal_gpio_config_input() takes both pulls, and
@@ -797,27 +772,22 @@ void initButtons() {
             // that existed only because Arduino had no combined form is gone. The pad ends in
             // the same state.
             od_hal_gpio_config_input(pin, hasPullup, hasPulldown);
-#endif
             od_hal_delay_ms(10);
             bool initialPinState = (od_hal_gpio_read(pin) != 0);
             bool initialPressed = btn->inverted ? !initialPinState : initialPinState;
             btn->current_state = initialPressed ? 1 : 0;
-#ifdef TARGET_ESP32
             od_hal_gpio_config_irq_arg(pin, OD_GPIO_EDGE_BOTH, buttonISR,
                                        (void*)(uintptr_t)buttonStateCount);
-#endif
             btn->initialized = true;
             buttonStateCount++;
         }
     }
     if (buttonStateCount > 0) {
-#ifdef TARGET_ESP32
         for (uint8_t i = 0; i < buttonStateCount; i++) {
             if (buttonStates[i].initialized) {
                 od_hal_gpio_irq_disable(buttonStates[i].pin);
             }
         }
-#endif
         od_hal_delay_ms(50);
         buttonEventPending = false;
         lastChangedButtonIndex = 0xFF;
@@ -829,13 +799,11 @@ void initButtons() {
             btn->current_state = initialPressed ? 1 : 0;
             btn->press_count = 0;
         }
-#ifdef TARGET_ESP32
         for (uint8_t i = 0; i < buttonStateCount; i++) {
             if (buttonStates[i].initialized) {
                 od_hal_gpio_irq_enable(buttonStates[i].pin);
             }
         }
-#endif
     }
 }
 
@@ -843,17 +811,14 @@ void enterDFUMode() {
     // Banner logged by the dispatcher (commandName() in communication.cpp).
 
 
-#ifdef TARGET_ESP32
     od_log_info("ESP32: Rebooting (OTA typically handled via WiFi)");
     od_hal_delay_ms(100);
     esp32_ble_deinit_before_restart();
     esp_restart();
-#endif
 }
 
 od_cmd_result_t handleDeepSleepCommand(const od_cmd_ctx_t *ctx, const uint8_t* payload, uint16_t payloadLen) {
     // Banner logged by the dispatcher (commandName() in communication.cpp).
-#ifdef TARGET_ESP32
     // Optional 2-byte big-endian seconds payload overrides the configured
     // deep-sleep duration for exactly one cycle. 0x0000 = explicit no-override.
     uint16_t overrideSeconds = 0;
@@ -888,7 +853,6 @@ od_cmd_result_t handleDeepSleepCommand(const od_cmd_ctx_t *ctx, const uint8_t* p
      * reservation goes unused and the caller releases it. */
     enterDeepSleep(true, overrideSeconds);
     return OD_CMD_OK;
-#endif
 }
 
 od_cmd_result_t handlePowerOffCommand(const od_cmd_ctx_t *ctx, const uint8_t* payload, uint16_t payloadLen) {
@@ -897,9 +861,8 @@ od_cmd_result_t handlePowerOffCommand(const od_cmd_ctx_t *ctx, const uint8_t* pa
     // and ignored (unlike CMD_DEEP_SLEEP 0x0053, this has no duration payload).
     (void)payload;
     (void)payloadLen;
-    // powerLatch* are defined on every target (no-op stubs off ESP32; the header
-    // guarantees callers need no guards), so no #ifdef TARGET_ESP32 is required here:
-    // powerLatchDffConfigured() returns false off-ESP32 -> falls through to the NACK.
+    // powerLatchDffConfigured() returns false on a board with no D-FF latch, which
+    // falls through to the NACK below. Callers need no guard of their own.
     if (powerLatchDffConfigured()) {
         // Fire-and-forget hard rail-cut: queue the ACK, then release the D-FF latch.
         // On latch HW the rail usually drops before the ACK is actually transmitted.

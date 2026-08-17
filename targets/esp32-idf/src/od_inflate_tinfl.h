@@ -52,7 +52,7 @@
  * Overridable via a build flag if a target ever needs to force one engine or the
  * other, e.g. -DOPENDISPLAY_USE_TINFL=0 to keep uzlib's smaller footprint. */
 #if !defined(OPENDISPLAY_USE_TINFL)
-#  if defined(TARGET_ESP32) && defined(OPENDISPLAY_ENABLE_WIFI)
+#  if defined(OPENDISPLAY_ENABLE_WIFI)
 #    define OPENDISPLAY_USE_TINFL 1
 #  else
 #    define OPENDISPLAY_USE_TINFL 0

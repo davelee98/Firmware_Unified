@@ -58,7 +58,6 @@
 #define DEVICE_FLAG_PWR_LATCH_DFF (1 << 4) // Bit 4: 74AHC1G79 D-FF latch; pwr_pin_2=D, pwr_pin_3=CP; release via command 0x0052
 
 
-#ifdef TARGET_ESP32
 // No BLE stack types here any more: NimBLE lives behind ble_transport_esp32.cpp.
 #include <esp_system.h>
 #include <esp_mac.h>
@@ -68,7 +67,6 @@
 // RTC memory variables for deep sleep state tracking (declared in main.cpp)
 extern bool advertising_timeout_active;
 extern uint32_t advertising_start_time;
-#endif
 
 BBEPDISP bbep;
 
@@ -87,16 +85,12 @@ void bbepWriteData(BBEPDISP *pBBEP, uint8_t *pData, int iLen);
 
 uint8_t decompressionChunk[OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE];
 uint8_t bleResponseBuffer[94];
-#ifdef TARGET_ESP32
 // Rolling MSD sequence nibble; persists across deep sleep so advertisements
 // stay distinguishable across sleep/wake cycles.
 RTC_DATA_ATTR uint8_t mloopcounter = 0;
-#endif
-#ifdef TARGET_ESP32
 // Persists across deep sleep so a wake is not mistaken for a reboot. Re-armed
 // on the boot-screen path in setup(), which is the only path a real reset takes.
 RTC_DATA_ATTR uint8_t rebootFlag = 1;  // Set to 1 after reboot, cleared to 0 after BLE connection
-#endif
 uint8_t connectionRequested = 0;  // Reserved for future features (connection requested flag)
 uint8_t dynamicreturndata[11] = {0};  // Dynamic return data blocks (bytes 2-12 in advertising payload)
 uint8_t msd_payload[16] = {0};  // Manufacturer Specific Data payload (public, updated by updatemsdata())
@@ -115,7 +109,6 @@ char wifiSsid[33] = {0};  // 32 bytes + null terminator
 char wifiPassword[33] = {0};  // 32 bytes + null terminator
 uint8_t wifiEncryptionType = 0;  // 0x00=none, 0x01=WEP, 0x02=WPA, 0x03=WPA2, 0x04=WPA3
 bool wifiConfigured = false;  // True if WiFi config packet (0x26) was received and parsed
-#ifdef TARGET_ESP32
 // Small config-storage / status globals: kept on all ESP32 targets (config_parser
 // and the config-dump report reference them regardless of whether the WiFi
 // transport is compiled in). Trivial RAM cost.
@@ -124,7 +117,6 @@ bool wifiInitialized = false;
 char wifiServerUrl[65] = {0};
 uint16_t wifiServerPort = 2446;
 // bool wifiServerConfigured = false;  // dead -- nothing reads it (config_parser.cpp)
-#endif
 #ifdef OPENDISPLAY_HAS_WIFI
 // Heavy WiFi-transport surface: the TCP server/client objects and the RX
 // reassembly buffer exist ONLY when the WiFi transport is compiled in -- the S3
@@ -178,7 +170,6 @@ bool powerDownExternalFlash(uint8_t mosiPin, uint8_t misoPin, uint8_t sckPin, ui
 void powerDownExternalFlashFromConfig(void);
 void xiaoinit();
 void ws_pp_init();
-#ifdef TARGET_ESP32
 void fullSetupAfterConnection();
 // force: sleep even with a client connected (explicit host request 0x0053).
 // overrideSleepSeconds: nonzero replaces deep_sleep_time_seconds for this one
@@ -186,7 +177,6 @@ void fullSetupAfterConnection();
 void enterDeepSleep(bool force = false, uint16_t overrideSleepSeconds = 0);
 extern bool advertising_timeout_active;
 extern uint32_t advertising_start_time;
-#endif
 void getChipIdHex(char* out, size_t out_size);   // see encryption.h for the contract
 void secureEraseConfig();
 void checkResetPin();
@@ -258,12 +248,9 @@ uint8_t configReadResponseBuffer[128];
 struct SecurityConfig &securityConfig = globalConfig.security;
 bool encryptionInitialized = false;
 
-#ifdef TARGET_ESP32
 // 0x00000000 = "not set". Persists across deep sleep on ESP32.
 RTC_DATA_ATTR uint32_t displayed_etag = 0;
-#endif
 
-#ifdef TARGET_ESP32
 // RTC memory variables for deep sleep state tracking
 RTC_DATA_ATTR bool woke_from_deep_sleep = false;
 RTC_DATA_ATTR uint32_t deep_sleep_count = 0;
@@ -286,7 +273,6 @@ uint32_t minWakeWindowStartMs = 0;
 uint32_t lastActivityMs = 0;
 // Quiet window required before deep sleep when sleep_timeout_ms is unset.
 static constexpr uint32_t DEFAULT_IDLE_HOLD_MS = 10000;
-#endif
 
 #define AXP2101_SLAVE_ADDRESS 0x34
 #define AXP2101_REG_POWER_STATUS 0x00

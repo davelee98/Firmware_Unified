@@ -14,12 +14,10 @@
 #include "ble_transport.h"
 #include "od_rxq.h"
 
-#ifdef TARGET_ESP32
 // wifi_service.h only, deliberately: this file talks to the LAN transport
 // through opendisplay_lan_send_frame() and needs no WiFi stack types. <WiFi.h>
 // was here solely for two extern declarations that nothing used.
 #include "wifi_service.h"
-#endif
 
 /* Chunked CONFIG_WRITE reassembly, promoted to shared/core (F3). */
 #include "od_config_asm.h"

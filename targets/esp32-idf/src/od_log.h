@@ -7,10 +7,8 @@
 // TaskHandle_t, for od_log_set_loop_task(). FreeRTOS is not Arduino: both targets run it
 // natively, so this is a real dependency of the logger rather than shim residue. The paths
 // differ because the Adafruit nRF52 core ships FreeRTOS at the include root.
-#ifdef TARGET_ESP32
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#endif
 
 // Timestamped, allocation-free logging.
 //

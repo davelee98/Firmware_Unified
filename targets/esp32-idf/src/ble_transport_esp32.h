@@ -2,7 +2,7 @@
 #define BLE_TRANSPORT_ESP32_H
 
 // Stack-facing declarations for the ESP32 BleTransport implementation.
-// Included ONLY from ble_transport_esp32.cpp, inside that file's TARGET_ESP32 gate.
+// Included ONLY from ble_transport_esp32.cpp.
 //
 // This is what stops stack types leaking. The BLE* aliases that used to live in ble_init.h
 // were included by six translation units (main.h, communication.cpp, display_service.cpp,
@@ -17,9 +17,7 @@
 // include that replaces them. It is deliberately not merged into the .cpp: keeping the file
 // preserves the reference tree's include graph, so the next sync from Firmware diffs cleanly
 // instead of showing a deleted file and an unexplained new include.
-#ifdef TARGET_ESP32
 
 #include "od_ble.h"
 
-#endif  // TARGET_ESP32
 #endif  // BLE_TRANSPORT_ESP32_H

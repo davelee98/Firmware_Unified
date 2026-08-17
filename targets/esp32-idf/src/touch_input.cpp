@@ -7,12 +7,8 @@
 #include "od_hal_time.h"
 #include <string.h>
 
-#if defined(TARGET_ESP32)
 #include "esp_attr.h"      // IRAM_ATTR -- an IDF macro that arrived via <Arduino.h>
 #define TOUCH_ISR_ATTR IRAM_ATTR
-#else
-#define TOUCH_ISR_ATTR
-#endif
 
 extern struct od_config globalConfig;
 extern uint8_t dynamicreturndata[11];

@@ -1,6 +1,5 @@
 #include "wake_button.h"
 
-#if defined(TARGET_ESP32)
 
 #include "esp_sleep.h"
 #include "soc/soc_caps.h"
@@ -250,13 +249,3 @@ bool detectButtonWake(int wakeupCause) {
     }
 }
 
-#else  // not ESP32
-
-void armButtonWakeSources() {}
-
-bool detectButtonWake(int wakeupCause) {
-    (void)wakeupCause;
-    return false;
-}
-
-#endif

@@ -31,7 +31,7 @@
 // broken #ifndef OPENDISPLAY_HAS_WIFI path. Build it explicitly. Call sites in
 // main.cpp / communication.cpp / display_service.cpp / device_control.cpp /
 // config_parser.cpp are #ifdef-guarded on this macro.
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_ENABLE_WIFI)
+#if defined(OPENDISPLAY_ENABLE_WIFI)
 #define OPENDISPLAY_HAS_WIFI 1
 #endif
 

@@ -22,7 +22,7 @@
 #include <stddef.h>
 
 extern const struct od_panel_ops od_panel_ops_bbep;
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
 extern const struct od_panel_ops od_panel_ops_fastepd;
 #endif
 
@@ -34,7 +34,7 @@ static const struct od_panel_ops *select_backend(const struct DisplayConfig *d,
     /* Ordered, and the order is the policy: a specialised backend gets first refusal and
      * bb_epaper is the fallback that claims everything else. Adding a backend means adding it
      * to this list ABOVE bb_epaper, not editing a predicate. */
-#if defined(TARGET_ESP32) && defined(OPENDISPLAY_FASTEPD)
+#if defined(OPENDISPLAY_FASTEPD)
     if (od_panel_ops_fastepd.claims(panel_ic_type, d->display_technology)) {
         return &od_panel_ops_fastepd;
     }

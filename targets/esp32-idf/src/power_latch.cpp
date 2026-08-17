@@ -1,15 +1,11 @@
 // Soft power latch: a MOSFET or D-flip-flop that holds the device rail on, and the
 // long-press power button that releases it.
 //
-// The whole file used to sit under #if defined(TARGET_ESP32), with a block of empty
-// stubs for every other target. That guard was inherited, not required: the latch is
-// a board feature (DEVICE_FLAG_BATTERY_LATCH / DEVICE_FLAG_PWR_LATCH_DFF plus
-// pwr_pin_2/pwr_pin_3), not a SoC feature, and every predicate, the press state
-// machine and the D-FF clock pulse are plain GPIO and a millisecond clock -- now
-// od_hal_gpio and od_hal_time, which is what took this file off the Arduino shim
-// (phase C step 3). Only two things are genuinely ESP32-specific, and they are
-// shimmed below rather than fencing the file: pad-hold across deep sleep, and the
-// deep-sleep park after the rail is cut.
+// The latch is a BOARD feature (DEVICE_FLAG_BATTERY_LATCH / DEVICE_FLAG_PWR_LATCH_DFF
+// plus pwr_pin_2/pwr_pin_3), not a SoC one: every predicate, the press state machine
+// and the D-FF clock pulse are plain GPIO and a millisecond clock. Only two things
+// here are genuinely ESP32-specific, and they are shimmed below rather than fencing
+// the file: pad-hold across deep sleep, and the deep-sleep park after the rail is cut.
 //
 // No nRF board ships this hardware today, so the flags are simply never set there and
 // every entry point returns early exactly as the old stubs did. The difference is that
@@ -22,10 +18,8 @@
 #include "od_log.h"
 #include "structs.h"
 
-#if defined(TARGET_ESP32)
 #include "driver/gpio.h"
 #include "esp_sleep.h"  // pulls in SOC_GPIO_SUPPORT_DEEPSLEEP_WAKEUP
-#endif
 
 #ifndef DEVICE_FLAG_BATTERY_LATCH
 #define DEVICE_FLAG_BATTERY_LATCH (1 << 3)
@@ -51,31 +45,21 @@ uint32_t pressStartMs = 0;
 // so there is nothing to freeze and these are no-ops.
 
 inline void padHoldDisable(uint8_t pin) {
-#if defined(TARGET_ESP32)
     gpio_hold_dis((gpio_num_t)pin);
-#else
-    (void)pin;
-#endif
 }
 
 inline void padHold(uint8_t pin) {
-#if defined(TARGET_ESP32)
 #if !defined(CONFIG_IDF_TARGET_ESP32C6)
     gpio_deep_sleep_hold_en();
 #endif
     gpio_hold_en((gpio_num_t)pin);
-#else
-    (void)pin;
-#endif
 }
 
 // Same, preceded by the all-pad isolate the rail-cut paths do (but the
 // hold-for-sleep path deliberately does not -- kept distinct rather than merged,
 // so the ESP32 call sequences stay byte-for-byte what they were).
 inline void padIsolateAndHold(uint8_t pin) {
-#if defined(TARGET_ESP32)
     esp_sleep_config_gpio_isolate();
-#endif
     padHold(pin);
 }
 
@@ -85,7 +69,6 @@ inline void padIsolateAndHold(uint8_t pin) {
 // such state, so park loudly rather than returning into a loop() whose rail is
 // supposed to be gone.
 [[noreturn]] void parkAfterRailCut(int wakePin, bool haveWakePin) {
-#if defined(TARGET_ESP32)
 #if SOC_GPIO_SUPPORT_DEEPSLEEP_WAKEUP
     if (haveWakePin) {
         od_hal_gpio_config_input((uint8_t)wakePin, true, false);
@@ -96,15 +79,6 @@ inline void padIsolateAndHold(uint8_t pin) {
     (void)haveWakePin;
 #endif
     esp_deep_sleep_start();
-#else
-    (void)wakePin;
-    (void)haveWakePin;
-    od_log_warn("Power latch: rail cut but still running -- parking");
-    od_log_flush();
-    for (;;) {
-        od_hal_delay_ms(1000);
-    }
-#endif
 }
 
 // --- configuration -----------------------------------------------------------
