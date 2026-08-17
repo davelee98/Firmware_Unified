@@ -3,7 +3,7 @@
 
 // OD-PORT: <Arduino.h> in the reference tree, for millis() and delay(). Both come from
 // od_hal_time now, so this file is not one of the files the shim ratchet counts
-// (compat/ratchet.sh -- the shim is a demolition schedule, not a portability layer), and it
+// (the shim was a demolition schedule, not a portability layer), and it
 // names no vendor header at all. That matters beyond the ratchet: this file is a shared/core
 // candidate, and shared/ may call od_hal_* but not esp_* or freertos/*.
 #include "od_hal_time.h"

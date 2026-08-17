@@ -4,7 +4,7 @@
 # There is no CI. The checks that used to live in .github/workflows/ are here instead, which
 # means NOTHING RUNS UNLESS SOMEONE RUNS IT. Run this before you push.
 #
-#   tools/check.sh                 boundary + host suites + sanitizers + fuzz + shim ratchet
+#   tools/check.sh                 boundary + host suites + sanitizers + fuzz + arduino-free
 #   tools/check.sh --targets       also builds BOTH target families (ESP32 boards + sdkconfig
 #                                  baseline, and all three Nordic boards). Required before merge.
 #   tools/check.sh --esp32         ESP32 only, as --targets used to be
@@ -298,8 +298,79 @@ if [ "$DO_LATEST" = 1 ]; then
 fi
 
 # ======================================================================================= esp32 ==
-# Pure grep, so it always runs: the number of files including arduino_compat.h may only decrease.
-check "esp32: arduino shim ratchet" ./targets/esp32-idf/compat/ratchet.sh
+# THE SHIM IS GONE, and this is what keeps it gone. It replaces compat/ratchet.sh, whose metric
+# was "how many files INCLUDE a shim header" -- a count that reached 0 while three call sites
+# were still reaching shim primitives, because `delay(long)` and `millis()` are declared by an
+# OD-PATCH in third_party/bb_epaper/src/bb_epaper.h, not by any header the ratchet grepped for.
+# So this checks CALLS, which is the property that actually matters.
+#
+# panel/ and vendor/ are exempt BY DESIGN, not by oversight: od_bbep_idf_io.inl and
+# fastepd_adapter.cpp exist precisely to supply these primitives to the two vendored libraries
+# that demand them, and third_party/ is exempt from the one rule (CLAUDE.md, decision 13).
+arduino_free() {
+    local rc=0
+
+    # SPI.h is deliberately NOT in this list: the only one in the tree is the PERMANENT FastEPD
+    # adapter, vendor/fastepd/SPI.h, and counting it would make this check fail forever on a
+    # file that is meant to include it. The guard against a shim SPI.h reappearing is the next
+    # block, which pins where SPI.h may live -- compat/ used to hold that risk and is now gone.
+    local hdrs='(arduino_compat|Arduino|Wire|WiFi|ledc_compat|esp32-hal-gpio|HardwareSerial)\.h'
+    local hits
+    hits=$(grep -rlE "#[[:space:]]*include[[:space:]]*[<\"][[:space:]]*$hdrs" \
+             targets/esp32-idf --include='*.c' --include='*.cpp' --include='*.h' \
+             --include='*.hpp' --include='*.inl' 2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "::error::Arduino header included under targets/esp32-idf/:"
+        echo "$hits" | sed 's/^/    /'
+        rc=1
+    fi
+
+    hits=$(find targets/esp32-idf -name 'SPI.h' -not -path '*/build/*' \
+           | grep -v '^targets/esp32-idf/vendor/fastepd/SPI\.h$' || true)
+    if [ -n "$hits" ]; then
+        echo "::error::an SPI.h outside the FastEPD vendor adapter -- the header pattern above"
+        echo "         does not count <SPI.h>, so files including this one would be invisible:"
+        echo "$hits" | sed 's/^/    /'
+        rc=1
+    fi
+
+    # Calls to Arduino primitives in APP code. panel/ and vendor/ are exempt BY DESIGN:
+    # od_bbep_idf_io.inl and fastepd_adapter.cpp exist precisely to supply these to the two
+    # vendored libraries that demand them, and third_party/ is exempt from the one rule
+    # (CLAUDE.md, decision 13).
+    #
+    # The awk pass strips comments before matching. Without it the check fires on prose --
+    # "millis()-poll from loop()" in a header comment is not a call, and a gate that cannot
+    # tell those apart gets disabled rather than obeyed.
+    #
+    # `[(]` rather than `\(`: the pattern crosses shell -> awk -v -> dynamic regex, and a
+    # backslash does not survive that trip. It arrived as a bare `(`, which made the regex
+    # invalid, and awk died on the first file -- while the check still reported OK, because the
+    # `|| true` that was here swallowed the status. A gate that cannot fail is worse than none,
+    # so the scan's own failure is now a failure.
+    local prims='(pinMode|digitalWrite|digitalRead|analogRead|analogWrite|analogReadResolution|analogSetPinAttenuation|delay|delayMicroseconds|millis|micros|temperatureRead|yield)'
+    hits=$(find targets/esp32-idf/src targets/esp32-idf/hal targets/esp32-idf/ble \
+                targets/esp32-idf/main -type f \
+                \( -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name '*.inl' \) 2>/dev/null \
+           | xargs awk -v pat="(^|[^_[:alnum:]>.])$prims[[:space:]]*[(]" '
+               FNR == 1 { inblock = 0 }
+               { line = $0
+                 if (inblock) { if (sub(/.*\*\//, "", line)) inblock = 0; else next }
+                 gsub(/\/\*[^*]*\*\//, "", line)
+                 if (sub(/\/\*.*/, "", line)) inblock = 1
+                 sub(/\/\/.*/, "", line)
+                 if (line ~ pat) printf "%s:%d:%s\n", FILENAME, FNR, $0
+               }') || { echo "::error::the Arduino-primitive scan failed to run"; return 1; }
+    if [ -n "$hits" ]; then
+        echo "::error::Arduino primitive called from app code (use od_hal_*):"
+        echo "$hits" | sed 's/^/    /'
+        rc=1
+    fi
+
+    [ $rc -eq 0 ] && echo "OK: no Arduino header or primitive in targets/esp32-idf/ app code."
+    return $rc
+}
+check "esp32: arduino-free app code" arduino_free
 
 # ALL TEN FRAGMENTS, not a sampled four. The plan's verification list says ten, and a subset
 # leaves six board configurations covered by nothing -- the c3/c6/classic parts differ in PSRAM,

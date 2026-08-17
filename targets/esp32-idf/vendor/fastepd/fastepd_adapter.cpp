@@ -14,4 +14,20 @@
  */
 #include "SPI.h"
 
+#include <stdint.h>
+
+#include "od_hal_time.h"
+
 SPIClass SPI;
+
+/* millis(), for FastEPD's 19 call sites (third_party/FastEPD/src/arduino_io.inl declares it and
+ * deliberately does not define it). The return type must stay uint32_t to match that
+ * declaration. Truncating to 32 bits is what Arduino does and what the callers assume: they
+ * compare by subtraction, which is wrap-safe.
+ *
+ * It lives here rather than in a shared primitives file because FastEPD is the only thing that
+ * wants it, and this adapter is the permanent home for what FastEPD wants. */
+uint32_t millis(void)
+{
+    return od_hal_uptime_ms();
+}

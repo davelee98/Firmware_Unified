@@ -3,7 +3,7 @@
 # Phase B of the import (docs/MIGRATION.md § "The ESP32 import is different"). The goal of this
 # phase is to LINK AND BOOT ON HARDWARE EARLY, so that every later step -- each subsystem
 # promoted into shared/core -- is bisectable against a known-good baseline. It is not to be
-# clean; cleanliness is phase C's job, enforced by compat/ratchet.sh.
+# clean; cleanliness is phase C's job, enforced by tools/check.sh's arduino-free check.
 #
 #   ./build.sh <board>          e.g. ./build.sh s3-n16r8
 #

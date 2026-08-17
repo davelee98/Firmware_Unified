@@ -1,11 +1,9 @@
-/* app_main -- the IDF entry point, calling the imported Arduino setup()/loop().
- * TEMPORARY; part of the shim and dies with it.
+/* app_main -- the IDF entry point, calling setup()/loop().
  *
- * The Arduino core supplied this. Under IDF the application starts at app_main(), so the
- * loop lives here explicitly -- which is arguably an improvement, because the scheduling
- * that Arduino hid is now visible and adjustable.
+ * Under IDF the application starts at app_main(), so the loop that the Arduino core used to
+ * run for us lives here explicitly. That makes the scheduling visible and adjustable, which
+ * is why the shape stayed after the shim it arrived with was deleted.
  */
-#include "arduino_compat.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 

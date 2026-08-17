@@ -209,7 +209,7 @@ never went through this code.
 **The patch.** All 15 guarded SPI blocks become
 `#if defined(ARDUINO) || defined(OD_FASTEPD_IDF_SPI)`, and
 `targets/esp32-idf/main/CMakeLists.txt` sets `OD_FASTEPD_IDF_SPI=1` on `FastEPD.cpp` alone.
-The Arduino branch is reused verbatim because `targets/esp32-idf/compat/SPI.h` provides exactly
+The Arduino branch is reused verbatim because `targets/esp32-idf/vendor/fastepd/SPI.h` provides exactly
 that API over IDF's `spi_master`. Patched sites are marked `OD-PATCH` and all point at the
 explanatory note on `it8951WriteData()`.
 
@@ -233,8 +233,10 @@ choose *its* backend and must keep the `esp_idf` one.
 
 **Retiring it.** The upstream-shaped fix is an `esp_idf_io.inl` in FastEPD selected by
 `ESP_PLATFORM`. When that exists, delete both the patch and the CMake define. Until then, note
-that `compat/` cannot be removed at the end of phase C while FastEPD still depends on it —
-`compat/ratchet.sh` reports these vendored users separately for exactly that reason.
+that a vendored library's Arduino dependency does not end with the application port. `compat/`
+was deleted on 2026-08-16; what FastEPD needs moved into `targets/esp32-idf/vendor/fastepd/` and
+what bb_epaper needs into `targets/esp32-idf/panel/od_bbep_idf_io.inl`, each owned by the
+backend that wants it.
 
 ---
 

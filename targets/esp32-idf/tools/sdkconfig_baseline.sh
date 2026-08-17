@@ -18,7 +18,7 @@
 # docs/TOOLCHAINS.md has a PlatformIO-knob -> sdkconfig translation table for exactly this
 # purpose, maintained by hand. It caught two of those four. Hand-maintained lists of things to
 # remember do not survive contact with a toolchain upgrade -- which is the same argument
-# compat/ratchet.sh makes about the Arduino shim, and the same answer: give it a mechanical
+# tools/check.sh makes about Arduino primitives, and the same answer: give it a mechanical
 # gate rather than good intentions.
 #
 # WHAT IS RECORDED: the whole effective sdkconfig, not a curated subset. A subset can only

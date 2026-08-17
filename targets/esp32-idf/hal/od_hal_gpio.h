@@ -60,7 +60,7 @@ int od_hal_gpio_read(uint8_t cfg);
  * specified as edge-both with no mode argument. That is too narrow for the first real caller:
  * the GT911 touch controller asserts INT active-low and is attached FALLING, and an edge-both
  * attachment would fire a spurious event on every release. Widened deliberately -- see
- * compat/SHIM_BUDGET, step 6. */
+ * docs/ARCHIVE_esp32_arduino_shim.md, step 6. */
 typedef enum {
     OD_GPIO_EDGE_RISING = 0,
     OD_GPIO_EDGE_FALLING,

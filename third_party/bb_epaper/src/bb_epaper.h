@@ -46,7 +46,7 @@
 #define LOW 0
 void delay(long); /* OD-PATCH: was delay(int), which made every delay(uint32_t) call inside
                    * the library ambiguous against the long-taking definition. The definition
-                   * now lives in targets/esp32-idf/compat/arduino_compat.cpp, NOT in
+                   * now lives in targets/esp32-idf/panel/od_bbep_idf_io.inl, NOT in
                    * esp_idf/esp_generic.inl -- that backend is no longer compiled.
                    * RE-APPLIED at the 5dccfbb re-vendor: still unfixed upstream. */
 void pinMode(int pin, int mode);

@@ -244,7 +244,7 @@ symmetric across the library/application boundary — pads were re-attached on e
 bring-up as a side effect of sharing the object, which nobody designed.
 
 Under IDF they are two separate buses: `esp_generic.inl` owns its own
-`spi_bus_config_t`/`spi_device_handle_t` file-statics, while `compat/SPI.h` owns a different one
+`spi_bus_config_t`/`spi_device_handle_t` file-statics, while `vendor/fastepd/SPI.h` owns a different one
 on the same host. `main.cpp`'s `SPI.end()` now acts on the compat object, which never held the
 panel's bus, so it is a silent no-op for the panel while the pad parking in
 `configureDisplayPinsLowPower()` still happens. **The pairing broke invisibly when the backend
@@ -264,7 +264,7 @@ IDF asserts a hardware reset in `bbepInitIO` that Arduino never did, immediately
 **Bus init is conditional under Arduino, unconditional under IDF.** `arduino_io.inl` has a
 shared-SPI escape (`u8MOSI == 0xff` → do not touch the bus) and a bit-bang mode
 (`u32Speed == 0`). `esp_generic.inl` has neither and always seizes `SPI2_HOST` — which is why
-bb_epaper and the E1004 dual-CS path (through `compat/SPI.h`) can collide on one host here.
+bb_epaper and the E1004 dual-CS path (through `vendor/fastepd/SPI.h`) can collide on one host here.
 
 **Error handling.**
 

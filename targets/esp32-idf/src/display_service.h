@@ -91,7 +91,7 @@ void cleanupPartialWriteOnDisconnect(void);
 /* Release the panel SPI bus. Called from main.cpp's deep-sleep teardown, which used to reach
  * for SPI.end() itself -- the last thing keeping <SPI.h> in that file (phase C step 12).
  *
- * It belongs here rather than there on ownership grounds: compat/SPI.h's end() releases the
+ * It belongs here rather than there on ownership grounds: vendor/fastepd/SPI.h's end() releases the
  * device AND frees the bus using ownership state (_owns_bus) that only this layer sets up, and
  * whether the bus is owned at all depends on the FastEPD driver selection this layer makes.
  * main.cpp asking the display to release its own bus is the same shape as it asking
