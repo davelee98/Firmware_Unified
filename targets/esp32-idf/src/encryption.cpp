@@ -6,9 +6,6 @@
 #include "encryption_state.h"
 #include "od_log.h"
 
-#ifdef TARGET_NRF
-#include <Arduino.h>
-#endif
 #ifdef TARGET_ESP32
 #include "esp_mac.h"       // esp_efuse_mac_get_default -- was ESP.getEfuseMac() via the shim
 #include "od_hal_crypto.h"
@@ -18,11 +15,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#ifdef TARGET_NRF
-#include <Adafruit_LittleFS.h>
-#include <InternalFileSystem.h>
-using namespace Adafruit_LittleFS_Namespace;
-#endif
 #ifdef TARGET_ESP32
 /* ESP32: config storage is NVS, not LittleFS -- see config_parser.cpp and
  * hal/od_hal_nvs.h. This file only needs to invalidate the stored record. */
@@ -35,24 +27,18 @@ using namespace Adafruit_LittleFS_Namespace;
 static inline void od_delay_ms(uint32_t ms) {
 #ifdef TARGET_ESP32
     od_hal_delay_ms(ms);
-#else
-    delay((long)ms);
 #endif
 }
 
 static inline int od_read_pin(uint8_t pin) {
 #ifdef TARGET_ESP32
     return od_hal_gpio_read(pin);
-#else
-    return digitalRead(pin) ? 1 : 0;
 #endif
 }
 
 void getAuthDeviceIdBytes(uint8_t* device_id) {
     if (device_id == nullptr) return;
-#ifdef TARGET_NRF
-    uint32_t id = NRF_FICR->DEVICEID[0];
-#elif defined(TARGET_ESP32)
+#if defined(TARGET_ESP32)
     uint8_t macb[6] = {0};
     esp_efuse_mac_get_default(macb);
     /* ESP.getEfuseMac() returns the six factory bytes packed little-endian into a uint64_t,
@@ -128,17 +114,7 @@ void getChipIdHex(char* out, size_t out_size) {
         out[0] = '\0';
         return;
     }
-#ifdef TARGET_NRF
-    uint32_t id1 = NRF_FICR->DEVICEID[0];
-    uint32_t id2 = NRF_FICR->DEVICEID[1];
-    uint32_t last3Bytes = id2 & 0xFFFFFFu;
-    /* "%06X" replaces String(v, HEX) + toUpperCase() + a manual zero-pad loop, and produces
-     * the same six characters for every input. */
-    snprintf(out, out_size, "%06X", (unsigned)last3Bytes);
-    od_log_debug("Chip ID: %08X%08X", (unsigned)id1, (unsigned)id2);
-    od_log_debug("Using last 3 bytes: %s", out);
-    return;
-#elif defined(TARGET_ESP32)
+#if defined(TARGET_ESP32)
     uint8_t macb[6] = {0};
     esp_efuse_mac_get_default(macb);
     /* Same little-endian packing as getAuthDeviceIdBytes() above -- see the note there. The
@@ -158,31 +134,8 @@ void getChipIdHex(char* out, size_t out_size) {
 
 void secureEraseConfig() {
     od_log_info("=== SECURE ERASE CONFIG ===");
-#ifdef TARGET_NRF
-    /* Only the LittleFS path writes through this; on ESP32 the overwrite happens inside
-     * od_hal_nvs_secure_erase(), so scoping it here keeps 512 B of BSS off that build. */
-    static uint8_t zeroBuffer[512];
-    memset(zeroBuffer, 0, sizeof(zeroBuffer));
-#endif
 
-#ifdef TARGET_NRF
-    if (InternalFS.exists(CONFIG_FILE_PATH_LOCAL)) {
-        File file = InternalFS.open(CONFIG_FILE_PATH_LOCAL, FILE_O_WRITE);
-        if (file) {
-            size_t fileSize = file.size();
-            file.seek(0);
-            size_t written = 0;
-            while (written < fileSize) {
-                size_t toWrite = (fileSize - written < sizeof(zeroBuffer)) ? (fileSize - written) : sizeof(zeroBuffer);
-                file.write(zeroBuffer, toWrite);
-                written += toWrite;
-            }
-            file.close();
-            od_log_info("Config file securely erased (%zu bytes)", written);
-        }
-        InternalFS.remove(CONFIG_FILE_PATH_LOCAL);
-    }
-#elif defined(TARGET_ESP32)
+#if defined(TARGET_ESP32)
     /* Was: open the stored config file, zero its bytes, then remove it. The NVS port briefly
      * reduced this to a plain od_hal_nvs_erase(), which drops the overwrite entirely --
      * nvs_erase_key() only marks the entry deleted, so the AES-128 master key in config
@@ -215,11 +168,6 @@ void checkResetPin() {
      * pull. Asking for neither pull IS the plain-INPUT case, so the intermediate configuration
      * disappears and the pad ends in the same state. */
     od_hal_gpio_config_input(pin, pullup, pulldown);
-#elif defined(TARGET_NRF)
-    pinMode(pin, INPUT);
-    if (pullup) {
-        pinMode(pin, INPUT_PULLUP);
-    }
 #endif
 
     od_delay_ms(100);

@@ -717,4 +717,40 @@
 # Phase C's ESP32 app-code work is therefore DONE. What remains under targets/esp32-idf/ is
 # nRF-arm code and the permanent adapter. Nothing to verify on hardware in THIS step; the
 # outstanding hardware debt is steps 12, 13 and 14.
-5
+
+# 0 = 2026-08-16: the TARGET_NRF arms are deleted, and with them the five files that were
+# counted only for those arms. 5 -> 0. THE FLOOR IS REACHED.
+#
+# THIS IS THE DECREMENT THE ENTRY ABOVE PREDICTED, arriving by a different route than it
+# expected. It said the arms "leave with the nRF target at MIGRATION step 4"; step 4 happened
+# some time ago -- the nRF52840 became a board of targets/nordic-zephyr/ -- and the arms simply
+# stayed behind, unreferenced, because nothing was watching for that. No board fragment under
+# boards/ defines TARGET_NRF, and none ever has in this repository; all ten define TARGET_ESP32.
+# The arms were unreachable in every configuration this target builds.
+#
+# WHAT WAS DELETED: every #if/#elif/#else arm under TARGET_NRF or ARDUINO_ARCH_NRF52 in
+# main.cpp, main.h, display_service.cpp, config_parser.cpp, device_control.cpp, encryption.cpp,
+# buzzer_hw.cpp, od_log.cpp and od_log.h, plus src/ble_transport_nrf.{cpp,h}, whose entire
+# contents sat inside such an arm. 719 lines. Done mechanically by tools/drop_dead_arms.py,
+# which resolves only the conditions it fully understands and preserves every other verbatim.
+#
+# THE PROOF IS THE SECTION SIZES, and it is the only proof worth having here: code that never
+# compiled cannot move one byte of output. All 10 boards build, and text, data and bss are
+# IDENTICAL to the pre-change build on every one of them.
+#
+# That comparison earned its keep immediately. The first version of the tool substituted 0/1 for
+# unresolved macros in `#if` arithmetic, read `#if OPENDISPLAY_ZLIB_WINDOW_BITS == 9` as false
+# under both guesses, and deleted the arm sizing the inflate dictionary -- cutting a window that
+# is a WIRE CONTRACT with the host encoder from 4096 to 512 bytes. Nothing else caught it: the
+# build was green and the tests passed. bss was 3584 bytes light on six boards, and that was the
+# entire signal. The tool now refuses any condition that reads a macro's value.
+#
+# NOTHING TO VERIFY ON HARDWARE. Byte-identical output is a stronger statement than a smoke test.
+#
+# THE COUNT REACHING 0 IS NOT compat/ BEING DELETABLE TODAY. main/CMakeLists.txt still compiles
+# compat/app_main.cpp (the IDF entry point that calls setup()/loop()) and
+# compat/arduino_compat.cpp. Deleting the directory means relocating those first, which is a
+# build change with its own verification, not part of removing dead code. The extraction this
+# file describes -- delay(), delayMicroseconds(), millis(), ledc_compat.h into
+# vendor/fastepd/ -- is now unblocked and is the next step.
+0

@@ -136,8 +136,9 @@ float temperatureRead(void)
 {
     /* Forwarder. The implementation MOVED to hal/od_hal_adc.c (phase C step 14), unchanged,
      * for the same reason analogRead() did in step 7: IDF installs ONE temperature_sensor
-     * handle, so the HAL must own it or two installers silently fight. This remains only
-     * because display_service.cpp's TARGET_NRF arm still compiles against the shim. */
+     * handle, so the HAL must own it or two installers silently fight. Nothing calls this
+     * forwarder any more -- the last caller was display_service.cpp's TARGET_NRF arm -- and it
+     * goes when compat/ does. */
     return od_hal_adc_die_temp_c();
 }
 

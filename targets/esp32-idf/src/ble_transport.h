@@ -6,8 +6,8 @@
 // Portable BLE link abstraction. Deliberately includes NO stack headers, so any
 // translation unit can use it without dragging in Bluefruit or NimBLE types.
 //
-// Exactly one implementation is linked per build (ble_transport_nrf.cpp or
-// ble_transport_esp32.cpp), so this is a plain class rather than an abstract
+// Exactly one implementation is linked per build -- ble_transport_esp32.cpp,
+// this target's only one -- so this is a plain class rather than an abstract
 // base: virtual dispatch would cost a vtable and indirect calls for zero
 // benefit, and application code would still only ever see one type.
 //

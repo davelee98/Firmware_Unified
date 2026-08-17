@@ -233,11 +233,11 @@ void od_ble_evt_disconnect(uint16_t conn_handle, uint16_t reason) {
     // (od_rxq_item_t::tag), so a departed session's frames self-discard at
     // dispatch instead of needing a boundary that handle reuse could destroy.
     instanceRetire(conn_handle);
-    // The token is deliberately NOT released here -- see the matching note in
-    // ble_transport_nrf.cpp. Releasing on this callback would admit a new owner
-    // while the departed session's state is still live, and RX/TX run before
-    // the deferred cleanup. Release stays the abort's last step (R3a); a
-    // reconnecting client that loses its claim is reaped by contender refusal.
+    // The token is deliberately NOT released here. Releasing on this callback
+    // would admit a new owner while the departed session's state is still live,
+    // and RX/TX run before the deferred cleanup. Release stays the abort's last
+    // step (R3a); a reconnecting client that loses its claim is reaped by
+    // contender refusal.
     // Flag-only. The session teardown this implies (EPD force-off with
     // SPI.end()/rail cut, partial + pipe cleanup) is heavyweight,
     // state-mutating work that races loop()'s SPI streaming and pipe-frame

@@ -10,11 +10,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#ifdef TARGET_NRF
-#include <Adafruit_LittleFS.h>
-#include <InternalFileSystem.h>
-using namespace Adafruit_LittleFS_Namespace;
-#endif
 #ifdef TARGET_ESP32
 /* ESP32: config lives in NVS, not LittleFS (decided 2026-07-25). The three-function seam
  * is od_hal_nvs, shaped per docs/SHARED_API_DESIGN.md so the eventual promotion of this
@@ -77,13 +72,6 @@ void resetChunkedWriteState(void) {
 }
 
 bool initConfigStorage(){
-    #ifdef TARGET_NRF
-    if (!InternalFS.begin()) {
-        od_log_error("ERROR: Failed to mount internal file system");
-        return false;
-    }
-    return true;
-    #endif
     #ifdef TARGET_ESP32
     if (od_hal_nvs_init() != OD_HAL_NVS_OK) {
         od_log_error("ERROR: Failed to initialise NVS config storage");
@@ -95,9 +83,6 @@ bool initConfigStorage(){
 }
 
 void formatConfigStorage(){
-    #ifdef TARGET_NRF
-    InternalFS.format();
-    #endif
     #ifdef TARGET_ESP32
     (void)od_hal_nvs_erase();
     #endif
@@ -149,53 +134,12 @@ bool saveConfig(uint8_t* configData, uint32_t len){
         od_log_error("ERROR: Failed to write config to NVS");
         return false;
     }
-    #else
-    #ifdef TARGET_NRF
-    if (InternalFS.exists(CONFIG_FILE_PATH)) {
-        InternalFS.remove(CONFIG_FILE_PATH);
-    }
-    File file = InternalFS.open(CONFIG_FILE_PATH, FILE_O_WRITE);
-    #elif defined(TARGET_ESP32)
-    if (LittleFS.exists(CONFIG_FILE_PATH)) {
-        LittleFS.remove(CONFIG_FILE_PATH);
-    }
-    File file = LittleFS.open(CONFIG_FILE_PATH, FILE_WRITE);
-    #endif
-    if (!file) {
-        od_log_error("ERROR: Failed to open config file for writing");
-        #ifdef TARGET_NRF
-        file = InternalFS.open(CONFIG_FILE_PATH, FILE_O_WRITE);
-        #elif defined(TARGET_ESP32)
-        file = LittleFS.open(CONFIG_FILE_PATH, FILE_WRITE);
-        #endif
-        if (!file) {
-            od_log_error("ERROR: Failed to open config file for writing with CREATE|WRITE");
-        return false;
-        }
-    }
-    const size_t totalSize = sizeof(config_header_t) + len;
-    size_t bytesWritten = file.write((uint8_t*)&header, sizeof(header));
-    if (bytesWritten == sizeof(header) && len > 0) {
-        bytesWritten += file.write(configData, len);
-    }
-    file.close();
-    if (bytesWritten != totalSize) {
-        od_log_error("ERROR: Failed to write complete config data (expected %u, wrote %u)", (unsigned)totalSize, (unsigned)bytesWritten);
-        return false;
-    }
     #endif
     return true;
 }
 
 bool clearStoredConfig(void) {
-    #ifdef TARGET_NRF
-    if (InternalFS.exists(CONFIG_FILE_PATH)) {
-        if (!InternalFS.remove(CONFIG_FILE_PATH)) {
-            od_log_error("ERROR: Failed to remove config file");
-            return false;
-        }
-    }
-    #elif defined(TARGET_ESP32)
+    #if defined(TARGET_ESP32)
     if (od_hal_nvs_erase() != OD_HAL_NVS_OK) {
         od_log_error("ERROR: Failed to remove stored config");
         return false;
@@ -250,53 +194,6 @@ bool loadConfig(uint8_t* configData, uint32_t* len){
         return false;
     }
     memcpy(configData, blob + sizeof(config_header_t), header.data_len);
-#else
-    #ifdef TARGET_NRF
-    File file = InternalFS.open(CONFIG_FILE_PATH, FILE_O_READ);
-    #elif defined(TARGET_ESP32)
-    File file = LittleFS.open(CONFIG_FILE_PATH, FILE_READ);
-    #endif
-    if (!file) {
-        return false;
-    }
-    if (configData == nullptr || len == nullptr) {
-        file.close();
-        return false;
-    }
-    // Header staged on the stack, payload read straight into the caller's buffer.
-    // On any failure below configData may hold unvalidated bytes; every caller
-    // gates on the return value, so it is never read after a false return.
-    config_header_t header;
-    size_t bytesRead = file.read((uint8_t*)&header, sizeof(header));
-    if (bytesRead != sizeof(header)) {
-        od_log_error("ERROR: Failed to read config header (expected %u, got %u)", (unsigned)sizeof(header), (unsigned)bytesRead);
-        file.close();
-        return false;
-    }
-    if (header.magic != CONFIG_STORAGE_MAGIC) {
-        od_log_error("ERROR: Invalid config magic number");
-        file.close();
-        return false;
-    }
-    if (header.data_len > MAX_CONFIG_SIZE) {
-        od_log_error("ERROR: Config data too large");
-        file.close();
-        return false;
-    }
-    // Capacity is now checked BEFORE the read rather than after staging: the
-    // read target is the caller's buffer, so this bound is what keeps a large
-    // (but in-spec) config from overrunning a smaller caller buffer.
-    if (header.data_len > *len) {
-        od_log_error("ERROR: Config data larger than buffer");
-        file.close();
-        return false;
-    }
-    bytesRead = file.read(configData, header.data_len);
-    file.close();
-    if (bytesRead != header.data_len) {
-        od_log_error("ERROR: Failed to read complete config data (expected %u, read %u)", (unsigned)header.data_len, (unsigned)bytesRead);
-        return false;
-    }
 #endif
     uint32_t calculatedCRC = calculateConfigCRC(configData, header.data_len);
     if (header.crc != calculatedCRC) {
@@ -308,11 +205,7 @@ bool loadConfig(uint8_t* configData, uint32_t* len){
 }
 
 bool hasValidStoredConfig(void) {
-#ifdef TARGET_NRF
-    if (!InternalFS.exists(CONFIG_FILE_PATH)) {
-        return false;
-    }
-#elif defined(TARGET_ESP32)
+#if defined(TARGET_ESP32)
     /* No presence probe on ESP32. The obvious one -- load into a sizeof(config_header_t)
      * buffer and check for ENOENT -- cannot work: any real record is header + payload, so
      * the HAL returns E2BIG and logs "stored config is N B, buffer is 12 B" at ERROR level
@@ -590,9 +483,6 @@ void printConfigSummary(){
     #endif
     od_log_debug("Device Flags: 0x%02X", globalConfig.system_config.device_flags);
     od_log_debug("  PWR_PIN flag: %s", (globalConfig.system_config.device_flags & DEVICE_FLAG_PWR_PIN) ? "enabled" : "disabled");
-    #ifdef TARGET_NRF
-    od_log_debug("  XIAOINIT flag: %s", (globalConfig.system_config.device_flags & DEVICE_FLAG_XIAOINIT) ? "enabled" : "disabled");
-    #endif
     od_log_debug("  WS_PP_INIT flag: %s", (globalConfig.system_config.device_flags & DEVICE_FLAG_WS_PP_INIT) ? "enabled" : "disabled");
     od_log_debug("  BATTERY_LATCH flag: %s", (globalConfig.system_config.device_flags & DEVICE_FLAG_BATTERY_LATCH) ? "enabled" : "disabled");
     od_log_debug("  PWR_LATCH_DFF flag: %s", (globalConfig.system_config.device_flags & DEVICE_FLAG_PWR_LATCH_DFF) ? "enabled" : "disabled");
@@ -787,14 +677,6 @@ void full_config_init() {
         clearEncryptionSession();
         encryptionInitialized = true;
         checkResetPin();
-#ifdef TARGET_NRF
-        powerDownExternalFlashFromConfig();
-        if (globalConfig.loaded && (globalConfig.system_config.device_flags & DEVICE_FLAG_XIAOINIT)) {
-            od_log_info("Device flag DEVICE_FLAG_XIAOINIT is set, calling xiaoinit()...");
-            xiaoinit();
-            od_log_info("xiaoinit() completed");
-        }
-#endif
         if (globalConfig.loaded && (globalConfig.system_config.device_flags & DEVICE_FLAG_WS_PP_INIT)) {
             od_log_info("Device flag DEVICE_FLAG_WS_PP_INIT is set, calling ws_pp_init()...");
             ws_pp_init();

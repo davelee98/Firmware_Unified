@@ -10,24 +10,8 @@
 // The clock comes from od_hal_time. This was a private esp_timer_get_time()/1000 helper when it
 // was written (phase C step 1, before the time HAL existed) -- same arithmetic, one place now.
 static inline uint32_t od_log_millis(void) { return od_hal_uptime_ms(); }
-#else
-// nRF still gets these from the Arduino core, but this file must not INCLUDE Arduino to say
-// so -- it is not one of the files the shim ratchet counts and it is not going to become one
-// on the way to removing Arduino from the logger. Declared, not included. Both leave with the
-// Bluefruit stack at migration step 4.
-extern "C" uint32_t millis(void);
-static inline uint32_t od_log_millis(void) { return millis(); }
 #endif
 
-#ifndef TARGET_ESP32
-// The whole point of this file's nRF path: bypass Adafruit_USBD_CDC::write(), whose
-// send loop is bounded only by tud_cdc_n_connected() -- literally "DTR is high" --
-// and therefore spins forever when a host holds the port open but stops draining the
-// IN endpoint. tud_cdc_write() underneath it is a bare tu_fifo_write_n that takes
-// what fits and returns the count, so it cannot block no matter what the host does.
-// See docs/PLAN_NONBLOCKING_LOG_2026-07-29.md.
-#include <Adafruit_TinyUSB.h>
-#endif
 
 // Implemented in main.cpp: RTC-persisted wake cycle count on ESP32, always 0 on nRF52840.
 uint32_t getDeepSleepCount();
@@ -163,8 +147,6 @@ static void od_count_drop(bool feedBackoff) {
 static int od_port_room(void) {
 #ifdef TARGET_ESP32
     return od_hal_log_room();
-#else
-    return (int)tud_cdc_write_available();
 #endif
 }
 
@@ -180,8 +162,6 @@ static int od_port_room(void) {
 static bool od_port_write(const uint8_t *b, size_t n) {
 #ifdef TARGET_ESP32
     return od_hal_log_write(b, n) == n;
-#else
-    return tud_cdc_write(b, n) == n;
 #endif
 }
 
@@ -193,24 +173,6 @@ static bool od_port_wait_ready(int need, TickType_t start, TickType_t budget) {
     // against: always write.
     (void)need; (void)start; (void)budget;
     return true;
-#else
-    for (;;) {
-        // The room test MUST precede the expiry test. With a zero budget this
-        // degenerates to "try once, then discard"; reversed, it becomes "discard
-        // without trying" and every off-loop record is lost unconditionally.
-        if (od_port_room() >= need) {
-            return true;
-        }
-        if ((TickType_t)(xTaskGetTickCount() - start) >= budget) {
-            return false;
-        }
-        // vTaskDelay, NOT delay(): the core's delay() flushes CDC first and returns
-        // early without ever calling vTaskDelay when that flush spans a tick
-        // (cores/nRF5/delay.c, `if (flush_tick >= ticks) return;`, and ms2tick(1) is
-        // one tick at 1024 Hz). That turns this into a busy-spin at priority 2 that
-        // never yields to loop(), and time slicing is disabled.
-        vTaskDelay(1);
-    }
 #endif
 }
 
@@ -299,26 +261,6 @@ static void od_emit(const char *text, int tagAt, bool newline) {
     if (reported > 0) {
         __atomic_fetch_sub(&s_dropped, reported, __ATOMIC_RELAXED);
     }
-#else
-    // Push whatever is queued at the record boundary rather than waiting for a full
-    // bulk packet to accumulate, so a lone line is not held back by a quiet link.
-    tud_cdc_write_flush();
-    if (ok) {
-        s_loopConsecutiveDrops = 0;
-        if (reported > 0) {
-            // Subtract what was reported rather than zeroing, so a drop taken by
-            // another task between the load above and here is not swallowed.
-            __atomic_fetch_sub(&s_dropped, reported, __ATOMIC_RELAXED);
-        }
-    } else {
-        // Cannot happen while the reservation and the lock both hold; if it ever
-        // does, the tag bytes reached the host, so consume the report (re-reporting
-        // would double-count for a reader summing them) and count the lost record.
-        if (reported > 0) {
-            __atomic_fetch_sub(&s_dropped, reported, __ATOMIC_RELAXED);
-        }
-        od_count_drop(true);
-    }
 #endif
 
     if (s_txLock != NULL) {
@@ -402,8 +344,6 @@ void od_log_flush(void) {
                         (xSemaphoreTake(s_txLock, pdMS_TO_TICKS(OD_LOG_BUDGET_MS)) == pdTRUE);
 #ifdef TARGET_ESP32
     od_hal_log_flush();
-#else
-    tud_cdc_write_flush();
 #endif
     if (locked) {
         xSemaphoreGive(s_txLock);

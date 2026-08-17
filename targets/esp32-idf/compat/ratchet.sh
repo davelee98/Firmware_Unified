@@ -36,15 +36,16 @@
 #
 # So the terminal state has two halves, and only the first is what this budget measures:
 #
-#   1. APP-CODE COUNT -> 4. Every file under targets/esp32-idf/ stops including a SHIM header.
-#      The floor is 4, not 0: main.cpp, buzzer_hw.cpp, device_control.cpp and encryption.cpp are
-#      counted only for their TARGET_NRF arms, which cannot be compiled or verified on this
-#      target and leave with MIGRATION step 4.
+#   1. APP-CODE COUNT -> 0. Every file under targets/esp32-idf/ stops including a SHIM header.
+#      REACHED. The floor was long recorded as 4, held by main.cpp, buzzer_hw.cpp,
+#      device_control.cpp and encryption.cpp, each counted only for TARGET_NRF arms that this
+#      target never compiled. Those arms are gone, so the four went with them.
 #   2. compat/ IS DELETED, and vendor/fastepd/ IS NOT. They are separate directories precisely
 #      so that "delete compat/" is an unambiguous instruction rather than a judgement call.
 #
-# When the count reaches 4: confirm the remainder is nRF-only, delete compat/, and retire this
-# check with it. vendor/fastepd/ stays.
+# Half 1 is done and half 2 is not: main/CMakeLists.txt still compiles compat/arduino_compat.cpp
+# and compat/app_main.cpp, so deleting the directory is a build change, not a file removal.
+# Until that happens this check keeps running, pinned at 0.
 #
 #   ./targets/esp32-idf/compat/ratchet.sh
 #
@@ -201,19 +202,17 @@ if [ "$actual" -lt "$budget" ]; then
     exit 1
 fi
 
-if [ "$actual" -le 4 ]; then
+if [ "$actual" -eq 0 ]; then
     echo
-    echo "Count is at the FLOOR (4): the only files left include a shim header for their"
-    echo "TARGET_NRF arms -- main.cpp, buzzer_hw.cpp, device_control.cpp, encryption.cpp."
-    echo "None of those arms compiles on this target, so none can be verified here; they leave"
-    echo "with the nRF target at MIGRATION step 4."
+    echo "Count is ZERO: no file under targets/esp32-idf/ includes a shim header."
     echo
     echo "That is the whole of what this check measures, and it is NOT a licence to delete"
     echo "the FastEPD vendor adapter. vendor/fastepd/{SPI.h,fastepd_adapter.cpp} is PERMANENT"
     echo "and lives outside $COMPAT_DIR precisely so that 'delete compat/' stays unambiguous."
     echo
-    echo "Next: confirm the remainder is nRF-only, delete $COMPAT_DIR, and retire this check"
-    echo "and .github/workflows/esp32-shim-ratchet.yml together. Leave vendor/fastepd alone."
+    echo "Next: $COMPAT_DIR still supplies app_main.cpp and arduino_compat.cpp to"
+    echo "main/CMakeLists.txt, so deleting it means moving the IDF entry point first. Do that,"
+    echo "then retire this check and .github/workflows/esp32-shim-ratchet.yml together."
 fi
 
 echo "OK: shim usage is at its recorded budget."
