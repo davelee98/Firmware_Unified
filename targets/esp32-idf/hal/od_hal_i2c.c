@@ -2,7 +2,7 @@
  *
  * The bus mechanics are compat/Wire.h's, moved rather than rewritten -- including the two
  * defects that file had already found and fixed on hardware (the zero-length-write probe, and
- * honouring the no-STOP flag for repeated-START reads). compat/Wire.h is now an adapter over
+ * honouring the no-STOP flag for repeated-START reads). compat/Wire.h was reduced to an adapter over
  * this, so there is exactly one owner of the bus handle: IDF permits only one
  * i2c_new_master_bus() per port, and a second owner does not fail cleanly, it fails at the
  * point where two drivers disagree about who configured the pins.

@@ -57,6 +57,8 @@
 #include "esp_err.h"
 #include "esp_log.h"
 
+#include "od_hal_time.h"
+
 /* Arduino spellings bb_ep.inl uses. Guarded: this file is never compiled together with
  * compat/arduino_compat.h today, but a future TU that includes both must not fail on a
  * redefinition, and the values are identical either way. */
@@ -175,8 +177,14 @@ static void od_bbep_pin_input(int pin)
     gpio_config(&cfg);
 }
 
-/* Signatures are fixed by bb_epaper.h:49-50 and must match exactly -- a mismatch here is how
- * the vendored tree's delay(int)/delay(long) ambiguity happened. */
+/* Signatures are fixed by bb_epaper.h and must match exactly -- a mismatch here is how the
+ * vendored tree's delay(int)/delay(long) ambiguity happened. FastEPD separately defines
+ * delay(unsigned long); the two never meet, because no translation unit includes both trees. */
+void delay(long ms)
+{
+    od_hal_delay_ms(ms < 0 ? 0u : (uint32_t)ms);
+}
+
 void digitalWrite(int pin, int value)
 {
     if (!od_bbep_pin_valid(pin)) return;
@@ -433,7 +441,7 @@ void bbepDeInitIO(void)
     esp_err_t ret = spi_bus_free(OD_BBEP_SPI_HOST);
     if (ret != ESP_OK) {
         /* Another driver still holds a device on this host -- the E1004 dual-CS path opens one
-         * through compat/SPI.h. Not fatal, but it means the next init cannot re-attach the
+         * through vendor/fastepd/SPI.h. Not fatal, but it means the next init cannot re-attach the
          * pins, so it must not be silent. */
         ESP_LOGW(OD_BBEP_TAG, "spi_bus_free failed (%s); another device is still attached",
                  esp_err_to_name(ret));

@@ -9,7 +9,7 @@
  * replace the shim's copies, which stay: two vendored libraries link against `delay` and
  * `millis` by name (bb_epaper declares `void delay(long)` unmangled; FastEPD's arduino_io.inl
  * has an extern millis() with 19 call sites), so those symbols are pinned by third_party/ and
- * cannot leave with the app code. See compat/SHIM_BUDGET, endgame note.
+ * cannot leave with the app code. See docs/ARCHIVE_esp32_arduino_shim.md, endgame note.
  */
 #pragma once
 

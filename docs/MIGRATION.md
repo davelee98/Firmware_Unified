@@ -194,11 +194,16 @@ files including `arduino_compat.h` only ever *decreases*. The shim is scaffoldin
 scheduled demolition, not a portability layer — if it is still present when the last subsystem
 lands, the port is not done.
 
-> **CORRECTED 2026-08-05, from doing it.** This paragraph said to "remove the check together
-> with the file when it reaches zero". **Zero is not reachable, and that is not a failure.**
-> The ratchet ran 21 -> 5 and 5 is the floor: those five files are counted only for their
-> `TARGET_NRF` arms, which do not compile on the ESP32 target and therefore cannot be verified
-> there. They leave with the nRF target at step 4, and `compat/` is deletable then.
+> **CORRECTED TWICE.** 2026-08-05, from doing it: this paragraph said to "remove the check
+> together with the file when it reaches zero", and the answer then was that zero was not
+> reachable — the last five files were counted only for `TARGET_NRF` arms that do not compile
+> on the ESP32 target.
+>
+> **RESOLVED 2026-08-16.** Those arms were deleted (they had been unreachable since the Nordic
+> port took step 4), the count reached 0, and `compat/` was deleted. The check was replaced
+> rather than retired: `tools/check.sh`'s "esp32: arduino-free app code" checks CALLS, because
+> the ratchet's include-count reached 0 while three call sites still reached shim primitives.
+> Record: [ARCHIVE_esp32_arduino_shim.md](ARCHIVE_esp32_arduino_shim.md).
 >
 > Separately, **FastEPD needs a *permanent* compatibility layer** — a vendored Arduino library
 > whose IT8951 transport is written against the Arduino `SPI` object. That surface lives in

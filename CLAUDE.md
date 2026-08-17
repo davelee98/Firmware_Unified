@@ -46,8 +46,8 @@ looks arbitrary and is not); delete the story.
 - Paths in this bullet are relative to `targets/esp32-idf/`. `./build.sh` there builds every board
   fragment (it sources ESP-IDF itself; never on `PATH`). `tools/run_host_tests.sh` runs host tests
   — or drive them directly, `cmake -S tests/host -B <dir> && cmake --build <dir> && ctest
-  --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF. `compat/ratchet.sh` and
-  `tools/sdkconfig_baseline.sh` are gates a change must not break.
+  --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF.
+  `tools/sdkconfig_baseline.sh` is a gate a change must not break.
 - **`shared/` is no longer empty** —
   `core/od_{adv_control,advert,cmd,config,config_asm,config_read,config_tlv,core,dispatch,gate,reply,rxq,session,txq,watchdog}.c`
   listed in `shared/sources.cmake` (never globbed) in per-HAL tiers, plus the two all-inline
@@ -189,9 +189,15 @@ looks arbitrary and is not); delete the story.
   `tests/host/session_ccm_reference.inc`), so treat the CCM path as unproven until a board
   authenticates and completes an encrypted upload.
 - **Never hardware-verified:** the WiFi/LAN transport, and the F4/F7 correctness fixes.
-- **`compat/` (Arduino shim) is at its floor of 5 files** — `TARGET_NRF` arms that leave with
-  migration step 4. Do not "finish" them (`targets/esp32-idf/compat/SHIM_BUDGET`).
-- **`targets/esp32-idf/vendor/fastepd/` is not a shim** and outlives `compat/`: the permanent
+- **THE ARDUINO SHIM IS GONE** (2026-08-16). `targets/esp32-idf/compat/` went 22 files to 0 and
+  was deleted, along with its ratchet. `tools/check.sh`'s "esp32: arduino-free app code" replaces
+  it and checks CALLS, not includes — the ratchet's include-count reached 0 while three call
+  sites still reached shim primitives, because `delay(long)` and `millis()` are declared by an
+  OD-PATCH in `third_party/bb_epaper/src/bb_epaper.h`. Those two now live beside the vendored
+  library that wants each: `millis()` in `vendor/fastepd/fastepd_adapter.cpp`, `delay(long)` in
+  `panel/od_bbep_idf_io.inl`, both forwarding to `od_hal_time`. Record:
+  docs/ARCHIVE_esp32_arduino_shim.md.
+- **`targets/esp32-idf/vendor/fastepd/` is not a shim** and outlived `compat/`: the permanent
   FastEPD adapter (Arduino `SPI` over IDF `spi_master`). It and both vendored panel libraries sit
   off the include path, granted per-source in `main/CMakeLists.txt` — adding a consumer is an edit
   there, not an `#include`.

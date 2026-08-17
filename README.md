@@ -13,9 +13,10 @@ versioned repos that had drifted apart while implementing the same wire protocol
 > - **`shared/` is still empty.** No promotion has happened yet, so the ESP32 target holds
 >   logic destined for `shared/core`. The first promotion is a planned, test-first step, not
 >   something to do opportunistically — see [docs/MIGRATION.md](docs/MIGRATION.md).
-> - **The Arduino shim is at its floor, not gone.** `targets/esp32-idf/compat/` is down to 5
->   files from 21, and 5 is the floor: those files are counted only for `TARGET_NRF` arms that
->   do not compile on this target and leave with the Nordic migration.
+> - **The Arduino shim is gone** (2026-08-16). `targets/esp32-idf/compat/` went 22 files to 0 and
+>   was deleted. What survives is the permanent FastEPD adapter under
+>   `targets/esp32-idf/vendor/fastepd/`, which is not a shim and does not die; the record of the
+>   demolition is [docs/ARCHIVE_esp32_arduino_shim.md](docs/ARCHIVE_esp32_arduino_shim.md).
 >
 > The ESP32 target is **not** correctness-signed-off. Ten findings from
 > [docs/CORRECTNESS_REVIEW_2026-08-04.md](docs/CORRECTNESS_REVIEW_2026-08-04.md) are open or
@@ -205,7 +206,6 @@ cd targets/esp32-idf
 ./build.sh                 # all 10 boards -> release/, with a MANIFEST
 ./build.sh s3-n16r8        # or just one; ./build.sh --list to see them
 tools/run_host_tests.sh    # host tests under ASan+UBSan and TSan+UBSan
-compat/ratchet.sh          # Arduino-shim budget; must not regress
 tools/sdkconfig_baseline.sh
 ```
 

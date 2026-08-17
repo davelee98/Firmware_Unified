@@ -31,11 +31,7 @@ list(APPEND OD_APP_SOURCES
     ${OD_LIB_DIR}/uzlib/src/crc32.c
 )
 
-# The Arduino shim. TEMPORARY -- removed in phase C together with compat/ and its ratchet.
-list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../compat/arduino_compat.cpp
-                           ${CMAKE_CURRENT_LIST_DIR}/../compat/app_main.cpp)
-
-# The FastEPD vendor adapter's storage. NOT part of the shim above and not removed with it --
+# The FastEPD vendor adapter's storage, and millis() for FastEPD's call sites. PERMANENT --
 # see ../vendor/fastepd/SPI.h and the scoping block further down.
 list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../vendor/fastepd/fastepd_adapter.cpp)
 
@@ -155,7 +151,6 @@ idf_component_register(
     INCLUDE_DIRS
         ${OD_SRC_DIR}
         # NOTE: ../vendor/fastepd is deliberately ABSENT here -- see the scoping block below.
-        ${CMAKE_CURRENT_LIST_DIR}/../compat
         ${CMAKE_CURRENT_LIST_DIR}/../hal
         ${CMAKE_CURRENT_LIST_DIR}/../ble
         ${OD_LIB_DIR}/uzlib/src
@@ -191,7 +186,7 @@ idf_component_register(
 #   vendor/fastepd              THE FASTEPD VENDOR ADAPTER -- an Arduino SPI object over IDF's
 #                               spi_master. Permanent, not a shim: FastEPD's IT8951 transport
 #                               is written against that object and there is no version of it
-#                               that is not. compat/ dies; this does not.
+#                               that is not. compat/ died; this did not.
 #
 # While they were global, ANY source in the component could reach a vendor panel API, or
 # acquire an Arduino SPI dependency, by typing one include. Each is now granted to a NAMED LIST
@@ -268,7 +263,7 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE ${OD_BOARD_DEFINES})
 # It linked and it booted; the panel simply never received a byte.
 #
 # OD_FASTEPD_IDF_SPI selects a THIRD branch, added as an OD-PATCH in FastEPD.inl, that drives
-# the transport through compat/SPI.h. Defining ARDUINO instead was tried and rejected: it also
+# the transport through vendor/fastepd/SPI.h. Defining ARDUINO instead was tried and rejected: it also
 # selects FastEPD's Arduino font/Print/PROGMEM surface (pgm_read_*, memcpy_P, ledcAttach,
 # TwoWire::setTimeout), which is a whole Arduino core rather than an IO backend, and bb_epaper
 # reads the same macro and must keep its esp_idf backend.

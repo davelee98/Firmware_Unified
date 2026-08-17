@@ -1971,7 +1971,7 @@ void it8951WriteData(FASTEPDSTATE *pState, uint16_t data) {
  * panel that never received a byte.
  *
  * OD_FASTEPD_IDF_SPI (set per-source in targets/esp32-idf/main/CMakeLists.txt) selects the
- * Arduino branch verbatim, because targets/esp32-idf/compat/SPI.h provides exactly this API
+ * Arduino branch verbatim, because targets/esp32-idf/vendor/fastepd/SPI.h provides exactly this API
  * over IDF's spi_master. Defining ARDUINO instead was tried and rejected: it also pulls in
  * FastEPD's Arduino font/Print/PROGMEM surface, and bb_epaper reads the same macro to pick
  * ITS backend and must keep the esp_idf one.

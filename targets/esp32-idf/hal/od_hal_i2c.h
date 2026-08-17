@@ -32,7 +32,7 @@ extern "C" {
 #endif
 
 /* Return codes. Deliberately NOT Arduino's endTransmission() encoding (0 ok, 1..4 error) --
- * that inverted convention belongs at the Arduino boundary, and compat/Wire.h translates. */
+ * that inverted convention belonged at the Arduino boundary, where compat/Wire.h translated. */
 #define OD_HAL_I2C_OK        0
 #define OD_HAL_I2C_ERR      (-1)   /* bus fault, timeout, or a peer that NACKed data */
 #define OD_HAL_I2C_ENODEV   (-2)   /* nobody acknowledged the address */

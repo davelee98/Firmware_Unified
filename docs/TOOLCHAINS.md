@@ -527,8 +527,8 @@ four**. A curated list can only catch drift in settings someone already thought 
 four were missed precisely because nobody thought of them. The cost is a noisy diff on an IDF
 upgrade — and that noise *is* the review, because an IDF bump moves defaults underneath the
 project and this is the only place that becomes visible before hardware makes it visible
-instead. Same argument `compat/ratchet.sh` makes about the Arduino shim, same answer: a
-mechanical gate rather than good intentions.
+instead. Same argument `tools/check.sh`'s arduino-free check makes about Arduino
+primitives, same answer: a mechanical gate rather than good intentions.
 
 #### The `build.sh` footgun found doing this
 

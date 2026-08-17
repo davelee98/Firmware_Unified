@@ -23,7 +23,7 @@
 #include <Wire.h>
 #endif
 /* OD-PATCH: the it8951 transport in FastEPD.inl is compiled against the SPI object when
- * OD_FASTEPD_IDF_SPI is set (targets/esp32-idf/compat/SPI.h backs it with IDF's spi_master).
+ * OD_FASTEPD_IDF_SPI is set (targets/esp32-idf/vendor/fastepd/SPI.h backs it with IDF's spi_master).
  * See the OD-PATCH note at it8951WriteData() in FastEPD.inl for why this exists. */
 #ifdef OD_FASTEPD_IDF_SPI
 #include <SPI.h>

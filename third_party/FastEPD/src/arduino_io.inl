@@ -57,11 +57,12 @@ unsigned long micros(void)
 /* OD-PATCH: millis() would be a duplicate symbol -- another provider already defines it, so
  * this file declares it only. The rest of this file is required by FastEPD.inl and stays.
  *
- * The provider is now compat/arduino_compat.cpp, NOT bb_epaper. It used to be bb_epaper's
- * esp_generic.inl, and when panel/od_bbep.cpp replaced bb_epaper.cpp that backend went away
- * and FastEPD's 19 millis() calls became undefined references -- a link error naming FastEPD
- * for a cause in bb_epaper. The primitive is owned by the shim now precisely so neither
- * vendored library depends on the other for it. Return type must stay uint32_t to match. */
+ * The provider is targets/esp32-idf/vendor/fastepd/fastepd_adapter.cpp -- this library's own
+ * permanent adapter, NOT bb_epaper. It used to be bb_epaper's esp_generic.inl, and when
+ * panel/od_bbep.cpp replaced bb_epaper.cpp that backend went away and FastEPD's 19 millis()
+ * calls became undefined references -- a link error naming FastEPD for a cause in bb_epaper.
+ * Each vendored library now owns its own copy of what it needs, so neither depends on the
+ * other for a primitive. Return type must stay uint32_t to match. */
 extern uint32_t millis(void);
 #if 0
 unsigned long millis(void)

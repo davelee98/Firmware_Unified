@@ -97,7 +97,7 @@ void setup() {
     od_hal_log_open();
     od_hal_delay_ms(100);
     #elif !defined(DISABLE_USB_SERIAL)
-    delay(100);
+    od_hal_delay_ms(100);
     #endif
     #if defined(OPENDISPLAY_LOG_UART)
     od_log_init();

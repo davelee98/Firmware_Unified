@@ -620,9 +620,9 @@ is not this firmware.
 
 ### What else follows
 
-- **The Arduino shim can finally die.** `targets/esp32-idf/compat/` sits at its floor of 5, and
-  those files are counted only for `TARGET_NRF` arms. They leave with this port; only then does
-  the ratchet reach zero and `compat/` get dismantled per `SHIM_BUDGET`.
+- **The Arduino shim can finally die.** DONE 2026-08-16: the `TARGET_NRF` arms were deleted,
+  the count reached 0, and `targets/esp32-idf/compat/` went with it. See
+  [ARCHIVE_esp32_arduino_shim.md](ARCHIVE_esp32_arduino_shim.md).
 - **The advertising divergence closes.** Set `restartOnDisconnect(false)` and adopt
   `od_adv_control`; that deletes `restartsAdvertisingOnDisconnect()` and its special-case branch
   in `serviceBleAdvertisingRestart()`, because Bluefruit's automatic restart is a second policy

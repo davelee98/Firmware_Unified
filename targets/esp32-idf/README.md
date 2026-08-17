@@ -257,24 +257,25 @@ what licenses retiring the source repo:
    `delay(800)` rail settle in `pwrmgm()`.
 4. ~~**`s3-e1004` still has no board fragment**~~ — **RETIRED 2026-08-05**: the board variant is retired, so no fragment is wanted. See third_party/NOTICE.md.
 
-### Phase C — the ESP32 app-code work is DONE (2026-08-05)
+### Phase C — the Arduino shim is GONE (2026-08-16)
 
-`compat/ratchet.sh` reads **5**, down from the phase-B baseline of 21, across fifteen recorded
-steps. `compat/SHIM_BUDGET` carries one dated paragraph per step, including what each one
-found — several steps existed only because the shim was hiding a defect.
+The count went 22 → 0 across sixteen recorded steps and `compat/` was deleted.
+[docs/ARCHIVE_esp32_arduino_shim.md](../../docs/ARCHIVE_esp32_arduino_shim.md) carries one dated
+paragraph per step, including what each one found — several existed only because the shim was
+hiding a defect.
 
-**5 IS THE FLOOR, NOT A STALL.** The five files left — `main.cpp`, `display_service.cpp`,
-`buzzer_hw.cpp`, `device_control.cpp`, `encryption.cpp` — are counted **only for their
-`TARGET_NRF` arms**. Those arms do not compile on this target, so they cannot be verified here;
-converting them blind is the unverifiable edit MIGRATION.md warns against. They leave with the
-nRF target at migration step 4, and `compat/` is deletable at that moment.
+**The gate was replaced, not retired.** `tools/check.sh`'s "esp32: arduino-free app code" checks
+CALLS rather than includes. That distinction is not academic: the ratchet's include-count reached
+0 while three call sites still reached shim primitives, because `delay(long)` and `millis()` are
+declared by an OD-PATCH in `third_party/bb_epaper/src/bb_epaper.h` and not by any header it
+grepped for. One of the three was app code (`main.cpp`'s `delay(100)`).
 
-**The permanent piece is `vendor/fastepd/`, and it is smaller than this section used to claim.**
-It is one header plus its storage — an Arduino `SPI` object over IDF's `spi_master` — because
-FastEPD's IT8951 transport is written against that object. It is called an **adapter**, not a
-shim: in this repo "shim" means scheduled demolition, and using the word for something
-permanent would make the ratchet's vocabulary meaningless. It lives outside `compat/` so that
-"delete `compat/`" stays unambiguous, and `ratchet.sh` excludes it from the count.
+**The permanent piece is `vendor/fastepd/`.** It is one header plus its storage — an Arduino
+`SPI` object over IDF's `spi_master`, plus `millis()` — because FastEPD's IT8951 transport is
+written against that object. It is called an **adapter**, not a shim: in this repo "shim" means
+scheduled demolition, and using the word for something permanent would have made the ratchet's
+vocabulary meaningless. `delay(long)` sits in `panel/od_bbep_idf_io.inl` for the same reason on
+bb_epaper's side. Both forward to `od_hal_time`.
 
 > **Corrected 2026-08-04.** This section previously said the adapter would also have to own
 > `delay()`, `delayMicroseconds()`, `millis()` and `ledc_compat.h` "for `bb_epaper.h`'s
@@ -479,13 +480,13 @@ src/                            imported application sources (from Firmware)
 hal/                            od_hal_{nvs,log,gpio,time,i2c,adc,panel} -- this target's HALs
 panel/                          od_bbep*.{cpp,inl} bb_epaper IDF backend; od_panel_* HAL backends
 ble/                            NimBLE C-API transport
-compat/                         TEMPORARY Arduino shim -- at its floor of 5; see SHIM_BUDGET
-vendor/fastepd/                 PERMANENT FastEPD adapter -- NOT a shim, does not die with compat/
+vendor/fastepd/                 PERMANENT FastEPD adapter -- an adapter, NOT a shim
 tools/                          host tests, sdkconfig baseline gate
 ```
 
-The two directories that are easy to confuse: **`compat/` is scheduled for deletion and
-`vendor/fastepd/` is not.** They are separate directories for exactly that reason.
+`compat/`, the temporary Arduino shim, was deleted on 2026-08-16. `vendor/fastepd/` was always a
+separate directory so that "delete `compat/`" would stay an unambiguous instruction rather than a
+judgement call about which files inside it were permanent.
 
 ## Toolchain
 

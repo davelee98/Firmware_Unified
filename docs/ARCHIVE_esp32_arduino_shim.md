@@ -1,3 +1,27 @@
+# ARCHIVE: the esp32-idf Arduino shim, and the ratchet that retired it
+
+**This file is a record, not a live gate.** It was `targets/esp32-idf/compat/SHIM_BUDGET`, the
+budget half of a ratchet that counted how many files under `targets/esp32-idf/` included an
+Arduino shim header. That number went 22 -> 0 over phases B and C, `compat/` was deleted on
+2026-08-16, and the ratchet went with it.
+
+**What replaced it:** `tools/check.sh`'s "esp32: arduino-free app code" check. The ratchet counted
+INCLUDES, and that metric reached 0 while three call sites were still reaching shim primitives --
+`delay(long)` and `millis()` are declared by an OD-PATCH in
+`third_party/bb_epaper/src/bb_epaper.h`, not by any header it grepped for. The replacement checks
+CALLS.
+
+**Where the primitives went:** `millis()` to `targets/esp32-idf/vendor/fastepd/fastepd_adapter.cpp`
+and `delay(long)` to `targets/esp32-idf/panel/od_bbep_idf_io.inl` -- each next to the vendored
+library that demands it, both forwarding to `od_hal_time`. The IDF entry point moved to
+`targets/esp32-idf/src/app_main.cpp`; it was never a shim, only shim-adjacent.
+
+Everything below is the original file, unchanged. It is kept because several entries record
+*definition changes that were not progress* -- a widened metric, a header that stopped being
+counted -- and that distinction is the only thing separating a ratchet from a number that drifts.
+
+---
+
 # Number of files under targets/esp32-idf/ that may include the Arduino shim
 # (arduino_compat.h, or Arduino.h which forwards to it).
 #

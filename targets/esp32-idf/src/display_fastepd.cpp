@@ -10,7 +10,7 @@
 #include "protocol_pending.h"
 /* No <Arduino.h>: this file never used one. Its only Arduino-shaped names -- SPISettings,
  * MSBFIRST, SPI_MODE0 -- come from the FastEPD vendor adapter below, which is permanent and
- * deliberately not counted by compat/ratchet.sh. Phase C step 15. */
+ * deliberately not counted by the arduino-free check in tools/check.sh. */
 #include <SPI.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>

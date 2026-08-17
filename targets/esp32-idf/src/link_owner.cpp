@@ -2,7 +2,8 @@
 // token has to be a single atomic word rather than loop-task-only state.
 
 // OD-PORT: <Arduino.h> in the reference tree, for millis() alone. Replaced rather than pulling
-// this file onto the Arduino shim, for two reasons: the shim ratchet (compat/ratchet.sh)
+// this file onto the Arduino shim, for two reasons: the shim ratchet (now the arduino-free
+// check in tools/check.sh)
 // requires the shim to shrink and never grow, and THIS FILE is the clearest promotion candidate
 // in the target -- pure arbitration logic, no vendor surface, and it already has a host test
 // (../tools/test_link_owner.cpp). shared/ forbids Arduino outright, so the dependency had to go
