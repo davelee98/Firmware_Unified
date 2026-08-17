@@ -10,14 +10,6 @@
 void enterDeepSleep(bool force = false, uint16_t overrideSleepSeconds = 0);
 #endif
 
-#ifdef TARGET_NRF
-#include <Arduino.h>     // pinMode/attachInterrupt for the nRF arm; leaves at migration step 4
-#include <bluefruit.h>   // enterDFUMode() drives the SoftDevice teardown directly
-extern "C" {
-#include "nrf_soc.h"
-}
-extern "C" void bootloader_util_app_start(uint32_t start_addr);
-#endif
 #ifdef TARGET_ESP32
 #include <esp_system.h>
 #include "driver/gpio.h"
@@ -297,9 +289,6 @@ static void esp32_ble_deinit_before_restart() {
 void reboot(){
     // Banner logged by the dispatcher (commandName() in communication.cpp).
     od_hal_delay_ms(100);
-#ifdef TARGET_NRF
-    NVIC_SystemReset();
-#endif
 #ifdef TARGET_ESP32
     esp32_ble_deinit_before_restart();
     esp_restart();
@@ -723,8 +712,6 @@ void flashLed(uint8_t color, uint8_t brightness) {
 
 #ifdef TARGET_ESP32
 void IRAM_ATTR handleButtonISR(uint8_t buttonIndex) {
-#else
-void handleButtonISR(uint8_t buttonIndex) {
 #endif
     if (buttonIndex >= MAX_BUTTONS || !buttonStates[buttonIndex].initialized) return;
     ButtonState* btn = &buttonStates[buttonIndex];
@@ -743,21 +730,6 @@ void handleButtonISR(uint8_t buttonIndex) {
 void IRAM_ATTR buttonISR(void* arg) {
     uint8_t buttonIndex = (uint8_t)(uintptr_t)arg;
     handleButtonISR(buttonIndex);
-}
-#elif defined(TARGET_NRF)
-void buttonISRGeneric() {
-    for (uint8_t i = 0; i < buttonStateCount; i++) {
-        if (buttonStates[i].initialized) {
-            ButtonState* btn = &buttonStates[i];
-            bool pinState = (od_hal_gpio_read(btn->pin) != 0);
-            bool pressed = btn->inverted ? !pinState : pinState;
-            uint8_t newState = pressed ? 1 : 0;
-            if (newState != btn->current_state) {
-                handleButtonISR(i);
-                break;
-            }
-        }
-    }
 }
 #endif
 
@@ -825,9 +797,6 @@ void initButtons() {
             // that existed only because Arduino had no combined form is gone. The pad ends in
             // the same state.
             od_hal_gpio_config_input(pin, hasPullup, hasPulldown);
-#elif defined(TARGET_NRF)
-            pinMode(pin, INPUT);
-            if (hasPullup) pinMode(pin, INPUT_PULLUP);
 #endif
             od_hal_delay_ms(10);
             bool initialPinState = (od_hal_gpio_read(pin) != 0);
@@ -836,8 +805,6 @@ void initButtons() {
 #ifdef TARGET_ESP32
             od_hal_gpio_config_irq_arg(pin, OD_GPIO_EDGE_BOTH, buttonISR,
                                        (void*)(uintptr_t)buttonStateCount);
-#elif defined(TARGET_NRF)
-            attachInterrupt(pin, buttonISRGeneric, CHANGE);
 #endif
             btn->initialized = true;
             buttonStateCount++;
@@ -848,12 +815,6 @@ void initButtons() {
         for (uint8_t i = 0; i < buttonStateCount; i++) {
             if (buttonStates[i].initialized) {
                 od_hal_gpio_irq_disable(buttonStates[i].pin);
-            }
-        }
-#elif defined(TARGET_NRF)
-        for (uint8_t i = 0; i < buttonStateCount; i++) {
-            if (buttonStates[i].initialized) {
-                detachInterrupt(buttonStates[i].pin);
             }
         }
 #endif
@@ -874,12 +835,6 @@ void initButtons() {
                 od_hal_gpio_irq_enable(buttonStates[i].pin);
             }
         }
-#elif defined(TARGET_NRF)
-        for (uint8_t i = 0; i < buttonStateCount; i++) {
-            if (!buttonStates[i].initialized) continue;
-            uint8_t pin = buttonStates[i].pin;
-            attachInterrupt(pin, buttonISRGeneric, CHANGE);
-        }
 #endif
     }
 }
@@ -887,35 +842,6 @@ void initButtons() {
 void enterDFUMode() {
     // Banner logged by the dispatcher (commandName() in communication.cpp).
 
-#ifdef TARGET_NRF
-    od_log_info("Preparing to enter DFU bootloader mode...");
-
-    Bluefruit.Advertising.restartOnDisconnect(false);
-
-    if (Bluefruit.connected()) {
-        od_log_info("Disconnecting BLE...");
-        Bluefruit.disconnect(Bluefruit.connHandle());
-        od_hal_delay_ms(100);
-    }
-
-    sd_power_gpregret_clr(0, 0xFF);
-    sd_power_gpregret_set(0, 0xB1);
-
-    sd_softdevice_disable();
-
-    NVIC->ICER[0] = 0xFFFFFFFF;
-    NVIC->ICPR[0] = 0xFFFFFFFF;
-#if defined(__NRF_NVIC_ISER_COUNT) && __NRF_NVIC_ISER_COUNT == 2
-    NVIC->ICER[1] = 0xFFFFFFFF;
-    NVIC->ICPR[1] = 0xFFFFFFFF;
-#endif
-
-    sd_softdevice_vector_table_base_set(NRF_UICR->NRFFW[0]);
-    __set_CONTROL(0);
-    bootloader_util_app_start(NRF_UICR->NRFFW[0]);
-
-    while (1) {}
-#endif
 
 #ifdef TARGET_ESP32
     od_log_info("ESP32: Rebooting (OTA typically handled via WiFi)");
@@ -962,15 +888,6 @@ od_cmd_result_t handleDeepSleepCommand(const od_cmd_ctx_t *ctx, const uint8_t* p
      * reservation goes unused and the caller releases it. */
     enterDeepSleep(true, overrideSeconds);
     return OD_CMD_OK;
-#else
-    // Non-ESP32 (nRF etc.) have no timer deep sleep. The protocol permits a NACK here
-    // ([0xFF][0x53][OD_ERR_DEEP_SLEEP_UNSUPPORTED][0x00]), but we intentionally stay
-    // silent to preserve existing behavior — leave as-is unless a caller needs the NACK.
-    (void)ctx;
-    (void)payload;
-    (void)payloadLen;
-    od_log_warn("Deep sleep command not supported on this target");
-    return OD_CMD_NACK;
 #endif
 }
 

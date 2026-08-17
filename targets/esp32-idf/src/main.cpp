@@ -1,21 +1,3 @@
-/* THE ESP32 HALF OF THIS FILE IS OFF THE SHIM (phase C step 12). GPIO went to od_hal_gpio,
- * millis/delay/delayMicroseconds to od_hal_time, the panel SPI teardown to
- * displayReleaseSpiBus(), and the one Arduino String to a fixed buffer.
- *
- * <Arduino.h> STAYS, guarded, and the file stays on the ratchet's list -- because its
- * TARGET_NRF arms still need it. 78 of this file's Arduino call sites are nRF-only: the
- * OPENDISPLAY_BOOT_DIAG Serial.* tracing, the LED_GREEN/LED_BLUE CDC-wait loop, and
- * powerDownExternalFlash()'s bit-banged SPI. None of them compiles on this target, so none of
- * them can be verified here; converting them blind is exactly the unverifiable edit
- * docs/MIGRATION.md warns against. They leave with the nRF target at MIGRATION step 4, which is
- * the same rule buzzer_hw.cpp, device_control.cpp and encryption.cpp are counted under.
- *
- * Do NOT drop this include to make the number go down. That is the laundered decrement
- * compat/SHIM_BUDGET exists to catch. */
-#ifdef TARGET_NRF
-#include <Arduino.h>
-#endif
-
 #include "main.h"
 #include "boot_screen.h"
 #include "buzzer_control.h"
@@ -73,13 +55,7 @@ static const char* resetReasonName(esp_reset_reason_t reason) {
 static uint32_t minWakeTimeMs();
 #endif
 
-/* Both call sites are inside #ifdef TARGET_ESP32, and so is this: it uses ESP.* and
- * heap_caps_*, neither of which exists on the Nordic half of this still-shared main.cpp.
- * Guarded at the definition rather than relying on the callers, so the nRF52840 import at
- * migration step 4 gets a compile error only if it tries to CALL it, not merely by including
- * the file.
- *
- * One heap report, two lines, DRAM and PSRAM measured identically.
+/* One heap report, two lines, DRAM and PSRAM measured identically.
  *
  * THE TWO POOLS MUST NOT BE SUMMED. Internal DRAM is the scarce one -- ~170 KB free at boot on
  * an S3 against 8 MB of PSRAM -- so any combined figure is a PSRAM figure with the interesting
@@ -127,44 +103,7 @@ void setup() {
     od_hal_log_open();
     od_hal_delay_ms(100);
     #elif !defined(DISABLE_USB_SERIAL)
-    #ifndef TARGET_ESP32
-    /* nRF only. On ESP32 this was already a NO-OP -- the IDF console driver is up before
-     * setup() runs -- and the comment below has said so since phase B. Making that structural
-     * rather than a remark is what takes the last ESP32-reachable Serial call out of this file;
-     * every remaining Serial.* here is inside a TARGET_NRF && OPENDISPLAY_BOOT_DIAG block. */
-    Serial.begin(115200);
-    #endif
-    #if defined(TARGET_NRF) && defined(OPENDISPLAY_BOOT_DIAG)
-    // Full-firmware boot diagnostic. Reaching this LED proves that reset,
-    // application handoff, C/C++ runtime initialization, global constructors,
-    // FreeRTOS startup, and entry into setup() all completed.
-    pinMode(LED_GREEN, OUTPUT);
-    pinMode(LED_BLUE, OUTPUT);
-    digitalWrite(LED_GREEN, LED_STATE_ON);
-    digitalWrite(LED_BLUE, !LED_STATE_ON);
-
-    // Do not let later initialization hide the CDC port by faulting first.
-    // The full application remains linked; execution continues only after a
-    // host actually opens native USB serial.
-    bool blueOn = false;
-    uint32_t lastBlueToggleMs = millis();
-    while (!Serial) {
-        if (millis() - lastBlueToggleMs >= 250u) {
-            lastBlueToggleMs = millis();
-            blueOn = !blueOn;
-            digitalWrite(LED_BLUE, blueOn ? LED_STATE_ON : !LED_STATE_ON);
-        }
-        delay(10);
-    }
-    digitalWrite(LED_BLUE, !LED_STATE_ON);
-    Serial.println();
-    Serial.println("[BOOTDIAG] ENTERED setup(); USB CDC connected");
-    Serial.println("[BOOTDIAG] continuing normal boot in 5 seconds");
-    Serial.flush();
-    delay(5000);
-    #else
     delay(100);
-    #endif
     #endif
     #if defined(TARGET_ESP32) && defined(OPENDISPLAY_LOG_UART)
     od_log_init();
@@ -177,19 +116,6 @@ void setup() {
     od_hal_log_open();
     #endif
     od_log_init();
-    #ifndef TARGET_ESP32
-    // nRF only. With DTR low the CDC TX FIFO is overwritable, so its free-space
-    // query reads 0 while a write would still succeed -- without this the logger
-    // would count a drop for every line on an unattended tag and hand the first
-    // terminal to attach a meaningless six-figure total. operator bool() is
-    // tud_cdc_n_connected(), i.e. exactly the condition that used to trap
-    // Adafruit_USBD_CDC::write().
-    //
-    // Deliberately NOT installed on ESP32: HWCDC::isCDC_Connected()'s SOF watchdog
-    // is documented to flap on a healthy link, so a hook there would silently
-    // discard good output.
-    od_log_set_ready_hook([]() -> bool { return (bool)Serial; });
-    #endif
     #endif
     // Immediately after od_log_init(), so the boot lines below are not emitted at a
     // zero budget. setup() and loop() share a task on both targets (nRF's loop_task
@@ -253,15 +179,7 @@ void setup() {
     od_watchdog_app_arm();
     od_log_info("Starting setup...");
     if (is_deep_sleep_wake) { od_log_info("[wake] >> full_config_init"); od_log_flush(); }
-#if defined(TARGET_NRF) && defined(OPENDISPLAY_BOOT_DIAG)
-    Serial.println("[BOOTDIAG] before full_config_init()");
-    Serial.flush();
-#endif
     full_config_init();
-#if defined(TARGET_NRF) && defined(OPENDISPLAY_BOOT_DIAG)
-    Serial.println("[BOOTDIAG] after full_config_init()");
-    Serial.flush();
-#endif
 #ifdef OPENDISPLAY_HAS_WIFI
     // Reserve mbedTLS's two ~16.7 KB record buffers HERE and nowhere else: config is
     // loaded (so we know whether TLS is even used) but ble.begin() and initWiFi() have not
@@ -278,33 +196,7 @@ void setup() {
     odLanReserveRxBuffer();
 #endif
     if (is_deep_sleep_wake) { od_log_info("[wake] << full_config_init >> initio"); od_log_flush(); }
-#if defined(TARGET_NRF) && defined(OPENDISPLAY_BOOT_DIAG)
-    Serial.println("[BOOTDIAG] before initio()");
-    Serial.flush();
-#endif
     initio();
-#if defined(TARGET_NRF) && defined(OPENDISPLAY_BOOT_DIAG)
-    Serial.println("[BOOTDIAG] after initio()");
-    Serial.flush();
-#endif
-#ifdef TARGET_NRF
-    // SoftDevice must start before display/SPI; advertising starts after boot screen.
-    {
-        // Named local, not a temporary: the name outlives the call regardless of
-        // whether the stack copies it.
-        char bleDeviceName[3 + OD_CHIP_ID_HEX_LEN + 1] = "OD";
-        getChipIdHex(bleDeviceName + 2, sizeof(bleDeviceName) - 2);
-#ifdef OPENDISPLAY_BOOT_DIAG
-        Serial.println("[BOOTDIAG] before ble.begin() / SoftDevice enable");
-        Serial.flush();
-#endif
-        ble.begin(bleDeviceName);
-#ifdef OPENDISPLAY_BOOT_DIAG
-        Serial.println("[BOOTDIAG] after ble.begin() / SoftDevice enable");
-        Serial.flush();
-#endif
-    }
-#endif
     if (!is_deep_sleep_wake) {
         // Arm here rather than at declaration: this branch is the boot screen
         // redraw, and every real reset (power-on, panic, WDT, SW) clears the
@@ -333,8 +225,6 @@ void setup() {
         }
     }
     if (is_deep_sleep_wake) { od_log_info("[wake] << ble_begin"); od_log_flush(); }
-#elif defined(TARGET_NRF)
-    ble.startAdvertising();
 #endif
     #ifdef OPENDISPLAY_HAS_WIFI
     if (!is_deep_sleep_wake) {
@@ -381,8 +271,6 @@ void setup() {
 uint32_t getDeepSleepCount() {
 #ifdef TARGET_ESP32
     return deep_sleep_count;
-#else
-    return 0;
 #endif
 }
 
@@ -990,13 +878,6 @@ static void platformIdle() {
         lastMsdUpdate = od_hal_uptime_ms();
         updatemsdata();
     }
-#else
-    if (globalConfig.power_option.sleep_timeout_ms > 0) {
-        idleDelay(globalConfig.power_option.sleep_timeout_ms);
-        updatemsdata();
-    } else {
-        idleDelay(500);
-    }
 #endif
 }
 
@@ -1497,141 +1378,10 @@ void ws_pp_init(){
     od_log_info("Photo Printer initialized");
 }
 
-#ifdef TARGET_NRF
-void powerDownExternalFlashFromConfig(void) {
-    if (!globalConfig.loaded || globalConfig.flash_config_count == 0) {
-        return;
-    }
-    const FlashConfig* flashCfg = nullptr;
-    for (uint8_t i = 0; i < globalConfig.flash_config_count; i++) {
-        if ((globalConfig.flash_configs[i].flags & OD_FLASH_FLAG_ENABLED) != 0) {
-            flashCfg = &globalConfig.flash_configs[i];
-            break;
-        }
-    }
-    if (flashCfg == nullptr) {
-        return;
-    }
-    const uint8_t mosiPin = flashCfg->mosi_pin;
-    const uint8_t sckPin = flashCfg->sck_pin;
-    const uint8_t csPin = flashCfg->cs_pin;
-    if (mosiPin == 0xFF || sckPin == 0xFF || csPin == 0xFF) {
-        od_log_warn("Flash config: invalid MOSI/SCK/CS pins");
-        return;
-    }
-    od_log_debug("Flash config: deep sleep MOSI=%u SCK=%u CS=%u", mosiPin, sckPin, csPin);
-
-    pinMode(mosiPin, OUTPUT);
-    pinMode(sckPin, OUTPUT);
-    pinMode(csPin, OUTPUT);
-    digitalWrite(sckPin, LOW);
-    digitalWrite(csPin, LOW);
-
-    uint8_t cmd = 0xB9;
-    for (uint8_t bit = 0; bit < 8; bit++) {
-        digitalWrite(mosiPin, (cmd & 0x80) ? HIGH : LOW);
-        cmd <<= 1;
-        delayMicroseconds(1);
-        digitalWrite(sckPin, HIGH);
-        delayMicroseconds(1);
-        digitalWrite(sckPin, LOW);
-    }
-    digitalWrite(csPin, HIGH);
-    delayMicroseconds(30);
-
-    // Park like powerDownExternalFlash: CLK/MOSI LOW, CS HIGH (deselected, deep sleep).
-    pinMode(mosiPin, OUTPUT);
-    digitalWrite(mosiPin, LOW);
-    pinMode(sckPin, OUTPUT);
-    digitalWrite(sckPin, LOW);
-    pinMode(csPin, OUTPUT);
-    digitalWrite(csPin, HIGH);
-}
-#else
 void powerDownExternalFlashFromConfig(void) {}
-#endif
 
 bool powerDownExternalFlash(uint8_t mosiPin, uint8_t misoPin, uint8_t sckPin, uint8_t csPin, uint8_t wpPin, uint8_t holdPin) {
-    #ifdef TARGET_NRF
-    auto spiTransfer = [&](uint8_t data) -> uint8_t {
-        uint8_t result = 0;
-        for (int i = 7; i >= 0; i--) {
-            digitalWrite(mosiPin, (data >> i) & 1);
-            digitalWrite(sckPin, LOW);
-            delayMicroseconds(1);
-            result |= (digitalRead(misoPin) << i);
-            digitalWrite(sckPin, HIGH);
-            delayMicroseconds(1);
-        }
-        return result;
-    };
-    od_log_info("=== External Flash Power-Down ===");
-    od_log_debug("Pin configuration: MOSI=%u MISO=%u SCK=%u CS=%u WP=%u HOLD=%u",
-                 mosiPin, misoPin, sckPin, csPin, wpPin, holdPin);
-    od_log_debug("Configuring SPI pins...");
-    pinMode(mosiPin, OUTPUT);
-    pinMode(misoPin, INPUT);
-    pinMode(sckPin, OUTPUT);
-    pinMode(csPin, OUTPUT);
-    pinMode(wpPin, OUTPUT);
-    pinMode(holdPin, OUTPUT);
-    od_log_debug("SPI pins configured");
-    digitalWrite(sckPin, HIGH);  // Clock idle high (SPI mode 0)
-    digitalWrite(csPin, HIGH);   // CS inactive
-    digitalWrite(wpPin, HIGH);   // WP disabled (active-low)
-    digitalWrite(holdPin, HIGH); // HOLD disabled (active-low)
-    od_log_debug("Control pins set: CS=HIGH, WP=HIGH (disabled), HOLD=HIGH (disabled), SCK=HIGH (idle)");
-    delay(1);
-    od_log_debug("Attempting to wake flash from deep power-down (command 0xAB)...");
-    digitalWrite(csPin, LOW);
-    spiTransfer(0xAB);
-    digitalWrite(csPin, HIGH);
-    delay(10); // Wait for flash to wake up (typically 3-35us, using 10ms for safety)
-    od_log_debug("Wake-up command sent, waiting 10ms...");
-    od_log_debug("Reading JEDEC ID before power-down...");
-    digitalWrite(csPin, LOW);
-    spiTransfer(0x9F); // JEDEC ID command
-    uint8_t jedecId[3];
-    for (int i = 0; i < 3; i++) {
-        jedecId[i] = spiTransfer(0x00);
-    }
-    digitalWrite(csPin, HIGH);
-    od_log_debug("JEDEC ID before: 0x%02X%02X%02X (Manufacturer=0x%02X, MemoryType=0x%02X, Capacity=0x%02X)",
-                 jedecId[0], jedecId[1], jedecId[2], jedecId[0], jedecId[1], jedecId[2]);
-    delay(1);
-    od_log_debug("Sending deep power-down command (0xB9)...");
-    digitalWrite(csPin, LOW);
-    spiTransfer(0xB9);
-    digitalWrite(csPin, HIGH);
-    if(false){
-    od_log_debug("Deep power-down command sent, waiting 10ms...");
-    delay(10); // Wait for command to complete
-    od_log_debug("Reading JEDEC ID after power-down command...");
-    digitalWrite(csPin, LOW);
-    spiTransfer(0x9F);
-    uint8_t jedecIdAfter[3];
-    for (int i = 0; i < 3; i++) {
-        jedecIdAfter[i] = spiTransfer(0x00);
-    }
-    digitalWrite(csPin, HIGH);
-    od_log_debug("JEDEC ID after: 0x%02X%02X%02X (byte[0]=0x%02X, byte[1]=0x%02X, byte[2]=0x%02X)",
-                 jedecIdAfter[0], jedecIdAfter[1], jedecIdAfter[2], jedecIdAfter[0], jedecIdAfter[1], jedecIdAfter[2]);
-    }
-    // CS/WP/HOLD are active-low: keep HIGH so the chip stays deselected and in deep sleep.
-    // CLK/MOSI/MISO LOW — defined idle levels, no floating buffers on the MCU side.
-    const uint8_t qspiLow[] = { mosiPin, misoPin, sckPin };
-    for (uint8_t pin : qspiLow) {
-        pinMode(pin, OUTPUT);
-        digitalWrite(pin, LOW);
-    }
-    const uint8_t qspiHigh[] = { csPin, wpPin, holdPin };
-    for (uint8_t pin : qspiHigh) {
-        pinMode(pin, OUTPUT);
-        digitalWrite(pin, HIGH);
-    }
-    #else
     od_log_warn("External flash power-down not implemented for ESP32");
     return false;
-    #endif
     return false;
 }

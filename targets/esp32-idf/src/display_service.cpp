@@ -1,21 +1,6 @@
 #include "display_service.h"
 #include "od_cmd_reply.h"
 
-/* THE ESP32 HALF OF THIS FILE IS OFF THE SHIM (phase C step 14). The 41 Wire transactions and
- * 13+4 read clusters went to od_hal_i2c, GPIO to od_hal_gpio, millis/delay to od_hal_time, and
- * the one analogRead() to od_hal_adc.
- *
- * <Arduino.h> STAYS, guarded, and this file stays on the ratchet's list -- its TARGET_NRF arms
- * still need it (epdBsPinLowIfNrf()'s pinMode/digitalWrite and prepareEpdRailForBoot()'s two
- * delay(50) calls). Eight call sites, none of which compiles on this target, so none can be
- * verified here. Same rule main.cpp, buzzer_hw.cpp, device_control.cpp and encryption.cpp are
- * counted under; they leave together at MIGRATION step 4.
- *
- * Do NOT drop this include to make the number go down -- that is the laundered decrement
- * compat/SHIM_BUDGET exists to catch. */
-#ifdef TARGET_NRF
-#include <Arduino.h>
-#endif
 #include <bb_epaper.h>
 #include <string.h>
 #include "od_hal_i2c.h"
@@ -69,12 +54,6 @@
 #define od_zlib_stream_error  od_inflate_tinfl_error
 #endif
 
-#ifdef TARGET_NRF
-extern "C" {
-#include "nrf_soc.h"
-}
-#include "nrf.h"
-#endif
 
 #ifdef TARGET_ESP32
 #include "wifi_service.h"
@@ -189,21 +168,9 @@ bool bbepIsBusy(BBEPDISP *pBBEP);
 void flashLed(uint8_t color, uint8_t brightness);
 bool waitforrefresh(int timeout);
 
-#ifdef TARGET_NRF
-static bool nrfVbusPresent() {
-    //ignored for now
-    //return (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
-    return false;
-}
-#else
 static bool nrfVbusPresent() { return true; }
-#endif
 
 static void epdBsPinLowIfNrf() {
-#ifdef TARGET_NRF
-    pinMode(13, OUTPUT);
-    digitalWrite(13, LOW);
-#endif
 }
 
 // Battery boot: power-cycle the panel rail once. pwrmgm(true) already waits ~900 ms
@@ -211,15 +178,6 @@ static void epdBsPinLowIfNrf() {
 static void prepareEpdRailForBoot() {
     epdBsPinLowIfNrf();
     pwrmgm(true);
-#ifdef TARGET_NRF
-    if (!nrfVbusPresent()) {
-        delay(50);
-        pwrmgm(false);
-        delay(50);
-        epdBsPinLowIfNrf();
-        pwrmgm(true);
-    }
-#endif
 }
 
 // bb_epaper 71f6e70 replaced EP397/EP426 full-init RAM windows with SET_ORIENTATION
@@ -897,10 +855,6 @@ bool initOrRestoreWireForBus(uint8_t bus_id) {
         return false;
     }
     return true;
-#else
-    (void)bus_id;
-    initOrRestoreWireForOpenDisplay();
-    return true;
 #endif
 }
 
@@ -914,19 +868,6 @@ void initOrRestoreWireForOpenDisplay(void) {
         if (odI2cBegin(-1, -1, 100000u)) {
             s_wire_open_display_ready = true;
         }
-    }
-#else
-    if (!openDisplayI2cBusConfigured()) {
-        return;
-    }
-    if (i2cDataBusValid(0)) {
-        const struct DataBus& bus = globalConfig.data_buses[0];
-        od_hal_gpio_config_input(bus.pin_1, (bus.pullups & 0x01) != 0, false);
-        od_hal_gpio_config_input(bus.pin_2, (bus.pullups & 0x02) != 0, false);
-    }
-    odI2cBegin(-1, -1, 100000u);
-    if (i2cDataBusValid(0) && globalConfig.data_buses[0].bus_speed_hz > 0) {
-        od_hal_i2c_set_clock(globalConfig.data_buses[0].bus_speed_hz);
     }
 #endif
 }
@@ -949,19 +890,6 @@ void initDataBuses(){
             if(i == 0){
                 #ifdef TARGET_ESP32
                 initOrRestoreWireForOpenDisplay();
-                #endif
-                #ifdef TARGET_NRF
-                od_hal_gpio_config_input(bus->pin_1, false, false);
-                od_hal_gpio_config_input(bus->pin_2, false, false);
-                if(bus->pullups & 0x01){
-                    od_hal_gpio_config_input(bus->pin_1, true, false);
-                }
-                if(bus->pullups & 0x02){
-                    od_hal_gpio_config_input(bus->pin_2, true, false);
-                }
-                odI2cBegin(-1, -1, 100000u); // Uses default I2C pins
-                od_hal_i2c_set_clock(busSpeed);
-                od_log_info("NOTE: nRF52840 using default I2C pins (config pins: SCL=%u, SDA=%u)", bus->pin_1, bus->pin_2);
                 #endif
                 od_log_info("I2C bus %u initialized: SCL=pin%u, SDA=pin%u, Speed=%uHz", i, bus->pin_1, bus->pin_2, (unsigned)busSpeed);
             } else {
@@ -1005,9 +933,6 @@ void initio(){
         for (uint8_t i = 0; i < globalConfig.led_count; i++) {
             if (globalConfig.leds[i].led_type == 0) {
                 activeLedInstance = i;
-#ifdef TARGET_NRF
-                if (nrfVbusPresent())
-#endif
                 {
                     flashLed(0xE0, 15);
                     flashLed(0x1C, 15);
@@ -1695,13 +1620,6 @@ float readBatteryVoltage() {
 float readChipTemperature() {
 #ifdef TARGET_ESP32
     return od_hal_adc_die_temp_c();
-#elif defined(TARGET_NRF)
-    int32_t tempRaw = 0;
-    uint32_t err_code = sd_temp_get(&tempRaw);
-    if (err_code == 0) return tempRaw * 0.25f;
-    return -999.0;
-#else
-    return -999.0;
 #endif
 }
 

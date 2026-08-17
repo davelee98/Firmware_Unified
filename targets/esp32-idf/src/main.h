@@ -29,11 +29,6 @@
 #define XSTRINGIFY(x) STRINGIFY(x)
 #define SHA_STRING XSTRINGIFY(SHA)
 
-#ifdef TARGET_NRF
-#include <Adafruit_LittleFS.h>
-#include <InternalFileSystem.h>
-using namespace Adafruit_LittleFS_Namespace;
-#endif
 
 /* OD: config storage is NVS (hal/od_hal_nvs.h); LittleFS is gone from this target. */
 
@@ -62,16 +57,6 @@ using namespace Adafruit_LittleFS_Namespace;
 #define DEVICE_FLAG_BATTERY_LATCH (1 << 3) // Bit 3: Self-holding battery latch on pwr_pin_2; optional active-low long-press shutdown button on pwr_pin_3
 #define DEVICE_FLAG_PWR_LATCH_DFF (1 << 4) // Bit 4: 74AHC1G79 D-FF latch; pwr_pin_2=D, pwr_pin_3=CP; release via command 0x0052
 
-#ifdef TARGET_NRF
-// The Bluefruit stack objects (BLEDfu / BLEService / BLECharacteristic) are now
-// file-static inside ble_transport_nrf.cpp, so <bluefruit.h> no longer belongs
-// here. Only the raw SoftDevice APIs below are still used directly.
-// Forward declaration for SoftDevice temperature API
-extern "C" uint32_t sd_temp_get(int32_t *p_temp);
-extern "C" {
-    #include "nrf_soc.h"   // for sd_app_evt_wait()
-  }
-#endif
 
 #ifdef TARGET_ESP32
 // No BLE stack types here any more: NimBLE lives behind ble_transport_esp32.cpp.
@@ -106,15 +91,11 @@ uint8_t bleResponseBuffer[94];
 // Rolling MSD sequence nibble; persists across deep sleep so advertisements
 // stay distinguishable across sleep/wake cycles.
 RTC_DATA_ATTR uint8_t mloopcounter = 0;
-#else
-uint8_t mloopcounter = 0;
 #endif
 #ifdef TARGET_ESP32
 // Persists across deep sleep so a wake is not mistaken for a reboot. Re-armed
 // on the boot-screen path in setup(), which is the only path a real reset takes.
 RTC_DATA_ATTR uint8_t rebootFlag = 1;  // Set to 1 after reboot, cleared to 0 after BLE connection
-#else
-uint8_t rebootFlag = 1;  // Set to 1 after reboot, cleared to 0 after BLE connection
 #endif
 uint8_t connectionRequested = 0;  // Reserved for future features (connection requested flag)
 uint8_t dynamicreturndata[11] = {0};  // Dynamic return data blocks (bytes 2-12 in advertising payload)
@@ -280,9 +261,6 @@ bool encryptionInitialized = false;
 #ifdef TARGET_ESP32
 // 0x00000000 = "not set". Persists across deep sleep on ESP32.
 RTC_DATA_ATTR uint32_t displayed_etag = 0;
-#else
-// 0x00000000 = "not set". Non-ESP32 targets reset this on boot.
-uint32_t displayed_etag = 0;
 #endif
 
 #ifdef TARGET_ESP32

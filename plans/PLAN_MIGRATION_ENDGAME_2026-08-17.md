@@ -103,7 +103,17 @@ names `od_xfer_partial.c` and `od_zlib_stream.c` as the single place the plain-C
 re-argued, "the one shape where manual cleanup reliably loses," and says it is also the last point
 where switching is cheap. That argument belongs *before* the promotion starts.
 
-### 2.4 The dead nRF arms, and `compat/`
+### 2.4 The dead nRF arms, and `compat/` — DONE 2026-08-16
+
+**Closed.** No `TARGET_NRF` arm was reachable in any built configuration, so all of them and both
+nRF-only translation units are deleted (719 lines), the shim count reached its floor of 0, and all
+ten boards build with `text`, `data` and `bss` **identical** to the previous build — which is the
+proof that only never-compiled code went. What remains of `compat/` is `app_main.cpp` and
+`arduino_compat.cpp`, still listed in `main/CMakeLists.txt`; deleting the directory means moving
+the IDF entry point first, which is a build change rather than a deletion. The extraction into
+`vendor/fastepd/` that `compat/SHIM_BUDGET` specifies is now unblocked.
+
+The record below is what was true before that.
 
 `targets/esp32-idf/src/` still carries 54 `TARGET_NRF` references and two nRF-only translation
 units (`ble_transport_nrf.cpp`, `ble_transport_nrf.h`) — Bluefruit code for the nRF52840.
@@ -158,7 +168,7 @@ the "import snapshots drift" warning in `CLAUDE.md` stays load-bearing.
 ```
 2.1 hardware ──────────────┬──────────────────────────► 2.6 retire the source repos
                            │
-2.4 dead nRF arms (free)   │   2.2 Silabs C13 ──► 2.3 transfers
+2.4 dead nRF arms (DONE)   │   2.2 Silabs C13 ──► 2.3 transfers
                            │        ▲                 ▲
                            └────────┘                 └── language decision first
 ```
@@ -167,7 +177,7 @@ the "import snapshots drift" warning in `CLAUDE.md` stays load-bearing.
 - **2.2 before 2.3** is the argument in § 2.2: promoting transfers against only the two kernel
   targets designs around the constraint Silabs exists to impose. Doing it in the other order is how
   a 32 KB target discovers, late, that a shared buffer was sized for a device with PSRAM.
-- **2.4 is independent** of everything and can be taken at any time.
+- **2.4 is done** (2026-08-16); it was independent of everything else.
 - **2.5 is independent**, and mostly belongs to other repositories.
 
 **Recommended next unit:** H1 from `PLAN_OD_DISPATCH_C12_2026-08-16.md` § 7.2, when a board is
