@@ -3,6 +3,17 @@
 **Status:** NOT STARTED. Written 2026-08-16, after C12's software half landed. C12's hardware rows
 (H1-H3) remain ACCEPTED-UNRUN and do **not** block this plan.
 
+**Reviewed 2026-08-17 against the source**, and corrected in seven places. What the review
+CONFIRMED is worth stating, because it is the load-bearing half: § 2.2's event-retention mechanism
+is real (`sl_bt_step()` peeks and skips the pop; the SDK's own comment says the event "will be kept
+in the stack's queue"), there are exactly two `OD_FRAME_DEFERRED` returns and § 2.2 enumerates both,
+D8's arithmetic is exact to the byte (`6 + 218 = 224 = OD_SESSION_PLAIN_FRAME_MAX`), 3 slots is the
+right depth, and every spot-checked Silabs line reference lands on the claimed code. Corrected: the
+hook count (17 -> **21**), the watchdog premise (§ 4.1 — the part HAS one), the size of the config
+storage change (§ 2.5 — it is an NVM3 record layout change), a self-contradiction about how many
+shared edits this plan makes (§ 2.5 — one, not two), the missing depth assertion (§ 2.3), the
+chunk arithmetic (§ 2.4), and the unrecorded `SL_CATALOG_KERNEL_PRESENT` precondition (§ 2.2).
+
 **Parent:** [`PLAN_OD_DISPATCH_C12_2026-08-16.md`](PLAN_OD_DISPATCH_C12_2026-08-16.md) § 2.5 names
 Silabs as C13. This document is that plan.
 
@@ -85,6 +96,15 @@ bool sl_bt_can_process_event(uint32_t len)
 }
 ```
 
+**One precondition, and it has no build-time signal.** `sl_bt_can_process_event()` and `sl_bt_step()`
+both sit inside `#if !defined(SL_CATALOG_KERNEL_PRESENT)` (`autogen/sl_bluetooth.c`): under an RTOS
+"the stack events are processed in a dedicated event processing task, and these functions are not
+used at all". BG22 is a superloop with no kernel (CLAUDE.md decision 6) and
+`autogen/sl_component_catalog.h` defines no such symbol today — verified — so the override is live.
+But adding a kernel component later would leave the override compiling, never called, and
+`OD_FRAME_DEFERRED` silently reachable again with nothing failing. Record it as a checked
+precondition of this design, not as background.
+
 That is a real RX queue, in RAM the BT stack already charges for (`SL_BT_CONFIG_BUFFER_SIZE`, 3,150 B),
 with no drop path. A frame is only ever offered to dispatch when dispatch can complete it, so
 DEFERRED becomes unreachable in normal operation — and if it is ever returned anyway, that is an
@@ -121,7 +141,23 @@ storage width look like permission to emit a 256-byte characteristic value.
 
 On the BG22 ABI an entry is origin 4 + tag 4 + len 2 + data 256 plus tail alignment = 268 B.
 Confirm the private `s_ring` map symbol is 804 B rather than relying only on field-sum arithmetic.
-**3 × 268 = 804 B.**
+**3 × 268 = 804 B.** `OD_TXQ_SLOTS` is already `#ifndef`-guarded (`shared/core/od_txq.h:43`), so
+this is a `target_compile_definitions` setting and not a shared edit.
+
+**Assert the 3, do not just derive it here.** Nothing in `shared/` floors `OD_TXQ_SLOTS`, and the
+other two targets pin it with `OD_STATIC_ASSERT(OD_TXQ_SLOTS >= PIPE_MAX_W + 2u)` — a rule BG22
+cannot state, having no PIPE window. So BG22 asserts the property that actually matters:
+
+```c
+/* Usable capacity is SLOTS - 1, and the largest reservation od_dispatch_budget() makes on a
+ * target without PIPE is 2 (CMD_DIRECT_WRITE_{DATA,END}). */
+OD_STATIC_ASSERT(OD_TXQ_SLOTS - 1u >= 2u, "a 2-unit reservation must fit the arena");
+```
+
+Without it, an opcode that later needs 3 units would not fail to build — it would reserve, fail,
+and return `OD_FRAME_DEFERRED` on every such frame, which on this target is the outcome § 2.2 has
+just argued is unreachable. A silent invariant violation is exactly what architectural decision 1's
+"`_Static_assert` every wire size" exists to prevent.
 
 **The Silabs stack must realize ATT MTU 256 explicitly.** `SL_BGAPI_MAX_PAYLOAD_SIZE` bounds the
 configured MTU to `payload_size - 7`, so set it to at least **263**. During the system-boot event,
@@ -150,8 +186,10 @@ producer is shared, is a handful of fields, and replaces a hand-written loop tha
 losing data.
 
 The arithmetic is why it matters. `MAX_RESPONSE_DATA_SIZE` is 100
-(`shared/protocol/opendisplay_protocol.h:890`), giving 94 payload bytes per chunk after the 6-byte
-first-chunk header, so a 2,048-byte config is **22 notifications**. Twenty-two frames cannot pass
+(`shared/protocol/opendisplay_protocol.h:890`) and `od_config_read.c` uses `HDR_COMMON 4u` with two
+extra bytes on chunk 0 only, so the payload is **94 bytes in chunk 0 and 96 thereafter**
+(`shared/core/od_config_read.c:13,39-44`). A 2,048-byte config is therefore
+94 + 21 x 96 = 2,110 >= 2,048: **22 notifications**. Twenty-two frames cannot pass
 through a 2-slot arena in one dispatch by any arrangement. BG22 today emits all 22 back-to-back
 inside one BGAPI event, with no pacing and no wait on `sl_bt_evt_gatt_server_procedure_completed`
 (`opendisplay_pipe.c:758-792`), through a `pipe_send_raw` that drops on failure and returns `void`.
@@ -185,8 +223,10 @@ uniform (`docs/ARCHITECTURE.md` § "The gap, and a proposed fix"). Therefore:
 - `OD_CONFIG_ASM_REJECTED` means the caller must not touch storage. No path may commit a partial
   record.
 
-**Shared change required, and it is the second and last one.** `OD_CONFIG_MAX_SIZE` is a hard
-`4096u` at `shared/core/od_config_asm.h:67`, and `struct od_config_asm` embeds
+**Shared change required, and it is the ONLY one.** (An earlier draft called this "the second";
+there is no first. `OD_TXQ_SLOTS` is already `#ifndef`-guarded at `shared/core/od_txq.h:43`, so
+§ 2.3's depth of 3 is set with `target_compile_definitions` and touches no shared source.)
+`OD_CONFIG_MAX_SIZE` is a hard `4096u` at `shared/core/od_config_asm.h:67`, and `struct od_config_asm` embeds
 `uint8_t buffer[OD_CONFIG_MAX_SIZE]`. It becomes an `#ifndef`-guarded target macro with a documented
 floor — the sizing rule this repo already states for `OPENDISPLAY_ZLIB_WINDOW_BITS` and the queue
 depths (`docs/MEMORY_CONSTRAINTS.md:149-156`) — set via `target_compile_definitions` on BG22, with
@@ -197,6 +237,24 @@ scratch (`opendisplay_config_buf()`, the pattern `DIVERGENCE_MATRIX:208` calls c
 `s_cfg_chunk`. Adopting `od_config_asm` naively *adds* its 2,048 B buffer beside them. Both must be
 retired in the same commit. If they cannot be, stop — two 2 KB config buffers do not fit, and the
 plan is wrong about the storage path.
+
+**And retiring the first one is a STORAGE-FORMAT change, not a deletion.** `opendisplay_config_buf()`
+does not own a buffer; it returns `&s_cfg_rec.data`, a field of the static NVM3 record
+(`opendisplay_config_storage.h:9-15`):
+
+```c
+typedef struct {
+  uint32_t magic; uint32_t version; uint32_t crc; uint32_t data_len;
+  uint8_t  data[MAX_CONFIG_SIZE];
+} opendisplay_config_storage_t;                    /* 2,064 B — exactly the ledger's line */
+```
+
+`od_config_asm`'s buffer carries no magic, version, crc or data_len, so C13.2 must decide where the
+record header lives and how NVM3 reads and writes a payload that is no longer contiguous with it.
+Two shapes work — keep a 16-byte header struct and point NVM3 at the asm buffer, or stage the
+header separately around the same payload — and either is a change to the on-flash object layout,
+with a **read-back-across-reboot** obligation on top of the § 7 rows. Budget C13.2 accordingly; the
+2,064 B in § 4.6 is only recovered if this lands.
 
 Amend CLAUDE.md decision 12 and `DIVERGENCE_MATRIX` 2.7 in C13.0. A decision reversed in code but
 not in the documents that state it is how the next reader gets it wrong.
@@ -232,7 +290,16 @@ decides at the call site, and `tools/check.sh` already ratchets it by symbol on 
 ### 4.1 Tier consumption
 
 BG22 takes **PURE + HAL_CRYPTO + HAL_RADIO + APP_SESSION**, and declines **APP_RXQ** (§ 2.2),
-**HAL_ADV** and **HAL_WDT** (unchanged — it implements neither).
+**HAL_ADV** and **HAL_WDT**.
+
+**HAL_WDT is declined by choice, not by absence, and the record must say so.** The part HAS a
+hardware watchdog: `WDOG_PRESENT` / `WDOG_COUNT 1`, `WDOG0` at `0x4A018000`, `WDOG0_IRQn 43`, 16
+`PERSEL` periods over `LFRCO`/`LFXO`/`ULFRCO`/`HCLKDIV1024` — long enough on ULFRCO to span the
+60 s refresh. The SDK ships `emlib_wdog.slcc` and `hal_wdog.slcc`, so arming it is an SLC
+component, not a driver to write. What is true is narrower: `opendisplay-bg22.slcp` requests no
+watchdog component and no target source touches `WDOG`. C13 does not change that, but "BG22 has
+no watchdog" must not enter the record as a hardware fact — it is a firmware choice, and § 4.5
+depends on it being a conscious one.
 
 That is a new combination: Nordic's, minus WDT and RXQ. Add it to `shared/sources.cmake`'s consumer
 note. No new tier is created — declining is what the tiers are for.
@@ -272,7 +339,8 @@ consumer context. Nothing moves to a thread; there is none.
 
 `opendisplay_pipe.c` goes from 1,303 lines to transport and pump only — the shape C11 gave Nordic
 (1,194 → 200). Commands move with their state into `od_cmd_{device,config,direct,nfc}.c`, each
-exporting the one reset that disconnect cleanup calls. All 17 `od_cmd_app_*` hooks are defined; a
+exporting the one reset that disconnect cleanup calls. All **21** `od_cmd_app_*` hooks are defined — that is
+the count `shared/core/od_cmd_app.h` declares, and what ESP32 and Nordic each define today. A
 missing one is a link error, which is what makes D7 unrepeatable.
 
 Retired outright: the opcode switch (`:1089-1186`); `struct EncryptionSession s_session` and
@@ -291,6 +359,24 @@ What changes is **ordering** (D5). `od_txq_flush()` is the mechanism and it is a
 superloop-shaped: one drain attempt per call, `BUSY` if not yet empty, `TIMEOUT` at the deadline with
 entries left queued (`shared/core/od_txq.c:209-229`). The END handler loops on it until `OK` or
 `TIMEOUT`, then starts the refresh.
+
+**The barrier is a busy-loop on a target with the watchdog switched off, and that pairing is
+deliberate.** `od_txq_flush()` makes one drain attempt per call precisely so the caller keeps
+control, and its own comment gives the reason: it "keeps the waiting in the loop that also feeds
+the watchdog" (`shared/core/od_txq.c:222`). ESP32 and Nordic have that loop; BG22 declines
+HAL_WDT (§ 4.1), so it is the one target using this API with no recovery path.
+
+It is safe here for a specific reason, and the reason belongs in the plan rather than in a
+reviewer's head: `sl_bt_step()` calls `sl_bt_run()` **before** consulting
+`sl_bt_can_process_event()` (`autogen/sl_bluetooth.c:74-80`), so the stack continues to service
+the radio and release notification buffers while events are held. A RETRY therefore drains
+without needing the application to consume an event first, and neither § 2.2's hold nor this
+barrier can starve the other. **If that ordering ever changes, both mechanisms lose their
+safety argument at once** — treat it as a checked precondition, not background.
+
+Both loops are still bounded: the flush by `deadline_ms`, the hold by § 8's requirement to bound
+the producer's run. If C13.7 wants a belt as well, arming WDOG0 at a period above the refresh
+bound is an SLC component away (§ 4.1) — that is a decision, not a prerequisite.
 
 Converting refresh to `refresh_start`/`refresh_busy` remains the right eventual design and is
 explicitly out of scope — an `od_hal_panel` change affecting three targets.
@@ -330,11 +416,11 @@ Each commit builds headless, leaves all three targets link-complete, and finishe
 |---|---|---|
 | **C13.0** | `OD_CONFIG_MAX_SIZE` becomes an `#ifndef` target macro with a documented floor; BG22 sets 2048 and ESP32/Nordic assert 4096. Retain `OD_TX_FRAME_MAX=256`. Configure Silabs `SL_BGAPI_MAX_PAYLOAD_SIZE >= 263`; set maximum ATT MTU 256 during system boot before advertising and require the selected maximum to equal 256. Amend CLAUDE.md decision 12 and `DIVERGENCE_MATRIX` 2.7; add D8 to the matrix | Host test: oversize declared total REJECTED at the start frame with **nothing stored**, at both caps; a 253-byte BLE reply is queued and 254 is refused by the BLE value ceiling while the TX slot remains 256; ESP32/Nordic builds unchanged; boot log records selected MTU 256; no wire byte moved |
 | **C13.1** | Add the Silabs build to `tools/check.sh` as a fourth target gate (`DO_SILABS`, folded into `--targets`), under the same skip-is-not-a-pass rule | `--targets` reports 14/0/0 with the toolchain present, and a **skip** without it |
-| **C13.2** | Swap config: `od_config_tlv` + `od_config_asm` + `od_config` replace `opendisplay_config_parser.c` and `s_cfg_chunk`; retire `opendisplay_config_buf()` in the same commit; feature gates off | Host differential vs the retired parser over the corpus; `.bss` delta within § 4.6; **hardware Gate 2** |
+| **C13.2** | Swap config: `od_config_tlv` + `od_config_asm` + `od_config` replace `opendisplay_config_parser.c` and `s_cfg_chunk`; retire `opendisplay_config_buf()` in the same commit — which is an **NVM3 record layout** change, not a buffer deletion (§ 2.5); feature gates off | Host differential vs the retired parser over the corpus; `.bss` delta within § 4.6; **hardware Gate 2, including read-back of a config written by the PREVIOUS layout if any board carries one** |
 | **C13.3** | Implement `od_hal_crypto` over PSA; delete the hand-rolled CCM; add the Silabs arm to the CCM differential | Differential green against `tests/host/session_ccm_reference.inc`; `.text` delta recorded; **hardware: authenticate + one encrypted command** |
 | **C13.4** | Implement `od_session_app`; swap `od_session` in; delete `struct EncryptionSession`. Closes **D3, D4** | Host session suite incl. the `diff == 0` case, shown failing first; `.bss` −528 confirmed; **hardware Gate 2 incl. reconnect and key replacement** |
-| **C13.5** | Implement `od_hal_radio`; link `od_txq` at `OD_TXQ_SLOTS=3`; synchronous drain in the event handler plus a loop-pass drain. Closes the send half of **D6** | Host TXQ suite; RETRY arm exercised against a fake radio, incl. that a retry re-sends identical bytes and spends no nonce; `.bss` +804 confirmed; negotiated-MTU enforcement tested |
-| **C13.6** | Split commands into `od_cmd_{device,config,direct,nfc}.c`; define all 17 hooks; adopt `od_dispatch_frame()` + `od_core_frame_done()` + `od_core_reset()`; add `od_config_read` and the `sl_bt_can_process_event()` override. Delete the opcode switch and byte-inferred sealing. Closes **D1, D2, D6, D7** and the 0x0080 refusal | A missing hook is a link error — that is the enforcement; corpus gains `dispatch_corpus_silabs` (§ 6.2); DEFERRED-is-logged assertion; **hardware Gate 2 full** |
+| **C13.5** | Implement `od_hal_radio`; link `od_txq` at `OD_TXQ_SLOTS=3` via `target_compile_definitions`; add the § 2.3 capacity `OD_STATIC_ASSERT`; synchronous drain in the event handler plus a loop-pass drain. Closes the send half of **D6** | Host TXQ suite; RETRY arm exercised against a fake radio, incl. that a retry re-sends identical bytes and spends no nonce; `.bss` +804 confirmed; the assert shown FAILING at `OD_TXQ_SLOTS=2`; negotiated-MTU enforcement tested |
+| **C13.6** | Split commands into `od_cmd_{device,config,direct,nfc}.c`; define all 21 hooks; adopt `od_dispatch_frame()` + `od_core_frame_done()` + `od_core_reset()`; add `od_config_read` and the `sl_bt_can_process_event()` override. Delete the opcode switch and byte-inferred sealing. Closes **D1, D2, D6, D7** and the 0x0080 refusal | A missing hook is a link error — that is the enforcement; corpus gains `dispatch_corpus_silabs` (§ 6.2); DEFERRED-is-logged assertion; **hardware Gate 2 full** |
 | **C13.7** | The § 3.5 drain barrier on the direct-write END path (**D5**); the NFC 218-byte cap (**D8**) | **hardware: END ack observed on air before refresh begins**; 218 arrives whole, 219 errors |
 | **C13.8** | Extend the C11 ownership ratchets to this target; update CLAUDE.md status, `DIVERGENCE_MATRIX` resolutions, `docs/TEST_OWNERSHIP.md` | Clean-tree `--targets` at 14/0/0; every closed matrix row edited to say so |
 
@@ -366,7 +452,11 @@ fix proves nothing.
   `sl_bt_can_process_event()` is false for the duration.
 - **DEFERRED:** with `od_config_read_active()` forced true, a conflicting command returns DEFERRED
   and the target's handler **logs** rather than dropping silently.
-- **D8:** a 219-byte NFC record errors; 218 seals within 253.
+- **D8:** a 219-byte NFC record errors; 218 seals within 253. The cap is exact rather than
+  conservative — `6 + 218 = 224 = OD_SESSION_PLAIN_FRAME_MAX` — so pin 219 as the first failure,
+  not merely "some large value".
+- **Arena capacity:** `OD_TXQ_SLOTS=2` fails the § 2.3 static assert at compile time. A build-time
+  check needs a build-time demonstration; assert it once, in the commit that sets the depth.
 
 ### 6.2 The corpus gains a third profile
 
@@ -431,7 +521,9 @@ per-row PASS/FAIL. A build or a host suite is not on-air evidence.
 
 - **Two config buffers must never coexist.** If `opendisplay_config_buf()` and `s_cfg_chunk` cannot
   be retired in the commit that introduces `od_config_asm`, stop — the ledger inverts from −236 B to
-  +1,828 B and the plan is wrong about the storage path.
+  +1,828 B and the plan is wrong about the storage path. Note that the first is an NVM3 record field
+  rather than a standalone buffer (§ 2.5), so this stop condition is also the plan's largest piece of
+  unestimated work.
 - **Stop if 2048 truncates rather than refuses.** That is the exact failure fleet-wide-4096 existed
   to prevent, and it is invisible to the host.
 - **`OD_FRAME_DEFERRED` must never be dropped.** § 2.2's `sl_bt_can_process_event()` override is what
@@ -481,6 +573,10 @@ per-row PASS/FAIL. A build or a host suite is not on-air evidence.
 - Silabs selects maximum ATT MTU 256 before advertising, a connection negotiates 256 on hardware,
   and a 253-byte sealed notification is observed intact;
 - `.bss`/`.text` are recorded per commit and the final figure matches § 4.6's **negative** net;
+- the arena depth is a compile-time consequence of `od_dispatch_budget()`'s maximum, not a constant
+  derived in prose;
+- `HAL_WDT` is recorded as declined **by choice**, with the § 4.5 argument for why the flush barrier
+  is safe without it stated in the plan rather than assumed;
 - `dispatch_corpus_silabs` runs every `target-production` vector this target owns, with no
   predicate-excluded production vector;
 - the pre-C13.6 capture was taken, or its skip was recorded as conscious;
