@@ -5,8 +5,8 @@
 # means NOTHING RUNS UNLESS SOMEONE RUNS IT. Run this before you push.
 #
 #   tools/check.sh                 boundary + host suites + sanitizers + fuzz + arduino-free
-#   tools/check.sh --targets       also builds BOTH target families (ESP32 boards + sdkconfig
-#                                  baseline, and all three Nordic boards). Required before merge.
+#   tools/check.sh --targets       also builds ESP32, Nordic, and Silabs targets. Required before
+#                                  merge.
 #   tools/check.sh --esp32         ESP32 only, as --targets used to be
 #   tools/check.sh --fuzz-time 300 longer fuzz budget per target (default 60 s)
 #   tools/check.sh --latest        also replay the corpus against the NEWEST py-opendisplay
@@ -26,13 +26,15 @@ cd "$REPO"
 FUZZ_TIME=60
 DO_ESP32=0
 DO_NORDIC=0
+DO_SILABS=0
 DO_LATEST=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --esp32)      DO_ESP32=1 ;;
         --nordic)     DO_NORDIC=1 ;;
-        --targets)    DO_ESP32=1; DO_NORDIC=1 ;;
+        --silabs)     DO_SILABS=1 ;;
+        --targets)    DO_ESP32=1; DO_NORDIC=1; DO_SILABS=1 ;;
         --latest)     DO_LATEST=1 ;;
         --fuzz-time)  FUZZ_TIME="${2:?--fuzz-time needs a value}"; shift ;;
         --list)
@@ -163,7 +165,8 @@ c11_structure() {
     local rc=0 hits
     scan() {
         local what="$1" pattern="$2" why="$3"
-        hits=$(grep -rInE "$pattern" targets/*/src targets/*/hal shared/ 2>/dev/null || true)
+        hits=$(grep -rInE "$pattern" targets/*/src targets/*/hal shared/ \
+               targets/efr32bg22-slc/*.[ch] targets/efr32bg22-slc/*.cpp 2>/dev/null || true)
         if [ -n "$hits" ]; then
             echo "$hits"; echo; echo "$what: $why"; echo
             rc=1
@@ -191,6 +194,60 @@ c11_structure() {
     return $rc
 }
 check "structure: ownership ratchets"  c11_structure
+
+silabs_c13_config() {
+    grep -q '^#define PSA_WANT_ALG_CCM 1$' \
+        targets/efr32bg22-slc/config/od_psa_config_autogen.h || {
+        echo "Silabs tracked PSA CCM selection missing"; return 1; }
+    grep -A2 -q 'id: psa_crypto_ccm' targets/efr32bg22-slc/opendisplay-bg22.slcp || {
+        echo "Silabs SLC project no longer selects PSA CCM"; return 1; }
+    grep -q '^#define SL_PSA_KEY_USER_SLOT_COUNT[[:space:]]\+1$' \
+        targets/efr32bg22-slc/config/psa_crypto_config.h || {
+        echo "Silabs application PSA key-slot reserve is not one"; return 1; }
+    grep -A1 -q "name: SL_PSA_KEY_USER_SLOT_COUNT[[:space:]]*$" \
+        targets/efr32bg22-slc/opendisplay-bg22.slcp || {
+        echo "Silabs SLC project lost its PSA key-slot setting"; return 1; }
+    grep -A1 "name: SL_PSA_KEY_USER_SLOT_COUNT[[:space:]]*$" \
+        targets/efr32bg22-slc/opendisplay-bg22.slcp | grep -q "value: '1'" || {
+        echo "Silabs SLC project would regenerate the PSA key-slot reserve incorrectly"; return 1; }
+    grep -q '^#define SL_BGAPI_MAX_PAYLOAD_SIZE[[:space:]]\+(263)$' \
+        targets/efr32bg22-slc/config/sl_bgapi_config.h || {
+        echo "Silabs BGAPI payload no longer supports ATT MTU 256"; return 1; }
+    grep -A2 -q 'id: bluetooth_feature_resource_report' \
+        targets/efr32bg22-slc/opendisplay-bg22.slcp || {
+        echo "Silabs TX completion reporting component missing from tracked SLC input"; return 1; }
+    if grep -q '^#define SL_CATALOG_KERNEL_PRESENT' \
+        targets/efr32bg22-slc/autogen/sl_component_catalog.h; then
+        echo "Silabs kernel component invalidates the BGAPI event-retention design"; return 1
+    fi
+}
+check "silabs: C13 config ratchets" silabs_c13_config
+
+silabs_advertising_ownership() {
+    local count close_calls
+
+    if grep -q '\bopendisplay_ble_restart_advertising[[:space:]]*(' \
+        targets/efr32bg22-slc/app.c targets/efr32bg22-slc/opendisplay_ble.h; then
+        echo "Silabs advertising restart escaped the BLE event-layer owner"
+        grep -n '\bopendisplay_ble_restart_advertising[[:space:]]*(' \
+            targets/efr32bg22-slc/app.c targets/efr32bg22-slc/opendisplay_ble.h
+        return 1
+    fi
+    count=$(grep -c '\bopendisplay_ble_restart_advertising[[:space:]]*(' \
+        targets/efr32bg22-slc/opendisplay_ble.c)
+    if [ "$count" -ne 2 ]; then
+        echo "Silabs restart must have one private definition and one close-event call; found $count"
+        return 1
+    fi
+    close_calls=$(sed -n '/case sl_bt_evt_connection_closed_id:/,/^[[:space:]]*break;/p' \
+        targets/efr32bg22-slc/opendisplay_ble.c \
+        | grep -c '\bopendisplay_ble_restart_advertising[[:space:]]*(')
+    if [ "$close_calls" -ne 1 ]; then
+        echo "Silabs close-event handler must restart advertising exactly once; found $close_calls"
+        return 1
+    fi
+}
+check "silabs: advertising lifecycle ownership" silabs_advertising_ownership
 
 # ================================================================================== host suites ==
 # The real boundary enforcement: shared/ compiled for the host at -std=c99 -Wall -Wextra -Werror
@@ -402,6 +459,16 @@ if [ "$DO_NORDIC" = 1 ]; then
     check "nordic: all three boards" nordic_all
 else
     skip "nordic: all three boards" "needs --nordic/--targets (nRF toolchain, several minutes)"
+fi
+
+# ===================================================================================== silabs ==
+silabs_bg22() {
+    targets/efr32bg22-slc/build-and-flash.sh --clean --no-flash
+}
+if [ "$DO_SILABS" = 1 ]; then
+    check "silabs: BG22 headless build" silabs_bg22
+else
+    skip "silabs: BG22 headless build" "needs --silabs/--targets (Simplicity SDK 2025.12.2)"
 fi
 
 # ===================================================================================== summary ==

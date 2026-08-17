@@ -91,7 +91,6 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
 
     case sl_bt_evt_connection_closed_id:
       opendisplay_ble_on_event(evt);
-      opendisplay_ble_restart_advertising(advertising_set_handle);
       break;
 
     ///////////////////////////////////////////////////////////////////////////

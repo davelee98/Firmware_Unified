@@ -71,6 +71,9 @@ component:
   id: bluetooth_feature_legacy_advertiser
 - package: simplicity_sdk
   vendor: silabs
+  id: bluetooth_feature_resource_report
+- package: simplicity_sdk
+  vendor: silabs
   id: bluetooth_feature_sm
 - package: simplicity_sdk
   vendor: silabs
@@ -92,6 +95,9 @@ component:
   id: mpu
 - package: simplicity_sdk
   vendor: silabs
+  id: psa_crypto_ccm
+- package: simplicity_sdk
+  vendor: silabs
   id: rail_util_pti
 - package: simplicity_sdk
   vendor: silabs
@@ -108,10 +114,9 @@ configuration:
 - condition:
   - psa_crypto
   name: SL_PSA_KEY_USER_SLOT_COUNT
-  value: '0'
+  value: '1'
 ui_hints:
   highlight:
   - path: config/btconf/gatt_configuration.btconf
   - path: readme.md
     focus: true
-

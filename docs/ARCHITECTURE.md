@@ -522,14 +522,33 @@ Every target must realize the same link contract in its vendor stack:
 |---|---|
 | ESP32/NimBLE | request preferred ATT MTU 256 with `ble_att_set_preferred_mtu()` and enforce value admission at 253 |
 | Nordic/Zephyr | configure `CONFIG_BT_L2CAP_TX_MTU=256`, 260-byte ACL buffers (256 + 4-byte L2CAP header), and enforce value admission at 253 |
-| EFR32BG22/Silabs | set `SL_BGAPI_MAX_PAYLOAD_SIZE` to at least 263, call `sl_bt_gatt_server_set_max_mtu(256, &selected)` before advertising, require `selected == 256`, and enforce value admission at 253 |
+| EFR32BG22/Silabs | set `SL_BGAPI_MAX_PAYLOAD_SIZE` to at least 263 and call `sl_bt_gatt_server_set_max_mtu(256, &selected)` before advertising. An API error enters Gecko AppLoader; a successful lower `selected` value becomes the degraded stack ceiling. Value admission is then **left to the stack**: `sl_bt_gatt_server_send_notification` returns `SL_STATUS_COMMAND_TOO_LONG` above `ATT_MTU - 3` and never truncates, and the application keeps no copy of the MTU to check against |
 
-Negotiation is still peer-dependent: a connection may settle below 256, and a sender must not
-emit a notification larger than that connection's negotiated ATT MTU minus 3. The architectural
-maximum remains 256/253; a lower vendor default is an incomplete target integration, not a new
-fleet size decision. For the Silabs API specifically, the configured maximum MTU is bounded by
-`SL_BGAPI_MAX_PAYLOAD_SIZE - 7`, so a target that leaves `SL_BGAPI_MAX_PAYLOAD_SIZE` at 256 cannot
-realize this contract.
+Negotiation is still peer-dependent: a connection begins at MTU 23 and may settle below 256, and a
+sender must not emit a notification larger than that connection's effective ATT MTU minus 3. The
+absence or failure of an MTU exchange therefore falls back to the default MTU 23 rather than
+blocking boot or changing the stack-wide ceiling.
+
+**Only a GATT client can initiate an ATT MTU exchange**, so a peripheral cannot request one — it
+answers `ATT_EXCHANGE_MTU_RSP` with the maximum it configured and otherwise waits. That is why
+Silabs enforces the per-frame bound in the stack rather than mirroring the MTU in application
+state: the sole application-visible update is `sl_bt_evt_gatt_mtu_exchanged`, an event of the gatt
+**client** class, and a server that misses it would refuse frames the link can carry. Every sealed
+reply is at least 31 bytes while the 19-byte plaintext authentication response is not, so a stale
+mirror fails in the worst possible shape — authentication succeeds and the session then goes mute.
+A target may log the negotiated value; it may not gate admission on its own copy of it.
+
+The architectural maximum remains 256/253. For
+the Silabs API specifically, the configured maximum MTU is bounded by
+`SL_BGAPI_MAX_PAYLOAD_SIZE - 7`, so a target that leaves
+`SL_BGAPI_MAX_PAYLOAD_SIZE` at 256 selects at most MTU 249. That successful lower selection is a
+degraded operating ceiling, while an error return from the API is a recovery condition and enters
+Gecko AppLoader rather than starting the application service with an unknown ceiling.
+The required boot-time connection-TX-report enable follows the same recovery rule: an API error
+enters AppLoader. Runtime report errors remain fail-closed for the affected DIRECT END operation.
+The Silabs BLE event layer is the sole owner of post-disconnect advertising restart; the outer SDK
+event callback only forwards the close event. A restart API error enters AppLoader instead of an
+`app_assert` loop.
 
 ## One execution model: run-to-completion, for threaded and single-threaded alike
 

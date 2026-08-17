@@ -11,6 +11,8 @@ extern "C" {
 int opendisplay_display_direct_write_start(const uint8_t *payload, uint16_t payload_len);
 int opendisplay_display_direct_write_data(const uint8_t *payload, uint16_t payload_len);
 int opendisplay_display_direct_write_end(const uint8_t *payload, uint16_t payload_len, bool *refresh_ok);
+int opendisplay_display_direct_write_end_prepare(const uint8_t *payload, uint16_t payload_len);
+int opendisplay_display_direct_write_end_refresh(bool *refresh_ok);
 void opendisplay_display_abort(void);
 void opendisplay_display_boot_apply(void);
 void opendisplay_display_park_pins(void);

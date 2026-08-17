@@ -35,6 +35,25 @@ this project does not own** and **zero new copies to drift**.
 | `py-opendisplay`'s own 811 unit tests | `py-opendisplay` — **untouched** | its existing `test.yml` | @g4bri3lDev |
 | Hardware Gate 2 | unchanged, manual | — | firmware |
 
+### C13 Silabs record (2026-08-17)
+
+The C13 implementation session did not capture an untouched BG22 before the ATT characteristic
+was widened from 244 to 253 bytes. That pre-C13.0b capture gate is therefore **consciously
+skipped**, not passed; the old 245-byte transport-refusal behavior has no provenance-backed
+capture in this repo. The shared host suite now has a separately compiled BG22 profile
+(`OD_CONFIG_MAX_SIZE=2048`, `OD_TXQ_SLOTS=3`, `OD_CAP_{PIPE,PARTIAL,RXQ}=0`) covering the
+cap-sensitive ABI and dispatcher budgets. `silabs_fault_test.c` compiles the production command,
+BGAPI transport and radio sources over scripted drivers and covers NVM ordering/failure, retry and
+producer pressure/deadlines, notification-completion failures, and the NFC 218/219 boundary. That
+proves the target policy under injection; the actual BGAPI/NVM3/radio behavior and every C13 Gate 2
+row remain hardware-owned and unverified until a board run records the evidence required by the
+C13 plan.
+
+`tools/check.sh` also owns the Silabs advertising-lifecycle structural regression: the restart
+helper must remain private to `opendisplay_ble.c`, and the connection-close handler must contain
+exactly one call. This pins the double-start defect without pretending a host fake proves the
+vendor stack's active-advertiser error code; that response remains part of hardware Gate 2.
+
 Nothing in this recommendation requires a PR to `py-opendisplay`, `opendisplay-protocol`, or
 `Home_Assistant_Integration`. That is deliberate; see § Ownership.
 

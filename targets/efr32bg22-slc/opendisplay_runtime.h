@@ -20,52 +20,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "opendisplay_structs.h"
+#include "od_config.h"
 
-/* In-memory aggregate of all parsed config packets. Not a wire type. */
-struct GlobalConfig {
-  struct SystemConfig system_config;
-  struct ManufacturerData manufacturer_data;
-  struct PowerOption power_option;
-  struct DisplayConfig displays[4];
-  uint8_t display_count;
-  struct LedConfig leds[4];
-  uint8_t led_count;
-  struct SensorData sensors[4];
-  uint8_t sensor_count;
-  struct DataBus data_buses[4];
-  uint8_t data_bus_count;
-  struct BinaryInputs binary_inputs[4];
-  uint8_t binary_input_count;
-  struct NfcConfig nfc_configs[2];
-  uint8_t nfc_config_count;
-  struct FlashConfig flash_configs[2];
-  uint8_t flash_config_count;
-  uint8_t version;
-  uint8_t minor_version;
-  bool loaded;
-};
-
-/* In-memory BLE encryption / auth session + replay-protection state.
- * Not a wire type. */
-struct EncryptionSession {
-  bool authenticated;
-  uint8_t session_key[16];
-  uint8_t session_id[8];
-  uint64_t nonce_counter;
-  uint64_t last_seen_counter;
-  uint64_t replay_window[64];
-  uint8_t replay_idx;
-  uint32_t last_activity_ms;
-  uint8_t integrity_failures;
-  uint32_t session_start_ms;
-  uint8_t auth_attempts;
-  uint32_t last_auth_time_ms;
-  uint8_t client_nonce[16];
-  uint8_t server_nonce[16];
-  uint8_t pending_server_nonce[16];
-  uint32_t server_nonce_time_ms;
-};
+/* Preserve the target's source-level spelling while using the shared aggregate. */
+#define GlobalConfig od_config
 
 /* Firmware-local interpretation of the SecurityConfig.flags bitfield
  * (SecurityConfig itself is a wire struct in opendisplay_structs.h). */

@@ -1,0 +1,6 @@
+#ifndef OD_TEST_FAKE_SILABS_DEVICE_H
+#define OD_TEST_FAKE_SILABS_DEVICE_H
+
+void NVIC_SystemReset(void);
+
+#endif /* OD_TEST_FAKE_SILABS_DEVICE_H */

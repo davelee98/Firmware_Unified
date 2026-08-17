@@ -1,0 +1,6 @@
+#ifndef OD_TEST_FAKE_SILABS_COMPONENT_CATALOG_H
+#define OD_TEST_FAKE_SILABS_COMPONENT_CATALOG_H
+
+/* Deliberately no SL_CATALOG_KERNEL_PRESENT: C13 requires the superloop event-retention path. */
+
+#endif /* OD_TEST_FAKE_SILABS_COMPONENT_CATALOG_H */

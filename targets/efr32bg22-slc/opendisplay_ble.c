@@ -253,9 +253,9 @@ static od_button_state_t s_buttons[32];
 static uint8_t s_button_count;
 static volatile bool s_button_msd_dirty;
 
-static void build_and_apply_adv(uint8_t adv_set, const char *name, bool quick);
+static sl_status_t build_and_apply_adv(uint8_t adv_set, const char *name, bool quick);
 static void od_boost_advertising(uint32_t now_ms);
-static void od_apply_advertising_timing(uint8_t adv_handle, uint32_t now_ms);
+static sl_status_t od_apply_advertising_timing(uint8_t adv_handle, uint32_t now_ms);
 
 #if defined(__GNUC__)
 extern uint32_t __ResetReasonStart__;
@@ -280,6 +280,17 @@ static void od_enter_gecko_bootloader(void)
   cause->reason = OD_BTL_RESET_REASON_BOOTLOAD;
   cause->signature = OD_BTL_RESET_SIGNATURE_VALID;
   NVIC_SystemReset();
+}
+
+static bool od_advertising_api_ok(sl_status_t sc, const char *operation)
+{
+  if (sc == SL_STATUS_OK) {
+    return true;
+  }
+  printf("[OD] FATAL: %s failed sc=0x%04lX; entering bootloader\r\n",
+         operation, (unsigned long)sc);
+  od_enter_gecko_bootloader();
+  return false;
 }
 
 static bool od_pin_decode(uint8_t v, GPIO_Port_TypeDef *port_out, uint8_t *pin_out)
@@ -468,9 +479,15 @@ static void od_publish_button_msd(uint8_t adv_handle, uint32_t now_ms)
   s_button_msd_dirty = false;
   od_boost_advertising(now_ms);
   (void)sl_bt_advertiser_stop(adv_handle);
-  build_and_apply_adv(adv_handle, s_dev_name, true);
-  od_apply_advertising_timing(adv_handle, now_ms);
-  app_assert_status(sl_bt_legacy_advertiser_start(adv_handle, sl_bt_legacy_advertiser_connectable));
+  if (!od_advertising_api_ok(build_and_apply_adv(adv_handle, s_dev_name, true),
+                             "button advertising data update") ||
+      !od_advertising_api_ok(od_apply_advertising_timing(adv_handle, now_ms),
+                             "button advertising timing") ||
+      !od_advertising_api_ok(sl_bt_legacy_advertiser_start(
+                                 adv_handle, sl_bt_legacy_advertiser_connectable),
+                             "button advertising restart")) {
+    return;
+  }
 }
 
 static void od_buttons_arm_em4_wakeup(void)
@@ -1252,10 +1269,9 @@ static bool od_nfc_read_record_raw(uint8_t *type_out, uint8_t *out, uint16_t *io
   /* IL (payload ID length field present): unsupported — return verbatim NDEF. */
   if ((data[0] & 0x08u) != 0u) {
     if (ln > out_max) {
-      *io_len = out_max;
-    } else {
-      *io_len = (uint16_t)ln;
+      return false;
     }
+    *io_len = (uint16_t)ln;
     *type_out = OD_NFC_REC_RAW_NDEF;
     memcpy(out, data, *io_len);
     return true;
@@ -1292,10 +1308,9 @@ static bool od_nfc_read_record_raw(uint8_t *type_out, uint8_t *out, uint16_t *io
 
   default: /* TNF ≠ Well-known/MIME SR: verbatim NDEF (future-proof passthrough). */
     if (ln > out_max) {
-      *io_len = out_max;
-    } else {
-      *io_len = (uint16_t)ln;
+      return false;
     }
+    *io_len = (uint16_t)ln;
     *type_out = OD_NFC_REC_RAW_NDEF;
     memcpy(out, data, *io_len);
     return true;
@@ -1336,7 +1351,7 @@ static bool od_nfc_read_record_raw(uint8_t *type_out, uint8_t *out, uint16_t *io
     *type_out = OD_NFC_REC_WELL_KNOWN_RAW;
     raw_len = (uint16_t)(1u + tlen + plen);
     if (raw_len > out_max) {
-      raw_len = out_max;
+      return false;
     }
     if (raw_len == 0u) {
       *io_len = 0u;
@@ -1350,7 +1365,7 @@ static bool od_nfc_read_record_raw(uint8_t *type_out, uint8_t *out, uint16_t *io
   }
 
   if (copy_len > out_max) {
-    copy_len = out_max;
+    return false;
   }
   memcpy(out, &data[off], copy_len);
   *io_len = copy_len;
@@ -1618,14 +1633,14 @@ void opendisplay_ble_reload_config_from_nvm(void)
   opendisplay_display_boot_apply();
 }
 
-static void od_apply_advertising_timing(uint8_t adv_handle, uint32_t now_ms)
+static sl_status_t od_apply_advertising_timing(uint8_t adv_handle, uint32_t now_ms)
 {
   sl_status_t sc;
   uint16_t min_slots;
   uint16_t max_slots;
 
   if (adv_handle == 0xFFu) {
-    return;
+    return SL_STATUS_OK;
   }
   if (s_adv_boost_until_ms != 0u && now_ms < s_adv_boost_until_ms) {
     min_slots = OD_ADV_INTERVAL_BOOST_MIN;
@@ -1639,7 +1654,7 @@ static void od_apply_advertising_timing(uint8_t adv_handle, uint32_t now_ms)
   if (sc != SL_STATUS_OK) {
     printf("[OD] advertiser_set_timing sc=0x%04lX\r\n", (unsigned long)sc);
   }
-  app_assert_status(sc);
+  return sc;
 }
 
 static void od_boost_advertising(uint32_t now_ms)
@@ -1661,10 +1676,15 @@ static void od_advertising_boost_tick(uint8_t adv_handle, uint32_t now_ms)
   }
   was_boosted = false;
   s_adv_boost_until_ms = 0u;
-  od_apply_advertising_timing(adv_handle, now_ms);
+  if (!od_advertising_api_ok(od_apply_advertising_timing(adv_handle, now_ms),
+                             "advertising boost timing")) {
+    return;
+  }
   if (g_connection == 0xFFu) {
     (void)sl_bt_advertiser_stop(adv_handle);
-    app_assert_status(sl_bt_legacy_advertiser_start(adv_handle, sl_bt_legacy_advertiser_connectable));
+    (void)od_advertising_api_ok(sl_bt_legacy_advertiser_start(
+                                   adv_handle, sl_bt_legacy_advertiser_connectable),
+                               "advertising boost restart");
   }
 }
 
@@ -1774,7 +1794,7 @@ static sl_status_t install_opendisplay_gatt(void)
                                               0,
                                               uuid_pipe,
                                               sl_bt_gattdb_variable_length_value,
-                                              OD_PIPE_MAX_PAYLOAD,
+                                              OD_BLE_MAX_FRAME - 3u,
                                               1,
                                               &pipe_init,
                                               &ch_pipe);
@@ -1798,7 +1818,7 @@ static sl_status_t install_opendisplay_gatt(void)
   return SL_STATUS_OK;
 }
 
-static void build_and_apply_adv(uint8_t adv_set, const char *name, bool quick)
+static sl_status_t build_and_apply_adv(uint8_t adv_set, const char *name, bool quick)
 {
   uint8_t adv[31];
   uint8_t sr[31];
@@ -1841,8 +1861,8 @@ static void build_and_apply_adv(uint8_t adv_set, const char *name, bool quick)
   if (sc != SL_STATUS_OK) {
     printf("[OD] legacy_advertiser_set_data(adv) sc=0x%04lX len=%u\r\n",
            (unsigned long)sc, (unsigned)ai);
+    return sc;
   }
-  app_assert_status(sc);
   sc = sl_bt_legacy_advertiser_set_data(adv_set,
                                         sl_bt_advertiser_scan_response_packet,
                                         si,
@@ -1851,13 +1871,50 @@ static void build_and_apply_adv(uint8_t adv_set, const char *name, bool quick)
     printf("[OD] legacy_advertiser_set_data(sr) sc=0x%04lX len=%u\r\n",
            (unsigned long)sc, (unsigned)si);
   }
-  app_assert_status(sc);
+  return sc;
 }
 
 void opendisplay_ble_on_boot(uint8_t advertising_set_handle)
 {
   char hex[7];
   sl_status_t sc;
+  uint16_t selected_mtu = 0u;
+
+  /* An API failure and a smaller selected maximum are different outcomes. The first means the
+   * application cannot establish what the stack supports, so hand control to the independently
+   * installed Gecko AppLoader. The second is a valid stack result: continue with the selected
+   * ceiling and let each connection narrow it further through ATT MTU exchange. */
+  sc = sl_bt_gatt_server_set_max_mtu(OD_BLE_MAX_FRAME, &selected_mtu);
+  if (sc != SL_STATUS_OK) {
+    printf("[OD] FATAL: max ATT MTU API failed request=%u sc=0x%04lX; entering bootloader\r\n",
+           (unsigned)OD_BLE_MAX_FRAME, (unsigned long)sc);
+    od_enter_gecko_bootloader();
+    return;
+  }
+  if (selected_mtu != OD_BLE_MAX_FRAME) {
+    /* This is not an API failure. The stack enforces the resulting bound on every notification,
+     * so a lower selection is a degraded operating maximum, not a broken device. */
+    printf("[OD] DEGRADED: max ATT MTU request=%u selected=%u; large replies may be refused\r\n",
+           (unsigned)OD_BLE_MAX_FRAME, (unsigned)selected_mtu);
+  } else {
+    printf("[OD] max ATT MTU selected=%u (value max=%u)\r\n", (unsigned)selected_mtu,
+           (unsigned)(selected_mtu - 3u));
+  }
+
+  /* Eight is deliberately bounded. The app queue can contribute at most two packets per command;
+   * if the stack ever accumulates more than eight, the report's overflow flag makes END fail
+   * closed rather than claiming its ACK reached the air. This must precede every connection. */
+  sc = sl_bt_resource_enable_connection_tx_report(8u);
+  if (sc != SL_STATUS_OK) {
+    /* This is a boot-time stack configuration API failure, not a peer negotiation result. Running
+     * without it cannot satisfy D5's on-air completion contract, so remain recoverable through the
+     * independently installed AppLoader instead of asserting or exposing a partial application. */
+    printf("[OD] FATAL: connection TX report API failed sc=0x%04lX; entering bootloader\r\n",
+           (unsigned long)sc);
+    od_enter_gecko_bootloader();
+    return;
+  }
+  opendisplay_pipe_set_tx_report_available(true);
 
   if (loadGlobalConfig(&s_od_global_config)) {
     printf("[OD] config: loaded displays=%u leds=%u buses=%u nfc=%u flash=%u ver=%u.%u\r\n",
@@ -1905,27 +1962,46 @@ void opendisplay_ble_on_boot(uint8_t advertising_set_handle)
   opendisplay_led_init();
   opendisplay_display_boot_apply();
 
-  build_and_apply_adv(advertising_set_handle, s_dev_name, false);
+  if (!od_advertising_api_ok(build_and_apply_adv(advertising_set_handle, s_dev_name, false),
+                             "boot advertising data setup")) {
+    return;
+  }
   printf("[OD] advertising + scan rsp set\r\n");
 
-  od_apply_advertising_timing(advertising_set_handle,
-                              sl_sleeptimer_tick_to_ms(sl_sleeptimer_get_tick_count()));
+  if (!od_advertising_api_ok(
+          od_apply_advertising_timing(
+              advertising_set_handle,
+              sl_sleeptimer_tick_to_ms(sl_sleeptimer_get_tick_count())),
+          "boot advertising timing")) {
+    return;
+  }
 
   sc = sl_bt_legacy_advertiser_start(advertising_set_handle, sl_bt_legacy_advertiser_connectable);
-  if (sc != SL_STATUS_OK) {
-    printf("[OD] legacy_advertiser_start sc=0x%04lX\r\n", (unsigned long)sc);
+  if (!od_advertising_api_ok(sc, "boot advertising start")) {
+    return;
   }
-  app_assert_status(sc);
   printf("[OD] advertising started (~1 s interval while idle)\r\n");
 }
 
-void opendisplay_ble_restart_advertising(uint8_t advertising_set_handle)
+static bool opendisplay_ble_restart_advertising(uint8_t advertising_set_handle)
 {
-  build_and_apply_adv(advertising_set_handle, s_dev_name, false);
-  od_apply_advertising_timing(advertising_set_handle,
-                              sl_sleeptimer_tick_to_ms(sl_sleeptimer_get_tick_count()));
-  app_assert_status(sl_bt_legacy_advertiser_start(advertising_set_handle,
-                                                  sl_bt_legacy_advertiser_connectable));
+  sl_status_t sc;
+
+  if (!od_advertising_api_ok(build_and_apply_adv(advertising_set_handle, s_dev_name, false),
+                             "advertising restart data setup") ||
+      !od_advertising_api_ok(
+          od_apply_advertising_timing(
+              advertising_set_handle,
+              sl_sleeptimer_tick_to_ms(sl_sleeptimer_get_tick_count())),
+          "advertising restart timing")) {
+    return false;
+  }
+  sc = sl_bt_legacy_advertiser_start(advertising_set_handle,
+                                     sl_bt_legacy_advertiser_connectable);
+  if (!od_advertising_api_ok(sc, "advertising restart")) {
+    return false;
+  }
+  return true;
 }
 
 void opendisplay_ble_on_event(sl_bt_msg_t *evt)
@@ -1939,25 +2015,21 @@ void opendisplay_ble_on_event(sl_bt_msg_t *evt)
       s_connection_timeout_close_requested = false;
       reboot_flag = 0u;
       printf("[OD] connection opened handle=%u\r\n", (unsigned)g_connection);
-      if (s_adv_handle != 0xFFu) {
-        sl_status_t sc = sl_bt_advertiser_stop(s_adv_handle);
-        if (sc == SL_STATUS_OK) {
-          printf("[OD] advertising stopped while connected (single-client mode)\r\n");
-        } else {
-          printf("[OD] advertiser_stop sc=0x%04lX\r\n", (unsigned long)sc);
-        }
-      }
+      /* Connectable advertising stops automatically when this event is generated. */
       break;
     case sl_bt_evt_connection_closed_id:
       g_connection = 0xFF;
       s_connection_open_ms = 0u;
       s_connection_timeout_close_requested = false;
-      opendisplay_pipe_on_connection_closed();
+      /* opendisplay_pipe_handle_gatt_event() already reset the shared transport/session at the
+       * top of this function. Repeating it here advances the TXQ generation twice and aborts the
+       * display twice for one close event. */
       printf("[OD] connection closed reason=0x%02X\r\n",
              (unsigned)evt->data.evt_connection_closed.reason);
       if (s_adv_handle != 0xFFu) {
-        opendisplay_ble_restart_advertising(s_adv_handle);
-        printf("[OD] advertising resumed after disconnect\r\n");
+        if (opendisplay_ble_restart_advertising(s_adv_handle)) {
+          printf("[OD] advertising resumed after disconnect\r\n");
+        }
       }
       break;
     default:
@@ -1978,6 +2050,7 @@ void opendisplay_ble_schedule_deep_sleep(void)
 
 void opendisplay_ble_process(void)
 {
+  opendisplay_pipe_process();
   opendisplay_led_process();
   uint32_t now_ms = sl_sleeptimer_tick_to_ms(sl_sleeptimer_get_tick_count());
   od_publish_button_msd(s_adv_handle, now_ms);
@@ -1985,12 +2058,18 @@ void opendisplay_ble_process(void)
     od_advertising_boost_tick(s_adv_handle, now_ms);
   }
   if (od_nfc_field_detect_process(now_ms) && s_adv_handle != 0xFFu) {
-    build_and_apply_adv(s_adv_handle, s_dev_name, false);
+    if (!od_advertising_api_ok(build_and_apply_adv(s_adv_handle, s_dev_name, false),
+                               "NFC advertising data update")) {
+      return;
+    }
   }
   if ((now_ms - s_last_msd_refresh_ms) >= OD_MSD_UPDATE_INTERVAL_MS) {
     s_last_msd_refresh_ms = now_ms;
     if (s_adv_handle != 0xFFu) {
-      build_and_apply_adv(s_adv_handle, s_dev_name, false);
+      if (!od_advertising_api_ok(build_and_apply_adv(s_adv_handle, s_dev_name, false),
+                                 "periodic advertising data update")) {
+        return;
+      }
     }
   }
   if (g_connection != 0xFFu

@@ -46,7 +46,7 @@ unsigned od_corpus_profile_caps(void)
     /* A deliberately SPARSE device: no partial, no buzzer, no power latch. That is what makes the
      * compiled-out NACK vectors reachable at all -- they are the ones no promoted target can
      * produce, because both promoted targets have those subsystems. */
-    return OD_VEC_CAP_PIPE | OD_VEC_CAP_NFC;
+    return OD_VEC_CAP_PIPE | OD_VEC_CAP_NFC | OD_VEC_CAP_CONFIG_4K | OD_VEC_CAP_RXQ;
 }
 
 /* Every hook here is a behaviour fixture, so the historical shapes are exactly

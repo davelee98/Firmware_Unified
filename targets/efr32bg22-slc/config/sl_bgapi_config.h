@@ -36,9 +36,8 @@
 // <o SL_BGAPI_MAX_PAYLOAD_SIZE> The maximum BGAPI payload size <256-2047>
 // <i> Default: 256
 // <i> Define the maximum payload size for BGAPI commands, responses, and events. The setting impacts all protocol stacks that use the BGAPI, i.e. Bluetooth host and Bluetooth mesh.
-#define SL_BGAPI_MAX_PAYLOAD_SIZE     (256)
+#define SL_BGAPI_MAX_PAYLOAD_SIZE     (263)
 
 // <<< end of configuration section >>>
 
 #endif // SL_BGAPI_CONFIG_H
-

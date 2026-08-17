@@ -3,6 +3,7 @@
 #include "od_dispatch.h"
 
 #include "od_cmd_app.h"
+#include "od_dispatch_ops.h"
 #include "od_config_read.h"
 #include "od_gate.h"
 #include "od_reply.h"
@@ -33,18 +34,25 @@ static uint8_t s_plain[OD_SESSION_PLAIN_MAX];
 uint8_t od_dispatch_budget(uint16_t cmd)
 {
     switch (cmd) {
-    case CMD_PIPE_WRITE_DATA:      return 3u;
-    case CMD_DIRECT_WRITE_DATA:    return 2u;
-    case CMD_DIRECT_WRITE_END:     return 2u;
-    /* THREE, not two. An explicit PIPE END emits the tail SACK (sendPipeAck), then the END ACK,
-     * then the refresh status -- verified on both its partial and full branches
-     * (display_service.cpp:2865, :2886, :2897/:2901 and :2327, :2373/:2377). At two the third
-     * reply is dropped AFTER the panel has already refreshed, so the host loses the completion
-     * signal for work the device actually did. The parent plan's table said two and was wrong. */
-    case CMD_PIPE_WRITE_END:       return 3u;
-    default:                       return 1u;
+#define OD_BUDGET_CASE(cmd_, hook_, budget_) case cmd_: return (uint8_t)(budget_);
+        OD_DISPATCH_OPCODE_ROWS(OD_BUDGET_CASE)
+#undef OD_BUDGET_CASE
+    case CMD_AUTHENTICATE:
+    case CMD_FIRMWARE_VERSION:
+    default:
+        return 1u;
     }
 }
+
+/* Per-row capacity checks, generated from the same source as route and budget. A named typedef per
+ * hook is C99-safe and unique even under the canonical header's pre-C11 static-assert fallback. */
+#define OD_ASSERT_ROW_FITS(cmd_, hook_, budget_)                                      \
+    typedef char od_dispatch_budget_fits_##hook_[                                     \
+        ((budget_) <= (OD_TXQ_SLOTS - 1u)) ? 1 : -1];
+OD_DISPATCH_OPCODE_ROWS(OD_ASSERT_ROW_FITS)
+#undef OD_ASSERT_ROW_FITS
+typedef char od_dispatch_budget_fits_authenticate[(1u <= (OD_TXQ_SLOTS - 1u)) ? 1 : -1];
+typedef char od_dispatch_budget_fits_firmware_version[(1u <= (OD_TXQ_SLOTS - 1u)) ? 1 : -1];
 
 /* KEY-LOSS RECOVERY, and the ORDER of these two tests is the whole safety argument.
  *
@@ -115,27 +123,11 @@ static void refuse_oversize(const od_reply_t *rp, uint16_t cmd)
 static od_cmd_result_t dispatch_plain(const od_cmd_ctx_t *ctx, uint16_t cmd, od_span_t body)
 {
     switch (cmd) {
-    case CMD_REBOOT:              return od_cmd_app_reboot(ctx, body);
-    case CMD_CONFIG_READ:         return od_cmd_app_config_read(ctx, body);
-    case CMD_CONFIG_WRITE:        return od_cmd_app_config_write(ctx, body);
-    case CMD_CONFIG_CHUNK:        return od_cmd_app_config_chunk(ctx, body);
-    case CMD_READ_MSD:            return od_cmd_app_read_msd(ctx, body);
-    case CMD_CONFIG_CLEAR:        return od_cmd_app_config_clear(ctx, body);
-    case CMD_ENTER_DFU:           return od_cmd_app_enter_dfu(ctx, body);
-    case CMD_POWER_OFF:           return od_cmd_app_power_off(ctx, body);
-    case CMD_DEEP_SLEEP:          return od_cmd_app_deep_sleep(ctx, body);
-    case CMD_DIRECT_WRITE_START:  return od_cmd_app_direct_start(ctx, body);
-    case CMD_DIRECT_WRITE_DATA:   return od_cmd_app_direct_data(ctx, body);
-    case CMD_DIRECT_WRITE_END:    return od_cmd_app_direct_end(ctx, body);
-    case CMD_LED_ACTIVATE:        return od_cmd_app_led_activate(ctx, body);
-    case CMD_LED_STOP:            return od_cmd_app_led_stop(ctx, body);
-    case CMD_PARTIAL_WRITE_START: return od_cmd_app_partial_start(ctx, body);
-    case CMD_BUZZER:              return od_cmd_app_buzzer(ctx, body);
-    case CMD_PIPE_WRITE_START:    return od_cmd_app_pipe_start(ctx, body);
-    case CMD_PIPE_WRITE_DATA:     return od_cmd_app_pipe_data(ctx, body);
-    case CMD_PIPE_WRITE_END:      return od_cmd_app_pipe_end(ctx, body);
-    case CMD_NFC_ENDPOINT:        return od_cmd_app_nfc(ctx, body);
-    default:                      return OD_CMD_UNKNOWN;
+#define OD_ROUTE_CASE(cmd_, hook_, budget_) case cmd_: return hook_(ctx, body);
+        OD_DISPATCH_OPCODE_ROWS(OD_ROUTE_CASE)
+#undef OD_ROUTE_CASE
+    default:
+        return OD_CMD_UNKNOWN;
     }
 }
 

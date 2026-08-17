@@ -42,6 +42,16 @@ include(${CMAKE_CURRENT_LIST_DIR}/../../shared/sources.cmake)
 if(OD_SHARED_SOURCES)
     add_library(od_shared STATIC ${OD_SHARED_SOURCES})
     target_include_directories(od_shared PUBLIC ${OD_SHARED_INCLUDE_DIRS})
+    # BG22 changes the ABI of cap-sensitive shared structs and the PIPE reservation table. Compile
+    # a real second variant; executable-local definitions cannot retroactively change od_shared.
+    add_library(od_shared_silabs STATIC ${OD_SHARED_SOURCES})
+    target_include_directories(od_shared_silabs PUBLIC ${OD_SHARED_INCLUDE_DIRS})
+    target_compile_definitions(od_shared_silabs PUBLIC
+        OD_CONFIG_MAX_SIZE=2048u
+        OD_TXQ_SLOTS=3u
+        OD_CAP_PIPE=0
+        OD_CAP_PARTIAL=0
+        OD_CAP_RXQ=0)
     message(STATUS "od: shared/ has ${CMAKE_CURRENT_LIST_DIR} sources — building od_shared")
 else()
     # No target code is imported yet. An INTERFACE library keeps every consumer below
@@ -92,6 +102,25 @@ add_test(NAME adv_control COMMAND od_adv_control_test)
 add_executable(od_config_asm_test config_asm_test.c)
 target_link_libraries(od_config_asm_test od_shared)
 add_test(NAME config_asm COMMAND od_config_asm_test)
+
+add_executable(od_config_asm_cap_test config_asm_cap_test.c)
+target_link_libraries(od_config_asm_cap_test od_shared_silabs)
+add_test(NAME config_asm_cap COMMAND od_config_asm_cap_test)
+
+# silabs_storage: the BG22 overlay, where od_config_asm's reassembly state and the NVM3 record are
+# one object. The two static asserts in the storage file compare LAYOUT; this compares SEQUENCING
+# -- the header is written over the four live assembler state words, so the order of capture,
+# write and reset is the whole correctness argument and no offsetof can check it. Production
+# opendisplay_config_storage.c over a fake NVM3; no Python needed, unlike the corpus profiles.
+add_executable(od_silabs_storage_test
+    silabs_storage_test.c
+    fake_silabs/nvm3_fake.c
+    ../../targets/efr32bg22-slc/opendisplay_config_storage.c)
+target_include_directories(od_silabs_storage_test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/fake_silabs
+    ../../targets/efr32bg22-slc)
+target_link_libraries(od_silabs_storage_test od_shared_silabs)
+add_test(NAME silabs_storage COMMAND od_silabs_storage_test)
 
 # config_tlv: the config-blob walk and its CRC. The walk is the PRE-AUTH attack surface -- this
 # blob is parsed at boot from storage a client can write -- so the cases that matter are the
@@ -168,6 +197,15 @@ add_test(NAME config_read COMMAND od_config_read_test)
 add_executable(od_dispatch_test dispatch_test.c)
 target_link_libraries(od_dispatch_test od_session_fake)
 add_test(NAME dispatch COMMAND od_dispatch_test)
+
+# The same ordering suite against BG22's actual shared ABI: 2 KB config buffer, three TX slots,
+# and PIPE/PARTIAL/RXQ declined. This catches a capability define applied only to a test TU instead
+# of to the shared objects whose routing and reservation table it changes.
+add_library(od_session_fake_silabs STATIC session_fake.c aes128.c)
+target_link_libraries(od_session_fake_silabs PUBLIC od_shared_silabs)
+add_executable(od_dispatch_silabs_test dispatch_test.c)
+target_link_libraries(od_dispatch_silabs_test od_session_fake_silabs)
+add_test(NAME dispatch_silabs COMMAND od_dispatch_silabs_test)
 
 # dispatch_route: the opcode map, one case per canonical opcode.
 #
@@ -363,7 +401,7 @@ if(Python3_FOUND)
     add_test(NAME vectors_schema
              COMMAND ${Python3_EXECUTABLE} ${OD_VEC_TOOL} --audit ${OD_VEC_DIR})
 
-    # ONE runner source, TWO executables. od_cmd_app_* is static link-time composition, so two
+    # ONE runner source, THREE executables. od_cmd_app_* is static link-time composition, so
     # profiles cannot share a binary -- and the answer to that is emphatically not a runtime
     # registry. Each executable resolves the seam once.
     #
@@ -415,6 +453,42 @@ if(Python3_FOUND)
     target_link_libraries(od_dispatch_corpus_nordic_test od_session_fake)
     add_dependencies(od_dispatch_corpus_nordic_test od_vectors_generated)
     add_test(NAME dispatch_corpus_nordic COMMAND od_dispatch_corpus_nordic_test)
+
+    # The BG22 production hooks, compiled with the same 2 KiB/three-slot/no-PIPE ABI as the target.
+    # Only the vendor drivers beneath them are faked; reply bytes still come from od_cmd_silabs.c.
+    add_executable(od_dispatch_corpus_silabs_test
+        corpus_runner.c
+        corpus_profile_silabs.c
+        fake_silabs/fake_silabs.c
+        ../../targets/efr32bg22-slc/od_cmd_silabs.c
+        ${OD_VEC_INC})
+    target_include_directories(od_dispatch_corpus_silabs_test PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/fake_silabs
+        ../../targets/efr32bg22-slc)
+    target_compile_definitions(od_dispatch_corpus_silabs_test PRIVATE
+        OPENDISPLAY_BUILD_ID="1a2b3c4d")
+    target_link_libraries(od_dispatch_corpus_silabs_test od_session_fake_silabs)
+    add_dependencies(od_dispatch_corpus_silabs_test od_vectors_generated)
+    add_test(NAME dispatch_corpus_silabs COMMAND od_dispatch_corpus_silabs_test)
+
+    # Target-specific failure policy: production BGAPI transport + production command hooks over
+    # scripted vendor drivers. This is separate from the corpus because ordering, time and driver
+    # failures are state assertions rather than wire fixtures.
+    add_executable(od_silabs_fault_test
+        silabs_fault_test.c
+        fake_silabs/fake_silabs.c
+        fake_silabs/fake_silabs_bgapi.c
+        ../../targets/efr32bg22-slc/od_cmd_silabs.c
+        ../../targets/efr32bg22-slc/opendisplay_pipe.c
+        ../../targets/efr32bg22-slc/od_hal_radio.c)
+    target_include_directories(od_silabs_fault_test PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/fake_silabs
+        ../../targets/efr32bg22-slc)
+    target_compile_definitions(od_silabs_fault_test PRIVATE
+        OD_TEST_REAL_SILABS_PIPE=1
+        OPENDISPLAY_BUILD_ID="1a2b3c4d")
+    target_link_libraries(od_silabs_fault_test od_session_fake_silabs)
+    add_test(NAME silabs_fault COMMAND od_silabs_fault_test)
 endif()
 
 # bench_dispatch_gate: the two `dispatch-gate` helpers against a fake BLE client.

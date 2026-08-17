@@ -860,7 +860,10 @@ extern "C" int opendisplay_display_direct_write_data(const uint8_t *payload, uin
   return 0;
 }
 
-extern "C" int opendisplay_display_direct_write_end(const uint8_t *payload, uint16_t payload_len, bool *refresh_ok)
+static int s_dw_refresh_mode = REFRESH_FULL;
+
+extern "C" int opendisplay_display_direct_write_end_prepare(const uint8_t *payload,
+                                                              uint16_t payload_len)
 {
   if (!s_active) {
     printf("[OD] dw end err inactive\r\n");
@@ -877,17 +880,24 @@ extern "C" int opendisplay_display_direct_write_end(const uint8_t *payload, uint
          (unsigned long)s_total_bytes);
     return -2;
   }
+  s_dw_refresh_mode = REFRESH_FULL;
+  if (payload != nullptr && payload_len >= 1u && payload[0] == 1u) {
+    s_dw_refresh_mode = REFRESH_FAST;
+  }
+  return 0;
+}
+
+extern "C" int opendisplay_display_direct_write_end_refresh(bool *refresh_ok)
+{
+  if (!s_active) {
+    return -1;
+  }
   if (refresh_ok != nullptr) {
     *refresh_ok = false;
   }
 
-  int refresh_mode = REFRESH_FULL;
-  if (payload != nullptr && payload_len >= 1u && payload[0] == 1u) {
-    refresh_mode = REFRESH_FAST;
-  }
-
-  printf("[OD] dw refresh start mode=%d\r\n", refresh_mode);
-  (void)bbepRefresh(&s_epd, refresh_mode);
+  printf("[OD] dw refresh start mode=%d\r\n", s_dw_refresh_mode);
+  (void)bbepRefresh(&s_epd, s_dw_refresh_mode);
   bool ok = wait_for_refresh(60000u);
   printf("[OD] dw refresh done ok=%d busy=%d\r\n", (int)ok, (int)bbepIsBusy(&s_epd));
   bbepSleep(&s_epd, DEEP_SLEEP);
@@ -900,4 +910,12 @@ extern "C" int opendisplay_display_direct_write_end(const uint8_t *payload, uint
     *refresh_ok = ok;
   }
   return 0;
+}
+
+extern "C" int opendisplay_display_direct_write_end(const uint8_t *payload,
+                                                      uint16_t payload_len,
+                                                      bool *refresh_ok)
+{
+  int rc = opendisplay_display_direct_write_end_prepare(payload, payload_len);
+  return rc == 0 ? opendisplay_display_direct_write_end_refresh(refresh_ok) : rc;
 }
