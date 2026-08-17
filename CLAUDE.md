@@ -59,8 +59,15 @@ looks arbitrary and is not); delete the story.
   Two tiers are named for a **seam** rather than a HAL, because what they need is a target
   function rather than a driver: APP_SESSION (`od_session_app.h`) and APP_RXQ
   (`od_rxq_app_report`).
-- **THE WHOLE COMMAND PATH IS SHARED ON BOTH TARGETS, AND NONE OF IT HAS RUN ON SILICON**
-  (C8 2026-08-15, C10 2026-08-15, C11 2026-08-16). `od_txq` is egress (capacity a counter,
+- **THE WHOLE COMMAND PATH IS SHARED ON BOTH TARGETS.** (C8 2026-08-15, C10 2026-08-15,
+  C11 2026-08-16). **NOW HARDWARE-VERIFIED on `esp32-idf`** (`s3-n16r8-extuart-debug`,
+  2026-08-17): PIPE upload, `CMD_PARTIAL_WRITE` (0x76), config read, and config write
+  (write + reload-after-write confirmed) all completed, each run twice — once plaintext,
+  once under `od_session` encryption. **Nordic partially verified too**
+  (`xiao_nrf52840`, PROFILE=debug, 2026-08-17): an encrypted PIPE upload completed and the
+  panel displayed the image correctly — `CMD_PARTIAL_WRITE`, config read and config write
+  have not yet been run through this shared stack on Nordic, and plaintext PIPE was not
+  separately confirmed there. `od_txq` is egress (capacity a counter,
   ownership a generation-tagged token), `od_reply` chooses seal-or-plain **at the call site**
   instead of inferring it from response bytes, `od_gate` maps every `od_session` result to a wire
   action, `od_dispatch` owns the ordering AND the opcode map, `od_config_read` makes CONFIG_READ a
@@ -69,7 +76,8 @@ looks arbitrary and is not); delete the story.
   `[00][cmd][FE]` and needs a slot of its own, and precedes *decrypt*, because decrypt advances the
   replay window — so a frame deferred after decrypting is a replay when re-offered. That is why
   `OD_FRAME_DEFERRED` is returnable only before decrypt.
-- **C11 (2026-08-16) retired the dispatch scaffolding. NOT HARDWARE-VERIFIED, on either target.**
+- **C11 (2026-08-16) retired the dispatch scaffolding. HARDWARE-VERIFIED on `esp32-idf`
+  (2026-08-17, see above); Nordic verified only for the PIPE path so far (see above).**
   - **The opcode map is `od_dispatch.c`'s, once.** Targets supply named per-command hooks
     (`shared/core/od_cmd_app.h`); `od_cmd_dispatch()` is gone from both. Every target defines
     every hook, so adding an opcode without every target stating its answer is a **link error** —
@@ -111,10 +119,15 @@ looks arbitrary and is not); delete the story.
   `xiao_nrf54l15`: RAM 176712 → 154700 B
   (**22.0 KB reclaimed**, more than the plan's ~12 KB estimate because narrowing the MTU shrinks
   the ACL buffers too). Both queue depths are now derived from the target's own `PIPE_MAX_W + 2`
-  and asserted where both constants are visible. NOT hardware-verified on either target.
-  **`od_session` is CALLED ON BOTH `esp32-idf` AND `nordic-zephyr`, AND HARDWARE-VERIFIED ON
-  `nordic-zephyr`/`xiao_nrf52840` ONLY** (C5 2026-08-15, C6 2026-08-15; Gate 2 passed on the
-  nRF52840 2026-08-15). It owns the 0x0050 handshake, the KDF, the replay window and the CCM
+  and asserted where both constants are visible. HARDWARE-VERIFIED on `esp32-idf`
+  (`s3-n16r8-extuart-debug`, 2026-08-17, via the PIPE/config run described above), and on
+  Nordic (`xiao_nrf52840`, 2026-08-17) for the PIPE traffic that ran through it — config
+  read/write and `CMD_PARTIAL_WRITE` have not exercised this ring on Nordic yet.
+  **`od_session` is CALLED ON BOTH `esp32-idf` AND `nordic-zephyr`, AND NOW
+  HARDWARE-VERIFIED ON BOTH** (C5 2026-08-15, C6 2026-08-15; Gate 2 passed on the
+  nRF52840 2026-08-15; `esp32-idf`/`s3-n16r8-extuart-debug` 2026-08-17 — PIPE upload,
+  `CMD_PARTIAL_WRITE`, config read and config write all completed encrypted). It owns the
+  0x0050 handshake, the KDF, the replay window and the CCM
   envelope in both directions; each target keeps only its clock, its device identity and its
   logging. `esp32-idf/src/encryption.cpp` went 863 → 285 lines (the swap, plus
   the CC310 arm and the crypto forwarders it orphaned) and `nordic-zephyr/src/opendisplay_pipe.c`
@@ -125,11 +138,17 @@ looks arbitrary and is not); delete the story.
   (`PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 12)`) accepts and authenticates real traffic.
   That was the single likeliest first-flash failure and it is retired: plain `PSA_ALG_CCM` pins a
   16-byte tag and would have failed every operation with `NOT_PERMITTED`.
-  **`esp32-idf` IS STILL UNVERIFIED** — C5's swap, C1's mbedTLS arm and everything from C8 to C11
-  have never run on a board, so the authority target is the one trailing. Nordic carries C9-C11
-  unflashed too. Two things there that only hardware shows: the
+  **`esp32-idf` C5/C1/C8-C11 ARE NOW HARDWARE-VERIFIED** (2026-08-17, `s3-n16r8-extuart-debug`)
+  — C5's swap, C1's mbedTLS CCM arm, and the C8-C11 shared dispatch/txq/reply/gate/config_read
+  stack all ran real PIPE upload, `CMD_PARTIAL_WRITE`, config read and config write traffic,
+  plaintext and encrypted. **Nordic (`xiao_nrf52840`, 2026-08-17) now carries C8-C11 partially
+  hardware-verified too** — an encrypted PIPE upload completed through the shared stack and
+  the panel rendered correctly — but `CMD_PARTIAL_WRITE`, config read/write, and a plaintext
+  (unencrypted) run have not been exercised there yet. Two things that only
+  hardware shows, and that neither run specifically exercised: the
   `diff == 0` replay fix and the exact inner-length check are the two behaviour changes
-  (`DIVERGENCE_MATRIX` § 6.5-6.9) that can refuse a frame the old code accepted.
+  (`DIVERGENCE_MATRIX` § 6.5-6.9) that can refuse a frame the old code accepted — this was a
+  clean-traffic run, not a malformed/replayed-frame regression pass.
   **The `OD-S1` PIPE silence fix is UNPROVEN on either target** — though the stimulus for it now
   exists: `targets/esp32-idf/tools/od-device-cli.py dispatch-gate` (C12.2) seals one `0x0081` frame
   and writes the retained bytes twice, requires a fresh device-side `nonce_reason=3` report, and
