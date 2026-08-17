@@ -38,11 +38,13 @@ class FakeDevice:
         self.events: list[tuple[str, object]] = []
         self.seen_nonces: set[bytes] = set()
         self.log_lines: list[str] = []
+        self._log_written = 0
 
         # --- knobs, so the failing cases are reachable -------------------------------------
         self.start_nacks = False          # PIPE START refuses (e.g. a size mismatch)
         self.data_nacks = False           # the first DATA frame refuses
         self.answer_replays = False       # the defect OD-S1 exists to detect
+        self.report_replays = True        # the required target-side nonce_reason=3 telemetry
         self.drop_while_unsubscribed = False   # queued frames are lost rather than held
         self.dispatch_while_unsubscribed = True  # the device processes writes even when it cannot send
         self.refresh_status = 0x73        # 0x73 complete, 0x74 timed out, None to send neither
@@ -55,6 +57,7 @@ class FakeDevice:
         self._queued: list[bytes] = []
         self._notify: Callable[[bytes], None] | None = None
         self._pipe_open = False
+        self._pipe_remaining = 0
         self.session_id = bytes(range(16, 24))
         self._tx_counter = 0
 
@@ -129,20 +132,23 @@ class FakeDevice:
         if len(wire) >= 2 + 16 + 1 + 12:
             nonce = wire[2:18]
             try:
-                self.cli.decrypt_response(self.session_key, wire)
+                plain = self.cli.decrypt_response(self.session_key, wire)
             except Exception:
                 # A tag failure is tamper evidence and keeps its NACK (od_gate.c).
                 if self.bad_tag_answer is not None:
                     return [self.bad_tag_answer]
                 return [bytes([0x00, cmd_lo, 0xFF])]
             if nonce in self.seen_nonces:
-                self.log_lines.append(f"decrypt failed (0x{cmd_hi:02x}{cmd_lo:02x}, nonce_reason=2)")
+                if self.report_replays:
+                    # NONCE_REPLAY is 3. Reason 2 is OUT_OF_WINDOW, a different hardware claim.
+                    self.log_lines.append(
+                        f"decrypt failed (0x{cmd_hi:02x}{cmd_lo:02x}, rc=4, nonce_reason=3)")
                 if not self.answer_replays:
                     return []               # OD-S1: a replayed PIPE DATA frame draws silence
                 return [bytes([0x00, cmd_lo, 0xFF])]
             self.seen_nonces.add(nonce)
-            return self._dispatch(cmd_lo)
-        return self._dispatch(cmd_lo)
+            return self._dispatch(cmd_lo, plain[2:])
+        return self._dispatch(cmd_lo, wire[2:])
 
     # A hard NACK and the gate's [00][cmd][FF] never go sealed: a client whose session just failed
     # cannot read a protected frame. Everything else is an application response and is.
@@ -150,17 +156,31 @@ class FakeDevice:
     def _is_plaintext(frame: bytes) -> bool:
         return frame[0] == 0xFF or (len(frame) == 3 and frame[2] == 0xFF)
 
-    def _dispatch(self, cmd_lo: int) -> list[bytes]:
+    def _dispatch(self, cmd_lo: int, payload: bytes = b"") -> list[bytes]:
         if cmd_lo == 0x80:
             if self.start_nacks:
                 return [bytes([0xFF, 0x80, 0x01, 0x00])]
             self._pipe_open = True
+            self._pipe_remaining = (int.from_bytes(payload[6:10], "little")
+                                    if len(payload) >= 10 else 0)
             return [bytes([0x00, 0x80, 0x01, 0x20, 0x20, 0xF4, 0x00, 0x01])]
         if cmd_lo == 0x81:
             if self.data_nacks:
                 return [bytes([0xFF, 0x81, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00])]
-            return [bytes([0x00, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00])]
+            if not self._pipe_open:
+                return []
+            self._pipe_remaining = max(0, self._pipe_remaining - max(0, len(payload) - 1))
+            out = [bytes([0x00, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00])]
+            if self._pipe_remaining == 0:
+                # Production full/uncompressed PIPE carries END on the final DATA frame.
+                out.append(bytes([0x00, 0x82]))
+                if self.refresh_status is not None:
+                    out.append(bytes([0x00, self.refresh_status]))
+                self._pipe_open = False
+            return out
         if cmd_lo == 0x82:
+            if not self._pipe_open:
+                return [bytes([0xFF, 0x82])]
             out = [bytes([0x00, 0x82])]
             if self.refresh_status is not None:
                 out.append(bytes([0x00, self.refresh_status]))
@@ -190,5 +210,9 @@ class FakeDevice:
         return out
 
     def write_log(self, path: str) -> None:
-        with open(path, "w") as fh:
-            fh.write("\n".join(self.log_lines) + "\n")
+        # RTT/serial capture grows; it does not rewrite old bytes. Keeping that property matters
+        # because the production workflow checkpoints the file and accepts only appended evidence.
+        with open(path, "a") as fh:
+            for line in self.log_lines[self._log_written:]:
+                fh.write(line + "\n")
+        self._log_written = len(self.log_lines)

@@ -170,9 +170,9 @@ likewise unexercised.
 `targets/esp32-idf/tools/od-device-cli.py dispatch-gate` seals one `0x0081` frame and writes the
 retained bytes twice, which is the distinction that decides whether this row is tested at all:
 re-sealing the same sequence number produces a fresh nonce and exercises PIPE duplicate handling
-instead, and the two are indistinguishable in a device log. It ends with a deliberately corrupted
-tag that MUST draw a NACK — silence is not evidence unless a response could have been seen, and a
-disconnected notify path is also silent. Its helpers are pinned against a fake BLE client
+instead. It requires a fresh device-side `nonce_reason=3` report and uses a deliberately corrupted
+tag that MUST draw a NACK — silence is not evidence unless both the replay classification and a
+visible control response were observed. Its helpers are pinned against a fake BLE client
 (`tests/host/bench_dispatch_gate_test.py`); nothing about it has run on a board.
 
 ## Open items

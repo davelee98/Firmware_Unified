@@ -20,7 +20,7 @@
     "forbids": "capability predicates that must be OFF -- replaces the cap_* state booleans, which could only be spelled positively",
     "origin": "transport an h2d frame arrives on: ble | lan-plain | lan-tls. Behaviour, not provenance: BLE has a 244-byte dispatcher ceiling, LAN 4094, and lan-tls bypasses the session gate",
     "proof": "what a passing vector may CLAIM: shared (reply comes from shared dispatch) | target-production (from a target's production command code) | historical-fixture (a shape current production does not emit; never counted as target coverage)",
-    "provenance": "per side: authored | captured | captured-unattributed. The last is for the legacy py-opendisplay fixtures whose target/SHA/panel/date were never recorded; it may not be used by a new vector",
+    "provenance": "per side: authored requires <side>_source; captured requires the complete <side> capture metadata; captured-unattributed is frozen to the legacy py-opendisplay fixture allowlist and requires source + limitation",
     "expect.replies": "ordered array, for one dispatch that emits more than one frame. expect.reply remains the zero-or-one shorthand; null still means the device emits nothing"
   },
   "vectors": [
@@ -42,7 +42,9 @@
       "origin": "ble",
       "provenance": {
         "frame": "authored",
-        "reply": "authored"
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/core/od_gate.c"
       }
     },
     {
@@ -63,7 +65,9 @@
       "origin": "ble",
       "provenance": {
         "frame": "authored",
-        "reply": "authored"
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/core/od_gate.c"
       }
     },
     {
@@ -86,6 +90,7 @@
       "origin": "ble",
       "provenance": {
         "frame": "authored",
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
         "reply": "captured-unattributed",
         "reply_source": "py-opendisplay/tests/fixtures/real_protocol_data/02_read_firmware_response.bin",
         "limitation": "bytes are a real capture; the originating target, firmware SHA, panel, host version and date were never recorded and are not recoverable from either repository"
@@ -111,7 +116,9 @@
       "requires": [],
       "provenance": {
         "frame": "authored",
-        "reply": "authored"
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "targets/nordic-zephyr/src/od_cmd_device.c"
       }
     },
     {
@@ -151,7 +158,8 @@
       "requires": [],
       "proof": "target-production",
       "provenance": {
-        "frame": "authored"
+        "frame": "authored",
+        "frame_source": "shared/protocol/opendisplay_protocol.h"
       }
     },
     {
@@ -172,7 +180,9 @@
       "origin": "ble",
       "provenance": {
         "frame": "authored",
-        "reply": "authored"
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/core/od_gate.c"
       }
     },
     {
@@ -194,7 +204,9 @@
       "origin": "ble",
       "provenance": {
         "frame": "authored",
-        "reply": "authored"
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/core/od_dispatch.c"
       }
     },
     {
@@ -216,7 +228,9 @@
       "origin": "ble",
       "provenance": {
         "frame": "authored",
-        "reply": "authored"
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "targets/nordic-zephyr/src/od_cmd_config.c"
       }
     },
     {
@@ -238,6 +252,7 @@
       "provenance": {
         "frame": "captured-unattributed",
         "reply": "authored",
+        "reply_source": "shared/protocol/opendisplay_protocol.h",
         "frame_source": "py-opendisplay/tests/fixtures/real_protocol_data/03_upload_start_uncompressed_command.bin",
         "limitation": "bytes are a real capture; the originating target, firmware SHA, panel, host version and date were never recorded and are not recoverable from either repository"
       }
@@ -262,6 +277,7 @@
       "provenance": {
         "frame": "captured-unattributed",
         "reply": "authored",
+        "reply_source": "shared/protocol/opendisplay_protocol.h",
         "frame_source": "py-opendisplay/tests/fixtures/real_protocol_data/04_data_chunk_command.bin",
         "limitation": "bytes are a real capture; the originating target, firmware SHA, panel, host version and date were never recorded and are not recoverable from either repository"
       }
@@ -289,6 +305,7 @@
       "provenance": {
         "frame": "captured-unattributed",
         "reply": "authored",
+        "reply_source": "shared/protocol/opendisplay_protocol.h",
         "frame_source": "py-opendisplay/tests/fixtures/real_protocol_data/05_upload_end_command.bin",
         "limitation": "bytes are a real capture; the originating target, firmware SHA, panel, host version and date were never recorded and are not recoverable from either repository"
       }
@@ -309,7 +326,8 @@
       "requires": [],
       "proof": "target-production",
       "provenance": {
-        "frame": "authored"
+        "frame": "authored",
+        "frame_source": "shared/protocol/opendisplay_protocol.h"
       }
     },
     {
@@ -330,7 +348,9 @@
       "origin": "ble",
       "provenance": {
         "frame": "authored",
-        "reply": "authored"
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/core/od_dispatch.c"
       }
     },
     {
@@ -354,7 +374,9 @@
       "origin": "ble",
       "provenance": {
         "frame": "authored",
-        "reply": "authored"
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/protocol/opendisplay_protocol.h"
       }
     },
     {
@@ -378,7 +400,9 @@
       "origin": "ble",
       "provenance": {
         "frame": "authored",
-        "reply": "authored"
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/protocol/opendisplay_protocol.h"
       }
     },
     {
@@ -402,7 +426,9 @@
       "origin": "ble",
       "provenance": {
         "frame": "authored",
-        "reply": "authored"
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/protocol/opendisplay_protocol.h"
       }
     }
   ]

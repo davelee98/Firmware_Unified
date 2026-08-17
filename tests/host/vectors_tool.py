@@ -70,6 +70,17 @@ CAPTURE_FIELDS = ("target", "firmware_sha", "protocol_version", "panel", "host_v
                   "transport", "date")
 PROVENANCE_KEYS = ("frame", "reply", "limitation")
 
+# The only unattributed captures that existed when C12 introduced structured provenance. This is
+# deliberately a side-specific allowlist: `captured-unattributed` is a quarantine for known legacy
+# debt, not a label new vectors may use to avoid recording capture metadata.
+LEGACY_UNATTRIBUTED = {
+    ("dispatch/firmware-version-plaintext-exempt", "reply"),
+    ("dispatch/firmware-version-response-no-patch", "frame"),
+    ("dispatch/ack-width-direct-write-start-2byte", "frame"),
+    ("dispatch/direct-write-data-chunk-ack", "frame"),
+    ("dispatch/direct-write-end-ack", "frame"),
+}
+
 # Semantic knobs a vector may set before its steps run. Deliberately a closed set: an unrecognised
 # key is a vector asking for a precondition no runner establishes, which would otherwise pass while
 # asserting less than it claims. The chunk_* group belongs to the config corpus, which this tool
@@ -118,11 +129,6 @@ def _replies(expect: dict, where: str) -> list[bytes] | None:
     right and the reason `expect.reply: null` is not the same as an absent key."""
     if "reply" in expect and "replies" in expect:
         raise Bad(f"{where}: has both `reply` and `replies`")
-    if "replies" in expect:
-        seq = expect["replies"]
-        if not isinstance(seq, list) or not seq:
-            raise Bad(f"{where}: `replies` must be a non-empty array; use `reply: null` for silence")
-        return [_hex(f"{where}.replies[{i}]", r) for i, r in enumerate(seq)]
     parsed = expect.get("parsed")
     if parsed is not None:
         # Validated here, EXECUTED later: od_dispatch_frame() exposes an outcome and replies, not a
@@ -137,6 +143,11 @@ def _replies(expect: dict, where: str) -> list[bytes] | None:
                 raise Bad(f"{where}: `expect.parsed` path {path!r} has an empty segment")
             if not isinstance(want, (str, int, float, bool)) and want is not None:
                 raise Bad(f"{where}: `expect.parsed[{path}]` must be a JSON scalar")
+    if "replies" in expect:
+        seq = expect["replies"]
+        if not isinstance(seq, list) or not seq:
+            raise Bad(f"{where}: `replies` must be a non-empty array; use `reply: null` for silence")
+        return [_hex(f"{where}.replies[{i}]", r) for i, r in enumerate(seq)]
     if "reply" not in expect:
         raise Bad(f"{where}: no `reply` or `replies`")
     if expect["reply"] is None:
@@ -187,6 +198,8 @@ def _check_vector(raw: dict) -> dict:
     prov = raw.get("provenance", {})
     if not isinstance(prov, dict):
         raise Bad("`provenance` must be an object")
+    if "frame" not in prov:
+        raise Bad("`provenance.frame` is required")
     known = set(PROVENANCE_KEYS)
     for side in ("frame", "reply"):
         known |= {f"{side}_source"} | {f"{side}_{f}" for f in CAPTURE_FIELDS}
@@ -201,19 +214,27 @@ def _check_vector(raw: dict) -> dict:
             continue
         if kind not in PROVENANCE:
             raise Bad(f"`provenance.{side}` must be one of {sorted(PROVENANCE)}, got {kind!r}")
+        source = prov.get(f"{side}_source")
+        if kind == "authored" and (not isinstance(source, str) or not source.strip()):
+            raise Bad(f"`provenance.{side}` is authored but has no {side}_source reference")
         if kind == "captured":
             # TEST_OWNERSHIP.md's capture plan lists what a capture must carry to be a regression
             # baseline. A `captured` label without them is an unattributed capture wearing a better
             # name, which is precisely the confusion this field exists to remove.
-            missing = [f for f in CAPTURE_FIELDS if not prov.get(f"{side}_{f}")]
+            missing = [f for f in CAPTURE_FIELDS
+                       if not isinstance(prov.get(f"{side}_{f}"), str)
+                       or not prov[f"{side}_{f}"].strip()]
             if missing:
                 raise Bad(f"`provenance.{side}` is captured but lacks {missing}")
         if kind == "captured-unattributed":
             # The whole point of this kind is that it names what it cannot attribute.
-            if not prov.get(f"{side}_source"):
+            if not isinstance(source, str) or not source.strip():
                 raise Bad(f"`provenance.{side}` is captured-unattributed but has no {side}_source")
-            if not prov.get("limitation"):
+            if not isinstance(prov.get("limitation"), str) or not prov["limitation"].strip():
                 raise Bad(f"`provenance.{side}` is captured-unattributed but has no limitation")
+            if (raw["id"], side) not in LEGACY_UNATTRIBUTED:
+                raise Bad(f"`provenance.{side}` uses captured-unattributed outside the frozen "
+                          "legacy allowlist")
 
     for key in raw.get("state", {}):
         if key not in STATE_KEYS:
@@ -247,6 +268,9 @@ def _check_vector(raw: dict) -> dict:
         if direction == "d2h" and replies:
             raise Bad(f"{where}: a d2h observation cannot expect a reply")
         norm.append({"dir": direction, "frame": frame, "origin": origin, "replies": replies})
+
+    if any(s["dir"] == "h2d" for s in norm) and "reply" not in prov:
+        raise Bad("`provenance.reply` is required for an h2d vector, including explicit silence")
 
     return {
         "id": raw["id"],
