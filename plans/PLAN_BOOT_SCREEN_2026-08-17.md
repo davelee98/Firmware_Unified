@@ -312,12 +312,49 @@ unconditionally; APP_BOOT only if C-B4 passes.
 
 ### 3.3 The vendored neighbours
 
-- **`qr/qrcode.c` → `third_party/qrcode/`.** Vendored MIT code, exempt from the one rule by
-  decision 13. Nordic and Silabs are byte-identical — adopt that as canonical and reformat ESP32's
-  onto it. One copy, three consumers, exactly as `third_party/bb_epaper` already works.
+- **`qr/qrcode.c` → `third_party/qrcode/`** — see § 3.3.2, which is larger than it looks.
 - **`logo_bitmap.h` → one home**, with `tools/convert_logo.py` moved beside it. It is a
   **generated asset, not shared logic**; the 111 KB of hex source under `shared/core/` would
   misrepresent what `shared/` is. Inclusion is gated **per size**, not on/off — see below.
+
+#### 3.3.2 The QR encoder: one copy, and a differential before discarding two
+
+Three copies today — `targets/esp32-idf/src/qr/`, `targets/nordic-zephyr/src/qr/`,
+`targets/efr32bg22-slc/qr/` — of vendored MIT code, exempt from the one rule by decision 13. They
+collapse to `third_party/qrcode/`, exactly as `third_party/bb_epaper` already works.
+
+**The boot screen is its only consumer, which is why this belongs to this plan.** Every file that
+includes it, in this repo and in all three sibling repos, is a boot screen:
+
+```
+targets/{esp32-idf,nordic-zephyr}/src/boot_screen.cpp
+targets/efr32bg22-slc/opendisplay_display.cpp
+../Firmware/src/boot_screen.cpp   ../Firmware_NRF54/src/boot_screen.cpp
+../Firmware_Silabs/opendisplay_display.cpp
+```
+
+Nothing else in the fleet draws a QR code. A standalone plan for a change with one downstream
+consumer, written by the effort about to rewrite that consumer, would be ceremony.
+
+**But it is not the file move it was first written up as.** Nordic and Silabs are byte-identical
+(`6c8dc10b…`). ESP32's differs (`d8aecca…`) by **312 whitespace-insensitive lines in the `.c` and
+21 in the `.h`.** Spot checks look like reformatting and restored comments — table layout,
+`#include <limits.h>` moved — consistent with "the same code reformatted", but 312 lines is far
+past what anyone should eyeball and then declare cosmetic.
+
+So **C-B0 owes a differential, not an assertion**: encode a corpus of payloads — including the
+boot screen's own 23-byte base64url landing payload at every version and ECC level it can select —
+through both copies and compare the resulting module bitmaps. Byte-equal output is what licenses
+discarding ESP32's copy. If they are *not* equivalent, that is a finding which changes what C-B3
+inherits, and it must surface before the renderer extraction rather than during it.
+
+**It lands as its own PR, sequenced first.** Not because it is separable in purpose — it is not —
+but because the review question is unrelated to everything after it:
+
+- **zero behaviour change** if the differential passes, so the PR reduces to "are these the right
+  bytes"; a renderer extraction cannot be reviewed that way;
+- **different governance** — `third_party/` under decision 13, not `shared/` under the one rule;
+- **it stands alone.** Three copies to one is worth having even if the renderer work stalls.
 
 #### 3.3.1 The logo gate selects SIZES, and BG22 takes S1 + S2
 
@@ -467,7 +504,7 @@ and zero skips.
 
 | Commit | Content | Required proof |
 |---|---|---|
-| **C-B0** | `third_party/qrcode/` — one copy (the Nordic/Silabs byte-identical form), three consumers. No behaviour change. | all three targets link; images **byte-identical** on Nordic and Silabs, since their bytes are already canonical |
+| **C-B0** | `third_party/qrcode/` — one copy (the Nordic/Silabs byte-identical form), three consumers (§ 3.3.2). **Own PR, sequenced first.** | **A differential proving ESP32's 312-line-divergent copy is behaviourally identical** across a payload corpus at every version/ECC the boot screen can select — that is what licenses discarding it. Plus: all three targets link, and images **byte-identical** on Nordic and Silabs, whose bytes are already canonical |
 | **C-B1** | `shared/core/od_boot_payload.c` (PURE) + host test. Both targets swap onto it. Settles **B4**. | differential: the new payload/URL/redaction output matches each target's current output byte-for-byte on a corpus of device ids, keys and versions — **including the all-zero key** |
 | **C-B2** | **Adopt Nordic's QR quiet zone into the base (B3)** and report the defect to `../Firmware`. No seam yet. | the golden harness reports the geometry set where the authority's form satisfies `qrX + qrPx > w_log`; that set is non-empty, is recorded, and is empty after the change |
 | **C-B3** | `shared/core/od_boot_app.h` + `od_boot_screen.c` (new APP_BOOT tier) + the golden-hash host test. `esp32-idf` swaps onto it; its `boot_screen.cpp` becomes ~60 lines of seam. Lands **B2**'s upstream fix and C-B2's verdict, plus the `logoBmp = NULL` hygiene fix above. | goldens pinned for every scheme × rotation × geometry; ESP32 golden set **matches the pre-swap renderer** except at the pixels B2 and B3 deliberately change, each enumerated |
