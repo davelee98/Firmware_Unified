@@ -1,5 +1,5 @@
 /*
- * OpenDisplay resumable zlib inflater API.
+ * OpenDisplay portable resumable zlib inflater API.
  *
  * The implementation owns one global stream. Callers reset it with the exact
  * expected output size, push input until final, and poll bounded output chunks.

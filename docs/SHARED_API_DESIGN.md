@@ -129,7 +129,7 @@ target BLE/LAN glue ──frame in──► od_core_rx() ──enqueue──► 
                         │ session/CCM · advert build · (PIPE, compile-opt)  │
                         └───────────────┬───────────────────────────────────┘
                           calls ▼                       ▲ target supplies
-                 ┌── shared/hal (extern C) ──┐   ┌── shared/compress ──┐
+                 ┌── shared/hal (extern C) ──┐   ┌── core/zlib inflate ┐
                  │ time gpio spi i2c nvs      │   │ od_zlib_stream_*    │
                  │ crypto radio log panel     │   │ (uzlib, 512 B win)  │
                  └───────────────────────────┘   └─────────────────────┘
@@ -623,11 +623,10 @@ the ops table, out of `shared/core`.
 
 ---
 
-## `shared/compress` — inflate
+## `shared/core/od_zlib_inflate` — inflate
 
-One engine, already portable, already vendored identically in NRF54/Silabs and present in
-Firmware: the resumable `od_zlib_stream.c` (byte-resumable rewrite of uzlib/tinf, pure C, no
-vendor headers). Lift it under `shared/compress/` unchanged:
+The portable engine is `shared/core/od_zlib_inflate.c`: a byte-resumable rewrite of uzlib/tinf,
+plain C with no vendor headers or heap dependency. Its stable streaming API is:
 
 ```c
 void             od_zlib_stream_reset(uint32_t expected_output_size);
@@ -638,9 +637,9 @@ uint32_t         od_zlib_stream_output_count(void);
 /* status: NEEDS_INPUT=0, OUTPUT_READY=1, DONE=2, ERROR=-1 */
 ```
 
-Window size is a **compile-time macro** (`OPENDISPLAY_ZLIB_WINDOW_BITS`, floor 9 = 512 B) with
-static (`USE_HEAP_WINDOW=0`) or heap allocation, exactly as today. The engine already rejects a
-stream whose CMF declares a larger window than the target allows (`od_zlib_stream.c:641-644`) —
+Window size is a **compile-time macro** (`OPENDISPLAY_ZLIB_WINDOW_BITS`, floor 9 = 512 B) backed
+by one bounded static state object. The engine rejects a stream whose CMF declares a larger
+window than the target allows (`od_zlib_inflate.c`) —
 so this macro is a genuine wire contract, not just a buffer knob (see MEMORY_CONSTRAINTS.md).
 The ESP32's ROM-tinfl adapter (`od_inflate_tinfl.*`) is a *build-level* alternative behind the
 same four-symbol API (`#define` remap) — keep it optional and ESP32-only.

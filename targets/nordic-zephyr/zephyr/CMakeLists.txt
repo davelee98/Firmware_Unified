@@ -247,7 +247,6 @@ target_sources(app PRIVATE
   # OUR glue TU, not the vendored bb_epaper.cpp -- see panel/od_bbep_zephyr.cpp for why.
   ${PANEL_DIR}/od_bbep_zephyr.cpp
   ${THIRD_PARTY_DIR}/bb_epaper/src/Group5.cpp
-  ${THIRD_PARTY_DIR}/uzlib/src/od_zlib_stream.c
 )
 
 # ------------------------------------------------------------------------------ shared/ ---

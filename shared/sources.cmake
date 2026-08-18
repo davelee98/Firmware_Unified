@@ -75,7 +75,9 @@
 #   core/od_xfer_direct.c 0x70/0x71/0x72
 #   core/od_xfer_partial.c 0x76
 #   core/od_pipe.c        0x80-0x82          (compile-gated OD_PIPE_ENABLE)
-#   compress/od_zlib_stream.c
+#   core/od_zlib_inflate.c portable streaming zlib inflate     (LANDED — one bounded static
+#                         window, shared by all three target families; ESP32 may remap the API
+#                         to its ROM-backed tinfl adapter without changing the wire contract.)
 
 get_filename_component(OD_SHARED_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
 
@@ -110,6 +112,7 @@ set(OD_SHARED_SOURCES_PURE
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config_tlv.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_advert.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config.c"
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_zlib_inflate.c"
 )
 
 set(OD_SHARED_SOURCES_HAL_ADV

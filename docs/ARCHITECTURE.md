@@ -32,8 +32,7 @@ reverts to four codebases in one directory.
         └───────────────▲───────────────────────────┘
                         │ calls
         ┌───────────────┴───────────────────────────┐
-        │  shared/core/    dispatch, config, xfers  │
-        │  shared/compress/ inflate engines         │
+        │  shared/core/    dispatch, config, inflate│
         │  shared/protocol/ wire contract (#defines)│
         └───────────────────────────────────────────┘
 ```
@@ -446,7 +445,7 @@ the first step are in TEST_OWNERSHIP.md.
 | Direct-write / partial / PIPE state machines | Pure bookkeeping over byte streams; no panel needed. PIPE reorder + SACK especially |
 | Session auth, nonce/replay window | Arithmetic with load-bearing off-by-ones (`PIPE_MAX_W ≤ ±32` replay window) |
 | Advertisement assembly | Pure encode; trivially testable, currently untested |
-| Inflate (`shared/compress`) | Window-size rejection, truncated and corrupt streams |
+| Inflate (`shared/core/od_zlib_inflate.c`) | Window-size rejection, truncated and corrupt streams |
 
 **Fuzzing is not optional for the parsers.** Config TLV parsing and frame dispatch are reachable
 *before authentication*, so a malformed frame from an unpaired peer reaches them. Fuzz those two
@@ -642,7 +641,7 @@ pump is the mechanism; a second thread owning protocol state is the thing being 
 ### The rules
 
 1. **Nothing in `shared/core` blocks.** Long operations are resumable state machines that
-   return a status and yield to the caller. `shared/compress`'s `od_zlib_stream.c` already is
+   return a status and yield to the caller. `shared/core/od_zlib_inflate.c` already is
    one (`OD_ZLIB_STATUS_NEEDS_INPUT` / `_OUTPUT_READY` / `_DONE` / `_ERROR`) — treat that as the
    house style for transfers and dispatch, not as a peculiarity of inflate.
 2. **`shared/core` owns no thread, task, timer, or work queue.** The target's loop calls in;
@@ -769,8 +768,8 @@ option should get a type, default, range, and help text rather than a raw `-D`. 
 target has no Kconfig at all (SLC + `target_compile_definitions`), so Kconfig is merely *how
 two of the three targets set* these constants, never the interface `shared/` presents.
 
-The knobs that exist today: `OPENDISPLAY_ZLIB_WINDOW_BITS`, `OPENDISPLAY_ZLIB_USE_HEAP_WINDOW`,
-and `PIPE_SMALL_DRAM_WINDOW` (the classic ESP32's 320 KB of RAM cannot link the full 33-slot
+The knobs that exist today: `OPENDISPLAY_ZLIB_WINDOW_BITS` and `PIPE_SMALL_DRAM_WINDOW` (the
+classic ESP32's 320 KB of RAM cannot link the full 33-slot
 PIPE_WRITE reorder queue).
 
 The zlib window is the worked example of why this must be a parameter and not a constant: the

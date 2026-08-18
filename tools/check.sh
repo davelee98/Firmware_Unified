@@ -78,7 +78,7 @@ check() {
 boundary_includes() {
     # Header patterns that pin a file to one SDK. Extend as targets are imported. Note the
     # ESP-IDF families beyond esp_*: driver/, soc/, hal/, rom/ and freertos/ are all IDF-only.
-    # miniz.h is the ROM tinfl header -- the inflate ENGINE belongs in shared/compress, the ROM
+    # miniz.h is the ROM tinfl header -- the portable inflate engine belongs in shared/core, the ROM
     # binding does not. Panel libraries are target-layer: shared/ reaches the panel only through
     # od_hal_panel.
     local pattern='#[[:space:]]*include[[:space:]]*[<"]([[:space:]]*)?(esp_|esp32|driver/|soc/|hal/|rom/|miniz|freertos/|nrf_|nrfx|nrf\.h|sl_|sli_|em_|zephyr/|Arduino\.h|WiFi\.h|ESPmDNS|bluefruit\.h|Adafruit|NimBLE|bb_epaper|FastEPD|TFT_eSPI|Seeed)'
@@ -429,8 +429,7 @@ arduino_free() {
 }
 check "esp32: arduino-free app code" arduino_free
 
-# ALL TEN FRAGMENTS, not a sampled four. The plan's verification list says ten, and a subset
-# leaves six board configurations covered by nothing -- the c3/c6/classic parts differ in PSRAM,
+# ALL 11 FRAGMENTS, not a sampled subset. The c3/c6/classic parts differ in PSRAM,
 # LAN and panel backends, which is precisely where a shared-core change breaks one target and not
 # the others. `build.sh` with no arguments builds every fragment; `sdkconfig_baseline.sh` with no
 # arguments then checks every board that has a build, so the two stay in step automatically

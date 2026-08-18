@@ -48,26 +48,25 @@ buffer with the CCM plaintext buffer, and shrink the replay window (below).
    merely skip the handlers — a linked-but-unused 8.3 KB array is an instant link failure here.
 
 2. **The zlib window — a wire contract, not a knob.** BG22 pins
-   `OPENDISPLAY_ZLIB_WINDOW_BITS=9` → **512 B**, statically (`USE_HEAP_WINDOW=0`). A 32 KB
+   `OPENDISPLAY_ZLIB_WINDOW_BITS=9` → **512 B**, statically. A 32 KB
    window (bits 15) is a third of the chip's RAM and can never exist. The inflater *rejects* any
    stream whose CMF header declares a window larger than its compile limit
-   (`od_zlib_stream.c:641-644`), so this is not a local sizing choice — **the host encoder
+   (`shared/core/od_zlib_inflate.c`), so this is not a local sizing choice — **the host encoder
    (`py-opendisplay`) must cap `windowBits ≤ 9` for any stream a 9-bit device will receive.**
    Correction to the workspace-level note "existing targets pin 32 KB windows for legacy-client
-   compatibility": that is false for all but one board. The measured reality —
+   compatibility": that was false for all but one now-retired board. The current reality —
 
    | Target / board | `WINDOW_BITS` | Window | Alloc |
    |---|---:|---:|---|
    | EFR32BG22 | 9 | 512 B | static |
    | nRF54L15 | 9 | 512 B | static |
-   | ESP32 (default, most envs) | 9 | 512 B | heap |
-   | ESP32-S3 `env:esp32-s3-E1004` **only** | 15 | 32 KB | heap |
+   | ESP32 (all current boards) | 9 | 512 B | static or tinfl backend |
 
-   So `shared/compress` treats the window as a per-target macro with **512 B as the documented
-   floor**. The host side already complies unconditionally — `py-opendisplay` encodes
+   So `shared/core/od_zlib_inflate` treats the window as a per-target macro with **512 B as the
+   documented floor**. The host side already complies unconditionally — `py-opendisplay` encodes
    `window_bits = 9` for every device and rejects its own output if the header advertises more
    (DESIGN_REVIEW_2026-07-25.md F5) — so the wire contract holds today and the E1004's 15-bit
-   build is host-unreachable dead capability. What is left open is narrower; see below.
+   build no longer exists. What is left open is narrower; see below.
 
 3. **`MAX_CONFIG_SIZE` — DECIDED 2026-07-25: 4096 fleet-wide, BG22 included.** It is a single
    product-wide value, not a per-target macro: the host may send up to 4096 bytes of config to

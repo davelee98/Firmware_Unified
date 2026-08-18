@@ -21,13 +21,6 @@ file(GLOB OD_APP_SOURCES
     ${OD_SRC_DIR}/qr/*.c
 )
 
-# Temporary repo-level home for the resumable zlib inflater. C14 first collapses ESP32's
-# byte-identical target-local copy here, then promotes the tested engine to shared/core/.
-set(OD_ZLIB_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../third_party/uzlib/src)
-list(APPEND OD_APP_SOURCES
-    ${OD_ZLIB_DIR}/od_zlib_stream.c
-)
-
 # The FastEPD vendor adapter's storage, and millis() for FastEPD's call sites. PERMANENT --
 # see ../vendor/fastepd/SPI.h and the scoping block further down.
 list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../vendor/fastepd/fastepd_adapter.cpp)
@@ -150,7 +143,6 @@ idf_component_register(
         # NOTE: ../vendor/fastepd is deliberately ABSENT here -- see the scoping block below.
         ${CMAKE_CURRENT_LIST_DIR}/../hal
         ${CMAKE_CURRENT_LIST_DIR}/../ble
-        ${OD_ZLIB_DIR}
         # NOTE: neither third_party/bb_epaper/src nor third_party/FastEPD/src is here, and
         # nor is ../vendor/fastepd. All three are granted per-source below. ../panel stays --
         # it is OUR code (the IDF backend), not a vendored tree.

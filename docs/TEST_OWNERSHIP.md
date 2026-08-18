@@ -28,7 +28,7 @@ this project does not own** and **zero new copies to drift**.
 | Artifact | Home | Runner | Owner |
 |---|---|---|---|
 | Wire-vector corpus (`tests/vectors/*.json`) | `Firmware_Unified` | both runners below | firmware |
-| C unit tests for `shared/core`, `shared/compress` | `Firmware_Unified/tests/host/` | CTest | firmware |
+| C unit tests for `shared/core` | `Firmware_Unified/tests/host/` | CTest | firmware |
 | libFuzzer harnesses (config TLV, frame dispatch) | `Firmware_Unified/tests/fuzz/` | clang + CI | firmware |
 | Corpus replay against the Python host | `Firmware_Unified/tests/host/replay_vectors.py` | pytest-free script, pinned `py-opendisplay` from PyPI | firmware |
 | Capability-permutation builds, `.bss` ceilings, `_Static_assert`s | `Firmware_Unified/tests/` | CTest + CI matrix | firmware |

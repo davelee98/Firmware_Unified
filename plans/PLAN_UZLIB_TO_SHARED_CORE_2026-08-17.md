@@ -1,7 +1,8 @@
 # C14 — Canonical shared zlib inflater
 
-**Status:** proposed, revised 2026-08-17. Scope is deliberately narrow — **the engine moves, the
-pump does not.**
+**Status:** implemented in software on `c14-canonical-zlib-inflater`, 2026-08-18. Automated gate
+complete; hardware matrix remains explicit debt. Scope stayed deliberately narrow — **the engine
+moved, the pump did not.**
 
 **Source:** [DEDUP_5_COMPRESSION_2026-08-17.md](DEDUP_5_COMPRESSION_2026-08-17.md).
 
@@ -54,7 +55,7 @@ an acceptance criterion for this plan.
 The five source files are byte-identical between `third_party/uzlib/src/` and
 `targets/esp32-idf/lib/uzlib/src/`. There is no divergent implementation to reconcile.
 
-## 3. Current consumers and backend split
+## 3. Pre-C14 consumers and backend split
 
 | Consumer | Current portable-engine wiring |
 |---|---|
@@ -257,3 +258,46 @@ reported as hardware verification.
   the recorded portable-board memory delta with the plan results.
 - **Backend-blind testing:** an S3-only hardware pass exercises tinfl and says nothing about the
   relocated portable engine; the four-device matrix above is mandatory.
+
+## 8. Implementation record
+
+The five-stage sequence landed without combining the deferred pump/backend-selection work:
+
+- `0bd6092` — removed ESP32's byte-identical target-local uzlib tree. Git blob identity proved the
+  live source itself was unchanged, and all 11 ESP32 configurations built.
+- `5fb3f5c` — moved the characterization harness into `tests/host/`. Static and heap variants both
+  passed the same stored/fixed/dynamic, chunking, CMF-window, truncation, Adler, trailing-input,
+  expected-size, and output-count cases. Fixtures are independently generated and committed, so
+  this suite does not silently disappear when host zlib development files are absent.
+- `9386e68` — removed the unused Adler-32 and CRC-32 helper translation units and declarations.
+- `b25654f` — removed heap-window selection, allocation, and obsolete headers; all target families
+  compiled the final static-state form before it moved.
+- C14.5 moved `od_zlib_inflate.{c,h}` into `shared/core`, registered the source once in PURE,
+  removed every target-specific source/include entry, and linked the permanent host test through
+  `od_shared`. The old `third_party/uzlib/` and placeholder `shared/compress/` trees have no files.
+
+Measured on the portable-engine `c3-n4` profile, C14.3 → final:
+
+| Metric | C14.3 baseline | Final | Delta |
+|---|---:|---:|---:|
+| Flash code | 453,858 B | 453,790 B | -68 B |
+| DRAM total | 155,968 B | 156,464 B | +496 B |
+| `.bss` | 62,016 B | 62,512 B | +496 B |
+| `.data` | 10,420 B | 10,420 B | 0 B |
+| Flash data | 140,924 B | 140,884 B | -40 B |
+| Total image | 688,800 B | 688,692 B | -108 B |
+
+The +496 B static-RAM delta is the intended relocation of the 512-byte history window from heap
+allocation into the singleton state, net of removed heap bookkeeping. The final `c3-n4` link map
+contains `od_zlib_inflate.c`, the four live stream entry points, and a 0x694-byte state section.
+The `s3-n16r8` tinfl profile contains none of the portable inflater object, entry points, or state;
+`od_zlib_stream_output_count()` remains unreferenced and does not pull it in.
+
+Final automated verification: `tools/check.sh --targets` reports **16 passed, 0 failed, 0
+skipped**. That includes gcc, clang, ASan+UBSan, three 60-second pre-auth fuzz runs, the pinned
+Python wire-corpus replay, all 11 ESP32 configurations plus sdkconfig baselines, all three Nordic
+boards, and the BG22 headless build. The permanent host suite registers one static inflater test
+and passes 35/35 in a direct gcc run.
+
+No C14 hardware case has been run. The four-device compressed-upload matrix in §5 remains debt;
+software/build verification is not substituted for it.

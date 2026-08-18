@@ -1,5 +1,5 @@
 /*
- * OpenDisplay streaming zlib inflater, based on uzlib/tinf.
+ * OpenDisplay portable streaming zlib inflater, based on uzlib/tinf.
  */
 
 #include <string.h>
