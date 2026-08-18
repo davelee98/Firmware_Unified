@@ -4,7 +4,7 @@
  * Drop-in replacement for the portable streaming inflater,
  * od_zlib_stream_*). It exposes the SAME streaming contract (reset / push / poll /
  * error / output_count) and the SAME status type (od_zlib_status_t, reused from
- * uzlib.h) so display_service.cpp can bind its existing od_zlib_stream_* call sites
+ * od_zlib_inflate.h) so display_service.cpp can bind its existing od_zlib_stream_* call sites
  * to this engine via a compile-time #define remap, with no changes to the portable engine and
  * no changes to the call sites.
  *
@@ -36,14 +36,14 @@
  * headroom rather than the 32 KB the TINFL_LZ_DICT_SIZE constant suggests; a window
  * wider than 9 bits sizes it to the window instead). vs ~2.5 KB for uzlib.
  *
- * The status enum (od_zlib_status_t, OD_ZLIB_STATUS_*) is defined by uzlib.h; we
+ * The status enum (od_zlib_status_t, OD_ZLIB_STATUS_*) is defined by od_zlib_inflate.h; we
  * only include it, never modify it.
  */
 
 #ifndef OD_INFLATE_TINFL_H
 #define OD_INFLATE_TINFL_H
 
-#include "uzlib.h"   /* od_zlib_status_t + OD_ZLIB_STATUS_* (include only, not modified) */
+#include "od_zlib_inflate.h" /* od_zlib_status_t + OD_ZLIB_STATUS_* */
 
 /* Gate: which BUILDS use this engine — NOT which transports it serves (see SCOPE
  * above; once enabled it handles BLE too). Mirrors the condition that defines
@@ -65,7 +65,7 @@
 extern "C" {
 #endif
 
-/* Same semantics/signatures as od_zlib_stream_* in uzlib.h. */
+/* Same semantics/signatures as od_zlib_stream_* in od_zlib_inflate.h. */
 void od_inflate_tinfl_reset(uint32_t expected_output_size);
 od_zlib_status_t od_inflate_tinfl_push(const uint8_t *input, size_t len, bool final);
 od_zlib_status_t od_inflate_tinfl_poll(uint8_t *output, size_t capacity, size_t *produced);

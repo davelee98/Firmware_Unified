@@ -108,7 +108,6 @@ target_include_directories(app PRIVATE
 
 target_compile_definitions(app PRIVATE
   OD_APP_VERSION=0x0100
-  OPENDISPLAY_ZLIB_USE_HEAP_WINDOW=0
 )
 
 # BOARD *is* set here -- find_package(Zephyr) has run. Only the EXTRA_CONF_FILE block above it

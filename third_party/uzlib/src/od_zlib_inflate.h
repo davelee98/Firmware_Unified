@@ -1,12 +1,12 @@
 /*
- * OpenDisplay streaming zlib inflater, based on uzlib/tinf.
+ * OpenDisplay resumable zlib inflater API.
  *
- * The original uzlib one-shot/callback inflater API is intentionally not
- * exposed in this vendored copy. Firmware uses one global streaming inflater.
+ * The implementation owns one global stream. Callers reset it with the exact
+ * expected output size, push input until final, and poll bounded output chunks.
  */
 
-#ifndef UZLIB_H_INCLUDED
-#define UZLIB_H_INCLUDED
+#ifndef OD_ZLIB_INFLATE_H
+#define OD_ZLIB_INFLATE_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -15,8 +15,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#include "uzlib_conf.h"
 
 #ifndef OPENDISPLAY_ZLIB_WINDOW_BITS
 #define OPENDISPLAY_ZLIB_WINDOW_BITS 9
@@ -45,4 +43,4 @@ uint32_t od_zlib_stream_output_count(void);
 }
 #endif
 
-#endif /* UZLIB_H_INCLUDED */
+#endif /* OD_ZLIB_INFLATE_H */

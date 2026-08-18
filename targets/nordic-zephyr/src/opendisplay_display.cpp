@@ -20,7 +20,7 @@
 #include <string.h>
 
 extern "C" {
-#include "uzlib.h"
+#include "od_zlib_inflate.h"
 }
 
 void bbepSendCMDSequence(BBEPDISP *pBBEP, const uint8_t *pSeq);

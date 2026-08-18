@@ -20,5 +20,4 @@ set(OD_BOARD_DEFINES
     # can never fill. structs.h asserts the relationship.
     OD_TXQ_SLOTS=18u
     OD_RXQ_SLOTS=18u
-    OPENDISPLAY_ZLIB_USE_HEAP_WINDOW=1
 )

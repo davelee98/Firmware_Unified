@@ -26,7 +26,7 @@
 #include "link_owner.h"
 #include "session_guard.h"
 #include "touch_input.h"
-#include "uzlib.h"
+#include "od_zlib_inflate.h"
 #if defined(OPENDISPLAY_FASTEPD)
 #include "display_fastepd.h"
 #endif
@@ -36,7 +36,7 @@
 // portable engine is left completely untouched — it is simply not called here, so the
 // linker drops it. The od_zlib_stream_* call sites below are unchanged; the macros
 // rebind them at compile time. od_zlib_status_t / OD_ZLIB_STATUS_* stay shared
-// (temporarily from uzlib.h).
+// (from od_zlib_inflate.h).
 //
 // This remap is UNCONDITIONAL within such a build — it is not gated per transport, so
 // it rebinds EVERY compressed path in this file: direct-write (0x70/0x71), partial

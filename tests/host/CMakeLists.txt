@@ -81,27 +81,15 @@ add_executable(od_span_test span_test.c)
 target_link_libraries(od_span_test od_shared)
 add_test(NAME span COMMAND od_span_test)
 
-# zlib_inflate: characterize both storage modes of the portable streaming inflater before C14
-# removes the heap variant. These are separate executables because the production source exports
-# one global API and owns singleton state. The case table is identical; only the compile definition
-# differs, pinning the Nordic/Silabs static path and the ESP32 heap path independently.
+# zlib_inflate: the portable streaming inflater. C14.2 characterized its former heap and static
+# storage modes with the same suite; the results were identical, so C14.4 retired heap selection
+# and this permanent test now covers the one static implementation.
 set(OD_ZLIB_INFLATE_SOURCE
     "${CMAKE_CURRENT_LIST_DIR}/../../third_party/uzlib/src/od_zlib_stream.c")
-foreach(storage IN ITEMS static heap)
-    add_executable(od_zlib_inflate_${storage}_test
-        zlib_inflate_test.c
-        ${OD_ZLIB_INFLATE_SOURCE})
-    target_include_directories(od_zlib_inflate_${storage}_test PRIVATE
-        "${CMAKE_CURRENT_LIST_DIR}/../../third_party/uzlib/src")
-    if(storage STREQUAL "heap")
-        target_compile_definitions(od_zlib_inflate_${storage}_test PRIVATE
-            OPENDISPLAY_ZLIB_USE_HEAP_WINDOW=1)
-    else()
-        target_compile_definitions(od_zlib_inflate_${storage}_test PRIVATE
-            OPENDISPLAY_ZLIB_USE_HEAP_WINDOW=0)
-    endif()
-    add_test(NAME zlib_inflate_${storage} COMMAND od_zlib_inflate_${storage}_test)
-endforeach()
+add_executable(od_zlib_inflate_test zlib_inflate_test.c ${OD_ZLIB_INFLATE_SOURCE})
+target_include_directories(od_zlib_inflate_test PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/../../third_party/uzlib/src")
+add_test(NAME zlib_inflate COMMAND od_zlib_inflate_test)
 
 # adv_control: the loop-owned advertising policy machine (correctness review F4) driven against
 # a scripted fake HAL. The fake supplies od_hal_adv_{program,start,stop} at LINK time, exactly
