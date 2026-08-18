@@ -3,20 +3,25 @@
 One repository for **all OpenDisplay firmware targets**, replacing four independently
 versioned repos that had drifted apart while implementing the same wire protocol.
 
-> **Status: one target imported and running** (updated 2026-08-05). `targets/esp32-idf/`
-> builds **10 boards** and has been flashed and exercised on an ESP32-S3. The other two
-> targets — `nordic-zephyr` and `efr32bg22-slc` — are still README-only, so build those from
-> their original repos.
+> **Status: all three targets build; two are hardware-verified** (updated 2026-08-17).
+> `targets/esp32-idf/` builds **11 boards** (9 shipping + 2 debug) and is verified on an
+> ESP32-S3. `targets/nordic-zephyr/` builds three boards and is verified on `xiao_nrf52840`
+> only — its other two boards build clean but have never been flashed.
+> `targets/efr32bg22-slc/` builds headless and **has never been flashed**.
+> [docs/HARDWARE_MATRIX.md](docs/HARDWARE_MATRIX.md) is the board list, with the release/debug
+> variants and the kernel each runs on;
+> [docs/HARDWARE_VERIFICATION_CHECKLIST.md](docs/HARDWARE_VERIFICATION_CHECKLIST.md) is what has
+> actually run on silicon. A board building is not a board working.
 >
 > Two things that sound like omissions but are deliberate:
 >
-> - **`shared/` is still empty.** No promotion has happened yet, so the ESP32 target holds
->   logic destined for `shared/core`. The first promotion is a planned, test-first step, not
->   something to do opportunistically — see [docs/MIGRATION.md](docs/MIGRATION.md).
 > - **The Arduino shim is gone** (2026-08-16). `targets/esp32-idf/compat/` went 22 files to 0 and
 >   was deleted. What survives is the permanent FastEPD adapter under
 >   `targets/esp32-idf/vendor/fastepd/`, which is not a shim and does not die; the record of the
 >   demolition is [docs/ARCHIVE_esp32_arduino_shim.md](docs/ARCHIVE_esp32_arduino_shim.md).
+> - **`efr32bg22-slc` runs no RTOS at all** — a bare-metal superloop, not an unfinished port.
+>   Zephyr was rejected for it on RAM (32 KB total), and its BGAPI event-retention design is only
+>   valid without a kernel, so the build fails if one appears.
 >
 > The ESP32 target is **not** correctness-signed-off. Ten findings from
 > [docs/CORRECTNESS_REVIEW_2026-08-04.md](docs/CORRECTNESS_REVIEW_2026-08-04.md) are open or
@@ -58,11 +63,14 @@ vendored copy shared by every target, not a per-target fork.
 
 ## Targets
 
-| Directory | Chips | Build system | From |
-|---|---|---|---|
-| `targets/esp32-idf/` | ESP32-S3 / C3 / C6 / classic | **ESP-IDF** (CMake + Kconfig) | `Firmware` |
-| `targets/nordic-zephyr/` | nRF54L15, nRF52840 | Zephyr / nRF Connect SDK + west | `Firmware_NRF54`, `Firmware` |
-| `targets/efr32bg22-slc/` | EFR32BG22 | Simplicity SDK + SLC (CMake) — **unchanged** | `Firmware_Silabs` |
+| Directory | Chips | Boards | Kernel | Build system | From |
+|---|---|---|---|---|---|
+| `targets/esp32-idf/` | ESP32-S3 / C3 / C6 / classic | 11 | FreeRTOS | **ESP-IDF** (CMake + Kconfig) | `Firmware` |
+| `targets/nordic-zephyr/` | nRF54L15, nRF54LM20A, nRF52840 | 3 | Zephyr | Zephyr / nRF Connect SDK + west | `Firmware_NRF54`, `Firmware` |
+| `targets/efr32bg22-slc/` | EFR32BG22 | 1 | **none** (superloop) | Simplicity SDK + SLC (CMake) | `Firmware_Silabs` |
+
+Board-by-board, including which variants are debug builds and how each target produces one:
+[docs/HARDWARE_MATRIX.md](docs/HARDWARE_MATRIX.md).
 
 **Three targets, not four.** The legacy nRF52 (bare Nordic SDK, `Firmware_NRF` — *not* the
 nRF52840, which is a board of `targets/nordic-zephyr/` above) is deliberately absent: it **is
@@ -203,14 +211,17 @@ The ESP32 target builds every board with one command, which sources ESP-IDF itse
 
 ```bash
 cd targets/esp32-idf
-./build.sh                 # all 10 boards -> release/, with a MANIFEST
+./build.sh                 # all 11 boards -> release/, with a MANIFEST
+./build.sh --release       # the 9 shipping boards; excludes the two -debug ones
 ./build.sh s3-n16r8        # or just one; ./build.sh --list to see them
 tools/run_host_tests.sh    # host tests under ASan+UBSan and TSan+UBSan
 tools/sdkconfig_baseline.sh
 ```
 
-The last three are gates a change must not break. Per-target details are in each
-`targets/*/README.md`; the other two targets have no build yet.
+The last two are gates a change must not break, and `tools/check.sh --targets` at the repo root
+builds all three target families. Per-target details are in each `targets/*/README.md`; the full
+board list, its release/debug variants and the kernel each board runs on are in
+[docs/HARDWARE_MATRIX.md](docs/HARDWARE_MATRIX.md).
 
 All three toolchains are installed on the primary dev box (ESP-IDF v5.5.4, nRF Connect SDK
 v3.3.1 with west v1.5.0, Simplicity SDK 2025.12.2), though **none is on `PATH`** — each needs
@@ -224,6 +235,10 @@ Host-runnable tests for `shared/` need none of that — see [tests/](tests/READM
 cmake -S tests/host -B build -G Ninja && cmake --build build && ctest --test-dir build
 ```
 
+- [docs/HARDWARE_MATRIX.md](docs/HARDWARE_MATRIX.md) — every board, its chip, its kernel, and how
+  its release and debug variants are built. "Debug" is a different mechanism on each target
+- [docs/HARDWARE_VERIFICATION_CHECKLIST.md](docs/HARDWARE_VERIFICATION_CHECKLIST.md) — what has
+  been observed on real silicon, per board and per behaviour
 - [docs/TOOLCHAINS.md](docs/TOOLCHAINS.md) — which toolchain each target uses and why
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — the `shared`/`hal` boundary
 - [docs/MIGRATION.md](docs/MIGRATION.md) — migration order and per-target procedure
