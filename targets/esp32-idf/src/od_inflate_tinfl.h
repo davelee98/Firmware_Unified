@@ -1,11 +1,11 @@
 /*
  * od_inflate_tinfl — ESP32 inflate adapter backed by the ROM miniz `tinfl`.
  *
- * Drop-in replacement for the uzlib streaming inflater (lib/uzlib,
+ * Drop-in replacement for the portable streaming inflater,
  * od_zlib_stream_*). It exposes the SAME streaming contract (reset / push / poll /
  * error / output_count) and the SAME status type (od_zlib_status_t, reused from
  * uzlib.h) so display_service.cpp can bind its existing od_zlib_stream_* call sites
- * to this engine via a compile-time #define remap, with no changes to lib/uzlib and
+ * to this engine via a compile-time #define remap, with no changes to the portable engine and
  * no changes to the call sites.
  *
  * SCOPE — this serves EVERY compressed path, not just WiFi/LAN. The remap in

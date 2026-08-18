@@ -5,7 +5,6 @@
 # readable. Registering them from here costs one relative path and keeps that property.
 
 set(OD_SRC_DIR ${CMAKE_CURRENT_LIST_DIR}/../src)
-set(OD_LIB_DIR ${CMAKE_CURRENT_LIST_DIR}/../lib)
 
 # shared/ -- ONE source list, four consumers (shared/sources.cmake). This target is the first
 # to consume it; until 2026-08-05 it took only shared/protocol's headers, so a file added to
@@ -22,13 +21,13 @@ file(GLOB OD_APP_SOURCES
     ${OD_SRC_DIR}/qr/*.c
 )
 
-# uzlib + the resumable inflate engine. od_zlib_stream.c is destined for shared/compress/ at
-# migration step 3-4 (SHARED_API_DESIGN.md); it is compiled from lib/ for now so that the
-# promotion is a separate, revertable commit rather than something smuggled into phase B.
+# Temporary repo-level home for the resumable zlib inflater. C14 first collapses ESP32's
+# byte-identical target-local copy here, then promotes the tested engine to shared/core/.
+set(OD_ZLIB_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../third_party/uzlib/src)
 list(APPEND OD_APP_SOURCES
-    ${OD_LIB_DIR}/uzlib/src/od_zlib_stream.c
-    ${OD_LIB_DIR}/uzlib/src/adler32.c
-    ${OD_LIB_DIR}/uzlib/src/crc32.c
+    ${OD_ZLIB_DIR}/od_zlib_stream.c
+    ${OD_ZLIB_DIR}/adler32.c
+    ${OD_ZLIB_DIR}/crc32.c
 )
 
 # The FastEPD vendor adapter's storage, and millis() for FastEPD's call sites. PERMANENT --
@@ -153,7 +152,7 @@ idf_component_register(
         # NOTE: ../vendor/fastepd is deliberately ABSENT here -- see the scoping block below.
         ${CMAKE_CURRENT_LIST_DIR}/../hal
         ${CMAKE_CURRENT_LIST_DIR}/../ble
-        ${OD_LIB_DIR}/uzlib/src
+        ${OD_ZLIB_DIR}
         # NOTE: neither third_party/bb_epaper/src nor third_party/FastEPD/src is here, and
         # nor is ../vendor/fastepd. All three are granted per-source below. ../panel stays --
         # it is OUR code (the IDF backend), not a vendored tree.

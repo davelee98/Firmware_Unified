@@ -12,7 +12,8 @@ firmware's config layout.
 - `uf2conv.py` / `uf2families.json` — convert `.bin`/`.hex` images to UF2 for
   boards that flash via USB mass storage.
 - `test_zlib_stream.c` — standalone test harness for the firmware's streaming
-  zlib/uzlib decoder (`lib/uzlib`). Not part of the PlatformIO build.
+  zlib decoder (temporarily `third_party/uzlib`). C14 promotes this harness into
+  the repository host suite.
 - `ble_crypto.py` / `config_packet.py` — shared helpers. `ble_crypto.py` is
   inlined into `od-device-cli.py` and kept here for reference. `config_packet.py`
   is imported by `provision_firmware.py`.

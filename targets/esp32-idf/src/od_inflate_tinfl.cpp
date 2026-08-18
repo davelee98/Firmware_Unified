@@ -25,7 +25,7 @@
  *  2) Output staging ring — SPEED. tinfl's bulk paths need CONTIGUOUS headroom to the
  *     ring end: symbol decode wants a couple of bytes, and the 8-bytes-at-a-time match
  *     copy wants headroom >= the match length. DEFLATE's max match is 258 bytes
- *     (RFC 1951 length codes 257..285; cf. length_base[] in lib/uzlib/src/od_zlib_stream.c),
+ *     (RFC 1951 length codes 257..285; cf. length_base[] in the portable inflater),
  *     so at a 512-byte ring a long match is often too close to the wrap and falls back
  *     to the slow byte-at-a-time copy. The share of output affected scales as
  *     match_len/ring_size, i.e. it halves per doubling with no threshold — ~50% at 512

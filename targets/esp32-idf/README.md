@@ -365,12 +365,10 @@ directory legitimately contains Nordic code that does not belong to this target.
 migration **step 4**, when the nRF52840 half becomes a board on `targets/nordic-zephyr/`; that
 is why `Firmware` is not retired until step 4 completes.
 
-**`lib/uzlib/src/od_zlib_stream.c` is destined for `shared/compress/`, not this target.** It is
-the resumable inflate engine, pure C with no vendor headers, already vendored identically in the
-NRF54 and Silabs repos — SHARED_API_DESIGN.md § `shared/compress` says to lift it unchanged. It
-was imported *here* rather than straight into `shared/` on purpose: promotion is migration step
-3-4, and doing it during Phase A would conflate an import with a refactor and cost the clean
-blame this phase exists to preserve. It is the obvious first promotion candidate.
+**The resumable zlib inflater is temporarily compiled from `third_party/uzlib/src/`.** ESP32's
+byte-identical target-local copy was retired at C14.1. The remaining repo-level implementation is
+promoted to `shared/core/` later in C14, after its current heap and static storage modes are pinned
+by host tests. It remains pure C with no vendor headers.
 
 ### Protocol header state at import
 

@@ -32,11 +32,11 @@
 #endif
 
 // On ESP32-WiFi BUILDS, route this file's streaming-inflate calls to the ROM `tinfl`
-// engine (src/od_inflate_tinfl.*) instead of the uzlib bit-serial inflater. uzlib
-// (lib/uzlib) is left completely untouched — it is simply not called here, so the
+// engine (src/od_inflate_tinfl.*) instead of the portable bit-serial inflater. The
+// portable engine is left completely untouched — it is simply not called here, so the
 // linker drops it. The od_zlib_stream_* call sites below are unchanged; the macros
 // rebind them at compile time. od_zlib_status_t / OD_ZLIB_STATUS_* stay shared
-// (from uzlib.h).
+// (temporarily from uzlib.h).
 //
 // This remap is UNCONDITIONAL within such a build — it is not gated per transport, so
 // it rebinds EVERY compressed path in this file: direct-write (0x70/0x71), partial
