@@ -28,7 +28,8 @@ looks arbitrary and is not); delete the story.
 
 ## Status
 
-- **Two HARDWARE-VERIFIED targets.** `targets/esp32-idf/` — 10 boards, run on an ESP32-S3. And
+- **Two HARDWARE-VERIFIED targets.** `targets/esp32-idf/` — 11 board configurations build, with
+  hardware verification on an ESP32-S3. And
   `targets/nordic-zephyr/` **as of 2026-08-14, extended 2026-08-15, on the `xiao_nrf52840` board
   only**: image upload, config write + reload and host-side MSD decode, then MIGRATION.md's full
   Gate 2 including the encrypted/authenticated path, all exercised on a flashed device. Its other
@@ -49,7 +50,7 @@ looks arbitrary and is not); delete the story.
   --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF.
   `tools/sdkconfig_baseline.sh` is a gate a change must not break.
 - **`shared/` is no longer empty** —
-  `core/od_{adv_control,advert,cmd,config,config_asm,config_read,config_tlv,core,dispatch,gate,reply,rxq,session,txq,watchdog}.c`
+  `core/od_{adv_control,advert,cmd,config,config_asm,config_read,config_tlv,core,dispatch,gate,reply,rxq,session,txq,watchdog,zlib_inflate}.c`
   listed in `shared/sources.cmake` (never globbed) in per-HAL tiers, plus the two all-inline
   headers `od_span.h` and `od_nonce_window.h` and the two pure seam headers `od_cmd_app.h` and
   `od_session_app.h`, which correctly have no entry there. Consumers:
@@ -199,6 +200,14 @@ looks arbitrary and is not); delete the story.
   and NFC limits with 232 assertions; none of the C13 behavior is hardware-verified yet. The remaining
   unpromoted protocol logic is **the transfer state machines** — direct, partial, PIPE and NFC,
   target-owned on purpose (C11 § 1) and now smaller, explicit inputs to their own promotions.
+- **C14 canonical portable inflater (2026-08-18):** `shared/core/od_zlib_inflate.{c,h}` is the
+  only portable implementation. The former target-local/vendor copies, checksum helpers,
+  heap-window mode, obsolete headers, and placeholder compression directory are gone. The
+  source is in the PURE tier; every target receives it through `shared/sources.cmake`, while ESP32
+  Wi-Fi builds retain their existing tinfl symbol remap. `tools/check.sh --targets` passed 16/0/0,
+  including all 11 ESP32 configurations, all three Nordic boards, and BG22. No C14 compressed-upload
+  hardware case has run; the four-device matrix remains in
+  `plans/PLAN_UZLIB_TO_SHARED_CORE_2026-08-17.md` §5.
 - `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel,crypto}`;
   `od_hal_crypto_random.c` is its own translation unit so a host test can compile the RNG arm
   without mbedTLS.
@@ -279,7 +288,7 @@ before proposing anything under `shared/`; extend the pattern as targets are imp
      `take`/`drop` saturate and are only for lengths already known to fit. The whole config
      parse path takes spans; new shared code does too.
    - **Single-exit + `goto cleanup`** in anything holding a resource across a fallible step.
-   Revisit only at `od_session.c` / `od_xfer_partial.c` / `od_zlib_stream.c`: nested resource
+   Revisit only at `od_session.c` / `od_xfer_partial.c`: nested resource
    lifetimes with several failure exits per function are the one shape where manual cleanup
    reliably loses. That is also the last point where switching is cheap.
 2. **One vtable, deliberately** — `od_panel_ops` (`targets/esp32-idf/hal/od_hal_panel.h`), for the

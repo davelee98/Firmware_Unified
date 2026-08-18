@@ -28,5 +28,4 @@ set(OD_BOARD_DEFINES
     # This is the boards/*.cmake half of Firmware's dc60c8a, whose own half was three
     # per-env edits to platformio.ini -- a file this repo deliberately does not carry, so the
     # change could not arrive with the source sync and had to be re-expressed here.
-    OPENDISPLAY_ZLIB_USE_HEAP_WINDOW=1
 )

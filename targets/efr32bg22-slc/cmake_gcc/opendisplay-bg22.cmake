@@ -269,7 +269,6 @@ add_library(slc OBJECT
     # Third target on this pattern; third_party/bb_epaper takes zero edits.
     "${CMAKE_CURRENT_LIST_DIR}/../panel/od_bbep_efr32.cpp"
     "${OD_REPO_ROOT}/third_party/bb_epaper/src/Group5.cpp"
-    "${OD_REPO_ROOT}/third_party/uzlib/src/od_zlib_stream.c"
 
     # shared/ -- the PURE TIER ONLY: needs the C standard library and shared/protocol, nothing
     # else, both of which this target already has. od_adv_control.c (HAL_ADV) and od_watchdog.c
@@ -312,7 +311,6 @@ target_include_directories(slc PUBLIC
    "${SDK_PATH}/segger/systemview/SEGGER"
    "${OD_REPO_ROOT}/third_party/bb_epaper/src"
    "${CMAKE_CURRENT_LIST_DIR}/../panel"
-   "${OD_REPO_ROOT}/third_party/uzlib/src"
     "${SDK_PATH}/devices/platform/Device/SiliconLabs/EFR32BG22/Include"
     "${SDK_PATH}/platform_common_apps/app/common/util/app_assert"
     "${SDK_PATH}/platform_common/platform/common/inc"
@@ -389,7 +387,6 @@ target_compile_definitions(slc PUBLIC
     "OD_CONFIG_WITH_WIFI=0"
     "OD_CONFIG_WITH_DATA_EXTENDED=0"
     "OPENDISPLAY_ZLIB_WINDOW_BITS=9"
-    "OPENDISPLAY_ZLIB_USE_HEAP_WINDOW=0"
     "__SILABS_BG22__=1"
     "EFR32BG22C222F352GM40=1"
     "SL_CODE_COMPONENT_SYSTEM=system"

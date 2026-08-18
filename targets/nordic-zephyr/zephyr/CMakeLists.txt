@@ -108,7 +108,6 @@ target_include_directories(app PRIVATE
 
 target_compile_definitions(app PRIVATE
   OD_APP_VERSION=0x0100
-  OPENDISPLAY_ZLIB_USE_HEAP_WINDOW=0
 )
 
 # BOARD *is* set here -- find_package(Zephyr) has run. Only the EXTRA_CONF_FILE block above it
@@ -248,7 +247,6 @@ target_sources(app PRIVATE
   # OUR glue TU, not the vendored bb_epaper.cpp -- see panel/od_bbep_zephyr.cpp for why.
   ${PANEL_DIR}/od_bbep_zephyr.cpp
   ${THIRD_PARTY_DIR}/bb_epaper/src/Group5.cpp
-  ${THIRD_PARTY_DIR}/uzlib/src/od_zlib_stream.c
 )
 
 # ------------------------------------------------------------------------------ shared/ ---

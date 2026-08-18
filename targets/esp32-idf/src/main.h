@@ -9,7 +9,7 @@
  * in through it. */
 #include "structs.h"
 #include "od_cmd.h"   /* od_cmd_result_t / od_cmd_ctx_t, for the handler declarations below */
-#include "uzlib.h"
+#include "od_zlib_inflate.h"
 #include <bb_epaper.h>
 #include "encryption_state.h"
 #include "config_parser.h"

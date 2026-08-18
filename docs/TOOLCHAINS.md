@@ -34,8 +34,8 @@ With IDF, `shared/` is an `idf_component_register()` component on one side and a
 **Buffer sizes become Kconfig options, which is what ARCHITECTURE.md already asked for.** Its
 memory-sensitivity section requires that buffer sizes be "target-parameterised behind
 compile-time constants the target sets, with a documented floor." IDF and Zephyr both have
-Kconfig. That turns `-DOPENDISPLAY_ZLIB_WINDOW_BITS=15`, `-DOPENDISPLAY_ZLIB_USE_HEAP_WINDOW`,
-and `-DPIPE_SMALL_DRAM_WINDOW` from ad-hoc `build_flags` strings into declared options with
+Kconfig. That turns `-DOPENDISPLAY_ZLIB_WINDOW_BITS=9` and `-DPIPE_SMALL_DRAM_WINDOW` from
+ad-hoc `build_flags` strings into declared options with
 types, defaults, ranges, and help text — in the same idiom on those two targets.
 
 **But do not design `shared/`'s configuration surface around Kconfig**, because the Silabs
@@ -509,7 +509,7 @@ the Arduino core's IDF version against `v5.5.4`'s Kconfig defaults, which nobody
 #### The gate that replaces hand-maintenance
 
 - [`targets/esp32-idf/sdkconfig.baselines/`](../targets/esp32-idf/sdkconfig.baselines) — the
-  **whole** effective sdkconfig of all ten boards, checked in, header block stripped (it carries
+  **whole** effective sdkconfig of all 11 boards, checked in, header block stripped (it carries
   the IDF version and would otherwise conflict on every toolchain bump for a non-configuration
   reason).
 - [`targets/esp32-idf/tools/sdkconfig_baseline.sh`](../targets/esp32-idf/tools/sdkconfig_baseline.sh)
@@ -641,9 +641,9 @@ What the repo gets in return, and it is more than it looks:
 carried at the workspace level. This target pins `OPENDISPLAY_ZLIB_WINDOW_BITS=9` — a
 **512-byte** window, not the 32 KB that "existing targets pin 32 KB windows for legacy-client
 compatibility" implies. 32 KB is a third of the chip's RAM; it can never exist here. So
-window size is a genuine per-target parameter in `shared/compress`, 512 B is its documented
+window size is a genuine per-target parameter in `shared/core/od_zlib_inflate`, 512 B is its documented
 floor, and the encoder side (`py-opendisplay`) must know which devices are 9-bit. Resolve
-this in writing before `shared/compress` is designed, not after.
+this in writing before the shared inflater is designed, not after.
 
 **Verify at import time** (I could not check these here): that the panel set actually
 overlaps — `opendisplay_epd_map.c` maps 66 panel ids to `bb_epaper` constants and whether
@@ -680,8 +680,8 @@ Both are cross-target but they are **not** the same kind of dependency:
   plus the four downstream backend `.inl`s and their `#ifdef` arms in `bb_epaper.cpp`. Worth
   upstreaming them so this stays a checkout rather than a fork — check first whether upstream
   has since taken them.
-- **`shared/compress/uzlib/`**. Pure C, no vendor headers, already vendored identically in both
-  repos (`lib/uzlib` and `third_party/uzlib`). This one genuinely belongs under `shared/`.
+- **`shared/core/od_zlib_inflate.{c,h}`**. Pure C, no vendor headers or heap dependency. C14
+  collapsed the byte-identical target copies and made this the one canonical portable engine.
 
 The CI boundary check in `.github/workflows/shared-boundary.yml` greps `shared/` only, so
 `third_party/` is already outside its scope — but add a comment there recording *why*
@@ -773,16 +773,16 @@ their IO calls, and the nRF52840 port reuses the nRF54L15 drivers.
 - **Can `Firmware` feature work pause during the IDF port?** See the first risk. *Decided
   2026-07-25: frozen for the duration of the port — MIGRATION.md § "Risks to watch".*
 - **What zlib window does the host encoder target per device?** Settled on the firmware side:
-  the default is **9 bits / 512 B on every target** (`uzlib.h:22`), targets *reject* streams
-  declaring a larger window, and only `esp32-s3-E1004` builds `=15`. The "32 KB for
-  legacy-client compatibility" note was simply wrong and is corrected in the workspace
+  the default is **9 bits / 512 B on every current target** (`od_zlib_inflate.h`), and targets
+  *reject* streams declaring a larger window. The former `esp32-s3-E1004` exception is retired.
+  The "32 KB for legacy-client compatibility" note was simply wrong and is corrected in the workspace
   `CLAUDE.md`; `opendisplay-protocol/docs/AUDIT_2026-07-19_SUMMARY.md:113` reached the same
   conclusion independently. *The contract half has since resolved too (2026-07-25): the host
   already encodes `windowBits = 9` unconditionally and rejects its own output otherwise
-  (DESIGN_REVIEW_2026-07-25.md F5), so the E1004's 15-bit build is host-unreachable dead
-  capability. What remains open is narrower — whether anyone ever wants >9 bits and where the
+  (DESIGN_REVIEW_2026-07-25.md F5). What remains open is narrower — whether anyone ever wants
+  >9 bits and where the
   per-device capability value lives, which is the capability-discovery problem, not a
-  compression one. `shared/compress` still exposes the window as a per-target parameter with
+  compression one. `shared/core/od_zlib_inflate` exposes the window as a per-target parameter with
   512 B as the floor (MEMORY_CONSTRAINTS.md).*
 - ~~**Is `CMD_NFC_ENDPOINT` (TNB132M) going to any other target?**~~ **ANSWERED 2026-07-25 —
   it is already on two targets**, and the premise here ("only EFR32BG22 implements it") was

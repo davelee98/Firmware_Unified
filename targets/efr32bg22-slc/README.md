@@ -118,7 +118,7 @@ byte-identical. The version string is the one behaviour change, and it is a chan
 firmware will report 2.2 where it used to report 2.1.
 
 The smallest target by a wide margin and the one that constrains `shared/` the most. Read
-this before designing anything in `shared/core` or `shared/compress` — several of the
+this before designing anything in `shared/core` — several of the
 memory rules in ../../docs/ARCHITECTURE.md exist because of this chip.
 
 ## Hardware and budgets
@@ -164,7 +164,7 @@ vendored.
 | `opendisplay_epd_map.c` | 75 | 66 panel-id → `bb_epaper` panel constants |
 | `opendisplay_display_color.c` | 65 | palette handling |
 | `main.c`, `app.c`, `app_bm.c` | 269 | SDK entry + bare-metal loop |
-| `third_party/uzlib/src/od_zlib_stream.c` | 723 | bit-serial streaming inflate |
+| `shared/core/od_zlib_inflate.c` | — | canonical bit-serial streaming inflate |
 | `third_party/bb_epaper/` | — | vendored, with `silabs_efr32_io.inl` + `silabs_bbep_busy.inl` backends |
 | `third_party/segger_rtt/` | — | RTT log transport |
 | `qr/qrcode.c` | 529 | QR generation |
@@ -254,7 +254,7 @@ an explicit call.
   (`Firmware` 919 C++, `Firmware_NRF54` 696 C) — the tightest starting point for
   `shared/core`, though it must be checked for missing features before it is treated as the
   donor rather than merely the cleanest.
-- **`od_zlib_stream.c` is the reference streaming inflate** for a target with no room for a
+- **`shared/core/od_zlib_inflate.c` is the reference streaming inflate** for a target with no room for a
   window buffer (see the divergence below).
 - **The bare-metal constraint is the useful one.** This target has no threads, no
   scheduler, and no blocking `k_sleep`. Any `shared/core` API that assumes it can block, own
@@ -273,7 +273,7 @@ already visible, before any code moves:
    `OPENDISPLAY_ZLIB_WINDOW_BITS=9`. The workspace-level note that "existing targets pin
    32 KB windows for legacy-client compatibility" is **not** true of this target — a 32 KB
    window is a third of the chip's RAM and cannot exist here. Any stream this device must
-   accept has to be encoded with a ≤512 B window. `shared/compress` must treat window size
+   accept has to be encoded with a ≤512 B window. `shared/core/od_zlib_inflate` treats window size
    as a first-class per-target parameter with this as the documented floor, and the encoder
    side (`py-opendisplay`) has to know which devices are 9-bit.
 2. **No PIPE sliding-window transfer.** Despite the file name, `opendisplay_pipe.c`

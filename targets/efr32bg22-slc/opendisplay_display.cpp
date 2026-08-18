@@ -16,7 +16,7 @@
 #include <string.h>
 
 extern "C" {
-#include "uzlib.h"
+#include "od_zlib_inflate.h"
 }
 
 #define OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE 256u

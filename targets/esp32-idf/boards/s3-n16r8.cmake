@@ -9,8 +9,6 @@ set(OD_SDKCONFIG_FRAGMENTS sdkconfig.defaults.esp32s3 boards/s3-n16r8.sdkconfig)
 # spelling across would be exactly the "build_flags idiom" CLAUDE.md forbids.
 set(OD_BOARD_DEFINES
     OPENDISPLAY_ENABLE_WIFI
-    OPENDISPLAY_ZLIB_USE_HEAP_WINDOW=1
     BOARD_HAS_PSRAM
     OPENDISPLAY_FASTEPD
 )
-

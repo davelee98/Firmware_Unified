@@ -81,6 +81,13 @@ add_executable(od_span_test span_test.c)
 target_link_libraries(od_span_test od_shared)
 add_test(NAME span COMMAND od_span_test)
 
+# zlib_inflate: the portable streaming inflater. C14.2 characterized its former heap and static
+# storage modes with the same suite; the results were identical, so C14.4 retired heap selection
+# and this permanent test now covers the one static implementation.
+add_executable(od_zlib_inflate_test zlib_inflate_test.c)
+target_link_libraries(od_zlib_inflate_test od_shared)
+add_test(NAME zlib_inflate COMMAND od_zlib_inflate_test)
+
 # adv_control: the loop-owned advertising policy machine (correctness review F4) driven against
 # a scripted fake HAL. The fake supplies od_hal_adv_{program,start,stop} at LINK time, exactly
 # as a target does — shared/ binds its HAL at link time, so there is no injection seam to fake

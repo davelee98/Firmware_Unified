@@ -365,12 +365,9 @@ directory legitimately contains Nordic code that does not belong to this target.
 migration **step 4**, when the nRF52840 half becomes a board on `targets/nordic-zephyr/`; that
 is why `Firmware` is not retired until step 4 completes.
 
-**`lib/uzlib/src/od_zlib_stream.c` is destined for `shared/compress/`, not this target.** It is
-the resumable inflate engine, pure C with no vendor headers, already vendored identically in the
-NRF54 and Silabs repos — SHARED_API_DESIGN.md § `shared/compress` says to lift it unchanged. It
-was imported *here* rather than straight into `shared/` on purpose: promotion is migration step
-3-4, and doing it during Phase A would conflate an import with a refactor and cost the clean
-blame this phase exists to preserve. It is the obvious first promotion candidate.
+**The portable resumable zlib inflater is `shared/core/od_zlib_inflate.{c,h}`.** ESP32's former
+target-local and third-party copies were retired in C14. It remains pure C with no vendor headers;
+Wi-Fi builds retain the existing tinfl API remap as their target-specific backend.
 
 ### Protocol header state at import
 
@@ -391,9 +388,8 @@ targets — see the ESP32 section of ../../docs/MIGRATION.md.
 
 ## Boards
 
-Eleven variants in the source repo's `platformio.ini`. **Ten have fragments and all ten
-build** (measured 2026-07-26, ESP-IDF v5.5.4, clean tree each time). The eleventh,
-`s3-e1004`, is absent because **the board variant is retired** (2026-08-05) — see below.
+**Eleven board fragments build** under ESP-IDF. The former `s3-e1004` variant is retired
+(2026-08-05); current fragments include the two `s3-n32r8-extuart` release/debug profiles.
 
 | Board | Chip | Flash / PSRAM | FastEPD | Image | Slot free | Notes |
 |---|---|---|---|---|---|---|
