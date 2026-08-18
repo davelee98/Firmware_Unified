@@ -332,41 +332,55 @@ that put it back on the stack would silently undo that.
 Refusing on a short buffer promotes ESP32's existing guard and makes Nordic's separate 340 B
 `s_gray4_plane_scratch` unnecessary. Same rule as decision 12: **refuse, never truncate.**
 
-#### 3.1.1 BG22 keeps its 256 B row buffer
+#### 3.1.1 BG22 keeps its 256 B row buffer — sized on a fleet fact, not a code limit
 
-Owner decision, 2026-08-17. The requirement follows from the renderer's own pitch formula
-(`../Firmware:593-597`) and the schemes BG22 supports — **1 bpp (mono/BWR/BWY) and 2 bpp
-(BWRY / 4-colour); no GRAY4, no BWGBRY, no GRAY16**, so neither the 4 bpp case nor the gray4
-plane split arises:
+Owner decision, 2026-08-17, and the *reason* matters more than the number because it decides what
+invalidates it.
 
-| Scheme | bpp | pitch at BG22's 800 px maximum |
-|---|---|---:|
-| mono / BWR / BWY | 1 | `(800+7)/8` = 100 B |
-| BWRY / 4-colour | 2 | `(800+3)/4` = **200 B** |
+**All colour schemes exist on BG22. No shipped BG22 is configured for 4 bpp.** Those are different
+statements and only the second sizes the buffer. `opendisplay_display_color.c:17` is correct, not
+over-general: BG22's image path genuinely handles `BWGBRY` and `GRAY16` at 4 bpp and `GRAY4` at
+2 bpp. What is true is narrower — no device in the field is configured that way.
 
-**`max(need) = 200 B` against 256 B — 56 B spare, no change required.** 800 px is the widest BG22
-can drive once B5 refuses the 1024×576 dual-controller panel.
+Against the renderer's pitch formula (`../Firmware:593-597`) at BG22's 800 px maximum, the widest
+it can drive once B5 refuses the 1024×576 dual-controller panel:
 
-Two notes for whoever revisits this:
+| Scheme | bpp | pitch at 800 px | shipped on BG22? |
+|---|---|---:|---|
+| mono / BWR / BWY | 1 | 100 B | yes |
+| BWRY / 4-colour | 2 | **200 B** | yes |
+| GRAY4 (+ plane split) | 2 | 300 B | **no** |
+| BWGBRY / GRAY16 | 4 | 400 B | **no** |
 
-- **The survey's sizing argument was wrong even though its conclusion was right.** It reasoned
-  *"the largest panel is `EP81_SPECTRA_1024x576`, and 1024 px at 4-colour 2 bpp is exactly 256 B"*
-  — but a 6-colour Spectra configures as BWGBRY, which is **4 bpp**, so that panel would have
-  needed 512 B. The number came out at exactly the buffer size by applying the wrong bpp. Do not
-  re-derive the cap from that sentence.
-- **An under-sized buffer is refused, not overrun.** The caller-supplied design means a scheme
-  needing more than 256 B returns `false` from `od_boot_screen_render()` rather than writing past
-  the end. That is the safety net if BG22's supported scheme set ever widens — a blank boot screen
-  and a log line, not memory corruption.
+**`max(need)` over the shipped set is 200 B against 256 B — 56 B spare, no change required.**
 
-**One consistency item this exposed, filed rather than fixed here.** BG22's *image* path disagrees
-with its *boot* path about which schemes exist: `opendisplay_display_color.c:17` returns 4 for
-`BWGBRY` and `GRAY16` and 2 for `GRAY4`, and the panel map accepts four `800x480_4GRAY` variants
-plus `EP73_SPECTRA_800x480`, while the boot renderer derives pitch from the panel flags alone
-(`is4clr ? 2bpp : 1bpp`, `opendisplay_display.cpp:467-469`) and has no 4 bpp path at all. Under
-the sizing decision above the helper is over-general rather than wrong, but it is the file the
-next person will read when sizing a buffer, and it will give them 4 bpp. Same treatment as B5 —
-say what the target cannot drive, where the reader looks.
+#### What this makes load-bearing
+
+Because the cap rests on a deployment fact rather than a capability limit, **the runtime refusal
+stops being a hypothetical safety net and becomes the thing that actually fires** if the fleet
+assumption ever breaks. Two consequences the plan must carry:
+
+1. **The boot renderer's ceiling is narrower than the image path's, on purpose, and that asymmetry
+   is now documented rather than accidental.** A BG22 configured for `BWGBRY` would upload and
+   display images correctly while its boot screen refused — because the image path is sized for
+   4 bpp and the boot row buffer is not. That is a coherent state, not a bug, but it is a
+   surprising one to debug from the outside.
+2. **The refusal must say which number to change.** `od_boot_screen_render()` returning `false`
+   should log the required and available lengths, so the diagnosis is "row buffer 256 < 400
+   required" rather than a blank panel. The fix is then one constant: 256 → 400 (+144 B static,
+   against the 480 B of main-RAM headroom C13 recorded).
+
+The § 7 golden tests pin the shipped set. They should additionally assert that the **unshipped**
+4 bpp and GRAY4 geometries are *refused* at 256 B rather than silently mis-rendered — that is the
+one behaviour this sizing decision depends on, so it is the one that needs a test.
+
+#### One thing not to re-derive from
+
+The survey's sizing argument reached the right answer by the wrong route: *"the largest panel is
+`EP81_SPECTRA_1024x576`, and 1024 px at 4-colour 2 bpp is exactly 256 B."* A 6-colour Spectra
+configures as `BWGBRY`, which is **4 bpp**, so that panel needs 512 B. The figure landed on the
+buffer size by applying the wrong bits-per-pixel to the wrong panel. Do not use that sentence to
+justify the cap; use the shipped-scheme table above.
 
 ### 3.2 Two shared sources, deliberately
 
