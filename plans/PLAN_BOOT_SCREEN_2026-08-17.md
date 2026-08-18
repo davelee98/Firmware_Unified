@@ -265,9 +265,58 @@ unconditionally; APP_BOOT only if C-B4 passes.
   decision 13. Nordic and Silabs are byte-identical — adopt that as canonical and reformat ESP32's
   onto it. One copy, three consumers, exactly as `third_party/bb_epaper` already works.
 - **`logo_bitmap.h` → one home**, with `tools/convert_logo.py` moved beside it. It is a
-  **generated asset, not shared logic**; 111 KB under `shared/core/` would misrepresent what
-  `shared/` is. Inclusion stays compile-gated (`OD_BOOT_LOGO_ENABLE`), default on where flash
-  allows and off on BG22.
+  **generated asset, not shared logic**; the 111 KB of hex source under `shared/core/` would
+  misrepresent what `shared/` is. Inclusion is gated **per size**, not on/off — see below.
+
+#### 3.3.1 The logo gate selects SIZES, and BG22 takes S1 + S2
+
+An earlier draft made this a boolean (`OD_BOOT_LOGO_ENABLE`, "off on BG22"). Measuring it showed
+that is the wrong shape, because the three sizes are not remotely equal in cost.
+
+**Measured** — compiled for `cortex-m33` at `-Os` with the BG22 build's own
+`-ffunction-sections -fdata-sections`, then linked under `--gc-sections`:
+
+| Linked set | Asset bytes | Share of BG22's ~27.8 KB flash headroom |
+|---|---:|---:|
+| S1 only (84x44) | 484 | 1.7 % |
+| **S1 + S2 (adds 154x80)** | **2,084** | **7.5 %** |
+| all three (adds S3, 499x260) | 18,464 | 66 % |
+
+**RAM cost is zero in every configuration.** The arrays are `static const`, so they land in
+`.rodata`; the measurement reports `.data 0` and `.bss 0`. The renderer indexes the array directly
+per pixel (`bootLogoPixelBlack()` takes `const uint8_t*`), so there is no scratch buffer either.
+An unreferenced size is not even emitted — GCC drops it at compile time, before `--gc-sections`
+is asked.
+
+**Decision, 2026-08-17: BG22 links S1 + S2. `OD_BOOT_LOGO_SIZES` defaults to 3; BG22 defines 2.**
+
+That is **behaviour-preserving on BG22, not a trade-off**, and the reachability arithmetic is why:
+
+| Size | reachable when `w_log` >= | and `headerH` >= | i.e. landscape `h_log` >= |
+|---|---:|---:|---:|
+| S2 | 514 | 96 | 480 |
+| S3 | 1664 | 276 | 1380 |
+
+BG22's largest map entry is `EP81_SPECTRA_1024x576` — far below S3's 1664 px threshold, and it is
+the dual-controller panel B5 makes it refuse anyway. **S3 can never be selected on this part**, so
+excluding it removes 16,380 B that could not have been drawn.
+
+Two things this must carry to be honest:
+
+1. **Dropping a size downgrades, it does not disable.** On a target that *can* reach S3 — roughly
+   1664x1380 and larger, such as an 1872x1404 panel — excluding it renders S2 instead. Smaller
+   logo, still a logo. That is why the gate is not `OD_BOOT_LOGO_ENABLE`.
+2. **The selector must not reference an excluded size.** The upstream chain tests S3 then S2
+   unconditionally (`../Firmware:864-865`); each branch becomes `#if`-gated on
+   `OD_BOOT_LOGO_SIZES`, with S1 remaining the ungated fallback. A host test asserts, for a
+   target's declared maximum panel geometry, that every excluded size is unreachable — so setting
+   the gate too low is a test failure rather than a silently smaller logo.
+
+**This materially de-risks C-B6.** The survey estimated 4-7 KB of `.text` for the shared renderer
+on BG22. At 18,464 B the logo alone would have consumed 66 % of headroom and made renderer
+adoption implausible on flash grounds before the stack question was even reached; at 2,084 B the
+combined cost is roughly 6-9 KB against 27.8 KB, and C-B6 turns back into the stack decision it
+was supposed to be.
 
 ---
 
