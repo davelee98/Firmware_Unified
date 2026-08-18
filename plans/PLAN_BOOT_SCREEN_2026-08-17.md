@@ -332,6 +332,42 @@ that put it back on the stack would silently undo that.
 Refusing on a short buffer promotes ESP32's existing guard and makes Nordic's separate 340 B
 `s_gray4_plane_scratch` unnecessary. Same rule as decision 12: **refuse, never truncate.**
 
+#### 3.1.1 BG22 keeps its 256 B row buffer
+
+Owner decision, 2026-08-17. The requirement follows from the renderer's own pitch formula
+(`../Firmware:593-597`) and the schemes BG22 supports — **1 bpp (mono/BWR/BWY) and 2 bpp
+(BWRY / 4-colour); no GRAY4, no BWGBRY, no GRAY16**, so neither the 4 bpp case nor the gray4
+plane split arises:
+
+| Scheme | bpp | pitch at BG22's 800 px maximum |
+|---|---|---:|
+| mono / BWR / BWY | 1 | `(800+7)/8` = 100 B |
+| BWRY / 4-colour | 2 | `(800+3)/4` = **200 B** |
+
+**`max(need) = 200 B` against 256 B — 56 B spare, no change required.** 800 px is the widest BG22
+can drive once B5 refuses the 1024×576 dual-controller panel.
+
+Two notes for whoever revisits this:
+
+- **The survey's sizing argument was wrong even though its conclusion was right.** It reasoned
+  *"the largest panel is `EP81_SPECTRA_1024x576`, and 1024 px at 4-colour 2 bpp is exactly 256 B"*
+  — but a 6-colour Spectra configures as BWGBRY, which is **4 bpp**, so that panel would have
+  needed 512 B. The number came out at exactly the buffer size by applying the wrong bpp. Do not
+  re-derive the cap from that sentence.
+- **An under-sized buffer is refused, not overrun.** The caller-supplied design means a scheme
+  needing more than 256 B returns `false` from `od_boot_screen_render()` rather than writing past
+  the end. That is the safety net if BG22's supported scheme set ever widens — a blank boot screen
+  and a log line, not memory corruption.
+
+**One consistency item this exposed, filed rather than fixed here.** BG22's *image* path disagrees
+with its *boot* path about which schemes exist: `opendisplay_display_color.c:17` returns 4 for
+`BWGBRY` and `GRAY16` and 2 for `GRAY4`, and the panel map accepts four `800x480_4GRAY` variants
+plus `EP73_SPECTRA_800x480`, while the boot renderer derives pitch from the panel flags alone
+(`is4clr ? 2bpp : 1bpp`, `opendisplay_display.cpp:467-469`) and has no 4 bpp path at all. Under
+the sizing decision above the helper is over-general rather than wrong, but it is the file the
+next person will read when sizing a buffer, and it will give them 4 bpp. Same treatment as B5 —
+say what the target cannot drive, where the reader looks.
+
 ### 3.2 Two shared sources, deliberately
 
 | Source | Tier | Why separate |
