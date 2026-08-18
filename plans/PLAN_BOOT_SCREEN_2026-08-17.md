@@ -283,6 +283,27 @@ All four are verified in the tree, not inferred.
 | **B4** | **BG22's key-display policy differs** in a way the survey calls arguably user-visible (§ 3.4). | survey § 3.4 | `od_boot_payload.c` settles it for all three, in Phase 2 which is cheap |
 | **B5** | **BG22 accepts a dual-controller panel it cannot drive.** Its map returns `EP81_SPECTRA_1024x576` for `panel_ic_type` `0x2B`; the vendored table flags that panel `BBEP_SPLIT_BUFFER`; BG22 has **no CS2 concept at all**. `bbepSetPanelType()` sets the flag and the library branches on it, so the panel is half-driven with no error. | map `opendisplay_epd_map.c:50`; flag `bb_ep.inl:4122`; no `cs_pin_2` anywhere under `targets/efr32bg22-slc/` | `OD_CAP_DUAL_CS=0` plus a **runtime refusal** at panel selection (§ 2.4) |
 
+### Not a defect, but fix it in passing: `logoBmp` is uninitialised
+
+`../Firmware:856` declares `const uint8_t* logoBmp;` with no initialiser, while `logoW`/`logoH`/
+`logoStride` beside it are zeroed. The whole selection block is inside `if (useZoneLayout)`
+(`:860`), which is false for any panel under 400x300 — so on those panels `logoBmp` is never
+assigned and is then passed to `bootLogoPixelBlack()` at `:1017`.
+
+**It is safe today, and only by accident of ordering.** Two independent things save it: the call
+site is prefixed `useZoneLayout &&`, and `bootLogoPixelBlack()` performs its bounds checks before
+touching `bmp`, so `bmpW == 0` returns false without dereferencing. Neither of those is the
+declaration, and neither is local to it. Drop the prefix at one call site, or reorder the checks
+inside the helper, and it becomes a use of an uninitialised pointer with nothing to catch it.
+
+**C-B3 carries `logoBmp = NULL` at the declaration and a `logoW > 0` guard at the draw site**, so
+the invariant is stated once where it can be seen rather than depending on two distant
+coincidences. Zero cost, and it removes a trap from code three targets are about to share.
+
+Worth stating why this is not listed with B1-B5: nothing misbehaves today, so it is hygiene
+carried by the extraction, not a defect the extraction closes. It is recorded because the
+extraction is the moment it is cheap and the last moment it is obvious.
+
 ### B3 is decidable by arithmetic, and Nordic is the one contributing behaviour
 
 "Nordic conforms or is ported in" resolves cleanly here, and the direction is *in*. The two forms
@@ -349,7 +370,7 @@ and zero skips.
 | **C-B0** | `third_party/qrcode/` — one copy (the Nordic/Silabs byte-identical form), three consumers. No behaviour change. | all three targets link; images **byte-identical** on Nordic and Silabs, since their bytes are already canonical |
 | **C-B1** | `shared/core/od_boot_payload.c` (PURE) + host test. Both targets swap onto it. Settles **B4**. | differential: the new payload/URL/redaction output matches each target's current output byte-for-byte on a corpus of device ids, keys and versions — **including the all-zero key** |
 | **C-B2** | **Adopt Nordic's QR quiet zone into the base (B3)** and report the defect to `../Firmware`. No seam yet. | the golden harness reports the geometry set where the authority's form satisfies `qrX + qrPx > w_log`; that set is non-empty, is recorded, and is empty after the change |
-| **C-B3** | `shared/core/od_boot_app.h` + `od_boot_screen.c` (new APP_BOOT tier) + the golden-hash host test. `esp32-idf` swaps onto it; its `boot_screen.cpp` becomes ~60 lines of seam. Lands **B2**'s upstream fix and C-B2's verdict. | goldens pinned for every scheme × rotation × geometry; ESP32 golden set **matches the pre-swap renderer** except at the pixels B2 and B3 deliberately change, each enumerated |
+| **C-B3** | `shared/core/od_boot_app.h` + `od_boot_screen.c` (new APP_BOOT tier) + the golden-hash host test. `esp32-idf` swaps onto it; its `boot_screen.cpp` becomes ~60 lines of seam. Lands **B2**'s upstream fix and C-B2's verdict, plus the `logoBmp = NULL` hygiene fix above. | goldens pinned for every scheme × rotation × geometry; ESP32 golden set **matches the pre-swap renderer** except at the pixels B2 and B3 deliberately change, each enumerated |
 | **C-B4** | `nordic-zephyr` swaps onto the same source. Closes **B1** — the logo appears for the first time. | Nordic golden set now equals ESP32's for equal geometry; **hardware: the logo is photographed on a flashed board**, because it has never rendered |
 | **C-B5** | BG22 takes `od_boot_payload.c` only. Delete the three retired copies and the dead Nordic asset. **Independently: `OD_CAP_DUAL_CS=0` and the runtime refusal (B5, § 2.4).** | BG22 `.text`/`.bss` delta recorded; a config naming `0x2B` is **refused with a log** and the pre-fix tree is shown half-driving it |
 | **C-B6** | **Decision commit, may be "no".** BG22 adopts APP_BOOT, or records why not. | `-fstack-usage` on a BG22 prototype **before** committing, against `SL_STACK_SIZE` 2752 and the 480 B of main-RAM headroom C13 recorded. A number, not a principle |
