@@ -7,10 +7,12 @@
 #include "opendisplay_runtime.h"
 #include "bb_epaper.h"
 #include "od_bbep_efr32.h"
+#include "od_boot_payload.h"
+#include "od_caps.h"
 #include "em_cmu.h"
 #include "em_gpio.h"
 #include "em_system.h"
-#include "qr/qrcode.h"
+#include "qrcode/qrcode.h"
 #include "sl_sleeptimer.h"
 #include <stdio.h>
 #include <string.h>
@@ -164,16 +166,31 @@ static const uint8_t *glyph5x7(char c)
   return s_font5x7[0].col;
 }
 
-static void set_pixel_row(uint8_t *row, int x, bool is4clr)
+static void set_pixel_row(uint8_t *row, int x, int bits_per_pixel)
 {
-  if (is4clr) {
+  if (bits_per_pixel == 4) {
+    row[x >> 1] &= (uint8_t)~(0xF0u >> ((unsigned)(x & 1) * 4u));
+  } else if (bits_per_pixel == 2) {
     row[x >> 2] &= (uint8_t)~(0xC0u >> ((unsigned)(x & 3) * 2u));
   } else {
     row[x >> 3] &= (uint8_t)~(0x80u >> ((unsigned)x & 7u));
   }
 }
 
-static void draw_text_row(uint8_t *row, int y, int x0, int y0, const char *s, int scale, bool is4clr, int max_x)
+static void make_gray4_plane_row(uint8_t *plane_row, const uint8_t *row_2bpp,
+                                 int plane_pitch, uint16_t width, int bit_select)
+{
+  memset(plane_row, 0x00, (size_t)plane_pitch);
+  for (uint16_t x = 0; x < width; x++) {
+    uint8_t code = (uint8_t)((~(row_2bpp[x >> 2] >> (6 - ((x & 3u) << 1)))) & 0x03u);
+    if (((code >> bit_select) & 0x01u) != 0u) {
+      plane_row[x >> 3] |= (uint8_t)(0x80u >> (x & 7u));
+    }
+  }
+}
+
+static void draw_text_row(uint8_t *row, int y, int x0, int y0, const char *s, int scale, int bits_per_pixel,
+                          int max_x)
 {
   int cursor = x0;
   const char *p;
@@ -197,7 +214,7 @@ static void draw_text_row(uint8_t *row, int y, int x0, int y0, const char *s, in
         for (sx = 0; sx < scale; sx++) {
           int rx = px + sx;
           if (rx >= 0 && (max_x < 0 || rx < max_x)) {
-            set_pixel_row(row, rx, is4clr);
+            set_pixel_row(row, rx, bits_per_pixel);
           }
         }
       }
@@ -294,71 +311,17 @@ static bool boot_layout_fit(uint16_t w, uint16_t h, int scale, int pad, int qr_m
   return false;
 }
 
-static void bytes_to_hex(const uint8_t *in, uint16_t len, char *out, uint16_t out_size)
-{
-  static const char *H = "0123456789ABCDEF";
-  uint16_t i;
-  if (out == nullptr || out_size < (uint16_t)(len * 2u + 1u)) {
-    return;
-  }
-  for (i = 0; i < len; i++) {
-    out[i * 2u + 0u] = H[(in[i] >> 4) & 0x0Fu];
-    out[i * 2u + 1u] = H[in[i] & 0x0Fu];
-  }
-  out[len * 2u] = '\0';
-}
-
-static uint16_t base64url_encode(const uint8_t *data, uint16_t len, char *out, uint16_t out_size)
-{
-  static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-  uint16_t out_len = 0;
-  uint16_t i = 0;
-  while (i + 3u <= len) {
-    uint32_t v = ((uint32_t)data[i] << 16) | ((uint32_t)data[i + 1u] << 8) | data[i + 2u];
-    i += 3u;
-    if (out_len + 4u >= out_size) {
-      return 0u;
-    }
-    out[out_len++] = tbl[(v >> 18) & 63u];
-    out[out_len++] = tbl[(v >> 12) & 63u];
-    out[out_len++] = tbl[(v >> 6) & 63u];
-    out[out_len++] = tbl[v & 63u];
-  }
-  if ((len - i) == 1u) {
-    uint32_t v = ((uint32_t)data[i] << 16);
-    if (out_len + 2u >= out_size) {
-      return 0u;
-    }
-    out[out_len++] = tbl[(v >> 18) & 63u];
-    out[out_len++] = tbl[(v >> 12) & 63u];
-  } else if ((len - i) == 2u) {
-    uint32_t v = ((uint32_t)data[i] << 16) | ((uint32_t)data[i + 1u] << 8);
-    if (out_len + 3u >= out_size) {
-      return 0u;
-    }
-    out[out_len++] = tbl[(v >> 18) & 63u];
-    out[out_len++] = tbl[(v >> 12) & 63u];
-    out[out_len++] = tbl[(v >> 6) & 63u];
-  }
-  if (out_len >= out_size) {
-    return 0u;
-  }
-  out[out_len] = '\0';
-  return out_len;
-}
 
 static bool render_boot_screen(BBEPDISP &epd, const struct GlobalConfig *cfg)
 {
-  static const char *LANDING_URL_PREFIX = "https://opendisplay.org/l/?";
+  static const uint8_t zero_key[OD_BOOT_KEY_SIZE] = { 0 };
   const struct SecurityConfig *sec = od_get_parsed_security();
   const struct DisplayConfig *dc;
-  uint16_t w, h, tag_type, mfg;
-  uint64_t uid;
+  uint16_t w, h;
   uint32_t last3;
-  uint8_t payload[23];
-  uint8_t key[16];
-  char payload_b64[64];
-  char url[128];
+  const uint8_t *key;
+  bool show_key;
+  char url[OD_BOOT_URL_SIZE];
   QRCode qr;
   static uint8_t qr_buf[256];
   uint16_t qr_buf_size;
@@ -384,28 +347,13 @@ static bool render_boot_screen(BBEPDISP &epd, const struct GlobalConfig *cfg)
   w = (uint16_t)epd.width;
   h = (uint16_t)epd.height;
 
-  memset(payload, 0, sizeof(payload));
-  tag_type = dc->legacy_tag_type;
-  payload[0] = (uint8_t)((tag_type >> 8) & 0xFFu);
-  payload[1] = (uint8_t)(tag_type & 0xFFu);
-  uid = SYSTEM_GetUnique();
-  last3 = (uint32_t)(uid & 0xFFFFFFu);
-  payload[2] = (uint8_t)((last3 >> 16) & 0xFFu);
-  payload[3] = (uint8_t)((last3 >> 8) & 0xFFu);
-  payload[4] = (uint8_t)(last3 & 0xFFu);
-  memset(key, 0, sizeof(key));
-  if (sec != nullptr && (sec->flags & SECURITY_FLAG_SHOW_KEY_ON_SCREEN) != 0u) {
-    memcpy(key, sec->encryption_key, sizeof(key));
-  }
-  memcpy(&payload[5], key, sizeof(key));
-  mfg = cfg->manufacturer_data.manufacturer_id;
-  payload[21] = (uint8_t)((mfg >> 8) & 0xFFu);
-  payload[22] = (uint8_t)(mfg & 0xFFu);
-
-  if (base64url_encode(payload, sizeof(payload), payload_b64, sizeof(payload_b64)) == 0u) {
+  last3 = (uint32_t)(SYSTEM_GetUnique() & 0xFFFFFFu);
+  key = sec != nullptr ? sec->encryption_key : zero_key;
+  show_key = sec != nullptr && (sec->flags & SECURITY_FLAG_SHOW_KEY_ON_SCREEN) != 0u;
+  if (!od_boot_url_build(dc->legacy_tag_type, last3, key, show_key,
+                         cfg->manufacturer_data.manufacturer_id, url, sizeof(url))) {
     return false;
   }
-  (void)snprintf(url, sizeof(url), "%s%s", LANDING_URL_PREFIX, payload_b64);
 
   qr_buf_size = qrcode_getBufferSize(6u);
   if (qr_buf_size == 0u || qr_buf_size > sizeof(qr_buf)) {
@@ -424,7 +372,7 @@ static bool render_boot_screen(BBEPDISP &epd, const struct GlobalConfig *cfg)
                    (unsigned)((ver >> 8) & 0xFFu), (unsigned)(ver & 0xFFu),
                    (unsigned)opendisplay_ble_get_app_version_patch());
   }
-  bytes_to_hex(key, sizeof(key), key_hex, sizeof(key_hex));
+  od_boot_format_key_display(key, show_key, key_hex);
   memcpy(k1, key_hex, 16);
   k1[16] = '\0';
   memcpy(k2, key_hex + 16, 16);
@@ -464,13 +412,28 @@ static bool render_boot_screen(BBEPDISP &epd, const struct GlobalConfig *cfg)
 
   {
     static uint8_t s_boot_row[256];
-    bool is4clr = (epd.iFlags & BBEP_4COLOR) != 0;
     bool is3clr = (epd.iFlags & BBEP_3COLOR) != 0;
-    int pitch = is4clr ? ((int)w + 3) / 4 : ((int)w + 7) / 8;
-    uint8_t white_byte = is4clr ? 0x55u : 0xFFu;
+    bool is_gray4 = dc->color_scheme == OD_COLOR_SCHEME_GRAY4;
+    int bits_per_pixel = opendisplay_color_bits_per_pixel(dc->color_scheme);
+    int pitch = ((int)w * bits_per_pixel + 7) / 8;
+    int plane_pitch = ((int)w + 7) / 8;
+    size_t workspace = (size_t)pitch;
+    uint8_t white_byte = 0xFFu;
     int domX, nameX, fwX, k1X, k2X, y;
     int text_max_x;
     int text_origin_x;
+
+    if (is_gray4) {
+      workspace += (size_t)plane_pitch;
+    }
+    if (workspace > sizeof(s_boot_row)) {
+      return false;
+    }
+    if (dc->color_scheme == OD_COLOR_SCHEME_BWRY) {
+      white_byte = 0x55u;
+    } else if (dc->color_scheme == OD_COLOR_SCHEME_BWGBRY) {
+      white_byte = 0x11u;
+    }
 
     dW  = text_width_px(domain_line, scale_text);
     nW  = text_width_px(name_line, scale_text);
@@ -503,50 +466,63 @@ static bool render_boot_screen(BBEPDISP &epd, const struct GlobalConfig *cfg)
       k2X = pad;
     }
 
-    bbepSetAddrWindow(&epd, 0, 0, (int)w, (int)h);
-    bbepStartWrite(&epd, is4clr ? PLANE_1 : PLANE_0);
+    const int render_passes = is_gray4 ? 2 : 1;
+    for (int pass = 0; pass < render_passes; pass++) {
+      bbepSetAddrWindow(&epd, 0, 0, (int)w, (int)h);
+      bbepStartWrite(&epd, is_gray4 ? (pass == 0 ? PLANE_0 : PLANE_1)
+                                    : opendisplay_color_start_plane(dc->color_scheme));
 
-    for (y = 0; y < (int)h; y++) {
-      memset(s_boot_row, white_byte, (size_t)pitch);
+      for (y = 0; y < (int)h; y++) {
+        memset(s_boot_row, white_byte, (size_t)pitch);
 
-      draw_text_row(s_boot_row, y, domX,  text_y,                      domain_line, scale_text, is4clr, text_max_x);
-      draw_text_row(s_boot_row, y, nameX, text_y + boot_line_step(scale_text), name_line, scale_text, is4clr,
-                    text_max_x);
-      draw_text_row(s_boot_row, y, fwX,   text_y + boot_line_step(scale_text) * 2, fw_line, scale_text, is4clr,
-                    text_max_x);
-      draw_text_row(s_boot_row, y, k1X,   text_y + boot_line_step(scale_text) * 3, k1, scale_text, is4clr, text_max_x);
-      draw_text_row(s_boot_row, y, k2X,   text_y + boot_line_step(scale_text) * 4, k2, scale_text, is4clr, text_max_x);
+        draw_text_row(s_boot_row, y, domX,  text_y,                      domain_line, scale_text, bits_per_pixel,
+                      text_max_x);
+        draw_text_row(s_boot_row, y, nameX, text_y + boot_line_step(scale_text), name_line, scale_text, bits_per_pixel,
+                      text_max_x);
+        draw_text_row(s_boot_row, y, fwX,   text_y + boot_line_step(scale_text) * 2, fw_line, scale_text, bits_per_pixel,
+                      text_max_x);
+        draw_text_row(s_boot_row, y, k1X,   text_y + boot_line_step(scale_text) * 3, k1, scale_text, bits_per_pixel,
+                      text_max_x);
+        draw_text_row(s_boot_row, y, k2X,   text_y + boot_line_step(scale_text) * 4, k2, scale_text, bits_per_pixel,
+                      text_max_x);
 
-      if (y >= qr_y && y < qr_y + qr_px) {
-        int local_y = y - qr_y;
-        int my = local_y / module_px;
-        if (my < (int)qr_modules) {
-          int qy_qr = my - 4;
-          int mx;
-          for (mx = 0; mx < (int)qr_modules; mx++) {
-            int qx_qr = mx - 4;
-            bool on = false;
-            if (qx_qr >= 0 && qy_qr >= 0 && qx_qr < (int)qr_size && qy_qr < (int)qr_size) {
-              on = qrcode_getModule(&qr, (uint8_t)qx_qr, (uint8_t)qy_qr);
-            }
-            if (!on) {
-              continue;
-            }
-            {
-              int px0 = qr_x + mx * module_px;
-              int sx;
-              for (sx = 0; sx < module_px; sx++) {
-                int px = px0 + sx;
-                if (px >= 0 && px < (int)w) {
-                  set_pixel_row(s_boot_row, px, is4clr);
+        if (y >= qr_y && y < qr_y + qr_px) {
+          int local_y = y - qr_y;
+          int my = local_y / module_px;
+          if (my < (int)qr_modules) {
+            int qy_qr = my - 4;
+            int mx;
+            for (mx = 0; mx < (int)qr_modules; mx++) {
+              int qx_qr = mx - 4;
+              bool on = false;
+              if (qx_qr >= 0 && qy_qr >= 0 && qx_qr < (int)qr_size && qy_qr < (int)qr_size) {
+                on = qrcode_getModule(&qr, (uint8_t)qx_qr, (uint8_t)qy_qr);
+              }
+              if (!on) {
+                continue;
+              }
+              {
+                int px0 = qr_x + mx * module_px;
+                int sx;
+                for (sx = 0; sx < module_px; sx++) {
+                  int px = px0 + sx;
+                  if (px >= 0 && px < (int)w) {
+                    set_pixel_row(s_boot_row, px, bits_per_pixel);
+                  }
                 }
               }
             }
           }
         }
-      }
 
-      bbepWriteData(&epd, s_boot_row, pitch);
+        if (is_gray4) {
+          uint8_t *plane_row = s_boot_row + pitch;
+          make_gray4_plane_row(plane_row, s_boot_row, plane_pitch, w, pass);
+          bbepWriteData(&epd, plane_row, plane_pitch);
+        } else {
+          bbepWriteData(&epd, s_boot_row, pitch);
+        }
+      }
     }
     if (is3clr) {
       bbepStartWrite(&epd, PLANE_1);
@@ -703,12 +679,20 @@ extern "C" void opendisplay_display_boot_apply(void)
     display_power_set(false);
     return;
   }
+#if OD_CAP_DUAL_CS == 0
+  if ((s_epd.iFlags & BBEP_SPLIT_BUFFER) != 0u) {
+    display_power_set(false);
+    return;
+  }
+#endif
   bbepSetRotation(&s_epd, (int)d->rotation * 90);
   bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
   od_bbep_wake(&s_epd);
   od_bbep_send_panel_init_full(&s_epd);
   if (!render_boot_screen(s_epd, opendisplay_get_global_config())) {
-    bbepFill(&s_epd, BBEP_WHITE, PLANE_DUPLICATE);
+    bbepSleep(&s_epd, DEEP_SLEEP);
+    display_power_set(false);
+    return;
   }
   /* The class's refresh(mode, bWait=true) called bbepWaitBusy() itself after a successful
      * refresh; the bare function does not. Written out explicitly -- dropping it would let boot
@@ -747,6 +731,12 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
     display_power_set(false);
     return -3;
   }
+#if OD_CAP_DUAL_CS == 0
+  if ((s_epd.iFlags & BBEP_SPLIT_BUFFER) != 0u) {
+    display_power_set(false);
+    return -4;
+  }
+#endif
   dw_init_mark("after setPanelType");
 
   bbepSetRotation(&s_epd, (int)d->rotation * 90);

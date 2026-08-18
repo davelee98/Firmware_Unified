@@ -100,6 +100,7 @@ add_custom_target(factory_config_gen DEPENDS ${FACTORY_GEN_STAMP})
 target_include_directories(app PRIVATE
   ${OD_SHARED_INCLUDE_DIRS}
   ${SRC_DIR}
+  ${THIRD_PARTY_DIR}
   ${THIRD_PARTY_DIR}/bb_epaper/src
   ${PANEL_DIR}
   ${THIRD_PARTY_DIR}/uzlib/src
@@ -243,7 +244,7 @@ target_sources(app PRIVATE
   ${SRC_DIR}/opendisplay_nfc.c
   ${SRC_DIR}/factory_config.c
   ${GEN_DIR}/factory_config_data.c
-  ${SRC_DIR}/qr/qrcode.c
+  ${THIRD_PARTY_DIR}/qrcode/qrcode.c
   # OUR glue TU, not the vendored bb_epaper.cpp -- see panel/od_bbep_zephyr.cpp for why.
   ${PANEL_DIR}/od_bbep_zephyr.cpp
   ${THIRD_PARTY_DIR}/bb_epaper/src/Group5.cpp
@@ -267,7 +268,7 @@ target_sources(app PRIVATE
 target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE} ${OD_SHARED_SOURCES_HAL_CRYPTO}
                            ${OD_SHARED_SOURCES_HAL_WDT} ${OD_SHARED_SOURCES_APP_RXQ}
                            ${OD_SHARED_SOURCES_HAL_RADIO} ${OD_SHARED_SOURCES_APP_SESSION}
-                           ${OD_SHARED_SOURCES_HAL_ADV})
+                           ${OD_SHARED_SOURCES_HAL_ADV} ${OD_SHARED_SOURCES_APP_BOOT})
 
 # The per-source INCLUDE_DIRECTORIES property that used to sit here is GONE, and its removal is
 # the point of the header adoption: it existed only to pin these two shared TUs to the canonical

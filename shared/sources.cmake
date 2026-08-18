@@ -108,6 +108,7 @@ get_filename_component(OD_SHARED_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
 # also the most wire-sensitive file here.
 
 set(OD_SHARED_SOURCES_PURE
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_boot_payload.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config_asm.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config_tlv.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_advert.c"
@@ -147,6 +148,12 @@ set(OD_SHARED_SOURCES_APP_RXQ
     "${CMAKE_CURRENT_LIST_DIR}/core/od_rxq.c"
 )
 
+# APP_BOOT needs the target's od_boot_app seam. It is kept separate so a target can consume the
+# protocol core without linking the optional boot renderer.
+set(OD_SHARED_SOURCES_APP_BOOT
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_boot_screen.c"
+)
+
 set(OD_SHARED_SOURCES_HAL_WDT
     "${CMAKE_CURRENT_LIST_DIR}/core/od_watchdog.c"
 )
@@ -160,6 +167,7 @@ set(OD_SHARED_SOURCES
     ${OD_SHARED_SOURCES_HAL_RADIO}
     ${OD_SHARED_SOURCES_APP_SESSION}
     ${OD_SHARED_SOURCES_APP_RXQ}
+    ${OD_SHARED_SOURCES_APP_BOOT}
     ${OD_SHARED_SOURCES_HAL_WDT}
 )
 
@@ -170,6 +178,7 @@ set(OD_SHARED_INCLUDE_DIRS
     "${OD_SHARED_DIR}/protocol"
     "${OD_SHARED_DIR}/core"
     "${OD_SHARED_DIR}/hal"
+    "${OD_SHARED_DIR}/../third_party"
 )
 # core/ and hal/ were missing until the first source landed and exposed it: with an empty
 # source list nothing ever included a shared header, so the gap could not present. Left as a

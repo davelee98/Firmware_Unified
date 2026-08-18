@@ -1,39 +1,76 @@
 # Plan: unify the boot screen renderer
 
-**Status:** PROPOSED, 2026-08-17. No source file is modified by this document.
+**Status:** IMPLEMENTED WITH STOP-GATE OUTCOMES, 2026-08-18, on
+`feat/boot-screen-shared`. Hardware verification remains open.
 
-**Source survey:** [DEDUP_1_BOOT_SCREEN_2026-08-17.md](DEDUP_1_BOOT_SCREEN_2026-08-17.md), whose
-design work this plan adopts almost entirely. Where this plan differs from the survey it says so
-and gives the evidence — there is one such place and it is § 2.3, which **reverses the survey's
-answer to its own open question 1**.
+**Source survey:** [DEDUP_1_BOOT_SCREEN_2026-08-17.md](DEDUP_1_BOOT_SCREEN_2026-08-17.md). This
+revision retains its duplication analysis but supersedes its implementation ordering and memory/
+transport assumptions where the evidence below says so.
 
-**Re-verified against the tree at `bb5d241` before writing.** Every figure below was measured, not
-transcribed. Two of the survey's numbers came out differently and are corrected in place.
+**Re-verified against this repo at `b12e5b4`.** The extraction authority is pinned to
+`../Firmware` commit **`64184bbecc88a2d07332f6f28fc922f581619ffc`** (short `64184bb`), whose
+`src/boot_screen.cpp` contains the 2026-08-10 swatch fix. The sibling worktree may be on another
+branch; implementation reads that exact blob, not whichever file happens to be checked out.
+
+### Implementation result
+
+The implementation followed the plan's safety gates rather than forcing every proposed adoption:
+
+| Area | Result |
+|---|---|
+| QR encoder | Three target copies collapsed into `third_party/qrcode/`. The differently formatted ESP32 and canonical objects were compiled with identical size/section flags, stripped, and proved byte-identical. |
+| Payload | `shared/core/od_boot_payload.c` is in PURE and used by all three targets, with host coverage for payload, URL, key display and redaction. |
+| Renderer | `shared/core/od_boot_screen.c` is in the new APP_BOOT tier. ESP32 and Nordic now use thin target seams and one renderer; their target-local renderers and duplicate logo headers are retired. |
+| Assets | The generated logo and conversion tool live together in `third_party/boot_logo/`; `OD_BOOT_LOGO_SIZES` removes unreachable sizes at compile time. |
+| Lifecycle | The fallible frame/plane/row seam and one-/two-segment host contract landed. Real dual-CS transport did **not** land because no split-panel hardware was available for C-B3's required proof. ESP32 and Nordic therefore reject split panels and report one segment. |
+| BG22 renderer | C-B6 was exercised and declined: linking APP_BOOT with S1+S2 exceeded BG22 flash by **3,772 B**. BG22 retains its compact renderer and adopts the shared payload and QR encoder. Its row buffer remains exactly **256 B**; fitting GRAY4 rows are re-rendered into two 1bpp controller planes using packed-row plus plane scratch inside that buffer. Scheme-based workspace overflow returns before output, silently, with no chunk/span fallback. |
+| BG22 dual CS | `OD_CAP_DUAL_CS=0` is enforced as product policy. A vendor `BBEP_SPLIT_BUFFER` panel is refused silently before panel I/O. |
+| Characterization | The proposed C-B1 pre-change goldens for all four renderers and generated BG22 map census did **not** land. Permanent coverage starts at the extracted payload/renderer contracts, including pixel-level authority swatch checks, V2-LUT and direct-2bpp GRAY4 assertions, and the exact 256/257-byte row boundary. This is residual test debt, not evidence that was run. |
+
+Build evidence, followed by representative rebuilds after the final authority color-contract
+corrections:
+
+- host GCC: **37/37** tests;
+- ESP-IDF release matrix: **9/9** boards; after the final correction, `esp32-c3-N4` and
+  `esp32-s3-N8R8` were rebuilt successfully;
+- Nordic/Zephyr: all three boards; after the final correction, `xiao_nrf52840` was rebuilt
+  successfully. Application RAM is 162,812 B (`xiao_nrf54l15`),
+  165,700 B (`xiao_nrf54lm20a`) and 145,700 B (`xiao_nrf52840`);
+- BG22: `.text` 249,976 B, `.data` 488 B, `.bss` 31,796 B; app flash is 250,464 B.
+
+Clang also passes all 37 non-fuzz host tests. Its three fuzz bodies each completed 2,000
+iterations, but CTest cannot report those cases passing in this ptrace environment because
+LeakSanitizer cannot attach; this is an environment limitation rather than a clean Clang fuzz-gate
+result.
+
+No board was flashed during implementation. The photographs, QR scan, refresh behavior and
+split-panel qualification in § 8 remain hardware debt.
 
 ---
 
 ## 1. Outcome
 
-**The base is `../Firmware/src/boot_screen.cpp`, the live sibling repo — not the `esp32-idf`
-snapshot.** Owner decision, 2026-08-17, and it is CLAUDE.md's own rule rather than a new one:
+**The base is `src/boot_screen.cpp` at pinned `../Firmware` commit `64184bb` — not the
+`esp32-idf` snapshot and not an unpinned live sibling checkout.** Owner decision, 2026-08-17, and
+it is CLAUDE.md's own rule rather than a new one:
 *"THE AUTHORITY IS `../Firmware/`, THE SIBLING REPO — NOT `targets/esp32-idf/src/`. That directory
 is a snapshot taken at import, and upstream keeps moving."* Nordic conforms to that base, or its
 difference is **ported into** it and justifies itself in writing.
 
-Extracting from the sibling rather than the snapshot has three consequences worth stating, because
-each removes work the earlier draft had scheduled:
+Extracting from the pinned sibling blob rather than the snapshot has three consequences worth
+stating, because each removes work the earlier draft had scheduled:
 
 - the 122-line snapshot drift is **carried in by construction**, so B2 stops being a port and
   becomes a property of the base;
-- the split-panel half-plane loop **comes with it** (§ 2.3), so the seam is validated against real
-  emitting code rather than designed speculatively;
+- the split-panel half-plane loop **comes with the source**, but cannot be enabled until both
+  target transports pass the prerequisite in § 2.3;
 - `esp32-idf`'s swap becomes a genuine behaviour change to verify, not a no-op refactor — it gains
   everything upstream landed since the import.
 
-`esp32-idf` and `nordic-zephyr` render the boot screen from one shared source. Four recorded
-defects close, two of them user-visible on shipped hardware. The renderer becomes the first
-subsystem in this repo with a **golden-output host test**, which is the real prize: it is a pure
-function of (geometry, facts) → packed rows, and nothing about it is testable today.
+`esp32-idf` and `nordic-zephyr` render the boot screen from one shared source. Five recorded
+defects close, several with user-visible or hardware-visible consequences. The renderer becomes
+the first subsystem in this repo with a **golden-output host test**, which is the real prize: it is
+a pure function of (geometry, facts) → packed rows, and nothing about it is testable today.
 
 `efr32bg22-slc` takes the *payload* half immediately and the *renderer* half only if a measured
 stack number allows. That split is load-bearing and is in the design from day one, not retrofitted.
@@ -58,7 +95,7 @@ Duplicated verbatim beyond the renderer itself:
 
 ---
 
-## 2. The three decisions
+## 2. The four decisions
 
 ### 2.1 All three targets, with BG22 taking a compile-time subset
 
@@ -81,9 +118,9 @@ assumed:
 | colour swatches | **none** (0) | yes |
 | logo | **none** (0) | yes |
 
-So the subset is precise: **BG22 declines zones, footer and swatches. It keeps everything else, and
-it gains a logo it never had** (§ 3.3.1, S1 + S2 at 2,084 B). "Subset as needed" is therefore not a
-reduction of BG22's boot screen — it loses nothing it renders today and gains one element.
+BG22's current renderer omits zones, footer, swatches and logo. That is a description of current
+behaviour, not a shared-renderer capability declaration. If BG22 adopts APP_BOOT it follows the
+shared geometry decisions and therefore gains those elements where the layout selects them.
 
 Amusingly the two implementations already agree on the threshold that matters: BG22 picks its text
 scale with `(w >= 400u && h >= 300u) ? 2 : 1` (`:441`), the same 400×300 boundary the shared
@@ -102,21 +139,18 @@ The shared renderer already decides zones by geometry, at runtime:
 useZoneLayout = (w_log >= 400 && h_log >= 300)     // ../Firmware:581
 ```
 
-**BG22 drives 13 panel types that satisfy that predicate**, counted from its own map against the
-vendored panel table:
+The earlier 13-panel census was incomplete and is withdrawn. The map contains additional native
+geometries, including `EP7_960x640`; the symbol `EP1085_1360x480` is also misleading because its
+vendored table entry is 680×480. C-B1 therefore generates a machine-checked census by joining
+every non-undefined `opendisplay_map_epd()` result to the vendored native width, height and flags,
+then evaluates all four rotations and every supported colour scheme. No acceptance decision may
+use dimensions parsed from an enum name.
 
-| | |
-|---|---|
-| 400×300 | `EP42_400x300`, `EP42B_`, `EP42R2_`, `EP42YR_` |
-| 648×480 | `EP583_648x480` |
-| 680×480 | `EP1085_1360x480` |
-| 800×480 | `EP426_800x480`, `EP426_..._4GRAY`, `EP75_..._4GRAY`, `EP75_..._4GRAY_GEN2`, `EP75YR_`, `EP397YR_` |
-| 1024×576 | `EP81_SPECTRA_1024x576` — dual-CS, refused under B5 |
-
-So BG22 renders no zones today **because its own renderer never implemented them**, not because
-its geometry excludes them. Hardcoding the absence would deny zones, footers and swatches to a
-dozen panel types the shared math says should have them — freezing an implementation gap into a
-compile-time fact and calling it a capability.
+The relevant bounds are already verified: after refusing the 1024×576 split panel, the widest
+single-controller BG22 map entry is the 960×640 `EP7_960x640`; many mapped panels meet the
+400×300 zone predicate. Therefore hardcoding the current absence would freeze an implementation
+gap into a target capability. The generated census supplies the exact count and remains as a host
+test so a future map or vendor-table change must update the recorded 256-byte outcome and logo gate.
 
 > **The rule: a target follows the shared layout math. A compile-time gate is only legitimate
 > where the math can never select the thing gated out.**
@@ -125,14 +159,15 @@ That distinction is what separates the two gates this plan does keep from the tw
 
 | Gate | Legitimate? | Why |
 |---|---|---|
-| `OD_BOOT_ZONES_ENABLE` | **no — dropped** | the math selects zones on 13 BG22 panels |
+| `OD_BOOT_ZONES_ENABLE` | **no — dropped** | mapped BG22 geometries satisfy the shared predicate |
 | `OD_BOOT_SWATCH_ENABLE` | **no — dropped** | same; swatches live in a footer the math asks for |
-| `OD_BOOT_LOGO_SIZES=2` | **yes** | S3 needs `w_log >= 1664`; BG22's largest drivable panel is 800 px wide after B5. The math can never select it |
+| `OD_BOOT_LOGO_SIZES=2` | **yes** | S3 needs `w_log >= 1664`; BG22's largest non-split native dimension is 960 px. The math can never select it |
 | caller-supplied `qr` buffer | **yes** | not a feature gate at all — the same bytes, in static instead of stack |
 
 The logo gate survives precisely *because* it follows the math rather than overriding it, and the
-same arithmetic independently confirms the § 3.3.1 choice: 800×480 gives `w_log = 800 >= 514` and
-`headerH = 96 >= 96`, so **S2 is reachable on BG22 and S1 alone would have been too little.**
+same arithmetic independently confirms the § 3.3.2 choice: mapped 800×480 panels give
+`w_log = 800 >= 514` and `headerH = 96 >= 96`, so **S2 is reachable on BG22 and S1 alone would
+have been too little.**
 S1 + S2 is what the math asks for.
 
 **BG22 therefore gains zones, footers and swatches on its larger panels**, alongside the logo.
@@ -153,11 +188,12 @@ budget is now:
 | BG22's current boot frame | ~300–350 B |
 | `SL_STACK_SIZE` | 2,752 B |
 
-**C-B6's measurement is now genuinely load-bearing rather than a formality**, and the plan should
-say so: roughly 640 B of a 2,752 B stack, in a call chain that is not the deepest in the system.
-If `-fstack-usage` says it does not fit, the answer is *still* not to hardcode a layout absence —
-it is to reduce the frame (compose zone strings into the existing scratch, shorten the footer
-segment arrays), or to raise the stack against measured headroom.
+**C-B6's measurement is genuinely load-bearing rather than a formality**: roughly 640 B of a
+2,752 B stack, in a call chain that is not the deepest in the system.
+If `-fstack-usage` says it does not fit, first reduce the frame (compose zone strings into the
+existing scratch, shorten the footer segment arrays). **This plan does not raise `SL_STACK_SIZE`.**
+If the measured frame still does not fit without stack growth, BG22 declines APP_BOOT and keeps
+only the shared payload and dual-CS refusal.
 
 Its dual-CS refusal (§ 2.4, B5) is independent of all of this and lands regardless.
 
@@ -213,37 +249,41 @@ things this plan needs:
 
 Together those reproduce the exact condition PR #147 was written to fix — the flag is set, the
 build succeeds, and no correct data reaches the glass. **That is a live defect in this repo,
-larger than the boot screen and not caused by it.** `FOLLOWUPS.md` gains an entry naming
-`../Firmware` `20807f3` and `src/split_panel.{h,cpp}` as the port target; BG22's panel map already
-lists `EP81_SPECTRA_1024x576` (`opendisplay_epd_map.c:50`), so it is not an ESP32-only question.
+larger than the boot screen and not caused by it.** It is nevertheless a prerequisite here:
+C-B3 ports the bufferless lifecycle from `../Firmware` `20807f3` to ESP32 and Nordic before either
+renderer may return `segments == 2`. Deferring the transport while advertising two segments would
+turn a known unsupported path into an apparently supported one.
 
 **It is also the same defect shape as B1.** A capability that disappears because a macro stopped
 being defined, while every build still passes, is what both PR #147 and § 4's B1 are. That is the
 argument for the rule in § 3.1: a capability must never be expressible as "defined nowhere."
 
-### 2.4 Dual CS: Nordic gains it, Silabs declines it — and declining must be loud
+### 2.4 Dual CS: ESP32 and Nordic gain verified support; BG22 excludes it by policy
 
 Owner decisions, 2026-08-17:
 
-- **`nordic-zephyr` supports dual CS.** The `split_panel` port is therefore not an ESP32 errand;
-  both targets take it, and the boot renderer's half-plane path has two real consumers rather than
-  one. This settles § 2.3's seam question in the strongest direction: the segment contract is
-  exercised, not merely reserved.
-- **`efr32bg22-slc` does not support dual CS.** That is a capability declaration, and this repo
-  already has the mechanism for exactly that — `shared/core/od_caps.h`, added by C13 so a target
-  can state an absence that `shared/` cannot infer. Dual CS becomes its second user:
-  `OD_CAP_DUAL_CS`, default `1`, with BG22 defining `0`.
+- **`esp32-idf` and `nordic-zephyr` support dual CS only after C-B3 lands and passes hardware.**
+  ESP32 already has held-CS primitives in `panel/od_bbep_stream.h`; Nordic has `cs_mode`/CS2
+  selection but still needs the held-CS half-plane stream lifecycle. Until that work lands each
+  target refuses a split panel and `od_boot_app_segments()` returns 1.
+- **`efr32bg22-slc` does not support dual CS as product policy.** This is normative, not an
+  implementation backlog. `shared/core/od_caps.h`, added by C13 so a target can state an absence
+  that `shared/` cannot infer, records it as `OD_CAP_DUAL_CS=0` on BG22. Wiring CS2 or porting the
+  split lifecycle is explicitly prohibited unless a later owner decision reverses this policy.
 
 **Declining is not the same as ignoring, and B5 is what ignoring looks like today.** BG22 already
 accepts `panel_ic_type = 0x2B` and maps it to `EP81_SPECTRA_1024x576`
 (`opendisplay_epd_map.c:50`), a panel the vendored table flags `BBEP_SPLIT_BUFFER | BBEP_7COLOR`
 (`bb_ep.inl:4122`). `bbepSetPanelType()` sets the flag, the library branches on it in three
-places, and BG22 has no CS2 pin, no CS2 config field and no dual-CS code path. The panel is
-half-driven and nothing says so.
+places. The canonical `DisplayConfig` **does** contain `cs_pin_2`, and BG22's backend already
+implements `bbepSetCS2()` plus `CMD_CS2`/`CMD_CS1_CS2` selection. Those shared/configuration and
+low-level primitives do **not** advertise BG22 support and are not a reason to complete the path;
+the target policy remains authoritative.
 
 **The refusal is a runtime test on the flag, not a compile-time check on the map.** After
 `bbepSetPanelType()` succeeds, BG22 tests `iFlags & BBEP_SPLIT_BUFFER` and fails the panel
-configuration loudly when `OD_CAP_DUAL_CS == 0`. Two reasons it must be that way round:
+configuration silently when `OD_CAP_DUAL_CS == 0`. The target emits no diagnostic, but still
+refuses before panel I/O. Two reasons the runtime flag must be tested after panel selection:
 
 1. **A macro can vanish; a flag cannot.** PR #147 exists precisely because 12 regions guarded by
    `#ifdef BBEP_T133A01` compiled to nothing when the define disappeared, while the build still
@@ -253,8 +293,8 @@ configuration loudly when `OD_CAP_DUAL_CS == 0`. Two reasons it must be that way
    Deleting `0x2B` from BG22's map would fix today's instance and miss the next panel the vendor
    flags. Testing the flag covers both.
 
-This is the same rule as decision 12's config cap: **refuse, never truncate.** A tag that will not
-drive a panel should say so at configuration time, not render half a frame.
+This is the same rule as decision 12's config cap: **refuse, never truncate.** A panel excluded by
+target policy should be rejected at configuration time, not half-driven.
 
 #### What this means for the seam
 
@@ -270,12 +310,12 @@ Upstream's emission structure is now known exactly, and it is **not** a per-row 
   (`split_panel.cpp`).
 - Each row therefore arrives as `pitch/2` bytes, left half for all rows first, then right.
 
-**Decision: the seam carries half-plane emission from day one, shaped as an outer pass with a
-deferred close.** `od_boot_app_begin_plane()` takes the segment count so a target can open once
-and close after the last segment; `od_boot_app_write_row()` carries both `y` and the segment index
-because FastEPD writes **positionally** while the split sink is a pure **stream** — the two
-contracts are different and only the target can reconcile them. This plan does **not** port the
-transport; it makes the later port a target-side implementation rather than a seam redesign.
+**Decision: the seam carries an explicit frame lifecycle and every lifecycle operation is
+fallible.** A successful frame begin is matched by frame end on every exit path; short, excess or
+transport-failed streams make frame end fail and prohibit refresh. Plane begin/end remain inside
+that frame. `od_boot_app_write_row()` carries `y` and segment because FastEPD writes
+**positionally** while the split sink is a pure **stream**. C-B3 proves this target contract before
+C-B4 extracts the renderer.
 
 ---
 
@@ -289,23 +329,24 @@ transport; it makes the later port a target-side implementation rather than a se
 #define OD_BOOT_PLANE_PRIMARY  0   /* mono / packed / BWR-BWY B&W / gray4 LSB */
 #define OD_BOOT_PLANE_SECOND   1   /* BWR-BWY colour / gray4 MSB */
 
-/* Open a plane. `segments` is 1 for an ordinary panel and 2 for a dual-controller one. The
- * renderer emits ALL rows of segment 0 before any of segment 1 (upstream's outer half-pass), and
- * the target closes only after the last segment -- the split sink holds both chip selects across
- * the pair. Declaring this here rather than discovering it later is § 2.3. */
-int  od_boot_app_begin_plane(int plane, uint16_t w, uint16_t h, uint8_t segments);
-/* One packed native row segment, pitch/segments bytes. Both `y` and `segment` are supplied
- * because the two consumers disagree: FastEPD writes POSITIONALLY, while the split sink is a
- * STREAM that tracks its own left/right crossover and faults on excess bytes. */
+/* Open one render transaction. `segments` is 1 for an ordinary panel and 2 only after the
+ * target's split transport has passed C-B3. All segment/plane output is inside this frame. */
+int  od_boot_app_begin_frame(uint16_t w, uint16_t h, uint8_t segments);
+int  od_boot_app_begin_plane(int plane);
+/* One complete packed native row segment, pitch/segments bytes. Both `y` and `segment` are
+ * supplied because positional and stream consumers need different target-side handling. */
 int  od_boot_app_write_row(uint16_t y, uint8_t segment, const uint8_t *row, uint16_t len);
-void od_boot_app_end_plane(int plane);
+int  od_boot_app_end_plane(int plane);
+/* Always called after a successful begin_frame, including renderer failures. Releases transport
+ * state and returns failure for a short, excess or faulted frame. A failed result forbids refresh. */
+int  od_boot_app_end_frame(void);
 
 /* Facts the renderer cannot derive. One target function each. */
 int   od_boot_app_bits_per_pixel(void);   /* FastEPD's ED103TC2 override */
 int   od_boot_app_default_plane(void);    /* getplane() / boot_get_plane() */
 bool  od_boot_app_direct_2bpp(void);      /* gray4 without the plane split */
 uint8_t od_boot_app_segments(void);       /* 1, or 2 for a dual-controller panel */
-void  od_boot_app_device_id_hex(char out[7]);
+uint32_t od_boot_app_device_id24(void);    /* low 24 bits, raw; PURE code formats six hex chars */
 void  od_boot_app_firmware_version(uint8_t *maj, uint8_t *min, uint8_t *patch);
 float od_boot_app_battery_volts(void);    /* < 0 = unknown */
 float od_boot_app_chip_temp_c(void);      /* < -900 = unknown */
@@ -322,57 +363,42 @@ bool od_boot_screen_render(const struct od_config *cfg,
                            const struct od_boot_bufs *bufs);
 ```
 
-**Every large buffer is caller-supplied and caller-sized, and the renderer REFUSES rather than
-truncates.** Row scratch is 960 B on ESP32, 680 B on Nordic, 256 B on BG22 — a shared fixed size
-would be sized for the biggest target, which the memory rule forbids. `qr` is caller-supplied
-because BG22 already makes it `static` deliberately to keep 256 B off a 2,752-byte stack
+**Every large buffer is caller-supplied and caller-sized.** Row scratch is 960 B on ESP32, 680 B
+on Nordic, and fixed at 256 B on BG22. Rendering still requires one complete packed row, plus the
+GRAY4 plane scratch where applicable. `qr` remains caller-supplied and requires 256 B because
+BG22 already makes it `static` deliberately to keep those bytes off a 2,752-byte stack
 (`SL_STACK_SIZE`, verified at `config/sl_memory_manager_region_config.h:45`); a shared renderer
 that put it back on the stack would silently undo that.
 
-Refusing on a short buffer promotes ESP32's existing guard and makes Nordic's separate 340 B
-`s_gray4_plane_scratch` unnecessary. Same rule as decision 12: **refuse, never truncate.**
+If the required row workspace exceeds `row_len`, `od_boot_screen_render()` returns `false` before
+opening a frame. It emits no diagnostic. In particular, the BG22 caller does not log or substitute
+another screen; the boot screen simply does not render.
 
-#### 3.1.1 BG22 keeps its 256 B row buffer — sized on a fleet fact, not a code limit
+#### 3.1.1 BG22 keeps its 256 B caller buffer
 
-Owner decision, 2026-08-17, and the *reason* matters more than the number because it decides what
-invalidates it.
+Owner decision, 2026-08-17: **BG22's APP_BOOT row buffer remains 256 B.** This is a hard target
+memory constraint with no fallback. Any geometry/scheme combination needing more than 256 B fails
+silently before frame output.
 
-**All colour schemes exist on BG22. No shipped BG22 is configured for 4 bpp.** Those are different
-statements and only the second sizes the buffer. `opendisplay_display_color.c:17` is correct, not
-over-general: BG22's image path genuinely handles `BWGBRY` and `GRAY16` at 4 bpp and `GRAY4` at
-2 bpp. What is true is narrower — no device in the field is configured that way.
+Against the renderer's pitch formula at the actual 960-pixel single-controller maximum:
 
-Against the renderer's pitch formula (`../Firmware:593-597`) at BG22's 800 px maximum, the widest
-it can drive once B5 refuses the 1024×576 dual-controller panel:
+| Scheme | required row workspace at 960 px | 256 B result |
+|---|---:|---|
+| mono / BWR / BWY | 120 B | renders |
+| BWRY / 4-colour | 240 B | renders, 16 B spare |
+| GRAY4 (`pitch + planePitch`) | 360 B | **silent failure** |
+| BWGBRY / GRAY16 | 480 B | **silent failure** |
 
-| Scheme | bpp | pitch at 800 px | shipped on BG22? |
-|---|---|---:|---|
-| mono / BWR / BWY | 1 | 100 B | yes |
-| BWRY / 4-colour | 2 | **200 B** | yes |
-| GRAY4 (+ plane split) | 2 | 300 B | **no** |
-| BWGBRY / GRAY16 | 4 | 400 B | **no** |
-
-**`max(need)` over the shipped set is 200 B against 256 B — 56 B spare, no change required.**
+The fixed cap adds **zero row-buffer RAM** relative to BG22 today. The failure happens before
+`od_boot_app_begin_frame()`, so it cannot truncate or leave a partially written panel even though
+it is intentionally invisible to the user and logs.
 
 #### What this makes load-bearing
 
-Because the cap rests on a deployment fact rather than a capability limit, **the runtime refusal
-stops being a hypothetical safety net and becomes the thing that actually fires** if the fleet
-assumption ever breaks. Two consequences the plan must carry:
-
-1. **The boot renderer's ceiling is narrower than the image path's, on purpose, and that asymmetry
-   is now documented rather than accidental.** A BG22 configured for `BWGBRY` would upload and
-   display images correctly while its boot screen refused — because the image path is sized for
-   4 bpp and the boot row buffer is not. That is a coherent state, not a bug, but it is a
-   surprising one to debug from the outside.
-2. **The refusal must say which number to change.** `od_boot_screen_render()` returning `false`
-   should log the required and available lengths, so the diagnosis is "row buffer 256 < 400
-   required" rather than a blank panel. The fix is then one constant: 256 → 400 (+144 B static,
-   against the 480 B of main-RAM headroom C13 recorded).
-
-The § 7 golden tests pin the shipped set. They should additionally assert that the **unshipped**
-4 bpp and GRAY4 geometries are *refused* at 256 B rather than silently mis-rendered — that is the
-one behaviour this sizing decision depends on, so it is the one that needs a test.
+Tests pin the boundary itself: a required workspace of 256 B renders; 257 B returns false with no
+seam calls and no log callback. The 360 B GRAY4 and 480 B 4bpp cases above do the same. C-B1's
+census records the silent render/fail result for every mapped geometry and supported scheme; a
+future wider entry inherits the same fixed-cap behavior.
 
 #### One thing not to re-derive from
 
@@ -380,7 +406,7 @@ The survey's sizing argument reached the right answer by the wrong route: *"the 
 `EP81_SPECTRA_1024x576`, and 1024 px at 4-colour 2 bpp is exactly 256 B."* A 6-colour Spectra
 configures as `BWGBRY`, which is **4 bpp**, so that panel needs 512 B. The figure landed on the
 buffer size by applying the wrong bits-per-pixel to the wrong panel. Do not use that sentence to
-justify the cap; use the shipped-scheme table above.
+justify the cap; use the capability table above.
 
 ### 3.2 Two shared sources, deliberately
 
@@ -395,16 +421,16 @@ force a target to take the renderer in order to get the session code. Naming a t
 rather than a HAL already has two precedents (APP_SESSION, APP_RXQ).
 
 Consumers: `esp32-idf` and `nordic-zephyr` take PURE + APP_BOOT. `efr32bg22-slc` takes PURE
-unconditionally; APP_BOOT only if C-B4 passes.
+unconditionally; APP_BOOT only if C-B6 passes.
 
 ### 3.3 The vendored neighbours
 
-- **`qr/qrcode.c` → `third_party/qrcode/`** — see § 3.3.2, which is larger than it looks.
+- **`qr/qrcode.c` → `third_party/qrcode/`** — see § 3.3.1, which is larger than it looks.
 - **`logo_bitmap.h` → one home**, with `tools/convert_logo.py` moved beside it. It is a
   **generated asset, not shared logic**; the 111 KB of hex source under `shared/core/` would
   misrepresent what `shared/` is. Inclusion is gated **per size**, not on/off — see below.
 
-#### 3.3.2 The QR encoder: one copy, and a differential before discarding two
+#### 3.3.1 The QR encoder: one copy, and a differential before discarding two
 
 Three copies today — `targets/esp32-idf/src/qr/`, `targets/nordic-zephyr/src/qr/`,
 `targets/efr32bg22-slc/qr/` — of vendored MIT code, exempt from the one rule by decision 13. They
@@ -432,7 +458,7 @@ past what anyone should eyeball and then declare cosmetic.
 So **C-B0 owes a differential, not an assertion**: encode a corpus of payloads — including the
 boot screen's own 23-byte base64url landing payload at every version and ECC level it can select —
 through both copies and compare the resulting module bitmaps. Byte-equal output is what licenses
-discarding ESP32's copy. If they are *not* equivalent, that is a finding which changes what C-B3
+discarding ESP32's copy. If they are *not* equivalent, that is a finding which changes what C-B4
 inherits, and it must surface before the renderer extraction rather than during it.
 
 **It lands as its own PR, sequenced first.** Not because it is separable in purpose — it is not —
@@ -443,7 +469,7 @@ but because the review question is unrelated to everything after it:
 - **different governance** — `third_party/` under decision 13, not `shared/` under the one rule;
 - **it stands alone.** Three copies to one is worth having even if the renderer work stalls.
 
-#### 3.3.1 The logo gate selects SIZES, and BG22 takes S1 + S2
+#### 3.3.2 The logo gate selects SIZES, and BG22 takes S1 + S2
 
 An earlier draft made this a boolean (`OD_BOOT_LOGO_ENABLE`, "off on BG22"). Measuring it showed
 that is the wrong shape, because the three sizes are not remotely equal in cost.
@@ -472,9 +498,11 @@ That is **behaviour-preserving on BG22, not a trade-off**, and the reachability 
 | S2 | 514 | 96 | 480 |
 | S3 | 1664 | 276 | 1380 |
 
-BG22's largest map entry is `EP81_SPECTRA_1024x576` — far below S3's 1664 px threshold, and it is
-the dual-controller panel B5 makes it refuse anyway. **S3 can never be selected on this part**, so
-excluding it removes 16,380 B that could not have been drawn.
+BG22's full map has no native dimension at or above 1664: its 1024×576 maximum-width entry is the
+split `EP81_SPECTRA_1024x576`, which B5 refuses, and the widest remaining entry is
+`EP7_960x640`. **S3 can never be selected on this target**, so excluding it removes 16,380 B that
+could not have been drawn. C-B1's generated map/table census pins that bound instead of trusting
+enum names or a hand-maintained panel count.
 
 Two things this must carry to be honest:
 
@@ -497,15 +525,15 @@ was supposed to be.
 
 ## 4. The defects this closes
 
-All four are verified in the tree, not inferred.
+All five are verified in the tree, not inferred.
 
 | # | Defect | Evidence | Closed by |
 |---|---|---|---|
-| **B1** | **Nordic renders no logo, silently, and has since import.** Its `boot_screen.cpp` has three `#ifdef BOOT_HAS_LOGO` blocks (`:896`, `:929`, `:1012`) and **nothing anywhere defines the macro** — ESP32 defines it at `:15`, inside the `#if __has_include("logo_bitmap.h")` guard that Nordic's copy dropped. So ~100 lines are unconditionally dead and `targets/nordic-zephyr/src/logo_bitmap.h` (111,510 B, byte-identical to ESP32's) is linked by nothing. | verified: `grep BOOT_HAS_LOGO` finds three uses and zero definitions on Nordic | one gate (`OD_BOOT_LOGO_ENABLE`) in shared code, so "defined nowhere" stops being representable |
+| **B1** | **Nordic renders no logo, silently, and has since import.** Its `boot_screen.cpp` has three `#ifdef BOOT_HAS_LOGO` blocks (`:896`, `:929`, `:1012`) and **nothing anywhere defines the macro** — ESP32 defines it at `:15`, inside the `#if __has_include("logo_bitmap.h")` guard that Nordic's copy dropped. So ~100 lines are unconditionally dead and `targets/nordic-zephyr/src/logo_bitmap.h` (111,510 B, byte-identical to ESP32's) is linked by nothing. | verified: `grep BOOT_HAS_LOGO` finds three uses and zero definitions on Nordic | one size-count gate (`OD_BOOT_LOGO_SIZES`) in shared code, so "defined nowhere" stops being representable |
 | **B2** | **Both targets are behind `../Firmware`** — a swatch-fill fix landed upstream 2026-08-10, plus whatever else is in the drift. | 122 `diff -w` lines against the authority | **adopting the authority as the base closes this by construction.** It still changes what BWR/BWY boards display, so it is verified, not assumed |
 | **B3** | **The authority's QR placement clips its own right quiet zone** whenever `modulePx * quiet > pad`. Nordic already fixed it. An **upstream defect**, not a Nordic divergence. | `../Firmware:820,883` vs `nordic:925` | **DECIDED 2026-08-17: adopt Nordic's form.** It is ported into the shared base, fixing ESP32 too, and reported back to `../Firmware` |
-| **B4** | **BG22's key-display policy differs** in a way the survey calls arguably user-visible (§ 3.4). | survey § 3.4 | `od_boot_payload.c` settles it for all three, in Phase 2 which is cheap |
-| **B5** | **BG22 accepts a dual-controller panel it cannot drive.** Its map returns `EP81_SPECTRA_1024x576` for `panel_ic_type` `0x2B`; the vendored table flags that panel `BBEP_SPLIT_BUFFER`; BG22 has **no CS2 concept at all**. `bbepSetPanelType()` sets the flag and the library branches on it, so the panel is half-driven with no error. | map `opendisplay_epd_map.c:50`; flag `bb_ep.inl:4122`; no `cs_pin_2` anywhere under `targets/efr32bg22-slc/` | `OD_CAP_DUAL_CS=0` plus a **runtime refusal** at panel selection (§ 2.4) |
+| **B4** | **BG22's key-display policy differs** in a way the survey calls arguably user-visible (§ 3.4). | survey § 3.4 | `od_boot_payload.c` settles it for all three in C-B2 |
+| **B5** | **BG22 accepts a panel excluded by target policy.** Its map returns `EP81_SPECTRA_1024x576` for `panel_ic_type` `0x2B`, and the vendored table flags it `BBEP_SPLIT_BUFFER`; the current path can therefore half-drive a configuration BG22 must not accept. Existing canonical CS2 fields and backend primitives do not override the policy. | map `opendisplay_epd_map.c:50`; flag `bb_ep.inl:4122`; owner policy `OD_CAP_DUAL_CS=0` | C-B3: enforce the policy with a **runtime refusal** at panel selection (§ 2.4) |
 
 ### Not a defect, but fix it in passing: `logoBmp` is uninitialised
 
@@ -520,7 +548,7 @@ touching `bmp`, so `bmpW == 0` returns false without dereferencing. Neither of t
 declaration, and neither is local to it. Drop the prefix at one call site, or reorder the checks
 inside the helper, and it becomes a use of an uninitialised pointer with nothing to catch it.
 
-**C-B3 carries `logoBmp = NULL` at the declaration and a `logoW > 0` guard at the draw site**, so
+**C-B4 carries `logoBmp = NULL` at the declaration and a `logoW > 0` guard at the draw site**, so
 the invariant is stated once where it can be seen rather than depending on two distant
 coincidences. Zero cost, and it removes a trap from code three targets are about to share.
 
@@ -559,7 +587,7 @@ Two things follow:
    the authority clips. That is a far better gate than the eye-check the earlier draft proposed —
    a clipped *quiet zone* still scans on most readers, which is precisely why this survived.
 2. **It is an upstream bug, so it goes back.** Fixing it only in `shared/` would leave
-   `../Firmware` — the authority, and a shipping repo — still clipping. C-B2 files it there.
+   `../Firmware` — the authority, and a shipping repo — still clipping. C-B4 reports it there.
 
 **Nordic contributes exactly one line of behaviour to the merged renderer.** Every other
 Nordic-only line in the 417-line `diff -w` against the authority is Zephyr plumbing, accessors and
@@ -572,10 +600,17 @@ is a defect rather than a divergence. That is a checkable claim and C-B4 should 
 
 This is the strongest argument and it is not the line count.
 
-The renderer is a pure function of (geometry, facts) → packed rows. Once the surface is a seam, a
-host test implements `od_boot_app_*` over a `malloc`'d frame and pins a **hash per case** across
-scheme × rotation × representative panel geometry. Today `tools/check.sh` has **no boot-screen
-check of any kind**, and there is no boot-screen test in `tests/host/`.
+The renderer is a pure function of (geometry, facts) → packed rows. C-B1 first wraps all three
+existing target renderers and the pinned `64184bb` authority with host shims, injects fixed device id,
+firmware version, battery, temperature, config and security facts, and records their output before
+any visual change. Those temporary adapters disappear after extraction, but their fixtures and
+hashes remain. Full-image hashes are valid only for those fixed-input fixtures; QR module matrices
+and payload fields are asserted independently so volatile metadata cannot masquerade as a render
+regression.
+
+After extraction the host seam captures packed rows and pins a hash per case across scheme ×
+rotation × representative native geometry. Today `tools/check.sh` has no boot-screen check of any
+kind, and there is no boot-screen test in `tests/host/`.
 
 That matters more than usual because both B1 and B2 are exactly what such a test catches for free:
 B2 is a rendering bug that shipped and was found by eye on hardware, and B1 is a missing element
@@ -591,33 +626,40 @@ and zero skips.
 
 | Commit | Content | Required proof |
 |---|---|---|
-| **C-B0** | `third_party/qrcode/` — one copy (the Nordic/Silabs byte-identical form), three consumers (§ 3.3.2). **Own PR, sequenced first.** | **A differential proving ESP32's 312-line-divergent copy is behaviourally identical** across a payload corpus at every version/ECC the boot screen can select — that is what licenses discarding it. Plus: all three targets link, and images **byte-identical** on Nordic and Silabs, whose bytes are already canonical |
-| **C-B1** | `shared/core/od_boot_payload.c` (PURE) + host test. Both targets swap onto it. Settles **B4**. | differential: the new payload/URL/redaction output matches each target's current output byte-for-byte on a corpus of device ids, keys and versions — **including the all-zero key** |
-| **C-B2** | **Adopt Nordic's QR quiet zone into the base (B3)** and report the defect to `../Firmware`. No seam yet. | the golden harness reports the geometry set where the authority's form satisfies `qrX + qrPx > w_log`; that set is non-empty, is recorded, and is empty after the change |
-| **C-B3** | `shared/core/od_boot_app.h` + `od_boot_screen.c` (new APP_BOOT tier) + the golden-hash host test. `esp32-idf` swaps onto it; its `boot_screen.cpp` becomes ~60 lines of seam. Lands **B2**'s upstream fix and C-B2's verdict, plus the `logoBmp = NULL` hygiene fix above. | goldens pinned for every scheme × rotation × geometry; ESP32 golden set **matches the pre-swap renderer** except at the pixels B2 and B3 deliberately change, each enumerated |
-| **C-B4** | `nordic-zephyr` swaps onto the same source. Closes **B1** — the logo appears for the first time. | Nordic golden set now equals ESP32's for equal geometry; **hardware: the logo is photographed on a flashed board**, because it has never rendered |
-| **C-B5** | BG22 takes `od_boot_payload.c` only. Delete the three retired copies and the dead Nordic asset. **Independently: `OD_CAP_DUAL_CS=0` and the runtime refusal (B5, § 2.4).** | BG22 `.text`/`.bss` delta recorded; a config naming `0x2B` is **refused with a log** and the pre-fix tree is shown half-driving it |
-| **C-B6** | BG22 adopts APP_BOOT. Only two gates, both math-following: `OD_BOOT_LOGO_SIZES=2` and the static QR buffer (§ 2.1). Zones, footers and swatches follow `useZoneLayout` exactly as on the other two targets, so BG22 **gains** them on its 400×300-and-larger panels. Retires its own renderer. | `-fstack-usage` on the gated build against `SL_STACK_SIZE` 2752, **taken before the swap lands**, plus `.text`/`.bss` deltas. A shortfall is answered with another justified gate, not abandonment. Hardware: the boot screen renders on a flashed BG22 — including the logo it has never had |
+| **C-B0** | `third_party/qrcode/` — one copy (the Nordic/Silabs byte-identical form), three consumers (§ 3.3.1). **Own PR, sequenced first.** | Encode the payload corpus through both implementations at every usable version/ECC and compare size plus module bits. Build both with identical flags and compare deterministic `.text`/`.rodata` contents after normalising symbols/relocations. Full boot-image equality is not the criterion. All three targets link. |
+| **C-B1** | **Characterization before change.** Add fixed-fact host adapters/goldens for the pinned authority and current ESP32, Nordic and BG22 renderers. Add the generated BG22 map↔vendor-table census, including native geometry, flags, rotations, every supported scheme, row bytes and reachable logo size. No production rendering behavior changes. | Baseline hashes are committed; the authority's QR-overhang case set is non-empty; Nordic's is empty; BG22's current small/large layouts are pinned. The census proves the 960-pixel non-split bound, the fixed-256-byte silent render/fail matrix and S3 unreachability. Mutation checks show a pixel or boundary change fails. |
+| **C-B2** | `shared/core/od_boot_payload.c` (PURE) + host test; all three targets swap onto it. The target supplies a raw low-24-bit device id and PURE code formats it. Settles **B4**. | Differential: payload, URL and redaction output against each target on a corpus of raw ids, keys and versions, including all-zero and all-`0xff` keys. Any intended B4 policy change has an explicit before/after fixture. |
+| **C-B3** | **Dual-CS transport prerequisite.** Add `shared/core/od_boot_app.h`; port the bufferless split-frame lifecycle from `../Firmware` `20807f3` to ESP32 and Nordic and implement the frame/plane seam without changing the renderer yet. Use ESP32's existing held-CS primitive and add the equivalent Nordic primitive. Reject absent, invalid, or aliased CS2 instead of inheriting upstream's GPIO-2 default. Add `OD_CAP_DUAL_CS=0` and runtime refusal on BG22. | Host state-machine tests invoke the actual seam and cover complete, short, excess, write-failed and cleanup paths; frame end is fallible and failed frames never refresh. On actual split-panel hardware, ESP32 and Nordic each complete left then right halves and refresh. Until a target passes, it refuses split panels and cannot return `segments=2`. BG22 `0x2B` is refused silently before panel I/O. |
+| **C-B4** | Add `shared/core/od_boot_screen.c` (APP_BOOT); swap ESP32. Extract from pinned `64184bb`, adopt Nordic's QR placement (B3), carry the authority swatch fix (B2), and initialise/guard `logoBmp`. Keep complete-row emission and the GRAY4 `pitch + planePitch` scratch contract. | Shared-renderer goldens match C-B1's pinned authority for fixed inputs except the separately pinned B3 QR rectangle. B2 and B3 each have enumerated before/after pixel sets. Split and ordinary frame lifecycles propagate every seam failure. |
+| **C-B5** | Swap Nordic onto APP_BOOT and retire its renderer/dead logo copy. Closes **B1**. | Equal facts and geometry produce the same packed rows as ESP32. The only target-policy deltas are recorded. Hardware shows the Nordic logo and an otherwise expected boot screen; its split-panel gate from C-B3 is repeated. |
+| **C-B6** | BG22 adopts APP_BOOT only if its pre-swap measurements pass. It uses `OD_BOOT_LOGO_SIZES=2`, caller-owned 256 B QR and **256 B row buffers**, the generated census, and the same runtime layout math; otherwise it retains its renderer while C-B0–C-B3 remain. | Before landing: `-fstack-usage` against `SL_STACK_SIZE=2752` with no stack growth, exact `.text`/`.data`/`.bss` deltas, every supported non-split census case matches the recorded render/silent-fail result, and hardware confirms both a fitting boot screen and an oversized case with no output or diagnostic. If optimization cannot fit, decline C-B6. |
 
-C-B0 through C-B2 are independent of the rest and can land while B3 is still being argued.
-C-B3 must precede C-B4. C-B6 may never happen.
+C-B1 precedes every visual change. C-B3 precedes every renderer swap that can emit two segments.
+C-B4 precedes C-B5. C-B6 is conditional and may legitimately not land.
 
 ---
 
 ## 7. Automated verification
 
-- **Golden hashes**, the centrepiece: every colour scheme × rotation × representative panel
-  geometry, hashed. Generated from the ESP32 renderer *before* the swap so the first run is a
-  regression test rather than a fresh baseline.
-- **Deliberate diffs are enumerated, not tolerated.** B2 and B3 change pixels. Each gets its own
-  golden pair (before/after) and a one-line statement of what moved. A golden that changes without
-  an entry is a failure.
-- **Payload differential** (C-B1) against each target's current output, all-zero key included.
-- **Short-buffer refusal**: `row_len` one byte under `pitch` returns false and writes nothing;
-  same for the gray4 `pitch + planePitch` case. Shown failing with the guard removed.
-- **Segment contract**: a `segments = 2` render emits `2 × height` calls of `pitch/2`, left half
-  first, even though no target implements the transport yet — this is what stops § 2.3's seam
-  decision from silently rotting.
+- **Pre-change characterization**, the centrepiece: fixed-input full-frame hashes from the
+  unchanged renderers land in C-B1, before the B3 behavior change or extraction. The shared
+  renderer then runs every scheme × rotation × representative native geometry.
+- **Deliberate diffs are enumerated, not tolerated.** B2 and B3 change ESP32 pixels; B1 adds the
+  Nordic logo; B4 can change displayed key policy; C-B6 adds BG22 zones/footer/swatches/logo. Each
+  has an explicit component or before/after fixture. A changed golden without an entry is failure.
+- **QR evidence is component-level.** C-B0 compares encoder size/module matrices; B3 compares QR
+  box coordinates and modules. A full-frame hash is used only with all metadata fixed.
+- **Payload differential** (C-B2) against each target's current output, all-zero key included.
+- **Fixed row-buffer boundary**: `required == row_len` renders; `required == row_len + 1` returns
+  false without logging or invoking any frame/plane/write seam. BG22's 360 B GRAY4 and 480 B 4bpp
+  cases are pinned silent failures at `row_len=256`. A short QR workspace also returns before output.
+- **Segment and lifecycle contract**: `segments = 2` emits `2 × height` complete row segments,
+  left half first; begin/end frame and plane failures propagate, and short/excess transport streams
+  cannot refresh.
+- **Capability truthfulness**: a target cannot report two segments until its transport is built
+  and verified; otherwise configuration is refused before rendering.
+- **BG22 census**: every mapped panel joins to the vendor table, native dimensions rather than enum
+  names drive buffer/logo math, and unknown/duplicate/unjoined entries fail the check.
 - **`tools/check.sh` gains a boot-screen check.** There is none today.
 
 ---
@@ -626,11 +668,16 @@ C-B3 must precede C-B4. C-B6 may never happen.
 
 | Row | Observation | It distinguishes |
 |---|---|---|
-| ESP32 boot screen unchanged | photograph before/after C-B3 matches except at B2/B3 pixels | that the extraction is behaviour-preserving |
-| **Nordic logo appears** | photographed on a flashed `xiao_nrf52840` | **B1** — it has never rendered, so this row fails by construction before C-B4 |
+| ESP32 ordinary-panel boot screen | photograph before/after C-B4 matches except at enumerated B2/B3 pixels | that extraction preserves the rest |
+| **ESP32 split panel** | boot frame and a transport-fed frame refresh completely on a real dual-CS panel | C-B3's held-CS lifecycle and cleanup |
+| **Nordic split panel** | same left/right completion and refresh on a real dual-CS panel | Nordic's new transport, not merely its existing CS2 primitives |
+| **Nordic logo appears** | photographed on a flashed `xiao_nrf52840` | **B1** — it has never rendered, so this row fails by construction before C-B5 |
 | Nordic boot screen otherwise unchanged | before/after photograph | that closing B1 did not disturb layout |
 | QR scans on both targets | a phone resolves the landing URL | the payload path end-to-end |
 | BWR/BWY swatch band | photograph on a colour panel | **B2**, which changes what these boards display |
+| BG22 small and zone layouts | flashed BG22 on representative `<400×300` and `>=400×300` panels | C-B6 layout, logo and stack behavior |
+| BG22 oversized row | 960px GRAY4 or 4bpp produces no boot frame and no diagnostic | fixed 256 B silent-failure policy |
+| BG22 split refusal | configure `0x2B`; observe silent refusal before frame output | B5 refuses rather than half-driving |
 
 `xiao_nrf54l15` and `xiao_nrf54lm20a` have never been flashed
 ([HARDWARE_MATRIX.md](../docs/HARDWARE_MATRIX.md)), so Nordic rows are `xiao_nrf52840` only and
@@ -640,18 +687,19 @@ must say so.
 
 ## 9. Risks and stop conditions
 
-- **Stop if the seam cannot express half-plane emission** without a target-visible change (§ 2.3).
-  Redesigning it after C-B3 means redoing C-B3 and C-B4.
-- **Stop if BG22 adoption needs the stack grown.** The answer to a 550 B increase against 480 B of
-  headroom is not a bigger stack; it is C-B6 answering "no", which is a legitimate outcome the
-  two-file split exists to permit.
-- **Do not bundle BG22 into Phase 1.** § 2.1.
+- **Stop before C-B4 if either split transport cannot express the fallible frame lifecycle.** A
+  target without verified transport must refuse split panels and must never return two segments.
+- **Stop if BG22 adoption needs the stack grown.** Optimize the frame first; if it still does not
+  fit, C-B6 answers "no". This plan does not authorize a larger `SL_STACK_SIZE`.
+- **Do not bundle BG22 renderer adoption before C-B6.** § 2.1.
 - **Do not let a golden change land unexplained.** The whole value is that pixel changes become
   visible; a test updated to match new output is the failure mode this replaces.
-- **`../Firmware` is the authority except at B3**, and that exception must be written into
-  `DIVERGENCE_MATRIX` with evidence, not assumed because Nordic's comment sounds confident.
-- **Re-measure the upstream diff before porting.** 122 lines today vs the survey's 173; the set,
-  not the count, is what C-B3 must carry.
+- **Pinned `../Firmware` `64184bb` is the renderer authority except at B3.** Never read the live
+  sibling path without verifying its blob. The B3 exception is written into `DIVERGENCE_MATRIX`
+  with arithmetic and C-B1 fixtures.
+- **Re-measure the pinned upstream diff before porting.** 122 lines at plan time vs the survey's
+  173; the set, not the count, is what C-B4 must carry. Updating the authority pin is a reviewed
+  plan change, not an incidental consequence of the sibling worktree moving.
 - **The logo asset must not land under `shared/`.** 111 KB of generated bitmap there misrepresents
   what `shared/` is for.
 
@@ -660,16 +708,14 @@ must say so.
 ## 10. What this plan does not do
 
 - No BG22 renderer adoption — that is C-B6 and may be declined.
-- **No split-panel transport.** The seam accommodates it and now has two committed consumers
-  (§ 2.4), but nothing here implements it. The port target is named — `../Firmware` `20807f3`,
-  `src/split_panel.{h,cpp}` — and it is owed to **both** `esp32-idf` and `nordic-zephyr`. The gap
-  is live today because the vendored library already flags both panels while no target carries the
-  module. Larger than the boot screen, and filed in `FOLLOWUPS.md` rather than absorbed here.
-- **No dual-CS support on BG22, ever** — that is now a declared capability (`OD_CAP_DUAL_CS=0`),
-  not an unfinished port. What this plan does add there is the **refusal**, so the absence stops
-  being silent (B5).
+- **No deferral of split-panel transport.** C-B3 implements it for ESP32 and Nordic because the
+  renderer contract cannot truthfully advertise two consumers without it.
+- **No dual-CS support on BG22.** This is target policy, not deferred work. Canonical config fields
+  and backend primitives do not weaken `OD_CAP_DUAL_CS=0`; changing it requires an explicit policy
+  reversal and a new reviewed plan. B5 enforces the current policy at panel selection.
 - No `od_hal_panel` promotion or change — explicitly out of scope (§ 2.2).
-- No change to what the boot screen *says*; only B2 and B3 change what it *looks like*, both
-  deliberately and both enumerated.
+- No unrecorded content or visual change. B4 may change BG22 key-display policy; B2/B3 alter
+  pixels; B1 adds the Nordic logo; and C-B6 adds the shared layout elements on BG22. Each is
+  deliberate and independently pinned.
 - No new wire surface. The boot screen has none — the landing URL is its only external contract,
-  and C-B1 pins it rather than altering it.
+  and C-B2 pins it rather than altering it.

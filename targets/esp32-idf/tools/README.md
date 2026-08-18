@@ -7,8 +7,8 @@ firmware's config layout.
 - `od-device-cli.py` — read, edit, and write a device's config over BLE.
 - `provision_firmware.py` — build firmware with a config baked in, or flash a
   config-clearing image.
-- `convert_logo.py` — convert `od_logo.svg` into a packed 1-bit C header for
-  the boot screen.
+- `../../../third_party/boot_logo/convert_logo.py` — convert the colocated
+  `od_logo.svg` into the shared packed 1-bit boot-screen header.
 - `uf2conv.py` / `uf2families.json` — convert `.bin`/`.hex` images to UF2 for
   boards that flash via USB mass storage.
 - The streaming zlib decoder harness now lives in `tests/host/zlib_inflate_test.c`

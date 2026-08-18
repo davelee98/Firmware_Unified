@@ -51,7 +51,9 @@ if(OD_SHARED_SOURCES)
         OD_TXQ_SLOTS=3u
         OD_CAP_PIPE=0
         OD_CAP_PARTIAL=0
-        OD_CAP_RXQ=0)
+        OD_CAP_RXQ=0
+        OD_CAP_DUAL_CS=0
+        OD_BOOT_LOGO_SIZES=2)
     message(STATUS "od: shared/ has ${CMAKE_CURRENT_LIST_DIR} sources — building od_shared")
 else()
     # No target code is imported yet. An INTERFACE library keeps every consumer below
@@ -80,6 +82,15 @@ add_test(NAME canary COMMAND od_canary)
 add_executable(od_span_test span_test.c)
 target_link_libraries(od_span_test od_shared)
 add_test(NAME span COMMAND od_span_test)
+
+add_executable(od_boot_payload_test boot_payload_test.c)
+target_link_libraries(od_boot_payload_test od_shared)
+add_test(NAME boot_payload COMMAND od_boot_payload_test)
+
+add_executable(od_boot_screen_test boot_screen_test.c
+    ${CMAKE_CURRENT_LIST_DIR}/../../third_party/qrcode/qrcode.c)
+target_link_libraries(od_boot_screen_test od_shared)
+add_test(NAME boot_screen COMMAND od_boot_screen_test)
 
 # zlib_inflate: the portable streaming inflater. C14.2 characterized its former heap and static
 # storage modes with the same suite; the results were identical, so C14.4 retired heap selection
