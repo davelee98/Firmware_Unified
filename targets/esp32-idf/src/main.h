@@ -141,7 +141,7 @@ uint32_t tcpReceiveBufferPos = 0;
 // Direct write mode state (bufferless display writing)
 bool directWriteActive = false;  // True when direct write mode is active
 bool directWriteCompressed = false;  // True if using compressed direct write
-bool directWriteBitplanes = false;  // True if using bitplanes (BWR/BWY - 2 planes)
+bool directWriteBitplanes = false;  // True for controller-plane streams (BWR/BWY/GRAY4)
 bool directWritePlane2 = false;  // True when writing plane 2 (R/Y) for bitplanes
 uint32_t directWriteBytesWritten = 0;  // Total bytes written to current plane
 uint32_t directWriteDecompressedTotal = 0;  // Expected decompressed size
@@ -223,8 +223,8 @@ uint8_t getFirmwarePatch();
 uint32_t getDeepSleepCount();  // RTC-persisted wake cycle count on ESP32; always 0 on nRF52840
 float readBatteryVoltage();  // Returns battery voltage in volts, or -1.0 if not configured
 float readChipTemperature();  // Returns chip temperature in degrees Celsius
-int getplane();
-int getBitsPerPixel();
+int displayBootPlane(uint8_t colorScheme);
+int displayBootBitsPerPixel(uint8_t colorScheme);
 
 // Encryption functions
 bool isEncryptionEnabled();

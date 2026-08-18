@@ -5,7 +5,6 @@
 #include "opendisplay_battery.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
-#include "opendisplay_display_color.h"
 
 #include <bb_epaper.h>
 
@@ -49,13 +48,35 @@ int od_boot_app_end_frame(void) { return 0; }
 
 int od_boot_app_bits_per_pixel(uint8_t color_scheme)
 {
-  return opendisplay_color_bits_per_pixel(color_scheme);
+  switch (color_scheme) {
+    case OD_COLOR_SCHEME_BWGBRY:
+    case OD_COLOR_SCHEME_BWGBRY_SPLIT:
+    case OD_COLOR_SCHEME_GRAY16:
+      return 4;
+    case OD_COLOR_SCHEME_BWRY:
+    case OD_COLOR_SCHEME_GRAY4:
+      return 2;
+    case OD_COLOR_SCHEME_MONO:
+    case OD_COLOR_SCHEME_BWR:
+    case OD_COLOR_SCHEME_BWY:
+    case OD_COLOR_SCHEME_SEVEN_COLOR:
+      return 1;
+    default:
+      return 0;
+  }
 }
 
 int od_boot_app_default_plane(uint8_t color_scheme)
 {
-  return opendisplay_color_start_plane(color_scheme) == 0
-      ? OD_BOOT_PLANE_PRIMARY : OD_BOOT_PLANE_SECOND;
+  switch (color_scheme) {
+    case OD_COLOR_SCHEME_MONO:
+    case OD_COLOR_SCHEME_BWR:
+    case OD_COLOR_SCHEME_BWY:
+    case OD_COLOR_SCHEME_GRAY16:
+      return OD_BOOT_PLANE_PRIMARY;
+    default:
+      return OD_BOOT_PLANE_SECOND;
+  }
 }
 
 bool od_boot_app_direct_2bpp(void) { return false; }

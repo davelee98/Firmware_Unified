@@ -195,6 +195,42 @@ c11_structure() {
 }
 check "structure: ownership ratchets"  c11_structure
 
+od_color_structure() {
+    local rc=0 hits count
+    for path in \
+        targets/nordic-zephyr/src/opendisplay_display_color.c \
+        targets/nordic-zephyr/src/opendisplay_display_color.h \
+        targets/efr32bg22-slc/opendisplay_display_color.c \
+        targets/efr32bg22-slc/opendisplay_display_color.h; do
+        if [ -e "$path" ]; then
+            echo "retired target color helper returned: $path"
+            rc=1
+        fi
+    done
+
+    hits=$(grep -rInE '\bopendisplay_color_[A-Za-z0-9_]*\b|\bcalc_controller_plane_bytes\b|\b(getBitsPerPixel|getplane)[[:space:]]*\(' \
+           targets/*/src targets/*/panel targets/efr32bg22-slc/*.[ch] \
+           targets/efr32bg22-slc/*.cpp 2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "legacy target-local direct-stream color geometry returned; use shared/core/od_color.h"
+        rc=1
+    fi
+
+    # NAME THE FILE, NEVER THE DIRECTORY. cmake_gcc/ contains build/, whose generated ninja
+    # files, compile_commands.json and linker map all mention this source -- so a recursive grep
+    # counts 6 and this check fails IFF BG22 has been built, which --targets does in the same run.
+    count=$(grep -RFl 'core/od_color.c' shared/sources.cmake targets/*/CMakeLists.txt \
+            targets/*/*/CMakeLists.txt targets/efr32bg22-slc/cmake_gcc/opendisplay-bg22.cmake \
+            2>/dev/null | wc -l)
+    if [ "$count" -ne 1 ] || ! grep -q 'core/od_color.c' shared/sources.cmake; then
+        echo "od_color.c must be registered exactly once, in shared/sources.cmake (found $count)"
+        rc=1
+    fi
+    return $rc
+}
+check "structure: od_color is the direct geometry authority"  od_color_structure
+
 silabs_c13_config() {
     grep -q '^#define PSA_WANT_ALG_CCM 1$' \
         targets/efr32bg22-slc/config/od_psa_config_autogen.h || {

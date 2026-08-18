@@ -11,6 +11,13 @@ canonical wire contract) and `../py-opendisplay` (the host, and the answer to "d
 actually do X?"). `targets/*/` here are import *snapshots* that drift; the siblings are live. Diff
 before you port — see § "Migration constraints".
 
+**SIBLING REPOSITORIES ARE READ-ONLY REFERENCES.** Read them freely — that is the whole point of
+the paragraph above. Do not create or switch branches, edit or regenerate files, commit, or push in
+a sibling while working here. Keep every implementation change, artifact, test and branch in this
+repository, and record a needed sibling change as external follow-up work — `FOLLOWUPS.md`, or the
+plan that wants it — unless the user explicitly overrides this in a later request. A defect found
+upstream is reported, not fixed from here.
+
 ## Reading budget
 
 Code first. Headers, build files and tests are ground truth; `docs/` explains *why* and is never a
@@ -50,7 +57,7 @@ looks arbitrary and is not); delete the story.
   --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF.
   `tools/sdkconfig_baseline.sh` is a gate a change must not break.
 - **`shared/` is no longer empty** —
-  `core/od_{adv_control,advert,cmd,config,config_asm,config_read,config_tlv,core,dispatch,gate,reply,rxq,session,txq,watchdog,zlib_inflate}.c`
+  `core/od_{adv_control,advert,cmd,color,config,config_asm,config_read,config_tlv,core,dispatch,gate,reply,rxq,session,txq,watchdog,zlib_inflate}.c`
   listed in `shared/sources.cmake` (never globbed) in per-HAL tiers, plus the two all-inline
   headers `od_span.h` and `od_nonce_window.h` and the two pure seam headers `od_cmd_app.h` and
   `od_session_app.h`, which correctly have no entry there. Consumers:
@@ -333,6 +340,19 @@ before proposing anything under `shared/`; extend the pattern as targets are imp
     Still one vendored copy for all targets; do not move it into `shared/`.
 14. **Headers beat design docs.** Where `targets/esp32-idf/hal/*.h` and docs/SHARED_API_DESIGN.md
     disagree, fix the doc.
+15. **`OD_COLOR_SCHEME_GRAY8` is a reserved identity, not an implemented scheme** (C-color,
+    2026-08-18). `shared/core/od_color.h` squats value 9 behind an `#ifndef` so a future canonical
+    assignment syncs down without renumbering, and `od_color_direct_geometry()` returns
+    `OD_COLOR_UNSUPPORTED` for it. Do not add 3-bpp packing, a 4-bpp substitute, FastEPD
+    expansion, Inkplate waveform selection, target admission, or a boot fallback — every
+    operational display path rejects it explicitly, and `tests/host/color_test.c` static-asserts
+    the number.
+    When `../opendisplay-protocol` eventually reserves value 9 and the vendored header is synced,
+    remove the `#ifndef` fallback and update `epaper-dithering`'s parity exemptions as external
+    follow-up work. **That enum reservation alone does not authorize wire behavior:**
+    `py-opendisplay` must keep rejecting uploads, and firmware must keep rejecting operational
+    use, until a separate device-qualified protocol/backend plan defines and tests the encoding.
+    See `plans/PLAN_OD_COLOR_2026-08-18.md` § 2.1.
 
 ## Layout
 

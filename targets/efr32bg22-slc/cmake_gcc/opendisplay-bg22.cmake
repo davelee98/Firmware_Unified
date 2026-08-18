@@ -254,7 +254,6 @@ add_library(slc OBJECT
     "../od_cmd_silabs.c"
     "../opendisplay_config_storage.c"
     "../opendisplay_config_parser.c"
-    "../opendisplay_display_color.c"
     "../opendisplay_display.cpp"
     "../opendisplay_epd_map.c"
     "../opendisplay_led.c"

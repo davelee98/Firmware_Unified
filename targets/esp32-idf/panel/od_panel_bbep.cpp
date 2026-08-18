@@ -5,10 +5,9 @@
  * is false, and the core must not assume it can compose a partial update from what is already
  * on the panel. Correction 2 in docs/SHARED_API_DESIGN.md exists to make that askable.
  *
- * PLANE ORDER IS TRANSLATED HERE (correction 5). The HAL contract is "plane 0 is the OLD
- * plane"; bb_epaper wants the old plane in PLANE_1. display_service.cpp's partial path already
- * does this mapping inline -- it writes PLANE_1 for the first plane_size bytes and PLANE_0
- * after. Doing it in the backend is what stops the core learning which vendor is underneath.
+ * FULL-FRAME PLANE ORDER follows od_color geometry. The separate partial-region contract
+ * normalizes old/new planes, but begin_region() is not implemented here yet; the live partial
+ * path remains in display_service.cpp and performs that vendor translation itself.
  *
  * SCOPE, stated plainly: this covers the full-frame streaming session, refresh, busy and sleep.
  * begin_region() is NOT implemented here and returns OD_PANEL_ENOTSUP -- the partial-window
@@ -21,6 +20,7 @@
 
 
 #include "bb_epaper.h"
+#include "od_color.h"
 #include "od_bbep_stream.h"
 #include "opendisplay_structs.h"
 #include "protocol_pending.h"
@@ -33,7 +33,6 @@ extern BBEPDISP bbep;
 /* Declared in display_service.cpp; the panel-type mapping stays there because it is a wire
  * contract (OD_PANEL_IC_* -> bb_epaper enum), not a driver detail. */
 int mapPanelIcToBbepType(uint16_t panel_ic_type);
-int getBitsPerPixel(void);
 
 /* bb_epaper's C entry points. Declared here for the same reason display_service.cpp declares
  * them: they are defined in panel/od_bbep.cpp's translation unit (bb_ep.inl), and bb_epaper.h
@@ -56,6 +55,7 @@ static bool s_session_open = false;
 static bool s_refreshing   = false;
 static bool s_init_ok      = false;
 static uint8_t  s_plane_count  = 1;
+static od_color_plane_t s_initial_plane = OD_COLOR_PLANE_0;
 static uint32_t s_plane_bytes  = 0;   /* bytes per plane; the plane switch point */
 static uint32_t s_written      = 0;
 
@@ -71,33 +71,46 @@ static int bbep_ops_init(const struct DisplayConfig *d, const struct SystemConfi
         od_log_error("panel: bb_epaper has no entry for panel_ic 0x%04X", (unsigned)panel_ic_type);
         return OD_PANEL_ERR;
     }
+    od_color_geometry_t geometry;
+    if (od_color_direct_geometry(d->color_scheme, d->pixel_width, d->pixel_height,
+                                 &geometry) != OD_COLOR_OK ||
+        geometry.layout == OD_COLOR_LAYOUT_SPLIT_HALVES) {
+        return OD_PANEL_ENOTSUP;
+    }
     /* Deliberately NOT calling bbepInitIO() here. Bring-up is sequenced with the panel rail
      * (pwrmgm) and the reset pulse by display_service.cpp's session code, which the repoint
      * moves; initialising the bus from underneath it would give the SPI device two owners --
      * the same defect class step 13 removed. */
     caps_out->width  = d->pixel_width;
     caps_out->height = d->pixel_height;
-    switch (getBitsPerPixel()) {
-        case 4:  caps_out->fmt = OD_PIX_4GRAY; break;
-        case 2:  caps_out->fmt = OD_PIX_2BPP;  break;
-        default: caps_out->fmt = OD_PIX_1BPP;  break;
+    if (geometry.layout == OD_COLOR_LAYOUT_CONTROLLER_PLANES) {
+        if (d->color_scheme == OD_COLOR_SCHEME_BWR) caps_out->fmt = OD_PIX_BWR;
+        else if (d->color_scheme == OD_COLOR_SCHEME_BWY) caps_out->fmt = OD_PIX_BWY;
+        else caps_out->fmt = OD_PIX_4GRAY;
+    } else {
+        switch (geometry.bits_per_pixel) {
+            case 4:  caps_out->fmt = OD_PIX_4GRAY; break;
+            case 2:  caps_out->fmt = OD_PIX_2BPP;  break;
+            default: caps_out->fmt = OD_PIX_1BPP;  break;
+        }
     }
-    if (d->color_scheme == OD_COLOR_SCHEME_BWR) caps_out->fmt = OD_PIX_BWR;
-    if (d->color_scheme == OD_COLOR_SCHEME_BWY) caps_out->fmt = OD_PIX_BWY;
 
-    caps_out->plane_count = (caps_out->fmt == OD_PIX_BWR || caps_out->fmt == OD_PIX_BWY ||
-                             caps_out->fmt == OD_PIX_4GRAY) ? 2 : 1;
+    /* Stream parts come from the geometry, not the display-format label. Packed 4-bpp
+     * streams are one part even though OD_PIX_4GRAY is the closest existing HAL label. */
+    caps_out->plane_count = geometry.part_count;
     caps_out->needs_framebuffer = false;   /* streaming sink -- see the header comment */
     /* BOTH halves must agree. partial_update_support is what the CONFIG declares over the
      * wire; pInitPart is whether this panel actually has a partial init sequence compiled in.
      * A config claiming partial on a panel bb_epaper cannot partial-refresh would have the
      * core offer 0x76 and the panel ignore it -- a silent failure, which is the class this
      * whole caps query exists to remove. */
-    caps_out->supports_partial  = (d->partial_update_support != OD_PARTIAL_UPDATE_NONE) &&
+    caps_out->supports_partial  = geometry.partial_supported &&
+                                  (d->partial_update_support != OD_PARTIAL_UPDATE_NONE) &&
                                   (bbep.pInitPart != NULL);
 
     s_plane_count = caps_out->plane_count;
-    s_plane_bytes = ((uint32_t)d->pixel_width * (uint32_t)d->pixel_height) / 8u;
+    s_initial_plane = geometry.initial_plane;
+    s_plane_bytes = geometry.part_bytes[0];
     s_init_ok = true;
     return OD_PANEL_OK;
 }
@@ -105,8 +118,7 @@ static int bbep_ops_init(const struct DisplayConfig *d, const struct SystemConfi
 static int bbep_ops_begin(void)
 {
     if (!s_init_ok) return OD_PANEL_ERR;
-    /* CORRECTION 5: plane 0 is the OLD plane, which bb_epaper wants in PLANE_1. */
-    bbepStartWrite(&bbep, s_plane_count > 1 ? PLANE_1 : PLANE_0);
+    bbepStartWrite(&bbep, s_initial_plane == OD_COLOR_PLANE_0 ? PLANE_0 : PLANE_1);
     s_written      = 0;
     s_session_open = true;
     return OD_PANEL_OK;
@@ -140,7 +152,7 @@ static int bbep_ops_write(const uint8_t *bytes, uint32_t len)
         s_written += chunk;
         off       += chunk;
         if (s_plane_count > 1 && s_written == s_plane_bytes) {
-            bbepStartWrite(&bbep, PLANE_0);   /* second plane = the NEW one */
+            bbepStartWrite(&bbep, s_initial_plane == OD_COLOR_PLANE_0 ? PLANE_1 : PLANE_0);
         }
     }
     return OD_PANEL_OK;
@@ -209,4 +221,3 @@ extern "C" const struct od_panel_ops od_panel_ops_bbep = {
     bbep_ops_abort,
     bbep_ops_mark_deinitialized,
 };
-

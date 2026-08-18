@@ -223,7 +223,6 @@ target_sources(app PRIVATE
   ${SRC_DIR}/opendisplay_button.c
   ${SRC_DIR}/opendisplay_config_parser.c
   ${SRC_DIR}/opendisplay_config_storage.c
-  ${SRC_DIR}/opendisplay_display_color.c
   ${SRC_DIR}/opendisplay_display.cpp
   ${SRC_DIR}/boot_screen.cpp
   ${SRC_DIR}/opendisplay_epd_map.c

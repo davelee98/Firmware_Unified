@@ -19,7 +19,7 @@
  *   1. ALL C LINKAGE. display_fastepd.h wraps 2 of 16 functions in extern "C"; this file wraps
  *      everything, because two of the three targets this must eventually serve are C-only.
  *   2. A CAPABILITY QUERY (od_panel_caps_t), so the core asks instead of scattering
- *      getBitsPerPixel() / fastepd_driver_used() / e1004_panel_used() / directWriteIsGray4()
+ *      color-geometry / backend / panel quirks
  *      across command handlers -- and so THE CORE, not the panel driver, decides whether 0x76
  *      is offered. It captures the streaming-vs-framebuffer split explicitly; the core must
  *      assume neither.
@@ -76,7 +76,7 @@ typedef enum {
 typedef struct {
     uint16_t    width, height;
     od_pixfmt_t fmt;
-    uint8_t     plane_count;        /* 1, or 2 for BWR / BWY / 4-gray */
+    uint8_t     plane_count;        /* direct-stream parts: 2 for BWR / BWY / GRAY4 */
     /* false = streaming sink (bb_epaper writes straight to controller RAM and there is no
      * framebuffer to re-read); true = buffered (FastEPD holds a full frame and blits).
      * The core needs this to decide whether a partial update can be composed at all. */
@@ -116,15 +116,15 @@ struct od_panel_ops {
 int  od_hal_panel_init(const struct DisplayConfig *d, const struct SystemConfig *sys,
                        uint16_t panel_ic_type, od_panel_caps_t *caps_out);
 
-/* Open a full-frame write session. Plane 0 (the OLD plane, correction 5) is written first. */
+/* Open a full-frame write session using the configured direct stream's initial plane. */
 int  od_hal_panel_begin(void);
 
 /* Open a partial-region session. Returns OD_PANEL_ENOTSUP when caps.supports_partial is false,
  * which the core is expected to have checked -- the check here is a backstop, not the gate. */
 int  od_hal_panel_begin_region(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
 
-/* Sequential sink. Bytes are appended to the open session; the backend tracks the plane split
- * itself from the geometry it was given, because only it knows the vendor's plane ordering. */
+/* Sequential sink. Bytes are appended to the open session; for a full-frame session the backend
+ * tracks direct-stream part boundaries from the configured color geometry. */
 int  od_hal_panel_write(const uint8_t *bytes, uint32_t len);
 
 /* Returns as soon as the controller has been told to refresh -- correction 3. Poll

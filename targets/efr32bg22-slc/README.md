@@ -162,7 +162,7 @@ vendored.
 | `opendisplay_config_storage.c` | 139 | NVM3-backed config blob |
 | `opendisplay_led.c` | 485 | LED patterns |
 | `opendisplay_epd_map.c` | 75 | 66 panel-id → `bb_epaper` panel constants |
-| `opendisplay_display_color.c` | 65 | palette handling |
+| `shared/core/od_color.c` | — | shared direct-stream color geometry |
 | `main.c`, `app.c`, `app_bm.c` | 269 | SDK entry + bare-metal loop |
 | `shared/core/od_zlib_inflate.c` | — | canonical bit-serial streaming inflate |
 | `third_party/bb_epaper/` | — | vendored, with `silabs_efr32_io.inl` + `silabs_bbep_busy.inl` backends |

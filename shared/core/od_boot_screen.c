@@ -1,6 +1,7 @@
 #include "od_boot_screen.h"
 #include "od_boot_app.h"
 #include "od_boot_payload.h"
+#include "od_color.h"
 #include "qrcode/qrcode.h"
 #include "boot_logo/logo_bitmap.h"
 #include <stdio.h>
@@ -467,9 +468,15 @@ bool od_boot_screen_render(const struct od_config *cfg,
     const int footerY0 = (int)h_log - footerH;
     const int middleH  = footerY0 - headerH;
     const uint8_t colorScheme = cfg->displays[0].color_scheme;
+    if (colorScheme == OD_COLOR_SCHEME_GRAY8) {
+        return false;
+    }
     const bool useBitplanes = (colorScheme == OD_COLOR_SCHEME_BWR || colorScheme == OD_COLOR_SCHEME_BWY);
     const bool direct2bpp = od_boot_app_direct_2bpp();
     const int bitsPerPixel = od_boot_app_bits_per_pixel(colorScheme);
+    if (bitsPerPixel != 1 && bitsPerPixel != 2 && bitsPerPixel != 4) {
+        return false;
+    }
     int pitch;
     if (bitsPerPixel == 4) pitch = (w + 1) / 2;
     else if (bitsPerPixel == 2) pitch = (w + 3) / 4;
