@@ -90,37 +90,74 @@ scale with `(w >= 400u && h >= 300u) ? 2 : 1` (`:441`), the same 400×300 bounda
 renderer uses for `useZoneLayout` (`../Firmware:581`). They were derived independently and landed
 on the same number.
 
-#### The rule that keeps a subset from becoming a lowest common denominator
+#### The rule: follow the math, do not hardcode the absence
 
-Decision 9's actual hazard is not "a target compiles less code". It is **a target that has a
-feature being denied it because another target lacks it.** So:
+An earlier revision of this section proposed `OD_BOOT_ZONES_ENABLE=0` and
+`OD_BOOT_SWATCH_ENABLE=0` on BG22, reasoning that it renders no zones today. **That was wrong, and
+it was the exact failure decision 9 names — proposed in the same section that warned against it.**
 
-> **A capability gate may remove a feature the target does not have. It may never change what a
-> target that has the feature renders.**
+The shared renderer already decides zones by geometry, at runtime:
 
-Concretely: `OD_BOOT_ZONES_ENABLE=0` on BG22 is legitimate because BG22 renders no zones today.
-The same macro must not exist to make the ESP32's zones optional for uniformity's sake. Every gate
-in § 3.3.1 and below is justified by a *measured absence in that target*, and the golden tests
-(§ 7) pin the full-capability output so a gate cannot quietly alter it.
+```c
+useZoneLayout = (w_log >= 400 && h_log >= 300)     // ../Firmware:581
+```
 
-#### The gates, and what each buys
+**BG22 drives 13 panel types that satisfy that predicate**, counted from its own map against the
+vendored panel table:
 
-| Gate | BG22 | Justified by | Buys |
-|---|---|---|---|
-| `OD_BOOT_ZONES_ENABLE` | 0 | no header/footer/manufacturer/model rendering today | ~210 B of stack — `manufLine`, `modelLine`, `footerSchemeStr`, `footerResStr`, `footerSegs`, `footerSegX`, `vStr`, `tStr` (survey § 5.3) |
-| `OD_BOOT_SWATCH_ENABLE` | 0 | no swatch band today; swatches live in the footer | `swatchCode[16]`, `swatchIsColor[16]` — 32 B of stack, plus the fill tables |
-| `OD_BOOT_LOGO_SIZES` | 2 | S3 unreachable on its panels (§ 3.3.1) | 16,380 B of flash |
-| caller-supplied `qr` buffer | static | BG22 already makes it static deliberately | 256 B off a 2,752 B stack |
+| | |
+|---|---|
+| 400×300 | `EP42_400x300`, `EP42B_`, `EP42R2_`, `EP42YR_` |
+| 648×480 | `EP583_648x480` |
+| 680×480 | `EP1085_1360x480` |
+| 800×480 | `EP426_800x480`, `EP426_..._4GRAY`, `EP75_..._4GRAY`, `EP75_..._4GRAY_GEN2`, `EP75YR_`, `EP397YR_` |
+| 1024×576 | `EP81_SPECTRA_1024x576` — dual-CS, refused under B5 |
 
-**Subsetting is what makes the stack arithmetic work**, and that is the point of naming the gates
-rather than adopting wholesale. The survey estimated ~900 B for the full renderer's frame against
-BG22's own ~300–350 B. Removing zones (~210 B) and the QR buffer (256 B) brings the shared frame
-to roughly 430 B — the same order as what BG22 spends today, rather than a third of its entire
-stack.
+So BG22 renders no zones today **because its own renderer never implemented them**, not because
+its geometry excludes them. Hardcoding the absence would deny zones, footers and swatches to a
+dozen panel types the shared math says should have them — freezing an implementation gap into a
+compile-time fact and calling it a capability.
 
-**C-B6 therefore measures rather than decides** (§ 6). The question is no longer "does BG22 adopt"
-— that is settled — but "does the subset fit", answered by `-fstack-usage` against `SL_STACK_SIZE`
-2752. If it does not, the response is another justified gate, not abandonment.
+> **The rule: a target follows the shared layout math. A compile-time gate is only legitimate
+> where the math can never select the thing gated out.**
+
+That distinction is what separates the two gates this plan does keep from the two it just dropped:
+
+| Gate | Legitimate? | Why |
+|---|---|---|
+| `OD_BOOT_ZONES_ENABLE` | **no — dropped** | the math selects zones on 13 BG22 panels |
+| `OD_BOOT_SWATCH_ENABLE` | **no — dropped** | same; swatches live in a footer the math asks for |
+| `OD_BOOT_LOGO_SIZES=2` | **yes** | S3 needs `w_log >= 1664`; BG22's largest drivable panel is 800 px wide after B5. The math can never select it |
+| caller-supplied `qr` buffer | **yes** | not a feature gate at all — the same bytes, in static instead of stack |
+
+The logo gate survives precisely *because* it follows the math rather than overriding it, and the
+same arithmetic independently confirms the § 3.3.1 choice: 800×480 gives `w_log = 800 >= 514` and
+`headerH = 96 >= 96`, so **S2 is reachable on BG22 and S1 alone would have been too little.**
+S1 + S2 is what the math asks for.
+
+**BG22 therefore gains zones, footers and swatches on its larger panels**, alongside the logo.
+"Subset as needed" turns out to subset almost nothing: the only thing BG22 compiles out is an
+asset its geometry cannot reach.
+
+#### What that costs, stated honestly
+
+Dropping the zone gate removes the ~210 B of stack it was claimed to save (`manufLine`,
+`modelLine`, `footerSchemeStr`, `footerResStr`, `footerSegs`, `footerSegX`, `vStr`, `tStr`). The
+budget is now:
+
+| | |
+|---|---:|
+| survey's full-frame estimate | ~900 B |
+| less the QR buffer moved to static | −256 B |
+| **estimated shared frame on BG22** | **~644 B** |
+| BG22's current boot frame | ~300–350 B |
+| `SL_STACK_SIZE` | 2,752 B |
+
+**C-B6's measurement is now genuinely load-bearing rather than a formality**, and the plan should
+say so: roughly 640 B of a 2,752 B stack, in a call chain that is not the deepest in the system.
+If `-fstack-usage` says it does not fit, the answer is *still* not to hardcode a layout absence —
+it is to reduce the frame (compose zone strings into the existing scratch, shorten the footer
+segment arrays), or to raise the stack against measured headroom.
 
 Its dual-CS refusal (§ 2.4, B5) is independent of all of this and lands regardless.
 
@@ -510,7 +547,7 @@ and zero skips.
 | **C-B3** | `shared/core/od_boot_app.h` + `od_boot_screen.c` (new APP_BOOT tier) + the golden-hash host test. `esp32-idf` swaps onto it; its `boot_screen.cpp` becomes ~60 lines of seam. Lands **B2**'s upstream fix and C-B2's verdict, plus the `logoBmp = NULL` hygiene fix above. | goldens pinned for every scheme × rotation × geometry; ESP32 golden set **matches the pre-swap renderer** except at the pixels B2 and B3 deliberately change, each enumerated |
 | **C-B4** | `nordic-zephyr` swaps onto the same source. Closes **B1** — the logo appears for the first time. | Nordic golden set now equals ESP32's for equal geometry; **hardware: the logo is photographed on a flashed board**, because it has never rendered |
 | **C-B5** | BG22 takes `od_boot_payload.c` only. Delete the three retired copies and the dead Nordic asset. **Independently: `OD_CAP_DUAL_CS=0` and the runtime refusal (B5, § 2.4).** | BG22 `.text`/`.bss` delta recorded; a config naming `0x2B` is **refused with a log** and the pre-fix tree is shown half-driving it |
-| **C-B6** | BG22 adopts APP_BOOT with the § 2.1 gates (`OD_BOOT_ZONES_ENABLE=0`, `OD_BOOT_SWATCH_ENABLE=0`, `OD_BOOT_LOGO_SIZES=2`, static QR buffer). Retires its own renderer. | `-fstack-usage` on the gated build against `SL_STACK_SIZE` 2752, **taken before the swap lands**, plus `.text`/`.bss` deltas. A shortfall is answered with another justified gate, not abandonment. Hardware: the boot screen renders on a flashed BG22 — including the logo it has never had |
+| **C-B6** | BG22 adopts APP_BOOT. Only two gates, both math-following: `OD_BOOT_LOGO_SIZES=2` and the static QR buffer (§ 2.1). Zones, footers and swatches follow `useZoneLayout` exactly as on the other two targets, so BG22 **gains** them on its 400×300-and-larger panels. Retires its own renderer. | `-fstack-usage` on the gated build against `SL_STACK_SIZE` 2752, **taken before the swap lands**, plus `.text`/`.bss` deltas. A shortfall is answered with another justified gate, not abandonment. Hardware: the boot screen renders on a flashed BG22 — including the logo it has never had |
 
 C-B0 through C-B2 are independent of the rest and can land while B3 is still being argued.
 C-B3 must precede C-B4. C-B6 may never happen.
