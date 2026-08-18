@@ -41,9 +41,6 @@ od_zlib_status_t od_zlib_stream_poll(uint8_t *output, size_t capacity, size_t *p
 const char *od_zlib_stream_error(void);
 uint32_t od_zlib_stream_output_count(void);
 
-uint32_t uzlib_adler32(const void *data, unsigned int length, uint32_t prev_sum);
-uint32_t uzlib_crc32(const void *data, unsigned int length, uint32_t crc);
-
 #ifdef __cplusplus
 }
 #endif

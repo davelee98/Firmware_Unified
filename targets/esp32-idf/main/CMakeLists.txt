@@ -26,8 +26,6 @@ file(GLOB OD_APP_SOURCES
 set(OD_ZLIB_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../third_party/uzlib/src)
 list(APPEND OD_APP_SOURCES
     ${OD_ZLIB_DIR}/od_zlib_stream.c
-    ${OD_ZLIB_DIR}/adler32.c
-    ${OD_ZLIB_DIR}/crc32.c
 )
 
 # The FastEPD vendor adapter's storage, and millis() for FastEPD's call sites. PERMANENT --
