@@ -70,47 +70,72 @@ The survey's § 4.1 analysis is adopted unchanged and its reasoning is correct:
   (`od_cmd_app.h`, `od_session_app.h`, `od_rxq_app_report`). Decision 1's stated mechanism;
   decision 2's "one vtable, deliberately" is untouched.
 
-### 2.3 Split-panel emission — the survey's open question 1, answered, and the answer is the opposite
+### 2.3 Split-panel emission — verified against the sibling repo, and it is live current work
 
-The survey ranked this first because it *shapes the seam*, and asked whether the missing
-half-plane path in `targets/esp32-idf/src/boot_screen.cpp` is deliberate omission or import drift.
-It guessed drift and said "ask whoever did the import." Reading `../Firmware/src/split_panel.h`
-answers it without asking, and the answer changes the seam:
+The survey ranked this first because it *shapes the seam*, guessed the missing half-plane path in
+`targets/esp32-idf/src/boot_screen.cpp` was import drift, and said "ask whoever did the import."
+The sibling repo answers it, and the answer is stronger than drift: **dual-controller panel support
+is new, deliberate, current upstream work.**
 
-> Dual-controller ("split buffer") e-paper panels — a single glass driven by two controllers on
-> separate chip-selects, each owning one half of every row. Currently the Seeed reTerminal
-> **E1004's 13.3" 1200x1600 Spectra6 (T133A01)** and the **8.1" 1024x576 Spectra6**.
->
-> Selection is entirely at **RUNTIME**: `splitPanelUsed()` tests `BBEP_SPLIT_BUFFER` on
-> `bbep.iFlags`, which `bbepSetPanelType()` fills in from the panel table for whatever
-> `panel_ic_type` the device config names. **There is no build flag.**
+`../Firmware` commit **`20807f3` (2026-08-10, PR #147)** — *"E1004 / dual-controller panels: pin
+bb_epaper upstream, replace the fork shim with a runtime-gated bufferless module"* — added
+`src/split_panel.{h,cpp}` and its boot-screen integration. Its own commit message settles three
+things this plan needs:
 
-Three consequences, all verified in the tree:
+1. **Dropping the `esp32-s3-E1004` env was correct and is unrelated to the panel.** Upstream:
+   *"it was the same hardware as `esp32-s3-N32R8-extuart`, and the panel is selected at runtime by
+   `panel_ic_type`, not at build time."* So the retired **board** and the live **panel** are
+   independent facts, and the inference "E1004 is retired, so the split path is dead" is exactly
+   backwards. The panel is reached by configuring any S3 board for it.
+2. **The module exists because a vanished vendor macro silently disabled the panel.** The old shim
+   was guarded by `#ifdef BBEP_T133A01` — a *bb_epaper fork* define, not a firmware one. Repinning
+   to upstream bb_epaper removed it, so *"all 12 guarded regions compiled to nothing while
+   `pio run -e esp32-s3-E1004` still reported SUCCESS: firmware that could not drive the panel,
+   with no error and no log line."* The replacement is gated at **runtime** on
+   `bbep.iFlags & BBEP_SPLIT_BUFFER`, with `static_assert`s so a future rename is a compile error.
+3. **Bufferless by necessity.** bb_epaper's own dual-CS writer needs a 960 KB `ucScreen`, so the
+   data phase is driven from the library's CS primitives directly.
 
-1. **It is not board-gated, so retiring the `s3-e1004` *board* did not retire it.** The panel is
-   selected by device *config* at runtime. Any S3 board can be configured for a split panel. The
-   tempting inference — "E1004 is retired, so the split path is dead" — is wrong, and it is the
-   inference someone will make if this is not written down.
-2. **The capability is absent from the entire unified repo.** `targets/esp32-idf/src/split_panel.*`
-   does not exist, no target references `splitPanelUsed()`, and `nordic-zephyr` has no copy either.
-   Only `../Firmware` has it. The snapshot knows the *scheme*
-   (`OD_COLOR_SCHEME_BWGBRY_SPLIT` appears in the palette and label code) but cannot emit to the
-   glass. **That is a capability regression against upstream, larger than the boot screen and not
-   caused by it.**
-3. **The 8.1" 1024×576 Spectra6 is one of the two split panels — and BG22's own panel map already
-   lists it** (`opendisplay_epd_map.c:50`, `case 0x002B: return EP81_SPECTRA_1024x576`). Whether
-   BG22's wiring of that panel is genuinely dual-controller is **UNVERIFIED** and is a question for
-   C-B4, but the identifier is there today.
+**The capability gap in this repo is live, not theoretical, and I verified both halves:**
 
-**Decision: the seam carries half-plane emission from day one; this plan does not implement the
-split-panel transport.** Concretely, `od_boot_app_begin_plane()` takes the segment count and
-`od_boot_app_write_row()` takes a length that may be half the pitch, so a later split-panel
-promotion is a target-side implementation rather than a seam redesign. Designing the seam without
-it and adding it later means redesigning it later, which is precisely what the survey warned about.
+- The vendored library **already flags both split panels**:
+  `third_party/bb_epaper/src/bb_ep.inl:4122` (`EP81_SPECTRA_1024x576`) and `:4157`
+  (`EP133_SPECTRA_1200x1600`) both carry `BBEP_SPLIT_BUFFER`, defined at
+  `third_party/bb_epaper/src/bb_epaper.h:319`, and the library branches on it in three places.
+  So a unified-repo device configured for either panel **does** get the flag set.
+- **No target has the module.** `targets/*/split_panel.*` does not exist and nothing calls
+  `splitPanelUsed()`. The application half is simply absent.
 
-**File the transport gap separately.** `FOLLOWUPS.md` gains an entry: the unified repo cannot drive
-dual-controller panels at all, and a device configured for one gets no correct output from any
-path, boot screen or image. That is not this plan's to fix.
+Together those reproduce the exact condition PR #147 was written to fix — the flag is set, the
+build succeeds, and no correct data reaches the glass. **That is a live defect in this repo,
+larger than the boot screen and not caused by it.** `FOLLOWUPS.md` gains an entry naming
+`../Firmware` `20807f3` and `src/split_panel.{h,cpp}` as the port target; BG22's panel map already
+lists `EP81_SPECTRA_1024x576` (`opendisplay_epd_map.c:50`), so it is not an ESP32-only question.
+
+**It is also the same defect shape as B1.** A capability that disappears because a macro stopped
+being defined, while every build still passes, is what both PR #147 and § 4's B1 are. That is the
+argument for the rule in § 3.1: a capability must never be expressible as "defined nowhere."
+
+#### What this means for the seam
+
+Upstream's emission structure is now known exactly, and it is **not** a per-row segment tag:
+
+- The half-plane loop is the **outer** loop (`splitHalfPasses`), with plane passes inside it
+  (`boot_screen.cpp:933`).
+- **Only half-pass 0 opens the frame** (`splitPanelBeginFrame()`), and the close is deferred past
+  both halves — *"the chip selects stay held until `splitPanelCloseFrame()`"* (`:1052`).
+- The sink is a **byte stream that tracks its own crossover**: `splitPanelSinkBytes(data, len)`
+  counts against `halfPlaneBytes()` and calls `advanceToRightHalf()` itself, and it **faults
+  loudly on excess bytes** rather than dropping them, which the shim it replaced did silently
+  (`split_panel.cpp`).
+- Each row therefore arrives as `pitch/2` bytes, left half for all rows first, then right.
+
+**Decision: the seam carries half-plane emission from day one, shaped as an outer pass with a
+deferred close.** `od_boot_app_begin_plane()` takes the segment count so a target can open once
+and close after the last segment; `od_boot_app_write_row()` carries both `y` and the segment index
+because FastEPD writes **positionally** while the split sink is a pure **stream** — the two
+contracts are different and only the target can reconcile them. This plan does **not** port the
+transport; it makes the later port a target-side implementation rather than a seam redesign.
 
 ---
 
@@ -124,11 +149,14 @@ path, boot screen or image. That is not this plan's to fix.
 #define OD_BOOT_PLANE_PRIMARY  0   /* mono / packed / BWR-BWY B&W / gray4 LSB */
 #define OD_BOOT_PLANE_SECOND   1   /* BWR-BWY colour / gray4 MSB */
 
-/* Open a plane. `segments` is 1 for an ordinary panel and 2 for a dual-controller one, where
- * each row arrives as `segments` calls of pitch/segments bytes, left half first. Declaring it
- * here rather than discovering it later is § 2.3. */
+/* Open a plane. `segments` is 1 for an ordinary panel and 2 for a dual-controller one. The
+ * renderer emits ALL rows of segment 0 before any of segment 1 (upstream's outer half-pass), and
+ * the target closes only after the last segment -- the split sink holds both chip selects across
+ * the pair. Declaring this here rather than discovering it later is § 2.3. */
 int  od_boot_app_begin_plane(int plane, uint16_t w, uint16_t h, uint8_t segments);
-/* One packed native row segment. `y` is supplied because FastEPD writes positionally. */
+/* One packed native row segment, pitch/segments bytes. Both `y` and `segment` are supplied
+ * because the two consumers disagree: FastEPD writes POSITIONALLY, while the split sink is a
+ * STREAM that tracks its own left/right crossover and faults on excess bytes. */
 int  od_boot_app_write_row(uint16_t y, uint8_t segment, const uint8_t *row, uint16_t len);
 void od_boot_app_end_plane(int plane);
 
@@ -300,8 +328,10 @@ must say so.
 ## 10. What this plan does not do
 
 - No BG22 renderer adoption — that is C-B6 and may be declined.
-- **No split-panel transport.** The seam accommodates it; nothing implements it. The repo-wide gap
-  is filed in `FOLLOWUPS.md` (§ 2.3) and is larger than the boot screen.
+- **No split-panel transport.** The seam accommodates it; nothing implements it. The port target
+  is known and named — `../Firmware` `20807f3`, `src/split_panel.{h,cpp}` — and the gap is live
+  today because the vendored library already flags both panels while no target carries the module
+  (§ 2.3). Larger than the boot screen, and filed in `FOLLOWUPS.md` rather than absorbed here.
 - No `od_hal_panel` promotion or change — explicitly out of scope (§ 2.2).
 - No change to what the boot screen *says*; only B2 and B3 change what it *looks like*, both
   deliberately and both enumerated.
