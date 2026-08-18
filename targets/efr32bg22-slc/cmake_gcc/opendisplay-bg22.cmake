@@ -248,6 +248,10 @@ add_library(slc OBJECT
     "../app.c"
     "../opendisplay_ble.c"
     "../opendisplay_pipe.c"
+    "../od_hal_crypto.c"
+    "../od_hal_radio.c"
+    "../od_session_app.c"
+    "../od_cmd_silabs.c"
     "../opendisplay_config_storage.c"
     "../opendisplay_config_parser.c"
     "../opendisplay_display_color.c"
@@ -283,6 +287,9 @@ add_library(slc OBJECT
     # -fdata-sections + --gc-sections (below) drop what nothing calls, and neither TU defines a
     # static instance, so struct od_config_asm costs RAM only once something declares one.
     ${OD_SHARED_SOURCES_PURE}
+    ${OD_SHARED_SOURCES_HAL_CRYPTO}
+    ${OD_SHARED_SOURCES_HAL_RADIO}
+    ${OD_SHARED_SOURCES_APP_SESSION}
 )
 
 target_include_directories(slc PUBLIC
@@ -371,6 +378,16 @@ target_include_directories(slc PUBLIC
 
 target_compile_definitions(slc PUBLIC
     "NVM3_MAX_OBJECT_SIZE=2112"
+    "SLI_PSA_CONFIG_AUTOGEN_OVERRIDE_FILE=\"od_psa_config_autogen.h\""
+    "OD_CONFIG_MAX_SIZE=2048u"
+    "OD_TXQ_SLOTS=3u"
+    "OD_CAP_PIPE=0"
+    "OD_CAP_PARTIAL=0"
+    "OD_CAP_RXQ=0"
+    "OD_CONFIG_WITH_TOUCH=0"
+    "OD_CONFIG_WITH_BUZZER=0"
+    "OD_CONFIG_WITH_WIFI=0"
+    "OD_CONFIG_WITH_DATA_EXTENDED=0"
     "OPENDISPLAY_ZLIB_WINDOW_BITS=9"
     "OPENDISPLAY_ZLIB_USE_HEAP_WINDOW=0"
     "__SILABS_BG22__=1"

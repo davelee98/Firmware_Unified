@@ -12,6 +12,7 @@
 
 #include "od_dispatch.h"
 
+#include "od_caps.h"
 #include "od_cmd_app.h"
 #include "od_config_read.h"
 #include "od_reply.h"
@@ -409,12 +410,16 @@ static void test_budget_covers_the_worst_case(void)
     uint8_t pipe[4] = { 0x00u, 0x81u, 1u, 2u };
     uint8_t other[4] = { 0x00u, 0x77u, 1u, 2u };
 
-    CASE("0x81 reserves three, so a handler emitting three replies is fully answered");
+    CASE("0x81 reservation follows the target PIPE capability");
     setup(false, false);
+#if OD_CAP_PIPE
     g_handler_replies = 3u;
+#else
+    g_handler_replies = 1u;
+#endif
     CHECK(od_dispatch_frame(&BLE, od_span_make(pipe, sizeof pipe)) == OD_FRAME_ACCEPTED);
     (void)od_txq_process();
-    CHECK(g_sent_n == 3u);                 /* none of them dropped for want of a slot */
+    CHECK(g_sent_n == g_handler_replies);  /* none of them dropped for want of a slot */
 
     CASE("an ordinary opcode reserves one, and a second reply is refused rather than borrowed");
     setup(false, false);
@@ -430,8 +435,13 @@ static void test_budget_covers_the_worst_case(void)
      * last one was dropped after the panel had already refreshed. */
     {
         static const struct { uint16_t cmd; uint8_t replies; } BUDGETS[] = {
+#if OD_CAP_PIPE
             { CMD_PIPE_WRITE_DATA,   3u },
             { CMD_PIPE_WRITE_END,    3u },
+#else
+            { CMD_PIPE_WRITE_DATA,   1u },
+            { CMD_PIPE_WRITE_END,    1u },
+#endif
             { CMD_DIRECT_WRITE_DATA, 2u },
             { CMD_DIRECT_WRITE_END,  2u },
             { CMD_BUZZER,            1u }

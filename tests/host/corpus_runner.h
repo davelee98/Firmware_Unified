@@ -1,6 +1,6 @@
 /* corpus_runner.h -- the shape of the generated vector table, and the seam a proof profile fills.
  *
- * ONE RUNNER, TWO EXECUTABLES. `od_cmd_app_*` is static link-time composition (C11), so two sets of
+ * ONE RUNNER, THREE EXECUTABLES. `od_cmd_app_*` is static link-time composition (C11), so multiple sets of
  * hook definitions cannot coexist in one binary -- and the fix for that is emphatically NOT a
  * runtime registry, which C11's plan rejected for the same reason it rejected a vtable. Each
  * executable links the same runner and generated table against ONE profile, and resolves the seam
@@ -28,6 +28,8 @@
 #define OD_VEC_CAP_POWER_LATCH  0x04u
 #define OD_VEC_CAP_PIPE         0x08u
 #define OD_VEC_CAP_NFC          0x10u
+#define OD_VEC_CAP_CONFIG_4K    0x20u
+#define OD_VEC_CAP_RXQ          0x40u
 
 /* What a passing vector is entitled to CLAIM. Reported separately so a fixture-produced legacy
  * shape can never be totalled as current target coverage. */

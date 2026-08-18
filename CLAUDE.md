@@ -39,8 +39,8 @@ looks arbitrary and is not); delete the story.
   it but you.** Boundary greps, the C11 ownership ratchets, the host suite under gcc + clang, the
   same suite under ASan/UBSan, the pre-auth fuzz targets, the py-opendisplay wire corpus, and the
   shim ratchet;
-  `--targets` adds both target families (ESP32 boards + sdkconfig baseline, all three Nordic
-  boards) and is required before merge. **A SKIP IS NOT A PASS** — missing
+  `--targets` adds all three target families (ESP32 boards + sdkconfig baseline, all three Nordic
+  boards, and the BG22 headless build) and is required before merge. **A SKIP IS NOT A PASS** — missing
   clang or ESP-IDF skips rather than fails, so read the summary, which reprints skips and exits
   2 when there were any.
 - Paths in this bullet are relative to `targets/esp32-idf/`. `./build.sh` there builds every board
@@ -54,8 +54,8 @@ looks arbitrary and is not); delete the story.
   headers `od_span.h` and `od_nonce_window.h` and the two pure seam headers `od_cmd_app.h` and
   `od_session_app.h`, which correctly have no entry there. Consumers:
   host tests and `esp32-idf` take the aggregate; `nordic-zephyr` takes PURE + HAL_CRYPTO +
-  HAL_RADIO + HAL_WDT + APP_SESSION + APP_RXQ; `efr32bg22-slc` takes PURE only — called on Nordic,
-  still compiled-only on Silabs except `od_advert`.
+  HAL_RADIO + HAL_WDT + APP_SESSION + APP_RXQ; `efr32bg22-slc` takes PURE + HAL_CRYPTO +
+  HAL_RADIO + APP_SESSION and deliberately declines APP_RXQ, HAL_ADV and HAL_WDT.
   Two tiers are named for a **seam** rather than a HAL, because what they need is a target
   function rather than a driver: APP_SESSION (`od_session_app.h`) and APP_RXQ
   (`od_rxq_app_report`).
@@ -188,19 +188,25 @@ looks arbitrary and is not); delete the story.
   **CALLED, NOT YET FLASHED:** `od_advert` on `efr32bg22-slc` — with that, no open-coded MSD copy
   is left on any target, and `tests/host/advert_test.c` holds the two encoders they shipped as the
   differential reference (do not "update" those to match the encoder).
-  `efr32bg22-slc` still open-codes the config parse: measured 2026-08-14 as
-  +1 byte of RAM **only with `OD_CONFIG_WITH_{TOUCH,BUZZER,WIFI,DATA_EXTENDED}=0`** (gated 909 B
-  vs its current 844 + 64; ungated 1617 B against 484 B of static slack at 98.5% RAM). Its real
-  gate is `MAX_CONFIG_SIZE` 4096 + the NVM3 object-size check, not the aggregate. The remaining
+  **SOFTWARE CANDIDATE, NOT YET FLASHED on `efr32bg22-slc` (C13, 2026-08-17):** config parsing,
+  config assembly, session, PSA/CRYPTOACC CCM, egress and dispatch now use the shared path. The
+  NVM3 record and assembler overlay one 2,048-byte buffer while retaining the deployed 16-byte
+  record header. The headless image links at 249,796 B flash and 32,284 B in the size tool's
+  heap-inclusive data-plus-BSS summary (480 B main-RAM headroom). The map's elastic heap grows from
+  0x2958 to 0x2d58, proving a 1,024 B non-heap static-RAM reduction. The target-production Silabs
+  corpus runs the real BG22 command hooks against fake drivers and passes. A second production-source
+  fault suite covers persistence ordering/failure, event pressure/deadlines, DIRECT END completion,
+  and NFC limits with 232 assertions; none of the C13 behavior is hardware-verified yet. The remaining
   unpromoted protocol logic is **the transfer state machines** — direct, partial, PIPE and NFC,
   target-owned on purpose (C11 § 1) and now smaller, explicit inputs to their own promotions.
 - `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel,crypto}`;
   `od_hal_crypto_random.c` is its own translation unit so a host test can compile the RNG arm
   without mbedTLS.
 - **`shared/hal/od_hal_crypto.h` is the third shared HAL** (2026-08-15, with `od_hal_adv` and
-  `od_hal_wdt`), implemented on both `esp32-idf` (mbedTLS) and `nordic-zephyr` (native
+  `od_hal_wdt`), implemented on `esp32-idf` (mbedTLS), `nordic-zephyr` (native
   `psa_aead_*`, which needed only `CONFIG_PSA_WANT_ALG_CCM=y` — the hand-rolled RFC 3610 both
-  Nordic targets carried existed because that Kconfig was never set, not because PSA lacked CCM).
+  Nordic targets carried existed because that Kconfig was never set, not because PSA lacked CCM),
+  and `efr32bg22-slc` (PSA shortened-tag CCM through the linked CRYPTOACC transparent driver).
   Prepared **key slots**, not a key in the caller's struct: the targets clear a session with
   `memset`, which would drop a live PSA handle and exhaust a finite pool. Four-valued status so a
   tag mismatch and an engine fault stay distinguishable — the session's 3-strike policy depends on
@@ -238,8 +244,11 @@ looks arbitrary and is not); delete the story.
   No fake ever sees an expected reply: the generated table is included by the runner and nothing
   else, and profiles get semantic knobs instead. That is what stops the corpus becoming its own
   oracle.
-- Live plan: docs/NEXT_STEPS_2026-08-05.md (docs/NEXT_STEPS.md is historical). Dispatch: C8–C11
-  landed, C12 in progress (plans/PLAN_OD_DISPATCH_C12_2026-08-16.md); Silabs is C13.
+- Live plan: plans/PLAN_MIGRATION_ENDGAME_2026-08-17.md (docs/NEXT_STEPS_2026-08-05.md is
+  superseded — six of its eight steps are done; docs/NEXT_STEPS.md is historical). Dispatch
+  C8–C12 landed. C13's Silabs implementation candidate is on `codex/silabs-c13`; hardware Gate 2
+  remains. **docs/HARDWARE_VERIFICATION_CHECKLIST.md is the itemized per-target hardware
+  checklist** — update it alongside this section whenever a hardware test runs.
 
 ## The one rule
 
@@ -294,8 +303,23 @@ before proposing anything under `shared/`; extend the pattern as targets are imp
 10. **Import working drivers as-is**; only shared logic is refactored.
 11. **First `shared/` source: `shared/core/od_adv_control.c`** (portable BLE advertising/
     lifecycle). `od_config.c` is the first *protocol* subsystem promoted.
-12. **`MAX_CONFIG_SIZE` is 4096 everywhere** — a global cap, not a per-target macro; a uniform
-    value removes a wire divergence a host could not discover. BG22 pays for it.
+12. **`OD_CONFIG_MAX_SIZE` is 4096 — except BG22, which is 2048** (C13, 2026-08-17). It was a
+    global cap for exactly the right reason: a per-target limit is a wire divergence a host
+    **cannot interrogate**, and `MAX_CONFIG_SIZE` was dropped from the capability bytes *because*
+    the value had become uniform. That reason has not gone away; it was outweighed on a 32 KB
+    part, where 4096 costs +2 KB of NVM3 record against a ~10.5 KB heap. So the constant is now
+    `#ifndef`-guarded in `od_config_asm.h` and set per target — 4096 on ESP32 and Nordic, 2048 on
+    BG22 via `target_compile_definitions`.
+    **Two things make that safe, and neither is optional.** `od_config_asm_start()` bounds the
+    declared total against `OD_CONFIG_MAX_SIZE` as well as the 4,000-byte transferable ceiling —
+    without it any cap below 4,000 is a remotely triggerable buffer overflow from a two-byte
+    length field, which is what the pre-C13 code was one constant away from. And BG22 **refuses,
+    never truncates**: an oversize declaration is NACKed at the start frame with nothing stored.
+    Silent truncation is the exact failure the fleet-wide rule existed to prevent, and it is
+    invisible to the host.
+    `struct od_config_asm` changes size with this macro, so any host test or target build mixing
+    caps across translation units is an ABI mismatch — `tests/host/` compiles a separate
+    `od_shared_silabs` for this reason.
 13. **`third_party/` is exempt from the one rule** — `bb_epaper` picks its IO backend by `#ifdef`.
     Still one vendored copy for all targets; do not move it into `shared/`.
 14. **Headers beat design docs.** Where `targets/esp32-idf/hal/*.h` and docs/SHARED_API_DESIGN.md
@@ -365,5 +389,7 @@ Rationale in [docs/MIGRATION.md](docs/MIGRATION.md) / [docs/ARCHITECTURE.md](doc
 
 EFR32BG22 32 KB, nRF52840 256 KB, ESP32-S3 512 KB + PSRAM. `shared/` must avoid buffers sized for
 the biggest target, unbounded heap, and assuming a heap exists. Sizes go behind compile-time
-constants the target sets, with a documented floor; decision 12 is the sole exception
-(docs/MEMORY_CONSTRAINTS.md item 3 has the BG22 mitigations gating the Silabs swap).
+constants the target sets, with a documented floor — `OD_CONFIG_MAX_SIZE` included since C13
+(decision 12), so there is no longer an exception to this rule. Its floor is a 400-byte policy
+assert in `od_config_asm.h`, and a cap a host cannot query has to be **refused loudly** rather
+than silently truncated (docs/MEMORY_CONSTRAINTS.md item 3, `DIVERGENCE_MATRIX` 2.7).

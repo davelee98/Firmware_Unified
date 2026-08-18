@@ -35,6 +35,8 @@
 
 /* CONFIG_CHUNK_SIZE, CONFIG_CHUNK_SIZE_WITH_PREFIX, MAX_CONFIG_CHUNKS. */
 #include "opendisplay_protocol.h"
+/* OD_STATIC_ASSERT, including the C99 fallback used by the Silabs build. */
+#include "opendisplay_structs.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -64,7 +66,15 @@ extern "C" {
  * targets/esp32-idf/src/config_parser.h). A mismatch is then a compile error in the target
  * that introduced it, not a silently smaller buffer.
  */
+#ifndef OD_CONFIG_MAX_SIZE
 #define OD_CONFIG_MAX_SIZE 4096u
+#endif
+
+/* Product policy rather than a parser invariant: all supported profiles can carry at least two
+ * ordinary CONFIG chunks. The runtime declaration check in od_config_asm_start() is the actual
+ * memory-safety boundary for smaller target buffers. */
+OD_STATIC_ASSERT(OD_CONFIG_MAX_SIZE >= CONFIG_CHUNK_SIZE * 2u,
+                 "project policy requires at least 400-byte config capacity");
 
 enum od_config_asm_result {
     /* Not a chunked transfer: the caller should save `payload` as the whole record. */

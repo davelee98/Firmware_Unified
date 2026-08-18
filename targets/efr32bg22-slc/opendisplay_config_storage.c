@@ -25,13 +25,26 @@ _Static_assert(sizeof(od_config_header_t) ==
                    offsetof(opendisplay_config_storage_t, data),
                "config header layout mismatch");
 
-/* Single shared staging record: .data is the config work buffer for pipe/parser;
- * full struct is used by saveConfig. Not re-entrant (BLE event loop is single-threaded). */
-static opendisplay_config_storage_t s_cfg_rec;
+/* Both layouts put their byte buffer at offset 16 and are exactly 2064 bytes in the BG22 profile.
+ * During an NVM3 write the four assembler state words become the legacy storage header; the
+ * assembler is reset immediately afterwards. This keeps the deployed record format without a
+ * second 2 KB staging object. */
+typedef union {
+  struct od_config_asm assembler;
+  opendisplay_config_storage_t record;
+} od_config_work_t;
 
-uint8_t *opendisplay_config_buf(void)
+_Static_assert(offsetof(struct od_config_asm, buffer) ==
+                   offsetof(opendisplay_config_storage_t, data),
+               "config assembler/storage buffer offsets differ");
+_Static_assert(sizeof(struct od_config_asm) == sizeof(opendisplay_config_storage_t),
+               "config assembler/storage sizes differ");
+
+static od_config_work_t s_cfg;
+
+struct od_config_asm *opendisplay_config_assembler(void)
 {
-  return s_cfg_rec.data;
+  return &s_cfg.assembler;
 }
 
 bool initConfigStorage(void)
@@ -67,23 +80,24 @@ bool saveConfig(uint8_t *config_data, uint32_t len)
     return false;
   }
 
-  /* CRC before any header writes; config_data may alias s_cfg_rec.data. */
+  /* CRC and copy before header writes; config_data may alias the shared buffer. */
   crc = calculateConfigCRC(config_data, len);
-  if (config_data != s_cfg_rec.data) {
-    memcpy(s_cfg_rec.data, config_data, len);
+  if (config_data != s_cfg.record.data) {
+    memmove(s_cfg.record.data, config_data, len);
   }
 
-  s_cfg_rec.magic = CONFIG_STORAGE_MAGIC;
-  s_cfg_rec.version = CONFIG_STORAGE_VERSION;
-  s_cfg_rec.data_len = len;
-  s_cfg_rec.crc = crc;
+  s_cfg.record.magic = CONFIG_STORAGE_MAGIC;
+  s_cfg.record.version = CONFIG_STORAGE_VERSION;
+  s_cfg.record.data_len = len;
+  s_cfg.record.crc = crc;
 
   total = header_sz + len;
-  sc = nvm3_writeData(nvm3_defaultHandle, OD_NVM3_CONFIG_KEY, &s_cfg_rec, total);
+  sc = nvm3_writeData(nvm3_defaultHandle, OD_NVM3_CONFIG_KEY, &s_cfg.record, total);
   if (sc != SL_STATUS_OK) {
     printf("[OD] nvm3_writeData config key=0x%06lX sc=0x%04lX len=%u\r\n",
            (unsigned long)OD_NVM3_CONFIG_KEY, (unsigned long)sc, (unsigned)total);
   }
+  od_config_asm_reset(&s_cfg.assembler);
   return sc == SL_STATUS_OK;
 }
 
@@ -136,4 +150,16 @@ bool loadConfig(uint8_t *config_data, uint32_t *len)
 
   *len = hdr.data_len;
   return true;
+}
+
+bool clearStoredConfig(void)
+{
+  sl_status_t sc;
+
+  if (nvm3_defaultHandle == NULL) {
+    return false;
+  }
+  sc = nvm3_deleteObject(nvm3_defaultHandle, OD_NVM3_CONFIG_KEY);
+  /* Deleting an already-absent config has the requested postcondition. */
+  return sc == SL_STATUS_OK || sc == ECODE_NVM3_ERR_KEY_NOT_FOUND;
 }

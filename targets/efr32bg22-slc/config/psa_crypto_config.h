@@ -25,7 +25,7 @@
 // <i> gracefully in case an application opens more than its declared amount of
 // <i> keys, thereby precluding the stack from functioning.
 // <i> Default: 4
-#define SL_PSA_KEY_USER_SLOT_COUNT     0
+#define SL_PSA_KEY_USER_SLOT_COUNT     1
 
 // <o SL_PSA_ITS_USER_MAX_FILES> Maximum User Persistent PSA Key Count <0-1024>
 // <i> Maximum amount of keys (or other files) that can be stored persistently
@@ -174,4 +174,3 @@
 #include "sli_psa_builtin_config_autogen.h"
 
 #endif // PSA_CRYPTO_CONFIG_H
-

@@ -24,7 +24,8 @@ unsigned od_corpus_profile_caps(void)
      * no D-FF power latch, which is why 0x52 answers the unsupported NACK. A vector whose
      * `forbids` names one of the present ones is excluded here and covered by the portable
      * profile -- and the runner counts that rather than hiding it. */
-    return OD_VEC_CAP_PARTIAL | OD_VEC_CAP_BUZZER | OD_VEC_CAP_PIPE | OD_VEC_CAP_NFC;
+    return OD_VEC_CAP_PARTIAL | OD_VEC_CAP_BUZZER | OD_VEC_CAP_PIPE | OD_VEC_CAP_NFC |
+           OD_VEC_CAP_CONFIG_4K | OD_VEC_CAP_RXQ;
 }
 
 /* Every hook here is production Nordic code. */

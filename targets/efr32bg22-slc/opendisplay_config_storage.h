@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "od_config_asm.h"
+
 #define MAX_CONFIG_SIZE 2048
 
 typedef struct {
@@ -20,9 +22,12 @@ bool saveConfig(uint8_t *config_data, uint32_t len);
 
 bool loadConfig(uint8_t *config_data, uint32_t *len);
 
+bool clearStoredConfig(void);
+
 uint32_t calculateConfigCRC(uint8_t *data, uint32_t len);
 
-/* Shared MAX_CONFIG_SIZE work buffer (pipe chunk / config read / parse). */
-uint8_t *opendisplay_config_buf(void);
+/* The sole config staging object. CONFIG_WRITE drives it directly; storage and parsing share its
+ * buffer so the 32 KB target never carries a second 2 KB blob. */
+struct od_config_asm *opendisplay_config_assembler(void);
 
 #endif

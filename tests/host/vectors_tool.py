@@ -47,6 +47,8 @@ CAPABILITIES = {
     "cap_power_latch",   # D-FF power-latch hardware present (0x52 POWER_OFF)
     "cap_pipe",          # 0x80-0x82 sliding-window PIPE compiled in
     "cap_nfc",           # 0x83 NFC endpoint implemented
+    "cap_config_4k",     # stored config capacity is the fleet-wide 4 KiB profile
+    "cap_rxq",           # target owns the shared application RX queue
 }
 
 # Which transport a frame arrives on. NOT cosmetic: shared dispatch applies a 244-byte ceiling to

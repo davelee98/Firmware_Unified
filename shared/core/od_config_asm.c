@@ -60,7 +60,8 @@ enum od_config_asm_result od_config_asm_start(struct od_config_asm *s, od_span_t
      *   - <= CONFIG_CHUNK_SIZE would have been a single frame, so it is nonsense chunked;
      *   - > the transferable ceiling cannot be delivered within MAX_CONFIG_CHUNKS, and a
      *     transfer that cannot succeed should be refused before any bytes are stored. */
-    if (total <= CONFIG_CHUNK_SIZE || total > OD_CONFIG_ASM_MAX_TRANSFERABLE) {
+    if (total <= CONFIG_CHUNK_SIZE || total > OD_CONFIG_ASM_MAX_TRANSFERABLE ||
+        total > OD_CONFIG_MAX_SIZE) {
         return OD_CONFIG_ASM_REJECTED;
     }
 
