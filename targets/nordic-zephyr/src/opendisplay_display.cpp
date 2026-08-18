@@ -540,6 +540,11 @@ static bool partial_prepare_panel_ram(void)
     display_power_set(false);
     return false;
   }
+  if ((s_epd.iFlags & BBEP_SPLIT_BUFFER) != 0u) {
+    od_log_error("split-panel transport is not hardware-qualified on this target");
+    display_power_set(false);
+    return false;
+  }
   bbepSetRotation(&s_epd, (int)d->rotation * 90);
   bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
   od_bbep_wake(&s_epd);
@@ -911,6 +916,11 @@ extern "C" bool opendisplay_display_boot_apply(void)
       display_power_set(false);
       continue;
     }
+    if ((s_epd.iFlags & BBEP_SPLIT_BUFFER) != 0u) {
+      od_log_error("boot display: split-panel transport is not hardware-qualified");
+      display_power_set(false);
+      return false;
+    }
     bbepSetRotation(&s_epd, (int)d->rotation * 90);
     bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin,
                d->clk_pin, 0);
@@ -977,6 +987,11 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
     od_log_info("dw start err setPanelType panel=%d", panel);
     display_power_set(false);
     return -3;
+  }
+  if ((s_epd.iFlags & BBEP_SPLIT_BUFFER) != 0u) {
+    od_log_info("dw start err split-panel transport is not hardware-qualified");
+    display_power_set(false);
+    return -4;
   }
   dw_init_mark("after setPanelType");
 

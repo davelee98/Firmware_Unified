@@ -167,7 +167,7 @@ vendored.
 | `shared/core/od_zlib_inflate.c` | — | canonical bit-serial streaming inflate |
 | `third_party/bb_epaper/` | — | vendored, with `silabs_efr32_io.inl` + `silabs_bbep_busy.inl` backends |
 | `third_party/segger_rtt/` | — | RTT log transport |
-| `qr/qrcode.c` | 529 | QR generation |
+| `third_party/qrcode/qrcode.c` | 529 | canonical QR encoder shared by all targets |
 
 ~20.9 k lines total including vendored third-party, of which the OpenDisplay-authored
 application is roughly 5.5 k.

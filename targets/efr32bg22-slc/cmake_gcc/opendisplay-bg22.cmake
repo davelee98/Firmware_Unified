@@ -258,7 +258,7 @@ add_library(slc OBJECT
     "../opendisplay_display.cpp"
     "../opendisplay_epd_map.c"
     "../opendisplay_led.c"
-    "../qr/qrcode.c"
+    "${OD_REPO_ROOT}/third_party/qrcode/qrcode.c"
     "../app_bm.c"
     "../autogen/gatt_db.c"
     "../autogen/sl_bluetooth.c"
@@ -308,6 +308,7 @@ target_include_directories(slc PUBLIC
    # so there is exactly one definition of each on the path and no per-source pinning is
    # needed. Re-importing those copies would reintroduce the hazard -- do not.
    ${OD_SHARED_INCLUDE_DIRS}
+   "${OD_REPO_ROOT}/third_party"
    "${SDK_PATH}/segger/systemview/SEGGER"
    "${OD_REPO_ROOT}/third_party/bb_epaper/src"
    "${CMAKE_CURRENT_LIST_DIR}/../panel"
@@ -382,6 +383,7 @@ target_compile_definitions(slc PUBLIC
     "OD_CAP_PIPE=0"
     "OD_CAP_PARTIAL=0"
     "OD_CAP_RXQ=0"
+    "OD_CAP_DUAL_CS=0"
     "OD_CONFIG_WITH_TOUCH=0"
     "OD_CONFIG_WITH_BUZZER=0"
     "OD_CONFIG_WITH_WIFI=0"

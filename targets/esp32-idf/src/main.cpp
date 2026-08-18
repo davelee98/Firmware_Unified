@@ -1079,6 +1079,11 @@ void fullSetupAfterConnection() {
         int panelType = mapEpd(globalConfig.displays[0].panel_ic_type);
         od_log_info("Panel type: %d", panelType);
         bbepSetPanelType(&bbep, panelType);
+        if ((bbep.iFlags & BBEP_SPLIT_BUFFER) != 0u) {
+            od_log_error("Split-panel transport is not hardware-qualified on this target");
+            memset(&bbep, 0, sizeof(BBEPDISP));
+            return;
+        }
         bbepSetRotation(&bbep, globalConfig.displays[0].rotation * 90);
     }
     od_log_info("=== Full setup completed ===");

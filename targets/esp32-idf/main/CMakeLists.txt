@@ -18,8 +18,9 @@ include(${CMAKE_CURRENT_LIST_DIR}/../../../shared/sources.cmake)
 file(GLOB OD_APP_SOURCES
     ${OD_SRC_DIR}/*.cpp
     ${OD_SRC_DIR}/*.c
-    ${OD_SRC_DIR}/qr/*.c
 )
+
+list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../../../third_party/qrcode/qrcode.c)
 
 # The FastEPD vendor adapter's storage, and millis() for FastEPD's call sites. PERMANENT --
 # see ../vendor/fastepd/SPI.h and the scoping block further down.
@@ -196,6 +197,7 @@ idf_component_register(
 # this build does not define.
 set(OD_FASTEPD_ADAPTER_DIR ${CMAKE_CURRENT_LIST_DIR}/../vendor/fastepd)
 set(OD_BBEP_INC_DIR        ${OD_TP_DIR}/bb_epaper/src)
+set(OD_QRCODE_INC_DIR      ${OD_TP_DIR})
 set(OD_FASTEPD_INC_DIR     ${OD_TP_DIR}/FastEPD/src)
 
 # Per-file grants. A file appears once, with every directory it needs -- the INCLUDE_DIRECTORIES
@@ -223,7 +225,10 @@ set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_fastepd.
 set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/../panel/od_panel_bbep.cpp
     TARGET_DIRECTORY ${COMPONENT_LIB}
     PROPERTIES INCLUDE_DIRECTORIES "${OD_BBEP_INC_DIR}")
-set_source_files_properties(${OD_SRC_DIR}/boot_screen.cpp ${OD_SRC_DIR}/main.cpp
+set_source_files_properties(${OD_SRC_DIR}/boot_screen.cpp
+    TARGET_DIRECTORY ${COMPONENT_LIB}
+    PROPERTIES INCLUDE_DIRECTORIES "${OD_BBEP_INC_DIR};${OD_QRCODE_INC_DIR}")
+set_source_files_properties(${OD_SRC_DIR}/main.cpp
                             ${CMAKE_CURRENT_LIST_DIR}/../panel/od_bbep.cpp
                             ${OD_BBEP_ALL_SOURCES}
     TARGET_DIRECTORY ${COMPONENT_LIB}

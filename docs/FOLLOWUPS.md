@@ -348,6 +348,43 @@ It is the shape `shared/` is designed to forbid: SHARED_API_DESIGN § `od_hal_ti
 reason — on the Silabs superloop there is no scheduler at all, so a blocking wait stops
 everything.
 
+### 3.9 FastEPD boot rendering and refresh can fail silently
+
+**Status:** open; explicitly deferred by owner decision, 2026-08-18. Do not add this to the
+boot-screen consolidation. **Evidence:** `verified` against the implemented FastEPD boot path.
+
+The shared boot renderer now has a fallible frame/plane/row contract, but the FastEPD adapter
+cannot currently honor it:
+
+- `targets/esp32-idf/src/boot_screen.cpp` calls `fastepd_boot_write_row()` and always returns
+  success from `od_boot_app_write_row()`;
+- `targets/esp32-idf/src/display_fastepd.cpp:fastepd_boot_write_row()` returns `void` and silently
+  drops a row when the framebuffer or source is null or the supplied pitch is short;
+- `fastepd_full_refresh_impl()` discards the `int` returned by `FASTEPD::fullUpdate()`;
+- `fastepd_wait_refresh()` returns only `!s_init_failed`, which reports the earlier initialization
+  result rather than the refresh that just ran; and
+- FastEPD's IT8951 ready/LUT wait helpers time out by breaking their loops and return `void`, so a
+  controller timeout is not surfaced even through `fullUpdate()`.
+
+The boot caller compounds the first two: `display_service.cpp` ignores the `bool` returned by
+`writeBootScreenWithQr()` on the FastEPD branch, then unconditionally runs `fastepd_full_update()`.
+A structurally incomplete framebuffer can therefore be refreshed and reported as successful.
+
+**Recommended later boundary:** make framebuffer construction verifiable without trying to
+detect whether `memcpy()` itself failed. Frame begin validates that the framebuffer exists and
+the configured/native dimensions agree. Each plane tracks the exact expected pitch and strictly
+sequential `y`; plane/frame end reject short, excess, duplicated or faulted output.
+`fastepd_boot_write_row()` returns `bool`, and the boot seam propagates it. Separately,
+`fastepd_full_update()` returns the vendor `fullUpdate()` status instead of discarding it. If real
+IT8951 timeout detection is required, the ready/LUT waits must also return status or an equivalent
+target-owned timed readiness check must be added.
+
+On any render or refresh failure, skip the physical refresh where it has not started, call
+`epdSessionForceOff()` (not only `pwrmgm(false)`), restore the watchdog phase to idle, and continue
+running the device. Do not retry or transmit a white fallback in this path: renderer contract
+failures are deterministic, and FastEPD's RAM framebuffer means a pre-refresh failure can leave
+the existing image on glass unchanged.
+
 ### 3.7 ~~`esp_generic.inl` is dead code carrying four patches~~ — resolved 2026-08-03
 
 Reverted to pristine upstream: byte-identical to `~/bb_epaper/esp_idf/esp_generic.inl`, 295

@@ -1501,6 +1501,11 @@ void initDisplay(){
         memset(&bbep, 0, sizeof(BBEPDISP));
         int panelType = mapEpd(globalConfig.displays[0].panel_ic_type);
         bbepSetPanelType(&bbep, panelType);
+        if ((bbep.iFlags & BBEP_SPLIT_BUFFER) != 0u) {
+            od_log_error("Split-panel transport is not hardware-qualified on this target");
+            pwrmgm(false);
+            return;
+        }
         int rotation = globalConfig.displays[0].rotation * 90;
         bbepSetRotation(&bbep, rotation);
         od_log_info("Height: %u", globalConfig.displays[0].pixel_height);
