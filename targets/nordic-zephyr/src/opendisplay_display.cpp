@@ -1,7 +1,7 @@
 #include "opendisplay_display.h"
 
+#include "od_color.h"
 #include "od_log.h"
-#include "opendisplay_display_color.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_constants.h"
@@ -273,9 +273,11 @@ static uint32_t parse_be_u32(const uint8_t *data)
          | (uint32_t)data[3];
 }
 
-static uint32_t calc_controller_plane_bytes(uint16_t width, uint16_t height)
+static uint32_t mono_plane_bytes(uint16_t width, uint16_t height)
 {
-  return ((uint32_t)(width + 7u) / 8u) * height;
+  od_color_geometry_t geometry;
+  return od_color_direct_geometry(OD_COLOR_SCHEME_MONO, width, height, &geometry) == OD_COLOR_OK
+      ? geometry.part_bytes[0] : 0u;
 }
 
 static void partial_cleanup(void)
@@ -594,11 +596,15 @@ extern "C" uint32_t opendisplay_display_total_bytes(void)
 extern "C" uint32_t opendisplay_display_expected_dw_bytes(void)
 {
   const struct DisplayConfig *d = display_cfg();
+  od_color_geometry_t geometry;
 
-  if (d == nullptr) {
+  if (d == nullptr
+      || od_color_direct_geometry(d->color_scheme, d->pixel_width, d->pixel_height,
+                                  &geometry) != OD_COLOR_OK
+      || geometry.layout == OD_COLOR_LAYOUT_SPLIT_HALVES) {
     return 0;
   }
-  return opendisplay_color_direct_write_total_bytes(d->pixel_width, d->pixel_height, d->color_scheme);
+  return geometry.total_bytes;
 }
 
 extern "C" uint32_t opendisplay_display_displayed_etag(void)
@@ -633,7 +639,7 @@ extern "C" bool opendisplay_display_partial_compressed(void)
 
 extern "C" uint32_t opendisplay_display_calc_plane_bytes(uint16_t width, uint16_t height)
 {
-  return calc_controller_plane_bytes(width, height);
+  return mono_plane_bytes(width, height);
 }
 
 extern "C" int opendisplay_display_partial_write_start(const uint8_t *payload, uint16_t payload_len,
@@ -685,7 +691,10 @@ extern "C" int opendisplay_display_partial_write_start(const uint8_t *payload, u
     }
     return -1;
   }
-  if (opendisplay_color_bits_per_pixel(d->color_scheme) != 1) {
+  od_color_geometry_t display_geometry;
+  if (od_color_direct_geometry(d->color_scheme, d->pixel_width, d->pixel_height,
+                               &display_geometry) != OD_COLOR_OK
+      || !display_geometry.partial_supported) {
     if (err_code_out != nullptr) {
       *err_code_out = OD_ERR_PARTIAL_UNSUPPORTED;
     }
@@ -705,7 +714,7 @@ extern "C" int opendisplay_display_partial_write_start(const uint8_t *payload, u
     return -1;
   }
 
-  uint32_t plane_bytes = calc_controller_plane_bytes(rect_w, rect_h);
+  uint32_t plane_bytes = mono_plane_bytes(rect_w, rect_h);
   uint32_t expected_size = plane_bytes * 2u;
   if (expected_size == 0u) {
     return -1;
@@ -798,7 +807,7 @@ static int dw_stream_raw_bytes(const uint8_t *payload, uint32_t payload_len)
    * chunk costs one comparison once the phase is already STREAM. */
   od_watchdog_app_phase(OD_WDT_PHASE_STREAM);
   uint32_t remaining = (s_written_bytes < s_total_bytes) ? (s_total_bytes - s_written_bytes) : 0u;
-  const bool bitplanes = opendisplay_color_is_bitplanes(s_color_scheme);
+  const bool bitplanes = s_plane_size != 0u;
   const uint8_t *p = payload;
   uint32_t left = payload_len;
   const uint32_t written_before = s_written_bytes;
@@ -970,6 +979,16 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
   }
   dw_init_mark("after cfg");
 
+  od_color_geometry_t geometry;
+  od_color_status_t color_status =
+    od_color_direct_geometry(d->color_scheme, d->pixel_width, d->pixel_height, &geometry);
+  if (color_status != OD_COLOR_OK || geometry.layout == OD_COLOR_LAYOUT_SPLIT_HALVES) {
+    od_log_info("dw start err unsupported color geometry cs=%u status=%d layout=%d",
+                (unsigned)d->color_scheme, (int)color_status,
+                color_status == OD_COLOR_OK ? (int)geometry.layout : -1);
+    return -2;
+  }
+
   int panel = opendisplay_map_epd(d->panel_ic_type);
   if (panel == EP_PANEL_UNDEFINED) {
     od_log_info("dw start err bad panel_ic_type=%u", (unsigned)d->panel_ic_type);
@@ -1007,17 +1026,11 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
   dw_init_mark("after setAddrWindow");
 
   s_color_scheme = d->color_scheme;
-  s_plane_size = 0;
+  s_plane_size = geometry.layout == OD_COLOR_LAYOUT_CONTROLLER_PLANES
+      ? geometry.part_bytes[0] : 0u;
   s_plane2_started = false;
-  if (opendisplay_color_is_bitplanes(s_color_scheme)) {
-    s_plane_size = opendisplay_color_bitplane_plane_bytes(d->pixel_width, d->pixel_height);
-  }
-  s_total_bytes =
-    opendisplay_color_direct_write_total_bytes(d->pixel_width, d->pixel_height, s_color_scheme);
-  {
-    int sp = opendisplay_color_start_plane(s_color_scheme);
-    bbepStartWrite(&s_epd, sp == 0 ? PLANE_0 : PLANE_1);
-  }
+  s_total_bytes = geometry.total_bytes;
+  bbepStartWrite(&s_epd, geometry.initial_plane == OD_COLOR_PLANE_0 ? PLANE_0 : PLANE_1);
   dw_init_mark("after startWrite");
 
   s_written_bytes = 0;
@@ -1057,10 +1070,10 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
     od_log_info("dw start note non-empty payload len=%u (ignored)", (unsigned)payload_len);
   }
 
-  od_log_info("dw start total=%lu B bpp=%d cs=%u panel=%u %ux%u bitplanes=%d%s",
-         (unsigned long)s_total_bytes, opendisplay_color_bits_per_pixel(s_color_scheme),
+  od_log_info("dw start total=%lu B bpp=%u cs=%u panel=%u %ux%u layout=%d%s",
+         (unsigned long)s_total_bytes, (unsigned)geometry.bits_per_pixel,
          (unsigned)s_color_scheme, (unsigned)d->panel_ic_type, (unsigned)d->pixel_width,
-         (unsigned)d->pixel_height, (int)opendisplay_color_is_bitplanes(s_color_scheme),
+         (unsigned)d->pixel_height, (int)geometry.layout,
          s_dw_compressed ? " zlib" : "");
   return 0;
 }
@@ -1257,6 +1270,7 @@ extern "C" int opendisplay_display_pipe_partial_arm(uint8_t flags, uint32_t old_
 {
   const struct DisplayConfig *d = display_cfg();
   uint32_t plane_bytes;
+  od_color_geometry_t display_geometry;
 
   if (err_code_out != nullptr) {
     *err_code_out = OD_ERR_PIPE_START_BAD_HEADER;
@@ -1277,7 +1291,9 @@ extern "C" int opendisplay_display_pipe_partial_arm(uint8_t flags, uint32_t old_
     return -1;
   }
   if (d->partial_update_support == 0u
-      || opendisplay_color_bits_per_pixel(d->color_scheme) != 1) {
+      || od_color_direct_geometry(d->color_scheme, d->pixel_width, d->pixel_height,
+                                  &display_geometry) != OD_COLOR_OK
+      || !display_geometry.partial_supported) {
     s_displayed_etag = 0;
     if (err_code_out != nullptr) {
       *err_code_out = OD_ERR_PIPE_START_PARTIAL_UNSUPPORTED;
@@ -1299,7 +1315,7 @@ extern "C" int opendisplay_display_pipe_partial_arm(uint8_t flags, uint32_t old_
     }
     return -1;
   }
-  plane_bytes = calc_controller_plane_bytes(w, h);
+  plane_bytes = mono_plane_bytes(w, h);
   if (plane_bytes == 0u || total_size != plane_bytes * 2u) {
     s_displayed_etag = 0;
     if (err_code_out != nullptr) {

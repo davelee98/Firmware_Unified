@@ -1,5 +1,6 @@
 #include "od_boot_app.h"
 #include "od_boot_screen.h"
+#include "od_color.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -193,6 +194,11 @@ int main(void)
   assert(g_begin_frames == 1 && g_begin_planes == 1 && g_writes == 128);
   assert(g_end_planes == 1 && g_end_frames == 1);
   assert(g_hash == 0xBA916E4Cu);
+
+  reset_fake();
+  make_case(&cfg, &sec, 296, 128, OD_COLOR_SCHEME_GRAY8);
+  assert(!render(&cfg, &sec, row, sizeof(row), qr, sizeof(qr)));
+  assert(g_begin_frames == 0 && g_begin_planes == 0 && g_writes == 0);
 
   reset_fake();
   make_case(&cfg, &sec, 2048, 8, OD_COLOR_SCHEME_MONO);

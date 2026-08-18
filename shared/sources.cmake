@@ -78,6 +78,9 @@
 #   core/od_zlib_inflate.c portable streaming zlib inflate     (LANDED — one bounded static
 #                         window, shared by all three target families; ESP32 may remap the API
 #                         to its ROM-backed tinfl adapter without changing the wire contract.)
+#   core/od_color.c       direct-stream color geometry          (LANDED — stateless checked
+#                         geometry shared by all three target families; GRAY8 value 9 remains an
+#                         explicitly unsupported local placeholder with no wire representation.)
 
 get_filename_component(OD_SHARED_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
 
@@ -109,6 +112,7 @@ get_filename_component(OD_SHARED_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
 
 set(OD_SHARED_SOURCES_PURE
     "${CMAKE_CURRENT_LIST_DIR}/core/od_boot_payload.c"
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_color.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config_asm.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_config_tlv.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_advert.c"

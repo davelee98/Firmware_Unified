@@ -71,14 +71,13 @@ int od_boot_app_end_frame(void)
 
 int od_boot_app_bits_per_pixel(uint8_t color_scheme)
 {
-  (void)color_scheme;
-  return getBitsPerPixel();
+  return displayBootBitsPerPixel(color_scheme);
 }
 
 int od_boot_app_default_plane(uint8_t color_scheme)
 {
-  (void)color_scheme;
-  return getplane() == PLANE_0 ? OD_BOOT_PLANE_PRIMARY : OD_BOOT_PLANE_SECOND;
+  return displayBootPlane(color_scheme) == PLANE_0
+      ? OD_BOOT_PLANE_PRIMARY : OD_BOOT_PLANE_SECOND;
 }
 
 bool od_boot_app_direct_2bpp(void)

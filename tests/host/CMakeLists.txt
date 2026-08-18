@@ -87,6 +87,10 @@ add_executable(od_boot_payload_test boot_payload_test.c)
 target_link_libraries(od_boot_payload_test od_shared)
 add_test(NAME boot_payload COMMAND od_boot_payload_test)
 
+add_executable(od_color_test color_test.c)
+target_link_libraries(od_color_test od_shared)
+add_test(NAME color COMMAND od_color_test)
+
 add_executable(od_boot_screen_test boot_screen_test.c
     ${CMAKE_CURRENT_LIST_DIR}/../../third_party/qrcode/qrcode.c)
 target_link_libraries(od_boot_screen_test od_shared)

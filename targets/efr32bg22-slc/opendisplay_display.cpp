@@ -1,5 +1,5 @@
 #include "opendisplay_display.h"
-#include "opendisplay_display_color.h"
+#include "od_color.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_constants.h"
@@ -231,6 +231,41 @@ static uint16_t text_width_px(const char *s, int scale)
   return (uint16_t)(strlen(s) * (size_t)(6 * scale));
 }
 
+/* Boot rendering is intentionally target-local. It is not direct-stream authority and it
+ * retains the BG22 renderer's fixed 256-byte row workspace and silent failure policy. */
+static int boot_bits_per_pixel(uint8_t color_scheme)
+{
+  switch (color_scheme) {
+    case OD_COLOR_SCHEME_BWGBRY:
+    case OD_COLOR_SCHEME_BWGBRY_SPLIT:
+    case OD_COLOR_SCHEME_GRAY16:
+      return 4;
+    case OD_COLOR_SCHEME_BWRY:
+    case OD_COLOR_SCHEME_GRAY4:
+      return 2;
+    case OD_COLOR_SCHEME_MONO:
+    case OD_COLOR_SCHEME_BWR:
+    case OD_COLOR_SCHEME_BWY:
+    case OD_COLOR_SCHEME_SEVEN_COLOR:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+static int boot_start_plane(uint8_t color_scheme)
+{
+  switch (color_scheme) {
+    case OD_COLOR_SCHEME_MONO:
+    case OD_COLOR_SCHEME_BWR:
+    case OD_COLOR_SCHEME_BWY:
+    case OD_COLOR_SCHEME_GRAY16:
+      return PLANE_0;
+    default:
+      return PLANE_1;
+  }
+}
+
 static int boot_line_step(int scale)
 {
   return scale * 10;
@@ -414,7 +449,10 @@ static bool render_boot_screen(BBEPDISP &epd, const struct GlobalConfig *cfg)
     static uint8_t s_boot_row[256];
     bool is3clr = (epd.iFlags & BBEP_3COLOR) != 0;
     bool is_gray4 = dc->color_scheme == OD_COLOR_SCHEME_GRAY4;
-    int bits_per_pixel = opendisplay_color_bits_per_pixel(dc->color_scheme);
+    int bits_per_pixel = boot_bits_per_pixel(dc->color_scheme);
+    if (bits_per_pixel == 0) {
+      return false;
+    }
     int pitch = ((int)w * bits_per_pixel + 7) / 8;
     int plane_pitch = ((int)w + 7) / 8;
     size_t workspace = (size_t)pitch;
@@ -470,7 +508,7 @@ static bool render_boot_screen(BBEPDISP &epd, const struct GlobalConfig *cfg)
     for (int pass = 0; pass < render_passes; pass++) {
       bbepSetAddrWindow(&epd, 0, 0, (int)w, (int)h);
       bbepStartWrite(&epd, is_gray4 ? (pass == 0 ? PLANE_0 : PLANE_1)
-                                    : opendisplay_color_start_plane(dc->color_scheme));
+                                    : boot_start_plane(dc->color_scheme));
 
       for (y = 0; y < (int)h; y++) {
         memset(s_boot_row, white_byte, (size_t)pitch);
@@ -587,7 +625,7 @@ static void dw_log_progress(void)
 static int dw_stream_raw_bytes(const uint8_t *payload, uint32_t payload_len)
 {
   uint32_t remaining = (s_written_bytes < s_total_bytes) ? (s_total_bytes - s_written_bytes) : 0u;
-  const bool bitplanes = opendisplay_color_is_bitplanes(s_color_scheme);
+  const bool bitplanes = s_plane_size != 0u;
   const uint8_t *p = payload;
   uint32_t left = payload_len;
   const uint32_t written_before = s_written_bytes;
@@ -716,6 +754,16 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
   }
   dw_init_mark("after cfg");
 
+  od_color_geometry_t geometry;
+  od_color_status_t color_status =
+    od_color_direct_geometry(d->color_scheme, d->pixel_width, d->pixel_height, &geometry);
+  if (color_status != OD_COLOR_OK || geometry.layout == OD_COLOR_LAYOUT_SPLIT_HALVES) {
+    printf("[OD] dw start err unsupported color geometry cs=%u status=%d layout=%d\r\n",
+           (unsigned)d->color_scheme, (int)color_status,
+           color_status == OD_COLOR_OK ? (int)geometry.layout : -1);
+    return -2;
+  }
+
   int panel = opendisplay_map_epd(d->panel_ic_type);
   if (panel == EP_PANEL_UNDEFINED) {
     printf("[OD] dw start err bad panel_ic_type=%u\r\n", (unsigned)d->panel_ic_type);
@@ -750,17 +798,11 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
   dw_init_mark("after setAddrWindow");
 
   s_color_scheme = d->color_scheme;
-  s_plane_size = 0;
+  s_plane_size = geometry.layout == OD_COLOR_LAYOUT_CONTROLLER_PLANES
+      ? geometry.part_bytes[0] : 0u;
   s_plane2_started = false;
-  if (opendisplay_color_is_bitplanes(s_color_scheme)) {
-    s_plane_size = opendisplay_color_bitplane_plane_bytes(d->pixel_width, d->pixel_height);
-  }
-  s_total_bytes =
-    opendisplay_color_direct_write_total_bytes(d->pixel_width, d->pixel_height, s_color_scheme);
-  {
-    int sp = opendisplay_color_start_plane(s_color_scheme);
-    bbepStartWrite(&s_epd, sp == 0 ? PLANE_0 : PLANE_1);
-  }
+  s_total_bytes = geometry.total_bytes;
+  bbepStartWrite(&s_epd, geometry.initial_plane == OD_COLOR_PLANE_0 ? PLANE_0 : PLANE_1);
   dw_init_mark("after startWrite");
 
   s_written_bytes = 0;
@@ -801,10 +843,10 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
     printf("[OD] dw start note non-empty payload len=%u (ignored)\r\n", (unsigned)payload_len);
   }
 
-  printf("[OD] dw start total=%lu B bpp=%d cs=%u panel=%u %ux%u bitplanes=%d%s\r\n",
-         (unsigned long)s_total_bytes, opendisplay_color_bits_per_pixel(s_color_scheme),
+  printf("[OD] dw start total=%lu B bpp=%u cs=%u panel=%u %ux%u layout=%d%s\r\n",
+         (unsigned long)s_total_bytes, (unsigned)geometry.bits_per_pixel,
          (unsigned)s_color_scheme, (unsigned)d->panel_ic_type, (unsigned)d->pixel_width,
-         (unsigned)d->pixel_height, (int)opendisplay_color_is_bitplanes(s_color_scheme),
+         (unsigned)d->pixel_height, (int)geometry.layout,
          s_dw_compressed ? " zlib" : "");
   return 0;
 }

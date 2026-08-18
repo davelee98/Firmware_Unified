@@ -103,7 +103,7 @@ void displayReleaseSpiBus(void);
 // frame's own reply context at START. A disconnect must only tear down a session
 // its own transport owns.
 od_origin_t transferSessionOrigin(void);
-int getplane();
-int getBitsPerPixel();
+int displayBootPlane(uint8_t colorScheme);
+int displayBootBitsPerPixel(uint8_t colorScheme);
 
 #endif

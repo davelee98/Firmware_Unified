@@ -10,6 +10,7 @@
 #include "structs.h"
 /* shared/core: the 16-byte MSD encoding. This target no longer assembles those bytes. */
 #include "od_advert.h"
+#include "od_color.h"
 /* OD-PORT: two panel IC values this file compares against are missing from
  * shared/protocol/ -- they were added to Firmware's VENDORED copy of the wire contract
  * and never propagated to canonical. See protocol_pending.h; it is a debt with a
@@ -474,7 +475,7 @@ static bool partial_write_to_panel(int refreshMode);
 static bool partial_write_stream_bytes(uint8_t* data, uint32_t len);
 static bool zlib_stream_to_direct_write(const uint8_t* data, uint32_t len, bool final);
 static bool zlib_stream_to_partial_write(const uint8_t* data, uint32_t len, bool final);
-static uint32_t calc_controller_plane_bytes(uint16_t width, uint16_t height);
+static uint32_t mono_plane_bytes(uint16_t width, uint16_t height);
 static uint32_t parse_be_u32(const uint8_t* data);
 static void send_direct_write_nack(const od_cmd_ctx_t *ctx, uint8_t opcode, uint8_t error, bool cleanupState);
 static PartialStreamContext partialCtx = {};
@@ -482,7 +483,7 @@ static PartialStreamContext partialCtx = {};
 // Direct-write session-setup helpers (shared by legacy 0x70 START and PIPE 0x80 START)
 // and the shared END/refresh tail (shared by legacy 0x72 END, PIPE 0x82 END, and
 // both auto-complete paths). Declared here; defined below near the direct-write handlers.
-static void directWriteComputeGeometry(bool compressed);
+static bool directWriteComputeGeometry(bool compressed);
 static void directWriteActivatePanel(void);
 static od_cmd_result_t directWriteFinishAndRefresh(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len, uint8_t endOpcode);
 static bool imageWriteFramesMayStillArrive(void);
@@ -1468,8 +1469,13 @@ void initDisplay(){
     if(globalConfig.display_count > 0){
 #if defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) {
+        int bitsPerPixel = displayBootBitsPerPixel(globalConfig.displays[0].color_scheme);
+        if (bitsPerPixel == 0) {
+            od_log_warn("Display: unsupported boot color scheme %u",
+                        (unsigned)globalConfig.displays[0].color_scheme);
+            return;
+        }
         pwrmgm(true);
-        int bitsPerPixel = getBitsPerPixel();
         od_log_info("Display: FastEPD (panel_ic %u, %ux%u, %d bpp)",
                     globalConfig.displays[0].panel_ic_type,
                     globalConfig.displays[0].pixel_width, globalConfig.displays[0].pixel_height,
@@ -1484,7 +1490,11 @@ void initDisplay(){
         od_log_info("Height: %u", globalConfig.displays[0].pixel_height);
         od_log_info("Width: %u", globalConfig.displays[0].pixel_width);
         if (! (globalConfig.displays[0].transmission_modes & OD_TRANSMISSION_MODE_CLEAR_ON_BOOT)){
-            writeBootScreenWithQr();
+            if (!writeBootScreenWithQr()) {
+                od_log_warn("FastEPD boot screen render failed");
+                epdSessionForceOff();
+                return;
+            }
             od_log_info("EPD refresh: FULL (boot, FastEPD)");
             touchSuspendForEpdRefresh();
             fastepd_full_update();
@@ -1543,27 +1553,27 @@ void initDisplay(){
 }
 
 
-int getplane() {
-    uint8_t colorScheme = globalConfig.displays[0].color_scheme;
+int displayBootPlane(uint8_t colorScheme) {
     if (colorScheme == OD_COLOR_SCHEME_MONO || colorScheme == OD_COLOR_SCHEME_GRAY16) return PLANE_0;
     if (colorScheme == OD_COLOR_SCHEME_BWR || colorScheme == OD_COLOR_SCHEME_BWY) return PLANE_0;
-    if (colorScheme == OD_COLOR_SCHEME_GRAY4) return PLANE_1;
     return PLANE_1;
 }
 
-int getBitsPerPixel() {
+int displayBootBitsPerPixel(uint8_t colorScheme) {
+    if (colorScheme == OD_COLOR_SCHEME_GRAY8) return 0;
 #if defined(OPENDISPLAY_FASTEPD)
     if (globalConfig.display_count > 0 &&
         globalConfig.displays[0].panel_ic_type == OD_PANEL_IC_ED103TC2_1872X1404_4GRAY) {
         return 4;
     }
 #endif
-    if (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_BWGBRY ||
-        globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_BWGBRY_SPLIT) return 4;
-    if (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_GRAY16) return 4;
-    if (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_BWRY) return 2;
-    if (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_GRAY4) return 2;
-    return 1;
+    if (colorScheme == OD_COLOR_SCHEME_BWGBRY ||
+        colorScheme == OD_COLOR_SCHEME_BWGBRY_SPLIT ||
+        colorScheme == OD_COLOR_SCHEME_GRAY16) return 4;
+    if (colorScheme == OD_COLOR_SCHEME_BWRY || colorScheme == OD_COLOR_SCHEME_GRAY4) return 2;
+    if (colorScheme == OD_COLOR_SCHEME_MONO || colorScheme == OD_COLOR_SCHEME_BWR ||
+        colorScheme == OD_COLOR_SCHEME_BWY || colorScheme == OD_COLOR_SCHEME_SEVEN_COLOR) return 1;
+    return 0;
 }
 
 static float readBatteryVoltageUncached() {
@@ -1802,16 +1812,6 @@ bool handleDirectWriteCompressedData(uint8_t* data, uint16_t len) {
     return true;
 }
 
-// True when the active display uses the bb_epaper 4-gray scheme (two 1-bit
-// controller planes). The FastEPD IT8951 path has its own 4bpp handling.
-static inline bool directWriteIsGray4(void) {
-    return (globalConfig.displays[0].color_scheme == OD_COLOR_SCHEME_GRAY4)
-#if defined(OPENDISPLAY_FASTEPD)
-        && !fastepd_driver_used()
-#endif
-        ;
-}
-
 // Two-plane uploads (4-gray and BWR/BWY) arrive as two pre-split, row-padded 1-bit
 // controller planes concatenated (plane0 then plane1). 4-gray is already gray-coded
 // host-side (py-opendisplay applies the panel's gray LUT, matching bbepSetPixel4Gray:
@@ -1821,8 +1821,11 @@ static inline bool directWriteIsGray4(void) {
 // boundary - no on-device de-interleave or 2bpp frame buffer. directWriteBytesWritten
 // is the running total across both planes, so the compressed and uncompressed paths
 // share this one plane-split implementation.
-static void streamGray4Bytes(const uint8_t* buf, uint32_t len) {
-    const uint32_t planeBytes = (((uint32_t)directWriteWidth + 7u) / 8u) * directWriteHeight;
+static uint32_t directWritePlaneBytes;
+static od_color_plane_t directWriteInitialPlane;
+
+static void streamControllerPlaneBytes(const uint8_t* buf, uint32_t len) {
+    const uint32_t planeBytes = directWritePlaneBytes;
     uint32_t off = 0;
     while (off < len && directWriteBytesWritten < 2u * planeBytes) {
         if (directWriteBytesWritten == 0u) {
@@ -1861,6 +1864,8 @@ void cleanupDirectWriteState(bool refreshDisplay) {
     directWriteTotalBytes = 0;
     directWriteRefreshMode = 0;
     directWriteStartTime = 0;
+    directWritePlaneBytes = 0;
+    directWriteInitialPlane = OD_COLOR_PLANE_NONE;
     // Panel power acts only while a transfer/refresh is actually in flight
     // (PWR_ACTIVE). refreshDisplay==true is a terminal teardown (disconnect,
     // 15-min timeout, mid-stream error) -> power fully off. refreshDisplay==false
@@ -1876,34 +1881,58 @@ void cleanupDirectWriteState(bool refreshDisplay) {
     }
 }
 
+/* Resolve the one target-owned direct format exception. ED103TC2 4-gray uses a FastEPD
+ * 4-bpp framebuffer regardless of its legacy scheme metadata. Reserved Gray8 is explicitly
+ * excluded: this adapter does not define an eight-gray wire format. */
+static od_color_status_t directWriteResolveGeometry(od_color_geometry_t* geometry) {
+    const struct DisplayConfig& d = globalConfig.displays[0];
+    if (d.color_scheme == OD_COLOR_SCHEME_GRAY8) {
+        memset(geometry, 0, sizeof(*geometry));
+        return OD_COLOR_UNSUPPORTED;
+    }
+#if defined(OPENDISPLAY_FASTEPD)
+    if (fastepd_driver_used() &&
+        d.panel_ic_type == OD_PANEL_IC_ED103TC2_1872X1404_4GRAY) {
+        memset(geometry, 0, sizeof(*geometry));
+        if (d.pixel_width == 0u || d.pixel_height == 0u) return OD_COLOR_BAD_GEOMETRY;
+        const uint64_t rowBytes = ((uint64_t)d.pixel_width + 1u) / 2u;
+        const uint64_t totalBytes = rowBytes * d.pixel_height;
+        if (totalBytes > UINT32_MAX) return OD_COLOR_OVERFLOW;
+        geometry->layout = OD_COLOR_LAYOUT_PACKED_ROWS;
+        geometry->bits_per_pixel = 4u;
+        geometry->part_count = 1u;
+        geometry->initial_plane = OD_COLOR_PLANE_0;
+        geometry->part_width[0] = d.pixel_width;
+        geometry->row_bytes[0] = (uint32_t)rowBytes;
+        geometry->part_bytes[0] = (uint32_t)totalBytes;
+        geometry->total_bytes = (uint32_t)totalBytes;
+        return OD_COLOR_OK;
+    }
+#endif
+    return od_color_direct_geometry(d.color_scheme, d.pixel_width, d.pixel_height, geometry);
+}
+
 // Computes the panel geometry and total controller byte count for a direct-write
 // session and records the compressed flag. Sets directWrite{Compressed,Bitplanes,
 // Plane2,Width,Height,TotalBytes}. No panel I/O, no acks. Shared by 0x70 and 0x80.
-static void directWriteComputeGeometry(bool compressed) {
-    uint8_t colorScheme = globalConfig.displays[0].color_scheme;
-    directWriteBitplanes = (colorScheme == OD_COLOR_SCHEME_BWR || colorScheme == OD_COLOR_SCHEME_BWY);
+static bool directWriteComputeGeometry(bool compressed) {
+    od_color_geometry_t geometry;
+    const od_color_status_t status = directWriteResolveGeometry(&geometry);
+    if (status != OD_COLOR_OK || geometry.layout == OD_COLOR_LAYOUT_SPLIT_HALVES) {
+        od_log_warn("Direct write unsupported color geometry cs=%u status=%d layout=%d",
+                    (unsigned)globalConfig.displays[0].color_scheme, (int)status,
+                    status == OD_COLOR_OK ? (int)geometry.layout : -1);
+        return false;
+    }
+    directWriteBitplanes = geometry.layout == OD_COLOR_LAYOUT_CONTROLLER_PLANES;
+    directWritePlaneBytes = directWriteBitplanes ? geometry.part_bytes[0] : 0u;
+    directWriteInitialPlane = geometry.initial_plane;
     directWritePlane2 = false;
     directWriteCompressed = compressed;
     directWriteWidth = globalConfig.displays[0].pixel_width;
     directWriteHeight = globalConfig.displays[0].pixel_height;
-    if (directWriteBitplanes) directWriteTotalBytes = 2u * (((uint32_t)directWriteWidth + 7u) / 8u) * directWriteHeight;
-    else {
-        // Panel RAM is row-padded: each row occupies ceil(w / pixelsPerByte) bytes, and the
-        // Python sender row-pads every plane (np.packbits(axis=1)). Size FLAT and we under-count
-        // on width-not-divisible-by-8 panels (e.g. 122-wide EP213), auto-completing before the
-        // bottom rows are written. Size row-padded to match sender + the gray4/bitplane paths.
-        uint32_t w = (uint32_t)directWriteWidth;
-        uint32_t h = (uint32_t)directWriteHeight;
-        int bitsPerPixel = getBitsPerPixel();
-        if (bitsPerPixel == 4) directWriteTotalBytes = ((w + 1u) / 2u) * h;       // ceil(w/2) bytes/row
-        else if (bitsPerPixel == 2) directWriteTotalBytes = ((w + 3u) / 4u) * h;  // ceil(w/4) bytes/row
-        else directWriteTotalBytes = calc_controller_plane_bytes(directWriteWidth, directWriteHeight); // ceil(w/8) bytes/row
-    }
-    // 4-gray arrives as two concatenated 1bpp planes (plane0 ++ plane1), streamed to
-    // PLANE_0/PLANE_1. Both compressed and uncompressed transports feed bytes through
-    // streamGray4Bytes as chunks arrive.
-    const bool gray4 = directWriteIsGray4();
-    if (gray4) directWriteTotalBytes = 2u * (((uint32_t)directWriteWidth + 7u) / 8u) * directWriteHeight;
+    directWriteTotalBytes = geometry.total_bytes;
+    return true;
 }
 
 // Powers/initializes the panel, opens the full address window, and (compressed)
@@ -1927,7 +1956,8 @@ static void directWriteActivatePanel(void) {
 #endif
     {
         bbepSetAddrWindow(&bbep, 0, 0, globalConfig.displays[0].pixel_width, globalConfig.displays[0].pixel_height);
-        bbepStartWrite(&bbep, directWriteBitplanes ? PLANE_0 : getplane());
+        bbepStartWrite(&bbep, directWriteInitialPlane == OD_COLOR_PLANE_0
+                                ? PLANE_0 : PLANE_1);
     }
     if (directWriteCompressed) {
         od_zlib_stream_reset(directWriteDecompressedTotal);
@@ -1967,6 +1997,12 @@ od_cmd_result_t handleDirectWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, u
     }
     resetPipeWriteState();
     imageWriteLogReset();
+    bool compressed = (len >= 4);
+    if (!directWriteComputeGeometry(compressed)) {
+        uint8_t errorResponse[] = {RESP_NACK, RESP_DIRECT_WRITE_START_ACK};
+        (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
+        return OD_CMD_NACK;
+    }
     touchSuspendForEpdRefresh();
     directWriteTouchSuspended = true;
 #if defined(OPENDISPLAY_FASTEPD)
@@ -1974,8 +2010,6 @@ od_cmd_result_t handleDirectWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, u
         fastepd_prepare_hardware();
     }
 #endif
-    bool compressed = (len >= 4);
-    directWriteComputeGeometry(compressed);
     if (compressed) {
         memcpy(&directWriteDecompressedTotal, data, 4);
         if (directWriteDecompressedTotal != directWriteTotalBytes) {
@@ -2036,7 +2070,9 @@ od_cmd_result_t handlePartialWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, 
 
     uint16_t dispW = globalConfig.displays[0].pixel_width;
     uint16_t dispH = globalConfig.displays[0].pixel_height;
-    if (getBitsPerPixel() != 1) {
+    od_color_geometry_t displayGeometry;
+    if (directWriteResolveGeometry(&displayGeometry) != OD_COLOR_OK ||
+        !displayGeometry.partial_supported) {
         // bb_epaper partial refresh support is effectively non-existent for
         // 2bpp+ panels, and physical panels may not support that mode either.
         // This protocol uses two 1bpp controller planes as old/new image memory.
@@ -2056,7 +2092,7 @@ od_cmd_result_t handlePartialWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, 
         return OD_CMD_NACK;
     }
 
-    uint32_t planeBytes = calc_controller_plane_bytes(rectW, rectH);
+    uint32_t planeBytes = mono_plane_bytes(rectW, rectH);
     uint32_t expectedLogicalSize = planeBytes * 2u;
 
     // TODO(protocol): 0x76 (partial-write) has no RESP_* mirror in the canonical
@@ -2145,8 +2181,8 @@ od_cmd_result_t handleDirectWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, ui
             directWriteBytesWritten += bytesToWrite;
         } else
 #endif
-        if (directWriteIsGray4() || directWriteBitplanes) {
-            streamGray4Bytes(data, bytesToWrite);  // advances directWriteBytesWritten, splits planes
+        if (directWriteBitplanes) {
+            streamControllerPlaneBytes(data, bytesToWrite);
         } else {
             directWriteSinkBytes(data, bytesToWrite);
         }
@@ -2233,8 +2269,7 @@ static od_cmd_result_t directWriteFinishAndRefresh(const od_cmd_ctx_t *ctx, uint
         (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
         return OD_CMD_NACK;
     }
-    const bool gray4 = directWriteIsGray4();
-    if (gray4 || directWriteBitplanes) {
+    if (directWriteBitplanes) {
         // Both planes must be present before refresh. Compressed and uncompressed
         // paths stream live as chunks, so confirm the full two-plane payload
         // arrived before refreshing stale RAM or committing an etag.
@@ -2337,7 +2372,7 @@ static od_cmd_result_t directWriteFinishAndRefresh(const od_cmd_ctx_t *ctx, uint
 // extension appended after total_size (payload len 22 instead of 10):
 //   [old_etag:4 LE][x:2][y:2][w:2][h:2]   (LE, unlike 0x76's big-endian layout).
 // total_size is the decompressed logical stream size = plane_size*2 where
-// plane_size = calc_controller_plane_bytes(w,h) (old plane then new plane, the
+// plane_size = the shared MONO row geometry (old plane then new plane, the
 // same stream 0x76 uses). Geometry/etag are validated exactly like the 0x76
 // handler; the ACK sets response flags bit1 to confirm partial acceptance. DATA
 // (0x0081) is routed to partialCtx (two 1bpp controller planes) instead of the
@@ -2542,8 +2577,8 @@ static bool pipeConsumePayload(uint8_t* data, uint16_t len) {
             directWriteBytesWritten += toWrite;
         } else
 #endif
-        if (directWriteIsGray4() || directWriteBitplanes) {
-            streamGray4Bytes(data, toWrite);  // advances directWriteBytesWritten, splits planes
+        if (directWriteBitplanes) {
+            streamControllerPlaneBytes(data, toWrite);
         } else {
             directWriteSinkBytes(data, toWrite);
         }
@@ -2604,7 +2639,9 @@ od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uin
         uint16_t dispH = globalConfig.displays[0].pixel_height;
         // 5: partial uses two 1bpp planes (old+new). FastEPD IT8951 accepts that stream
         // and applies a row-band update; 2bpp+ remains unsupported.
-        if (getBitsPerPixel() != 1) {
+        od_color_geometry_t displayGeometry;
+        if (directWriteResolveGeometry(&displayGeometry) != OD_COLOR_OK ||
+            !displayGeometry.partial_supported) {
             displayed_etag = 0; sendPipeStartNack(ctx, OD_ERR_PIPE_START_PARTIAL_UNSUPPORTED); return OD_CMD_NACK;
         }
         // 6: etag gate — nonzero and must match what is currently on the panel.
@@ -2623,15 +2660,17 @@ od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uin
     // so a NACK here needs no teardown. Partial: plane_size*2 (flat old+new planes, like
     // 0x76). Full: directWriteComputeGeometry's decompressed panel byte total.
     if (partial) {
-        planeBytes = calc_controller_plane_bytes(rectW, rectH);
+        planeBytes = mono_plane_bytes(rectW, rectH);
         if (planeBytes == 0 || total_size != planeBytes * 2u) {
             // Plan 1.2: every partial-request NACK at steps 5-8 clears the etag
             // (parity with send_direct_write_nack).
             displayed_etag = 0; sendPipeStartNack(ctx, OD_ERR_PIPE_START_SIZE_MISMATCH); return OD_CMD_NACK;
         }
     } else {
-        directWriteComputeGeometry(compressed);
-        if (total_size != directWriteTotalBytes) { sendPipeStartNack(ctx, OD_ERR_PIPE_START_SIZE_MISMATCH); return OD_CMD_NACK; }
+        if (!directWriteComputeGeometry(compressed) || total_size != directWriteTotalBytes) {
+            sendPipeStartNack(ctx, OD_ERR_PIPE_START_SIZE_MISMATCH);
+            return OD_CMD_NACK;
+        }
     }
 
     // Effective values (min-rule, plan 1.1). Floors at 1; N <= W; frame <= 244.
@@ -3118,9 +3157,9 @@ static bool zlib_stream_to_direct_write(const uint8_t* data, uint32_t len, bool 
                 directWriteBytesWritten += (uint32_t)bytesOut;
             } else
 #endif
-            if (directWriteIsGray4() || directWriteBitplanes) {
+            if (directWriteBitplanes) {
                 uint32_t before = directWriteBytesWritten;
-                streamGray4Bytes(decompressionChunk, (uint32_t)bytesOut);
+                streamControllerPlaneBytes(decompressionChunk, (uint32_t)bytesOut);
                 if (directWriteBytesWritten - before != (uint32_t)bytesOut) {
                     return false;
                 }
@@ -3274,8 +3313,10 @@ static bool partial_write_to_panel(int refreshMode) {
     return refreshSuccess;
 }
 
-static uint32_t calc_controller_plane_bytes(uint16_t width, uint16_t height) {
-    return ((uint32_t)(width + 7u) / 8u) * height;
+static uint32_t mono_plane_bytes(uint16_t width, uint16_t height) {
+    od_color_geometry_t geometry;
+    return od_color_direct_geometry(OD_COLOR_SCHEME_MONO, width, height, &geometry) == OD_COLOR_OK
+        ? geometry.part_bytes[0] : 0u;
 }
 
 static uint32_t parse_be_u32(const uint8_t* data) {
