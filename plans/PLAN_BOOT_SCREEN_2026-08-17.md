@@ -14,6 +14,22 @@ transcribed. Two of the survey's numbers came out differently and are corrected 
 
 ## 1. Outcome
 
+**The base is `../Firmware/src/boot_screen.cpp`, the live sibling repo — not the `esp32-idf`
+snapshot.** Owner decision, 2026-08-17, and it is CLAUDE.md's own rule rather than a new one:
+*"THE AUTHORITY IS `../Firmware/`, THE SIBLING REPO — NOT `targets/esp32-idf/src/`. That directory
+is a snapshot taken at import, and upstream keeps moving."* Nordic conforms to that base, or its
+difference is **ported into** it and justifies itself in writing.
+
+Extracting from the sibling rather than the snapshot has three consequences worth stating, because
+each removes work the earlier draft had scheduled:
+
+- the 122-line snapshot drift is **carried in by construction**, so B2 stops being a port and
+  becomes a property of the base;
+- the split-panel half-plane loop **comes with it** (§ 2.3), so the seam is validated against real
+  emitting code rather than designed speculatively;
+- `esp32-idf`'s swap becomes a genuine behaviour change to verify, not a no-op refactor — it gains
+  everything upstream landed since the import.
+
 `esp32-idf` and `nordic-zephyr` render the boot screen from one shared source. Four recorded
 defects close, two of them user-visible on shipped hardware. The renderer becomes the first
 subsystem in this repo with a **golden-output host test**, which is the real prize: it is a pure
@@ -53,8 +69,9 @@ swatches. Adopting a renderer designed for 1872×1404 three-zone layouts onto a 
 render none of those things, is CLAUDE.md decision 9 ("no lowest-common-denominator features") run
 in reverse.
 
-So Phase 1 merges two targets. **BG22 is a separate decision with its own gate** (§ 6, C-B4), and
-the two-file split in § 3.2 exists so it can take the cheap half without the expensive one.
+So Phase 1 merges two targets. **BG22 is a separate decision with its own gate** (§ 6, C-B6), and
+the two-file split in § 3.2 exists so it can take the cheap half without the expensive one. Its
+dual-CS refusal (§ 2.4, B5) is independent of both halves and lands regardless of how C-B6 goes.
 
 ### 2.2 The drawing surface is a link-time seam, not a vtable and not a framebuffer
 
@@ -115,6 +132,41 @@ lists `EP81_SPECTRA_1024x576` (`opendisplay_epd_map.c:50`), so it is not an ESP3
 **It is also the same defect shape as B1.** A capability that disappears because a macro stopped
 being defined, while every build still passes, is what both PR #147 and § 4's B1 are. That is the
 argument for the rule in § 3.1: a capability must never be expressible as "defined nowhere."
+
+### 2.4 Dual CS: Nordic gains it, Silabs declines it — and declining must be loud
+
+Owner decisions, 2026-08-17:
+
+- **`nordic-zephyr` supports dual CS.** The `split_panel` port is therefore not an ESP32 errand;
+  both targets take it, and the boot renderer's half-plane path has two real consumers rather than
+  one. This settles § 2.3's seam question in the strongest direction: the segment contract is
+  exercised, not merely reserved.
+- **`efr32bg22-slc` does not support dual CS.** That is a capability declaration, and this repo
+  already has the mechanism for exactly that — `shared/core/od_caps.h`, added by C13 so a target
+  can state an absence that `shared/` cannot infer. Dual CS becomes its second user:
+  `OD_CAP_DUAL_CS`, default `1`, with BG22 defining `0`.
+
+**Declining is not the same as ignoring, and B5 is what ignoring looks like today.** BG22 already
+accepts `panel_ic_type = 0x2B` and maps it to `EP81_SPECTRA_1024x576`
+(`opendisplay_epd_map.c:50`), a panel the vendored table flags `BBEP_SPLIT_BUFFER | BBEP_7COLOR`
+(`bb_ep.inl:4122`). `bbepSetPanelType()` sets the flag, the library branches on it in three
+places, and BG22 has no CS2 pin, no CS2 config field and no dual-CS code path. The panel is
+half-driven and nothing says so.
+
+**The refusal is a runtime test on the flag, not a compile-time check on the map.** After
+`bbepSetPanelType()` succeeds, BG22 tests `iFlags & BBEP_SPLIT_BUFFER` and fails the panel
+configuration loudly when `OD_CAP_DUAL_CS == 0`. Two reasons it must be that way round:
+
+1. **A macro can vanish; a flag cannot.** PR #147 exists precisely because 12 regions guarded by
+   `#ifdef BBEP_T133A01` compiled to nothing when the define disappeared, while the build still
+   passed. Gating on the runtime flag is the idiom upstream chose after being burned, and
+   `static_assert`s on the flag value make a rename a compile error.
+2. **The map is not the authority on which panels are dual-controller — the library table is.**
+   Deleting `0x2B` from BG22's map would fix today's instance and miss the next panel the vendor
+   flags. Testing the flag covers both.
+
+This is the same rule as decision 12's config cap: **refuse, never truncate.** A tag that will not
+drive a panel should say so at configuration time, not render half a frame.
 
 #### What this means for the seam
 
@@ -226,13 +278,48 @@ All four are verified in the tree, not inferred.
 | # | Defect | Evidence | Closed by |
 |---|---|---|---|
 | **B1** | **Nordic renders no logo, silently, and has since import.** Its `boot_screen.cpp` has three `#ifdef BOOT_HAS_LOGO` blocks (`:896`, `:929`, `:1012`) and **nothing anywhere defines the macro** — ESP32 defines it at `:15`, inside the `#if __has_include("logo_bitmap.h")` guard that Nordic's copy dropped. So ~100 lines are unconditionally dead and `targets/nordic-zephyr/src/logo_bitmap.h` (111,510 B, byte-identical to ESP32's) is linked by nothing. | verified: `grep BOOT_HAS_LOGO` finds three uses and zero definitions on Nordic | one gate (`OD_BOOT_LOGO_ENABLE`) in shared code, so "defined nowhere" stops being representable |
-| **B2** | **Both targets are behind `../Firmware` on a swatch-fill fix** landed upstream 2026-08-10. Survey § 2.4.1. | 122 `diff -w` lines against the authority | porting the authority's form, per the migration rule |
-| **B3** | **QR position divergence.** ESP32/upstream use `modulePx * (qrSize + quiet)`; Nordic uses `qrPx` and its comment claims the ESP32 form clips the right edge. One of them is wrong on real glass. | `boot_screen.cpp:311-316` (nordic) vs `:246-250` (esp32) | § 6 C-B2 adjudicates with evidence; **this is the one place the authority rule may point at the wrong answer**, so it needs an explicit recorded override rather than a silent choice |
+| **B2** | **Both targets are behind `../Firmware`** — a swatch-fill fix landed upstream 2026-08-10, plus whatever else is in the drift. | 122 `diff -w` lines against the authority | **adopting the authority as the base closes this by construction.** It still changes what BWR/BWY boards display, so it is verified, not assumed |
+| **B3** | **The authority's QR placement clips its own right quiet zone** whenever `modulePx * quiet > pad`. Nordic already fixed it. An **upstream defect**, not a Nordic divergence. | `../Firmware:820,883` vs `nordic:925` | **DECIDED 2026-08-17: adopt Nordic's form.** It is ported into the shared base, fixing ESP32 too, and reported back to `../Firmware` |
 | **B4** | **BG22's key-display policy differs** in a way the survey calls arguably user-visible (§ 3.4). | survey § 3.4 | `od_boot_payload.c` settles it for all three, in Phase 2 which is cheap |
+| **B5** | **BG22 accepts a dual-controller panel it cannot drive.** Its map returns `EP81_SPECTRA_1024x576` for `panel_ic_type` `0x2B`; the vendored table flags that panel `BBEP_SPLIT_BUFFER`; BG22 has **no CS2 concept at all**. `bbepSetPanelType()` sets the flag and the library branches on it, so the panel is half-driven with no error. | map `opendisplay_epd_map.c:50`; flag `bb_ep.inl:4122`; no `cs_pin_2` anywhere under `targets/efr32bg22-slc/` | `OD_CAP_DUAL_CS=0` plus a **runtime refusal** at panel selection (§ 2.4) |
 
-**B3 is the one that can go wrong quietly.** A clipped QR quiet zone still scans on most readers,
-so "it scanned" is not evidence. Adjudicate it with a photograph of a landscape panel under both
-forms, or by rendering both to a host golden image and measuring the right-edge margin in modules.
+### B3 is decidable by arithmetic, and Nordic is the one contributing behaviour
+
+"Nordic conforms or is ported in" resolves cleanly here, and the direction is *in*. The two forms
+differ by exactly one line and the geometry is fully determined:
+
+```
+contentRightX = w_log - pad                      (../Firmware:820)
+qrPx          = modulePx * (qrSize + 2*quiet)    (:783, quiet = 4)
+
+authority:  qrX = contentRightX - modulePx * (qrSize + quiet)     (:883)
+            -> full-box right edge = w_log - pad + modulePx*quiet
+nordic:     qrX = contentRightX - qrPx                            (nordic:925)
+            -> full-box right edge = w_log - pad, exactly
+```
+
+**The authority's form overhangs the content edge by `modulePx * quiet` and therefore falls off
+the panel whenever `modulePx * quiet > pad`.** With `quiet = 4` that is `4 * modulePx > pad`,
+which is reachable on ordinary geometries. Nordic's form can never clip. Its comment — *"Using
+qrSize+quiet here used to shift the code right by one quiet zone and clip the right edge"* —
+describes exactly this.
+
+**Decision, 2026-08-17: adopt Nordic's quiet zone.** This is the "or be ported in" half of the
+base rule, exercised once and in the direction the arithmetic supports.
+
+Two things follow:
+
+1. **No photograph is needed.** The predicate is arithmetic, so § 7's golden test evaluates
+   `qrX + qrPx > w_log` across every supported geometry and QR version and reports the set where
+   the authority clips. That is a far better gate than the eye-check the earlier draft proposed —
+   a clipped *quiet zone* still scans on most readers, which is precisely why this survived.
+2. **It is an upstream bug, so it goes back.** Fixing it only in `shared/` would leave
+   `../Firmware` — the authority, and a shipping repo — still clipping. C-B2 files it there.
+
+**Nordic contributes exactly one line of behaviour to the merged renderer.** Every other
+Nordic-only line in the 417-line `diff -w` against the authority is Zephyr plumbing, accessors and
+scheme constants — the material that *becomes* the `od_boot_app_*` implementation — plus B1, which
+is a defect rather than a divergence. That is a checkable claim and C-B4 should re-check it.
 
 ---
 
@@ -261,10 +348,10 @@ and zero skips.
 |---|---|---|
 | **C-B0** | `third_party/qrcode/` — one copy (the Nordic/Silabs byte-identical form), three consumers. No behaviour change. | all three targets link; images **byte-identical** on Nordic and Silabs, since their bytes are already canonical |
 | **C-B1** | `shared/core/od_boot_payload.c` (PURE) + host test. Both targets swap onto it. Settles **B4**. | differential: the new payload/URL/redaction output matches each target's current output byte-for-byte on a corpus of device ids, keys and versions — **including the all-zero key** |
-| **C-B2** | **Adjudicate B3 and record it.** No renderer code. Render both QR forms to host goldens, measure the right-edge quiet zone in modules, and if Nordic is right write the override into `docs/DIVERGENCE_MATRIX.md` with the evidence. | a written decision with a number or a photograph; **not** "it scanned" |
+| **C-B2** | **Adopt Nordic's QR quiet zone into the base (B3)** and report the defect to `../Firmware`. No seam yet. | the golden harness reports the geometry set where the authority's form satisfies `qrX + qrPx > w_log`; that set is non-empty, is recorded, and is empty after the change |
 | **C-B3** | `shared/core/od_boot_app.h` + `od_boot_screen.c` (new APP_BOOT tier) + the golden-hash host test. `esp32-idf` swaps onto it; its `boot_screen.cpp` becomes ~60 lines of seam. Lands **B2**'s upstream fix and C-B2's verdict. | goldens pinned for every scheme × rotation × geometry; ESP32 golden set **matches the pre-swap renderer** except at the pixels B2 and B3 deliberately change, each enumerated |
 | **C-B4** | `nordic-zephyr` swaps onto the same source. Closes **B1** — the logo appears for the first time. | Nordic golden set now equals ESP32's for equal geometry; **hardware: the logo is photographed on a flashed board**, because it has never rendered |
-| **C-B5** | BG22 takes `od_boot_payload.c` only. Delete the three retired copies and the dead Nordic asset. | BG22 `.text`/`.bss` delta recorded; no renderer change |
+| **C-B5** | BG22 takes `od_boot_payload.c` only. Delete the three retired copies and the dead Nordic asset. **Independently: `OD_CAP_DUAL_CS=0` and the runtime refusal (B5, § 2.4).** | BG22 `.text`/`.bss` delta recorded; a config naming `0x2B` is **refused with a log** and the pre-fix tree is shown half-driving it |
 | **C-B6** | **Decision commit, may be "no".** BG22 adopts APP_BOOT, or records why not. | `-fstack-usage` on a BG22 prototype **before** committing, against `SL_STACK_SIZE` 2752 and the 480 B of main-RAM headroom C13 recorded. A number, not a principle |
 
 C-B0 through C-B2 are independent of the rest and can land while B3 is still being argued.
@@ -328,10 +415,14 @@ must say so.
 ## 10. What this plan does not do
 
 - No BG22 renderer adoption — that is C-B6 and may be declined.
-- **No split-panel transport.** The seam accommodates it; nothing implements it. The port target
-  is known and named — `../Firmware` `20807f3`, `src/split_panel.{h,cpp}` — and the gap is live
-  today because the vendored library already flags both panels while no target carries the module
-  (§ 2.3). Larger than the boot screen, and filed in `FOLLOWUPS.md` rather than absorbed here.
+- **No split-panel transport.** The seam accommodates it and now has two committed consumers
+  (§ 2.4), but nothing here implements it. The port target is named — `../Firmware` `20807f3`,
+  `src/split_panel.{h,cpp}` — and it is owed to **both** `esp32-idf` and `nordic-zephyr`. The gap
+  is live today because the vendored library already flags both panels while no target carries the
+  module. Larger than the boot screen, and filed in `FOLLOWUPS.md` rather than absorbed here.
+- **No dual-CS support on BG22, ever** — that is now a declared capability (`OD_CAP_DUAL_CS=0`),
+  not an unfinished port. What this plan does add there is the **refusal**, so the absence stops
+  being silent (B5).
 - No `od_hal_panel` promotion or change — explicitly out of scope (§ 2.2).
 - No change to what the boot screen *says*; only B2 and B3 change what it *looks like*, both
   deliberately and both enumerated.
