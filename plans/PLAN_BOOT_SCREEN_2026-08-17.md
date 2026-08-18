@@ -60,18 +60,69 @@ Duplicated verbatim beyond the renderer itself:
 
 ## 2. The three decisions
 
-### 2.1 Two targets, not three — and that is decision 9, not timidity
+### 2.1 All three targets, with BG22 taking a compile-time subset
 
-BG22's boot screen is a **third independent derivation**
-(`targets/efr32bg22-slc/opendisplay_display.cpp`, ~210 lines inside a 921-line file), not a
-stripped copy. Different font, different layout solver, no rotation, no logo, no zones, no
-swatches. Adopting a renderer designed for 1872×1404 three-zone layouts onto a 32 KB part, to
-render none of those things, is CLAUDE.md decision 9 ("no lowest-common-denominator features") run
-in reverse.
+Owner decision, 2026-08-17: **BG22 adopts the common implementation, subset as needed.** An
+earlier draft of this plan argued for two targets and called BG22 adoption "decision 9 run in
+reverse". That objection was aimed at the wrong thing and is withdrawn — but the distinction it was
+reaching for is real and becomes this section's governing rule.
 
-So Phase 1 merges two targets. **BG22 is a separate decision with its own gate** (§ 6, C-B6), and
-the two-file split in § 3.2 exists so it can take the cheap half without the expensive one. Its
-dual-CS refusal (§ 2.4, B5) is independent of both halves and lands regardless of how C-B6 goes.
+**What BG22 actually has**, counted in `targets/efr32bg22-slc/opendisplay_display.cpp` rather than
+assumed:
+
+| | BG22 today | shared renderer |
+|---|---|---|
+| QR code | yes (56 references) | yes |
+| text lines | 5 — domain, name, fw, key ×2 (`:434`) | superset |
+| layout/scale solver | yes (37 references) | yes, richer |
+| rotation | yes — `bbepSetRotation()` at `:706`, `:752` | yes |
+| header zone | **none** (0 references) | yes |
+| footer zone | **none** (0) | yes |
+| colour swatches | **none** (0) | yes |
+| logo | **none** (0) | yes |
+
+So the subset is precise: **BG22 declines zones, footer and swatches. It keeps everything else, and
+it gains a logo it never had** (§ 3.3.1, S1 + S2 at 2,084 B). "Subset as needed" is therefore not a
+reduction of BG22's boot screen — it loses nothing it renders today and gains one element.
+
+Amusingly the two implementations already agree on the threshold that matters: BG22 picks its text
+scale with `(w >= 400u && h >= 300u) ? 2 : 1` (`:441`), the same 400×300 boundary the shared
+renderer uses for `useZoneLayout` (`../Firmware:581`). They were derived independently and landed
+on the same number.
+
+#### The rule that keeps a subset from becoming a lowest common denominator
+
+Decision 9's actual hazard is not "a target compiles less code". It is **a target that has a
+feature being denied it because another target lacks it.** So:
+
+> **A capability gate may remove a feature the target does not have. It may never change what a
+> target that has the feature renders.**
+
+Concretely: `OD_BOOT_ZONES_ENABLE=0` on BG22 is legitimate because BG22 renders no zones today.
+The same macro must not exist to make the ESP32's zones optional for uniformity's sake. Every gate
+in § 3.3.1 and below is justified by a *measured absence in that target*, and the golden tests
+(§ 7) pin the full-capability output so a gate cannot quietly alter it.
+
+#### The gates, and what each buys
+
+| Gate | BG22 | Justified by | Buys |
+|---|---|---|---|
+| `OD_BOOT_ZONES_ENABLE` | 0 | no header/footer/manufacturer/model rendering today | ~210 B of stack — `manufLine`, `modelLine`, `footerSchemeStr`, `footerResStr`, `footerSegs`, `footerSegX`, `vStr`, `tStr` (survey § 5.3) |
+| `OD_BOOT_SWATCH_ENABLE` | 0 | no swatch band today; swatches live in the footer | `swatchCode[16]`, `swatchIsColor[16]` — 32 B of stack, plus the fill tables |
+| `OD_BOOT_LOGO_SIZES` | 2 | S3 unreachable on its panels (§ 3.3.1) | 16,380 B of flash |
+| caller-supplied `qr` buffer | static | BG22 already makes it static deliberately | 256 B off a 2,752 B stack |
+
+**Subsetting is what makes the stack arithmetic work**, and that is the point of naming the gates
+rather than adopting wholesale. The survey estimated ~900 B for the full renderer's frame against
+BG22's own ~300–350 B. Removing zones (~210 B) and the QR buffer (256 B) brings the shared frame
+to roughly 430 B — the same order as what BG22 spends today, rather than a third of its entire
+stack.
+
+**C-B6 therefore measures rather than decides** (§ 6). The question is no longer "does BG22 adopt"
+— that is settled — but "does the subset fit", answered by `-fstack-usage` against `SL_STACK_SIZE`
+2752. If it does not, the response is another justified gate, not abandonment.
+
+Its dual-CS refusal (§ 2.4, B5) is independent of all of this and lands regardless.
 
 ### 2.2 The drawing surface is a link-time seam, not a vtable and not a framebuffer
 
@@ -422,7 +473,7 @@ and zero skips.
 | **C-B3** | `shared/core/od_boot_app.h` + `od_boot_screen.c` (new APP_BOOT tier) + the golden-hash host test. `esp32-idf` swaps onto it; its `boot_screen.cpp` becomes ~60 lines of seam. Lands **B2**'s upstream fix and C-B2's verdict, plus the `logoBmp = NULL` hygiene fix above. | goldens pinned for every scheme × rotation × geometry; ESP32 golden set **matches the pre-swap renderer** except at the pixels B2 and B3 deliberately change, each enumerated |
 | **C-B4** | `nordic-zephyr` swaps onto the same source. Closes **B1** — the logo appears for the first time. | Nordic golden set now equals ESP32's for equal geometry; **hardware: the logo is photographed on a flashed board**, because it has never rendered |
 | **C-B5** | BG22 takes `od_boot_payload.c` only. Delete the three retired copies and the dead Nordic asset. **Independently: `OD_CAP_DUAL_CS=0` and the runtime refusal (B5, § 2.4).** | BG22 `.text`/`.bss` delta recorded; a config naming `0x2B` is **refused with a log** and the pre-fix tree is shown half-driving it |
-| **C-B6** | **Decision commit, may be "no".** BG22 adopts APP_BOOT, or records why not. | `-fstack-usage` on a BG22 prototype **before** committing, against `SL_STACK_SIZE` 2752 and the 480 B of main-RAM headroom C13 recorded. A number, not a principle |
+| **C-B6** | BG22 adopts APP_BOOT with the § 2.1 gates (`OD_BOOT_ZONES_ENABLE=0`, `OD_BOOT_SWATCH_ENABLE=0`, `OD_BOOT_LOGO_SIZES=2`, static QR buffer). Retires its own renderer. | `-fstack-usage` on the gated build against `SL_STACK_SIZE` 2752, **taken before the swap lands**, plus `.text`/`.bss` deltas. A shortfall is answered with another justified gate, not abandonment. Hardware: the boot screen renders on a flashed BG22 — including the logo it has never had |
 
 C-B0 through C-B2 are independent of the rest and can land while B3 is still being argued.
 C-B3 must precede C-B4. C-B6 may never happen.
