@@ -397,6 +397,27 @@ is the argument for owning the backend. bb_epaper is down to 3 `OD-PATCH` sites,
 files genuinely compiled: `bb_ep.inl` (the `epd42yr2_init_full` duplicate-symbol fix, and the
 BUSY-wait timeout warning from 3.6) and `bb_epaper.h` (`delay(int)` → `delay(long)`).
 
+### 3.10 Compressed legacy direct write is no longer gated on the streaming-decompression capability, but compressed PIPE still is — *Nordic; wire-visible inconsistency*
+
+**Status:** open. **Evidence:** `verified` by reading the two paths, 2026-08-19; not reproduced on
+hardware.
+
+Before Transfer Phase 2 step 11, a compressed `0x70` START on `nordic-zephyr` reached
+`opendisplay_display_direct_write_start()`, which refuses compression when the parsed display
+config does not set `TRANSMISSION_MODE_STREAMING_DECOMPRESSION`
+(`targets/nordic-zephyr/src/opendisplay_display.cpp:1314`). `0x70` now routes to shared
+`od_xfer`, and `shared/core/od_xfer_direct.c` applies no such gate — a 4-byte size prefix simply
+means compressed. PIPE keeps the old behaviour: `opendisplay_display_pipe_full_start()` still
+funnels into `direct_write_start()`, so the gate still bites there.
+
+So on a device whose config lacks that bit, a compressed legacy direct write is now accepted while
+a compressed PIPE upload of the same image is refused. Decide which is correct and make both agree:
+either the capability is a real constraint (restore the gate inside shared `od_xfer`, keyed off
+`od_xfer_app_panel_info()` rather than a target global) or it is advisory and PIPE should stop
+enforcing it. Whichever way, the host reads that bit to decide whether to compress at all
+(`py-opendisplay` `device.py`, `supports_zip or supports_streaming_decompression`), so a device
+that answers inconsistently makes the host's choice look arbitrary.
+
 ### 3.4 Already tracked elsewhere — pointers only
 
 - **ESP32 does not parse `0x2A`**, and skip-to-CRC then discards the rest of the blob —
@@ -619,3 +640,34 @@ Both are host-only; no firmware or protocol change is required, and the firmware
 correct against the canonical header. Worth checking `Home_Assistant_Integration` for a caller of
 `deep_sleep()` before releasing, since the failure mode on latch hardware is a device that appears
 to have died.
+
+---
+
+## 6. `Firmware_NRF54` — every PIPE-partial START is refused by the device's own flag check
+
+**Status:** open upstream; **fixed in this repo** 2026-08-19. **Evidence:** `verified` by reading
+both trees, and by a host test that fails without the fix
+(`tests/host/pipe_write_test.c`, "a partial START reaches the partial machine with the transport
+selector stripped").
+
+`opendisplay_pipe_write.cpp` passes the PIPE START **flags word** to
+`opendisplay_display_pipe_partial_arm()`, which validates it against the **0x76 partial** flag set
+— `PARTIAL_ALLOWED_FLAGS`, bit0 (compression) only. A partial START necessarily carries
+`PIPE_FLAG_PARTIAL` (bit1), so the check always trips and the device answers
+`[FF][80][OD_ERR_PIPE_START_UNKNOWN_FLAG][00]`. PIPE-partial has therefore never worked on either
+Nordic tree; it is not a migration regression.
+
+- upstream: `Firmware_NRF54/src/opendisplay_display.cpp:1077` against
+  `src/opendisplay_pipe_write.cpp:260`
+- here (fixed): `targets/nordic-zephyr/src/opendisplay_pipe_write.cpp` now passes
+  `flags & ~PIPE_FLAG_PARTIAL`
+
+**The error code makes the failure worse than a refusal.** `OD_ERR_PIPE_START_UNKNOWN_FLAG` is
+`0x02`, which `py-opendisplay` names `PIPE_START_NACK_COMPRESSION` — "compression unsupported,
+retry uncompressed" (`protocol/responses.py:366`). So the host answers a partial-flag rejection by
+re-sending the same partial transfer **uncompressed**, gets `0x02` again, caches
+`_pipe_partial_supported = False` for the connection, and drops to the legacy `0x76` flow. One
+wrong mask thus costs both the partial path and, for that retry, compression.
+
+ESP32 validates the same fields inline in `display_service.cpp` and is unaffected; BG22 has no
+PIPE.

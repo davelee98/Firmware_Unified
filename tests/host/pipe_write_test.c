@@ -110,6 +110,8 @@ static int      g_refresh_rc;
 static bool     g_refresh_ok = true;
 static int      g_full_start_rc;
 static int      g_partial_arm_rc;
+static uint8_t  g_partial_arm_flags;
+static unsigned g_partial_arm_calls;
 static uint8_t  g_partial_arm_err = OD_ERR_PIPE_START_BAD_HEADER;
 static int      g_partial_prepare_rc;
 static bool     g_shared_xfer_active;
@@ -175,7 +177,9 @@ int opendisplay_display_pipe_full_start(bool c, uint32_t n)
 int opendisplay_display_pipe_partial_arm(uint8_t flags, uint32_t old_etag, uint16_t x, uint16_t y,
                                          uint16_t w, uint16_t h, uint32_t total, uint8_t *err)
 {
-    (void)flags; (void)old_etag; (void)x; (void)y; (void)w; (void)h; (void)total;
+    (void)old_etag; (void)x; (void)y; (void)w; (void)h; (void)total;
+    g_partial_arm_flags = flags;
+    ++g_partial_arm_calls;
     if (g_partial_arm_rc != 0 && err != NULL) {
         *err = g_partial_arm_err;
     }
@@ -229,6 +233,8 @@ static void reset_all(uint32_t total)
     g_refresh_ok = true;
     g_full_start_rc = 0;
     g_partial_arm_rc = 0;
+    g_partial_arm_flags = 0xFFu;
+    g_partial_arm_calls = 0u;
     g_partial_prepare_rc = 0;
     g_shared_xfer_active = false;
     g_shared_xfer_resets = 0u;
@@ -250,6 +256,33 @@ static od_cmd_result_t start_ok(uint32_t total, uint8_t window, uint8_t ack_ever
     req.client_max_frame = PIPE_MAX_FRAME_LOCAL;
     req.total_size = total;
     return opendisplay_pipe_write_start(&CTX, (const uint8_t *)&req, (uint16_t)sizeof req);
+}
+
+/* A well-formed partial START: the 10-byte header plus the 12-byte LE geometry extension. */
+static od_cmd_result_t start_partial(uint8_t flags, uint32_t total)
+{
+    uint8_t frame[sizeof(struct PipeStartRequest) + sizeof(struct PipePartialExt)];
+    struct PipeStartRequest req;
+    struct PipePartialExt ext;
+
+    memset(&req, 0, sizeof req);
+    req.version = 1u;
+    req.flags = (uint8_t)(PIPE_FLAG_PARTIAL | flags);
+    req.req_window = 4u;
+    req.req_ack_every = 2u;
+    req.client_max_frame = PIPE_MAX_FRAME_LOCAL;
+    req.total_size = total;
+
+    memset(&ext, 0, sizeof ext);
+    ext.old_etag = 0xA1B2C3D4u;
+    ext.x = 0u;
+    ext.y = 0u;
+    ext.w = 64u;
+    ext.h = 32u;
+
+    memcpy(frame, &req, sizeof req);
+    memcpy(frame + sizeof req, &ext, sizeof ext);
+    return opendisplay_pipe_write_start(&CTX, frame, (uint16_t)sizeof frame);
 }
 
 /* One DATA frame: [seq][payload...]. */
@@ -319,6 +352,49 @@ static void test_start_ok(void)
     CHECK(last_is(RESP_ACK, 0x80u));
     CHECK(!g_sent[0].plain);
     CHECK(opendisplay_pipe_write_active());
+}
+
+/* THE PARTIAL MACHINE SPEAKS 0x76's FLAG SET, where bit0 is compression and every other bit is
+ * unknown. PIPE_FLAG_PARTIAL is this transport's selector for reaching it, so passing the START
+ * flags word through unmodified refuses every partial transfer with OD_ERR_PIPE_START_UNKNOWN_FLAG
+ * -- which a host reads as "compression unsupported" and answers by retrying uncompressed. */
+static void test_start_partial_flag_domain(void)
+{
+    CASE("a partial START reaches the partial machine with the transport selector stripped");
+    reset_all(4096u);
+    CHECK(start_partial(0u, 4096u) == OD_CMD_OK);
+    CHECK(g_partial_arm_calls == 1u);
+    CHECK(g_partial_arm_flags == 0u);
+    CHECK(last_is(RESP_ACK, 0x80u));
+    CHECK((g_sent[0].data[7] & PIPE_FLAG_PARTIAL) != 0u);   /* bit1 echoed: partial accepted */
+    CHECK(opendisplay_pipe_write_active());
+
+    CASE("a compressed partial START passes compression on, and only compression");
+    reset_all(4096u);
+    CHECK(start_partial(PIPE_FLAG_COMPRESSED, 4096u) == OD_CMD_OK);
+    CHECK(g_partial_arm_flags == PIPE_FLAG_COMPRESSED);
+
+    CASE("an unknown flag alongside the partial selector is still refused before the arm");
+    reset_all(4096u);
+    CHECK(start_partial(0x40u, 4096u) == OD_CMD_NACK);
+    CHECK(g_partial_arm_calls == 0u);
+    CHECK(last_is(RESP_NACK, 0x80u));
+    CHECK(g_sent[0].data[2] == OD_ERR_PIPE_START_UNKNOWN_FLAG);
+
+    CASE("a partial START without the geometry extension is refused as a bad header");
+    reset_all(4096u);
+    {
+        struct PipeStartRequest req;
+
+        memset(&req, 0, sizeof req);
+        req.version = 1u;
+        req.flags = PIPE_FLAG_PARTIAL;
+        req.total_size = 4096u;
+        CHECK(opendisplay_pipe_write_start(&CTX, (const uint8_t *)&req, (uint16_t)sizeof req)
+              == OD_CMD_NACK);
+    }
+    CHECK(g_partial_arm_calls == 0u);
+    CHECK(g_sent[0].data[2] == OD_ERR_PIPE_START_BAD_HEADER);
 }
 
 static void test_start_displaces_shared_transfer(void)
@@ -567,6 +643,7 @@ int main(void)
 {
     test_start_bad_header_nacks();
     test_start_ok();
+    test_start_partial_flag_domain();
     test_start_displaces_shared_transfer();
     test_cadence_ack();
     test_data_outside_window_nacks();

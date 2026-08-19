@@ -312,8 +312,12 @@ extern "C" od_cmd_result_t opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx,
       return OD_CMD_NACK;
     }
     memcpy(&ext, payload + sizeof(req), sizeof(ext));
-    if (opendisplay_display_pipe_partial_arm(flags, ext.old_etag, ext.x, ext.y, ext.w, ext.h,
-                                             total_size, &err)
+    /* The partial machine's flag set is the 0x76 one, where bit0 is compression and nothing else
+     * is defined; PIPE_FLAG_PARTIAL is this transport's selector for reaching it at all. Hand it
+     * the partial-domain flags -- passing the selector through makes every partial START fail its
+     * unknown-flag check. */
+    if (opendisplay_display_pipe_partial_arm((uint8_t)(flags & ~PIPE_FLAG_PARTIAL), ext.old_etag,
+                                             ext.x, ext.y, ext.w, ext.h, total_size, &err)
         != 0) {
       send_pipe_start_nack(ctx, err);
       return OD_CMD_NACK;
