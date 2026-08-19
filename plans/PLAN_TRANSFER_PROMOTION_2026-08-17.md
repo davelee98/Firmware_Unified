@@ -16,6 +16,8 @@ ESP32 PIPE-only delete inventory, adapter-primitive retain inventory and transit
 ratchet. The Nordic step-10a software candidate now does the same and freezes its own 10b boundary.
 The BG22 step-10a software candidate now routes direct plus the capability-off partial reply through
 the same policy and deletes its entire legacy transfer machine; it has no PIPE-dependent 10b debt.
+Step 11 now routes all four legacy transfer rows directly to shared `od_xfer`, removes the temporary
+target hook surface and pins the unchanged `1`/`2`/`2`/`1` reservation budgets.
 No target cutover is hardware-qualified. Nordic and BG22 were implemented by explicit project
 direction before the preceding target rows were run; those sequencing exceptions do not clear any
 target's gate. Both PIPE-capable targets retain only the target machinery still called by PIPE,
@@ -190,6 +192,21 @@ version of this file. The detailed C14 and color plans remain the record of what
   and ASan/UBSan passes 43/43 with leak detection disabled under the ptrace runner. All 11 ESP32
   configurations, all three Nordic boards and the BG22 production image build. No board was
   flashed; every BG22 Phase 2 hardware row remains open.
+
+### Phase 2 step-11 dispatch closeout — 2026-08-19
+
+- `OD_DISPATCH_OPCODE_ROWS` names `od_xfer_direct_start()`, `od_xfer_data()`, `od_xfer_end()` and
+  `od_xfer_partial_start()` directly. Their reservation budgets remain `1`/`2`/`2`/`1`.
+- The four declarations are gone from `od_cmd_app.h`; ESP32 and BG22 no longer define forwarding
+  hooks, and Nordic's bridge translation unit is deleted from both production and host builds.
+- Dispatch ordering and route tests bind fake `od_xfer_*` entry points at link time, while the
+  Nordic and BG22 corpus profiles continue to exercise the production shared transfer machine over
+  their target hardware fakes.
+- `tools/check.sh` rejects the retired hook names, the Nordic bridge file, and any route or budget
+  drift. The PIPE hooks remain target-owned until Phase 3.
+- `ASAN_OPTIONS=detect_leaks=0 ./tools/check.sh --targets` passes `26/0/0`, including all ESP32
+  configurations, all three Nordic boards and the BG22 production image.
+- This is a routing-only software closeout. Every Phase 2 hardware row remains open.
 
 ## 1. Reconciliation result
 

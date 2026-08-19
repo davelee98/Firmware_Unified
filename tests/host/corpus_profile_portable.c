@@ -1,5 +1,5 @@
-/* corpus_profile_portable.c -- the portable proof profile: one definition of every od_cmd_app_*
- * hook, built from semantic knobs.
+/* corpus_profile_portable.c -- portable command-hook and transfer-entry fixtures built from
+ * semantic knobs.
  *
  * WHAT IT PROVES, AND WHAT IT DOES NOT. Running the whole corpus through this profile proves that
  * shared dispatch validates, gates, routes and plumbs every vector correctly, and that states no
@@ -19,6 +19,7 @@
 
 #include "od_cmd_app.h"
 #include "od_reply.h"
+#include "od_xfer.h"
 #include "opendisplay_protocol.h"
 
 #include <string.h>
@@ -206,14 +207,14 @@ od_cmd_result_t od_cmd_app_config_clear(const od_cmd_ctx_t *ctx, od_span_t body)
 
 /* ------------------------------------------------------------------------------- transfer --- */
 
-od_cmd_result_t od_cmd_app_direct_start(const od_cmd_ctx_t *ctx, od_span_t body)
+od_cmd_result_t od_xfer_direct_start(const od_cmd_ctx_t *ctx, od_span_t body)
 {
     (void)body;
     s_xfer_active = true;
     return ack2(ctx, 0x70u);
 }
 
-od_cmd_result_t od_cmd_app_direct_data(const od_cmd_ctx_t *ctx, od_span_t body)
+od_cmd_result_t od_xfer_data(const od_cmd_ctx_t *ctx, od_span_t body)
 {
     uint8_t e[2] = { RESP_NACK, 0x71u };
     (void)body;
@@ -226,7 +227,7 @@ od_cmd_result_t od_cmd_app_direct_data(const od_cmd_ctx_t *ctx, od_span_t body)
 
 /* The END ack, then the refresh status -- two frames from one dispatch, which is why the corpus
  * needed ordered reply lists at all. */
-od_cmd_result_t od_cmd_app_direct_end(const od_cmd_ctx_t *ctx, od_span_t body)
+od_cmd_result_t od_xfer_end(const od_cmd_ctx_t *ctx, od_span_t body)
 {
     uint8_t e[2] = { RESP_NACK, 0x72u };
     (void)body;
@@ -239,7 +240,7 @@ od_cmd_result_t od_cmd_app_direct_end(const od_cmd_ctx_t *ctx, od_span_t body)
     return ack2(ctx, 0x73u);       /* refresh completed */
 }
 
-od_cmd_result_t od_cmd_app_partial_start(const od_cmd_ctx_t *ctx, od_span_t body)
+od_cmd_result_t od_xfer_partial_start(const od_cmd_ctx_t *ctx, od_span_t body)
 {
     (void)body;
     if (!(od_corpus_knobs.caps & OD_VEC_CAP_PARTIAL)) {

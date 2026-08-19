@@ -9,6 +9,7 @@
 #include "od_reply.h"
 #include "od_session.h"
 #include "od_session_app.h"
+#include "od_xfer.h"
 
 #include <string.h>
 
@@ -112,11 +113,12 @@ static void refuse_oversize(const od_reply_t *rp, uint16_t cmd)
  * Two copies of this switch is how one target answers an opcode the other treats as unknown -- and
  * "unknown" is wire-visible: od_frame_policy() gives OD_FRAME_UNKNOWN_OPCODE no activity stamp, so
  * a recognised opcode holds an exclusive link open where an unrecognised one does not. A target
- * supplies the BEHAVIOUR of a command (od_cmd_app.h); it does not get to invent the routing.
+ * supplies target-specific command behaviour through od_cmd_app.h and hardware behaviour through
+ * subsystem seams such as od_xfer_app.h; it does not get to invent the routing.
  *
- * Every target defines every hook, so a capability a target lacks is a hook returning
- * OD_CMD_UNKNOWN rather than an absent case -- and adding an opcode here without every target
- * stating what it does about it is a LINK ERROR. That is the enforcement.
+ * Target-owned rows require every target to define their hook, so an incomplete addition is a
+ * link error. Promoted rows name their shared state machine directly; capability-off behaviour is
+ * compiled into that shared implementation.
  *
  * AUTHENTICATE and FIRMWARE_VERSION are absent: both are routed by od_dispatch_frame() before this
  * point, the first into od_gate and the second pre-gate. */

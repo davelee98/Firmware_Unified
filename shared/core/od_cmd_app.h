@@ -9,11 +9,10 @@
  * AUTHENTICATE (0x0050) is deliberately absent: od_gate owns the whole handshake and no target
  * sees it.
  *
- * EVERY TARGET IMPLEMENTS EVERY HOOK. A capability a target lacks still gets a definition, which
- * returns OD_CMD_UNKNOWN and answers nothing -- unless the protocol defines an explicit
- * unsupported response, which is a decision recorded at that hook, not an omission. A missing
- * definition is a link error, which is the enforcement: a new opcode cannot be added to the shared
- * switch without every target stating what it does about it.
+ * EVERY TARGET IMPLEMENTS EVERY HOOK DECLARED HERE. A capability a target lacks still gets a
+ * definition, which returns OD_CMD_UNKNOWN and answers nothing -- unless the protocol defines an
+ * explicit unsupported response. Promoted subsystems leave this surface and route directly to
+ * their shared state machine; capability policy then lives with that machine.
  *
  * `body` is PLAINTEXT: the frame has already met the session gate, so an encrypted frame arrives
  * decrypted and a plaintext one arrives as sent. A handler must complete -- dispatch has already
@@ -55,10 +54,6 @@ od_cmd_result_t od_cmd_app_config_clear(const od_cmd_ctx_t *ctx, od_span_t body)
 
 /* --- image transfer ------------------------------------------------------------------------ */
 
-od_cmd_result_t od_cmd_app_direct_start(const od_cmd_ctx_t *ctx, od_span_t body);      /* 0x0070 */
-od_cmd_result_t od_cmd_app_direct_data(const od_cmd_ctx_t *ctx, od_span_t body);       /* 0x0071 */
-od_cmd_result_t od_cmd_app_direct_end(const od_cmd_ctx_t *ctx, od_span_t body);        /* 0x0072 */
-od_cmd_result_t od_cmd_app_partial_start(const od_cmd_ctx_t *ctx, od_span_t body);     /* 0x0076 */
 od_cmd_result_t od_cmd_app_pipe_start(const od_cmd_ctx_t *ctx, od_span_t body);        /* 0x0080 */
 od_cmd_result_t od_cmd_app_pipe_data(const od_cmd_ctx_t *ctx, od_span_t body);         /* 0x0081 */
 od_cmd_result_t od_cmd_app_pipe_end(const od_cmd_ctx_t *ctx, od_span_t body);          /* 0x0082 */

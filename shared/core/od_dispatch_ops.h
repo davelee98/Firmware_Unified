@@ -23,12 +23,12 @@
     X(CMD_ENTER_DFU,           od_cmd_app_enter_dfu,       1u)                       \
     X(CMD_POWER_OFF,           od_cmd_app_power_off,       1u)                       \
     X(CMD_DEEP_SLEEP,          od_cmd_app_deep_sleep,      1u)                       \
-    X(CMD_DIRECT_WRITE_START,  od_cmd_app_direct_start,    1u)                       \
-    X(CMD_DIRECT_WRITE_DATA,   od_cmd_app_direct_data,     2u)                       \
-    X(CMD_DIRECT_WRITE_END,    od_cmd_app_direct_end,      2u)                       \
+    X(CMD_DIRECT_WRITE_START,  od_xfer_direct_start,       1u)                       \
+    X(CMD_DIRECT_WRITE_DATA,   od_xfer_data,               2u)                       \
+    X(CMD_DIRECT_WRITE_END,    od_xfer_end,                2u)                       \
     X(CMD_LED_ACTIVATE,        od_cmd_app_led_activate,    1u)                       \
     X(CMD_LED_STOP,            od_cmd_app_led_stop,        1u)                       \
-    X(CMD_PARTIAL_WRITE_START, od_cmd_app_partial_start,   1u)                       \
+    X(CMD_PARTIAL_WRITE_START, od_xfer_partial_start,      1u)                       \
     X(CMD_BUZZER,              od_cmd_app_buzzer,          1u)                       \
     X(CMD_PIPE_WRITE_START,    od_cmd_app_pipe_start,      1u)                       \
     X(CMD_PIPE_WRITE_DATA,     od_cmd_app_pipe_data,       (OD_CAP_PIPE ? 3u : 1u))  \

@@ -8,7 +8,6 @@
 #include "od_session.h"
 #include "od_session_app.h"
 #include "od_txq.h"
-#include "od_xfer.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_config_storage.h"
@@ -214,26 +213,6 @@ bool od_cmd_allow_unauthenticated(uint16_t cmd)
    * an unauthenticated storage mutation merely because the wire config contains the same flag. */
   (void)cmd;
   return false;
-}
-
-od_cmd_result_t od_cmd_app_direct_start(const od_cmd_ctx_t *ctx, od_span_t body)
-{
-  return od_xfer_direct_start(ctx, body);
-}
-
-od_cmd_result_t od_cmd_app_direct_data(const od_cmd_ctx_t *ctx, od_span_t body)
-{
-  return od_xfer_data(ctx, body);
-}
-
-od_cmd_result_t od_cmd_app_direct_end(const od_cmd_ctx_t *ctx, od_span_t body)
-{
-  return od_xfer_end(ctx, body);
-}
-
-od_cmd_result_t od_cmd_app_partial_start(const od_cmd_ctx_t *ctx, od_span_t body)
-{
-  return od_xfer_partial_start(ctx, body);
 }
 
 od_cmd_result_t od_cmd_app_pipe_start(const od_cmd_ctx_t *ctx, od_span_t body)
