@@ -196,7 +196,7 @@ c11_structure() {
 check "structure: ownership ratchets"  c11_structure
 
 esp32_xfer_cutover() {
-    local rc=0 hits pipe_start legacy_start
+    local rc=0 hits
 
     hits=$(grep -rInE '\b(handleDirectWriteStart|handleDirectWriteData|handleDirectWriteEnd|handlePartialWriteStart)[[:space:]]*\(' \
            targets/esp32-idf/src 2>/dev/null || true)
@@ -217,6 +217,21 @@ esp32_xfer_cutover() {
         fi
     done
 
+    if ! grep -q '\bod_xfer_reset[[:space:]]*(' targets/esp32-idf/src/session_guard.cpp; then
+        echo "ESP32 teardown must reset the shared legacy transfer before od_core_reset"
+        rc=1
+    fi
+    return $rc
+}
+check "esp32: shared legacy transfer cutover" esp32_xfer_cutover
+
+# TRANSITIONAL THROUGH PHASE 3 STEP 6. Target PIPE and shared od_xfer both drive the singleton
+# pump during the staged migration, so each START must displace the other owner first. The target
+# PIPE cutover must remove these two arms and replace this check with the permanent production
+# invariant: no target calls od_zlib_pump_reset/push; shared/core/od_xfer.c is the only caller.
+esp32_xfer_interim_pipe_arbitration() {
+    local rc=0 pipe_start legacy_start
+
     pipe_start=$(sed -n '/^od_cmd_result_t handlePipeWriteStart(/,/^}/p' \
                  targets/esp32-idf/src/display_service.cpp)
     if ! grep -q '\bod_xfer_active[[:space:]]*(' <<<"$pipe_start" ||
@@ -231,13 +246,72 @@ esp32_xfer_cutover() {
         echo "ESP32 legacy START must displace target PIPE through od_xfer_app_prepare_start"
         rc=1
     fi
-    if ! grep -q '\bod_xfer_reset[[:space:]]*(' targets/esp32-idf/src/session_guard.cpp; then
-        echo "ESP32 teardown must reset the shared legacy transfer before od_core_reset"
+    return $rc
+}
+check "esp32: interim PIPE/od_xfer arbitration" esp32_xfer_interim_pipe_arbitration
+
+# Phase 2 step 10b's executable boundary. These names are not all permanent: the delete inventory
+# is intentionally required while target PIPE owns it, and Phase 3 step 6 must remove this check in
+# the same commit that removes the inventory. The retain list prevents a bulk PIPE deletion from
+# taking adapter hardware primitives with it.
+esp32_xfer_10b_inventory() {
+    local rc=0 symbol pump_hits pump_count
+    local files=(
+        targets/esp32-idf/src/display_service.cpp
+        targets/esp32-idf/src/display_service.h
+        targets/esp32-idf/src/main.h
+        targets/esp32-idf/src/structs.h
+    )
+    local delete_symbols=(
+        PipeWriteState PipeReorderSlot pipeState pipeReorder
+        handlePipeWriteStart handlePipeWriteData handlePipeWriteEnd
+        resetPipeWriteState pipeWriteActive pipeSlot pipeChunkReceived pipeBuildAckPayload
+        sendPipeAck pipeAbortNoReply sendPipeNack sendPipeStartNack pipeUpdateHighestSeen
+        pipeConsumePayload directWriteComputeGeometry directWriteActivatePanel
+        directWriteFinishAndRefresh directWriteSinkBytes streamControllerPlaneBytes
+        direct_zlib_sink partial_consume_bytes partial_prepare_panel_ram partial_write_to_panel
+        partial_write_stream_bytes partial_zlib_sink zlib_stream_to_direct_write
+        zlib_stream_to_partial_write mono_plane_bytes parse_be_u32 PartialStreamContext partialCtx
+        sessionOrigin directWriteActive directWriteCompressed directWriteBitplanes
+        directWriteBytesWritten directWriteDecompressedTotal directWriteWidth directWriteHeight
+        directWriteTotalBytes directWriteCompressedReceived directWriteStartTime
+        directWritePlaneBytes directWriteInitialPlane
+    )
+    local retain_symbols=(
+        directWriteResolveGeometry xferAppClear xferAppWriteFull xferAppWritePartial
+        od_xfer_app_prepare_start od_xfer_app_panel_info od_xfer_app_begin_full
+        od_xfer_app_begin_partial od_xfer_app_write od_xfer_app_inflate_scratch
+        od_xfer_app_abort od_xfer_app_before_refresh od_xfer_app_barrier_abort
+        od_xfer_app_refresh od_xfer_app_displayed_etag od_xfer_app_set_displayed_etag
+        od_xfer_app_now_ms partial_set_addr_window partial_prepare_panel_ram_for
+        partial_refresh_for directWriteTouchSuspended cleanupDirectWriteState
+        cleanup_partial_write_state
+    )
+
+    for symbol in "${delete_symbols[@]}"; do
+        if ! grep -wq "$symbol" "${files[@]}"; then
+            echo "ESP32 10b delete inventory drifted before Phase 3: $symbol"
+            rc=1
+        fi
+    done
+    for symbol in "${retain_symbols[@]}"; do
+        if ! grep -wq "$symbol" targets/esp32-idf/src/display_service.cpp; then
+            echo "ESP32 adapter primitive missing from the 10b retain inventory: $symbol"
+            rc=1
+        fi
+    done
+
+    pump_hits=$(grep -RInE '\bod_zlib_pump_(reset|push)[[:space:]]*\(' \
+        targets/esp32-idf/src --include='*.c' --include='*.cpp' --include='*.h' 2>/dev/null || true)
+    pump_count=$(grep -c . <<<"$pump_hits")
+    if [ "$pump_count" -ne 4 ] || grep -v '^targets/esp32-idf/src/display_service\.cpp:' <<<"$pump_hits" | grep -q .; then
+        echo "$pump_hits"
+        echo "ESP32 interim pump ownership drifted: expected four target-PIPE calls in display_service.cpp"
         rc=1
     fi
     return $rc
 }
-check "esp32: shared legacy transfer cutover" esp32_xfer_cutover
+check "esp32: Phase 2 step 10b inventory" esp32_xfer_10b_inventory
 
 od_color_structure() {
     local rc=0 hits count

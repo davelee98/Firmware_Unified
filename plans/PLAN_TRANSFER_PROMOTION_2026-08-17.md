@@ -11,9 +11,11 @@
 **Status:** Phase 1 landed on `main` at `a9a4ac5` and its hardware gate was marked cleared on
 2026-08-18 in `docs/HARDWARE_VERIFICATION_CHECKLIST.md`. Phase 2's dormant shared machine landed
 through PR #47 at `d83a41a`. The ESP32 step-10a software candidate now routes the four legacy
-opcodes through shared policy and supplies the real hardware seam; it is not hardware-qualified.
-Nordic may not begin until the ESP32 cutover gate passes. ESP32 retains only the target machinery
-still called by PIPE, with PIPE and `od_xfer` made mutually exclusive owners of the singleton pump.
+opcodes through shared policy and supplies the real hardware seam. Step 10b now freezes the
+ESP32 PIPE-only delete inventory, adapter-primitive retain inventory and transitional arbitration
+ratchet; neither step is hardware-qualified. Nordic may not begin until the ESP32 cutover gate
+passes. ESP32 retains only the target machinery still called by PIPE, with PIPE and `od_xfer` made
+mutually exclusive owners of the singleton pump.
 
 This is the active plan for the remaining transfer-plane work. It supersedes the transfer sequence
 in `PLAN_MIGRATION_ENDGAME_2026-08-17.md` and the geometry/compression phases in the original
@@ -109,10 +111,10 @@ version of this file. The detailed C14 and color plans remain the record of what
 - Arbitration is bidirectional before pump use: PIPE START resets a live `od_xfer`, while
   `od_xfer_app_prepare_start()` releases target PIPE hardware and clears its state before a legacy
   START can activate. Disconnect/reset calls `od_xfer_reset()` before the common core teardown.
-- Explicit Phase 3 debt remains because target PIPE calls it directly: `PipeWriteState`,
-  `PipeReorderSlot`, `PartialStreamContext`, the `directWrite*` PIPE hardware fields, target PIPE
-  zlib finalization, and the full/partial PIPE sink, geometry, activation and refresh helpers.
-  None is reachable as command policy for `0x70`, `0x71`, `0x72` or `0x76`.
+- Explicit Phase 3 debt remains because target PIPE calls it directly. The exact delete/retain
+  inventory is owned by step 10b below; in particular, the adapter's shared panel primitives are
+  not PIPE debt merely because target PIPE also calls them. None of the delete inventory is
+  reachable as command policy for `0x70`, `0x71`, `0x72` or `0x76`.
 - Software evidence: the gcc host suite passes 43/43, and the clang and ASan/UBSan suites pass
   with leak detection disabled under the ptrace-based runner. All 11 ESP32 configurations build
   and pass the sdkconfig baseline; all three dormant Nordic configurations and the BG22 headless
@@ -120,6 +122,18 @@ version of this file. The detailed C14 and color plans remain the record of what
   inspection finds the shared entries in the image and no retired handler. BG22 remains at
   251,236 bytes flash and 32,284 bytes static RAM. Hardware evidence is open, so Nordic remains
   blocked by repository order.
+
+### Phase 2 ESP32 step-10b boundary — 2026-08-19
+
+- `tools/check.sh` separates the durable legacy-opcode cutover check from the transitional
+  PIPE/`od_xfer` arbitration check, so Phase 3 retires the latter deliberately rather than failing
+  because a deleted handler produces an empty grep body.
+- A second transitional check pins the named ESP32 delete and retain inventories and the four
+  target-PIPE pump call sites. Phase 3 replaces it with the target-scoped, then repository-wide,
+  single-pump-owner ratchet specified in step 10b.
+- The hardware checklist labels the interim gate as ESP32-specific and requires Nordic to add its
+  own bidirectional-replacement row at its 10a cutover. This boundary changes no production code;
+  PIPE-dependent deletion remains Phase 3 step 6.
 
 ## 1. Reconciliation result
 
@@ -740,9 +754,71 @@ production opcode:
       targets because they share DATA/END; BG22 switches direct plus the capability-off partial
       reply. BG22's simpler no-PIPE cutover does not change the repository order: ESP32 remains the
       reference, followed by Nordic nRF54, BG22 and the nRF52840 qualification row.
-    - **10b — PIPE-dependent deletion:** defer deletion of the target machinery inventoried solely
-      for PIPE to Phase 3 step 6. It is not part of the Phase 2 exit gate, and no new legacy command
-      path may call it after step 10a.
+    - **10b — PIPE-dependent deletion boundary:** defer deletion of the target machinery
+      inventoried solely for PIPE to Phase 3 step 6. It is not part of the Phase 2 exit gate, and no
+      new legacy command path may call it after step 10a. Phase 2 does own three concrete exit
+      artifacts: the named per-target inventory below, a passing interim arbitration ratchet, and a
+      per-target bidirectional-replacement hardware row. A target has not completed 10a until all
+      three exist.
+
+      The `esp32_xfer_cutover()` checks that inspect `handlePipeWriteStart()` and
+      `od_xfer_app_prepare_start()` are deliberately transitional. Nordic must add the equivalent
+      check with its 10a cutover. For each target, Phase 3 step 6 retires that target's two
+      arbitration arms in the same commit that deletes its target PIPE machine; leaving the old
+      check to fail on an absent function is not an acceptable implementation. Replace it first
+      with a target-scoped ratchet forbidding production calls to `od_zlib_pump_reset()` or
+      `od_zlib_pump_push()` outside `shared/core/od_xfer.c`. After both PIPE-capable targets cut
+      over, collapse those checks into one repository-wide production ratchet. Tests and
+      `shared/core/od_zlib_pump.c`'s function definitions are not call-site exceptions.
+
+      **ESP32 inventory, frozen by the landed 10a cutover:**
+
+      - **Delete in Phase 3 step 6:** `PipeWriteState`, `PipeReorderSlot`, `pipeState`,
+        `pipeReorder`, `handlePipeWriteStart()`, `handlePipeWriteData()`, `handlePipeWriteEnd()`,
+        `resetPipeWriteState()`, `pipeWriteActive()`, `pipeSlot()`, `pipeChunkReceived()`,
+        `pipeBuildAckPayload()`, `sendPipeAck()`, `pipeAbortNoReply()`, `sendPipeNack()`,
+        `sendPipeStartNack()`, `pipeUpdateHighestSeen()`, `pipeConsumePayload()`,
+        `directWriteComputeGeometry()`, `directWriteActivatePanel()`,
+        `directWriteFinishAndRefresh()`, `directWriteSinkBytes()`,
+        `streamControllerPlaneBytes()`, `direct_zlib_sink()`, `partial_consume_bytes()`,
+        `partial_prepare_panel_ram()`, `partial_write_to_panel()`,
+        `partial_write_stream_bytes()`, `partial_zlib_sink()`,
+        `zlib_stream_to_direct_write()`, `zlib_stream_to_partial_write()`, `mono_plane_bytes()`,
+        `parse_be_u32()`, `PartialStreamContext`, `partialCtx`, `sessionOrigin`,
+        `directWriteActive`, `directWriteCompressed`, `directWriteBitplanes`,
+        `directWriteBytesWritten`, `directWriteDecompressedTotal`, `directWriteWidth`,
+        `directWriteHeight`, `directWriteTotalBytes`, `directWriteCompressedReceived`,
+        `directWriteStartTime`, `directWritePlaneBytes` and `directWriteInitialPlane`. Delete any
+        now-unused PIPE declarations from `display_service.h`, `main.h` and `structs.h` in the same
+        commit; retain `transferActive()` and `imageWriteFramesMayStillArrive()` but reduce their
+        predicates to the shared owner.
+      - **Retain as adapter hardware primitives:** `directWriteResolveGeometry()`, `xferAppClear()`,
+        `xferAppWriteFull()`, `xferAppWritePartial()`, every `od_xfer_app_*` function,
+        `partial_set_addr_window()`, `partial_prepare_panel_ram_for()`, `partial_refresh_for()`,
+        and the lower-level panel, power, touch and partial-address/refresh helpers they call.
+        `directWriteTouchSuspended` remains adapter state despite its legacy name.
+        `cleanupDirectWriteState()` and `cleanup_partial_write_state()` are transitional bridge
+        helpers currently called by both target PIPE and `od_xfer_app_prepare_start()`; do not
+        bulk-delete them. When shared PIPE uses `xferApp`, remove those two prepare-start calls and
+        delete each cleanup helper only after it has no remaining caller.
+
+      **Nordic inventory, to be frozen by its 10a commit before its hardware gate:**
+
+      - **Delete candidates:** all state and policy in `opendisplay_pipe_write.cpp`, including
+        `PipeWriteState`, `PipeReorderSlot`, `s_pipe`, `s_reorder`, the
+        `opendisplay_pipe_write_{start,data,end,reset,active}()` surface and its ACK/reorder/consume
+        helpers; the PIPE-only display bridges `opendisplay_display_pipe_full_start()`,
+        `opendisplay_display_pipe_partial_arm()` and
+        `opendisplay_display_pipe_partial_prepare()`; and any legacy direct/partial counters,
+        sink/pump loops or query functions retained at 10a only because those bridges still call
+        them. The 10a checkpoint must replace this candidate description with the exact surviving
+        symbol list; “display helpers” is not an inventory.
+      - **Retain:** Nordic's complete `od_xfer_app_*` adapter and every named low-level panel,
+        power, touch, address-window and refresh primitive it calls. Helpers shared between that
+        adapter and target PIPE stay in this list even if PIPE is their second caller. The 10a
+        checkpoint must name them individually after the adapter refactor fixes their final names.
+
+      BG22 has no PIPE and therefore no 10b delete inventory.
 11. After all targets call the shared policy, route the four `OD_DISPATCH_OPCODE_ROWS` entries
     directly to `od_xfer_direct_start`, `od_xfer_data`, `od_xfer_end` and
     `od_xfer_partial_start`. Delete the four declarations from `od_cmd_app.h` and every temporary
@@ -766,9 +842,12 @@ directions; and BG22 capability-off code, ABI and RAM.
 Hardware must cover plaintext/encrypted raw and compressed direct, ACK-before-refresh trace,
 disconnect/reconnect, replacement START and a subsequent successful command. ESP32/Nordic also run
 partial etag match/mismatch, aligned/invalid rectangles, both plane boundaries and failure-clears-
-etag. ESP32 additionally runs plaintext LAN and TLS-LAN direct writes with a 4,092-byte DATA chunk
-and verifies that a LAN disconnect affects only a LAN-owned transfer. BG22 runs the unsupported
-response and confirms no partial or displayed-etag state in the map.
+etag. The bidirectional replacement case is a separate mandatory hardware row for every target
+that enters the interim two-machine state: ESP32 evidence does not qualify Nordic, and Nordic's
+10a change must add its own checklist row before it lands. ESP32 additionally runs plaintext LAN
+and TLS-LAN direct writes with a 4,092-byte DATA chunk and verifies that a LAN disconnect affects
+only a LAN-owned transfer. BG22 runs the unsupported response and confirms no partial or
+displayed-etag state in the map.
 
 Exit gate: for `0x70`, `0x71`, `0x72` and `0x76`, target code owns hardware operations only; no
 target parses those commands, owns their protocol accounting, finalizes their streams, constructs
@@ -781,32 +860,143 @@ or push of the singleton `od_zlib_pump`; removing that PIPE-owned remainder is P
 
 ### Phase 3 — promote PIPE
 
-1. Implement shared START negotiation, owner checks, sequence arithmetic, reorder queue and SACK.
-2. Feed the Phase 2 full/partial sink; do not create a PIPE decompressor or duplicate byte totals.
-   This removes the temporary cross-machine arbitration and makes the shared transfer owner the
-   only authority that may reset or push `od_zlib_pump`.
-3. Derive reorder payload from `PIPE_MAX_FRAME - PIPE_FRAME_OVERHEAD` and enforce negotiated frame
-   size on every DATA frame.
-4. Preserve fatal-NACK silence, raw-full auto-END, compressed/partial explicit END and ESP32 LAN
-   refusal.
-5. Resolve the current-tail evidence from Phase 0 with a test, not an assumed timer.
-6. Cut over ESP32 and Nordic independently and delete both target PIPE machines. In the same
-   target commit, delete the sinks, counters, geometry/finalization helpers and arbitration bridge
-   inventoried in Phase 2 step 10a solely because target PIPE still called them. BG22 keeps only
-   its explicit unsupported wrapper and links no reorder state.
+Entry boundary: every PIPE-capable target must have cleared its Phase 2 hardware gate, and the
+small-tail stall recorded as a live defect in `docs/HARDWARE_VERIFICATION_CHECKLIST.md` must be
+reproduced or retired with evidence, before either target PIPE machine is deleted. Those machines
+are the only reference behaviour available for reproducing that stall; deleting them first destroys
+the evidence the fix has to be measured against.
+
+The reorder, SACK and sequence policy in §4.4 is already specified and is not restated here. What
+Phase 3 adds is composition, lifecycle and cutover mechanics.
+
+**Step 1 — decide and record the four open behaviours.** These are wire- or session-visible and the
+targets currently disagree, so each is a decision this plan makes rather than something an
+implementation discovers.
+
+- **Command verdicts.** ESP32 answers `OD_CMD_OK` to inactive, fatal-state, zero-length and
+  wrong-owner DATA; Nordic answers `OD_CMD_NACK` to inactive, failed and malformed DATA. The verdict
+  decides whether a frame stamps the session activity clock, so the divergence is real. Adopt C11's
+  truthful-verdict rule: a frame that accepts nothing returns `OD_CMD_NACK` and emits no reply.
+  That covers inactive DATA/END, DATA after a fatal transfer, zero-length DATA, and DATA/END whose
+  `{origin, tag}` does not match the owner. A duplicate that is genuinely absorbed and SACKed is an
+  acceptance and returns `OD_CMD_OK`. Silence is refusal here: a `0x81` hard NACK is fatal to a
+  client's upload loop, so the verdict changes without the bytes changing.
+- **START ordering.** PIPE validates, arms state, queues the START ACK, and only then brings the
+  panel up. Phase 2 legacy START does the opposite. Keep PIPE's order — it is load-bearing, because
+  Spectra/ACeP-class bring-up runs for seconds and a client gates its 0x0080 wait on a normal
+  command timeout. Record it as a deliberate divergence from §5.3's END sequence rather than
+  normalising the two. The sequence is: parse and validate; arm shared state; queue the sealed
+  START ACK and unwind the armed state if `od_reply()` substitutes; activate the hardware; and on
+  post-ACK activation failure enter the fatal/silent state without emitting a contradictory START
+  NACK. Nordic already preserves that last rule; ESP32 currently ignores its START ACK result
+  (`display_service.cpp`'s `(void)od_cmd_reply(ctx, resp, ...)`) and gains the unwind.
+- **Fatal state.** `od_xfer_mode_t` already reserves `OD_XFER_FATAL`; give it meaning here. A fatal
+  PIPE transfer has released its hardware but still expects frames, because the target suppresses
+  per-frame logging until the client stops. One predicate cannot express both, and ESP32 already
+  carries two (`transferActive()` and `imageWriteFramesMayStillArrive()`). Shared code exports the
+  same pair: an owns-live-hardware query and a frames-may-still-arrive query. `OD_XFER_FATAL`
+  answers false to the first and true to the second until a replacement START or a reset.
+- **Negotiated frame lower bound.** `frame_eff` is capped at `PIPE_MAX_FRAME` but has no floor, and
+  `PIPE_FRAME_OVERHEAD` is 3. The enforcement this phase adds — `payload.n <= frame_eff -
+  PIPE_FRAME_OVERHEAD` — is unsigned, so a `frame_eff` below 3 wraps the bound to ~65533 and turns
+  the guard into an accept-anything. NACK the START with `BAD_HEADER` when `client_max_frame <=
+  PIPE_FRAME_OVERHEAD`, before any subtraction. Then enforce `body.n + 2 <= frame_eff` and
+  `payload.n <= frame_eff - PIPE_FRAME_OVERHEAD` on every DATA frame. The Python peer applies no
+  lower clamp, so the device is the only place this is checked.
+
+**Step 2 — define the internal, reply-free transfer operations header-first, before writing
+`od_pipe.c`.** `od_xfer_data()` and `od_xfer_end()` cannot be reused: they route on legacy modes and
+emit `0x71`/`0x72` replies. But this is not a new public surface. `od_xfer_mode_t` already reserves
+`OD_XFER_PIPE_FULL` and `OD_XFER_PIPE_PARTIAL`, and `od_xfer_internal.h` already holds the
+equivalent legacy operations (`od_xfer_direct_data_impl`, `od_xfer_partial_end_impl`). Add the PIPE
+peers there, beside them, not to `od_xfer.h`:
+
+- arm full or partial transfer state under the PIPE modes, with owner and expected totals;
+- activate the target hardware through the existing `od_xfer_app` seam;
+- consume ordered payload through the same offset-carrying sink, so byte accounting stays in one
+  place;
+- finalize a compressed stream;
+- test completeness;
+- perform the refresh with PIPE's own reply sequence.
+
+None of these emit a reply. `od_pipe.c` owns every PIPE wire byte; `od_xfer` owns state, accounting
+and hardware. Writing this header first is what prevents a second byte counter, a second inflater
+driver, or a second END policy from appearing despite the stated design.
+
+**Step 3 — resolve dispatch ownership and capability-off routing.** The three PIPE rows still name
+target hooks with reservation budgets `1`/`3`/`3`. At Phase 3 exit they name `od_pipe_start()`,
+`od_pipe_data()` and `od_pipe_end()` directly, the three declarations leave `od_cmd_app.h`, and
+every target bridge is deleted — the same shape as step 11 for the legacy opcodes. Pin the
+`1`/`3`/`3` budgets in dispatch tests before and after the reroute; a budget change is a separate
+wire-policy decision. `DATA` reserves three because the auto-END path spends a SACK plus an END ACK
+plus a refresh status.
+
+Two policies currently live in the target hooks and need an explicit home before those hooks
+disappear:
+
+- **BG22 capability-off.** `OD_CAP_PIPE=0` builds link `od_pipe_*` entry points that emit BG22's
+  existing `FF 80 04 00` START refusal and the existing silence for DATA/END, and allocate no
+  reorder state — exactly the shape `od_xfer_partial_start()` already uses for `OD_CAP_PARTIAL=0`.
+  "BG22 keeps an explicit unsupported wrapper" is not the exit state; a target-owned wrapper is
+  target wire policy, which the exit gate forbids.
+- **ESP32 NO PIPE ON LAN.** `pipe_refused_on_lan()` currently guards all three ESP32 hooks in
+  `od_cmd_app.cpp`; deleting those hooks deletes its only call sites. The refusal is an
+  origin-conditional wire rule (canonical header §9 rule 2), so it belongs in shared `od_pipe`
+  driven by a compile-time capability or the frame's own origin — not in a new target seam, which
+  would re-import wire policy into the target. Decide which before the reroute; the rule must stay
+  inert for BLE and refuse on LAN with the current bytes.
+
+**Step 4 — implement dormant shared `od_pipe` and prove it in software.** Build W=16, W=32 and
+capability-off configurations without rerouting a production opcode, following the Phase 2 staging
+that worked. Derive reorder payload width from `PIPE_MAX_FRAME - PIPE_FRAME_OVERHEAD`. Feed the
+step-2 operations; create no PIPE decompressor and no duplicate byte totals.
+
+**Step 5 — cut over ESP32, then Nordic, hardware-qualifying each before the next.** For each
+target, in the same commit: delete that target's PIPE machine and the exact step-10b delete
+inventory; preserve the named adapter primitives; delete the two `od_xfer_app_prepare_start()`
+calls that cancelled target PIPE and then each cleanup bridge helper once it has no remaining
+caller; retire that target's transitional two-way-arbitration ratchet; and add its target-scoped
+single-pump-owner ratchet. Leaving the interim ratchet to fail on an absent function is not an
+acceptable implementation.
+
+**Step 6 — finish reset ownership.** With PIPE inside the shared transfer singleton, `od_xfer` is
+linked by every target, so `od_core_reset()` resets it in the documented producer/egress/session
+ordering. Target disconnect paths stop calling `od_xfer_reset()` and
+`opendisplay_pipe_write_reset()` separately. This completes the integration step 10a deliberately
+left target-owned while adapters were staged.
+
+**Step 7 — reroute dispatch and install the permanent ratchet.** Apply step 3's routing, then
+promote the two target-scoped pump ratchets into one repository-wide production invariant: only
+`shared/core/od_xfer.c` calls `od_zlib_pump_reset()` or `od_zlib_pump_push()`. Scope that ratchet
+to production code — `targets/` plus `shared/core/` excluding `od_zlib_pump.c` itself — because
+`tests/host/zlib_pump_test.c` legitimately drives the pump directly and must keep doing so.
 
 Deterministic tests cover every START length/version/flag/capability/total; W/N values 0, 1, 16,
-17, 32, 33 and 255; frame bounds; sequence wrap; all small-window arrival permutations; gap close,
-duplicates, mask bits 0/31, cadence/tail SACKs; reply substitution; fatal silence; replacement,
+17, 32, 33 and 255; `client_max_frame` values 0, 1, 2, 3, 4, 243, 244, 245 and 65535, with the
+refusal boundary at `PIPE_FRAME_OVERHEAD` exact; frame bounds on every DATA frame; sequence wrap;
+all small-window arrival permutations; gap close, duplicates, mask bits 0/31, cadence/tail SACKs;
+reply substitution at START, SACK, END ACK and final status; post-ACK activation failure leaving a
+fatal state and no contradictory NACK; the selected verdict for each of inactive, fatal-state,
+zero-length, wrong-owner and genuinely-absorbed-duplicate frames; fatal silence; replacement,
 disconnect and wrong owner; raw/compressed/partial completion; W=16/W=32 profiles; LAN refusal
 inertness; and capability-off builds.
+
+Enumerate reply protection rather than implying it. Sealed through `od_reply()`: START ACK,
+cadence/gap/tail SACK, END ACK, refresh success and refresh timeout. Plaintext through
+`od_reply_plain()`: START, DATA and END hard NACKs. Pin the explicit-END order — tail SACK, END
+ACK, barrier, refresh, then `0x73`/`0x74` — the auto-END DATA maximum of three replies, and that no
+reply follows a substituted fatal NACK. Assert the sealed/plain choice under both a live session
+and a security-disabled one; payload bytes alone cannot distinguish them.
 
 Add a simple reference receiver and model-based traces with loss, duplication, reorder and wrap.
 Keep Python sender tests as the independent peer. Hardware runs forced loss/reorder/retransmission,
 tail below cadence, sequence wrap and `OD-S1` replay on ESP32 and Nordic.
 
-Exit gate: one PIPE machine exists; target code contains sizing facts, ingress and hardware seam
-only; BG22 pays zero PIPE state.
+Exit gate: one PIPE machine exists; no target parses `0x80`, `0x81` or `0x82`, owns their
+accounting, constructs their replies, or defines a command hook for them; the dispatch map names
+`od_pipe_*` directly; target code contains sizing facts, ingress and hardware seam only; BG22 pays
+zero PIPE state while still emitting its existing refusal bytes; `od_core_reset()` owns transfer
+reset; and the repository-wide single-pump-owner ratchet is installed.
 
 ### Phase 4 — promote NFC independently
 
@@ -849,7 +1039,7 @@ Use independently reviewable commits; do not land unused scaffolding:
 3. one pump target cutover/deletion per commit;
 4. transfer headers, fake target and direct/partial state tests;
 5. one legacy-stream target cutover/reduction per commit, with PIPE-only remainder inventoried;
-6. PIPE shared state/model tests;
+6. PIPE internal reply-free transfer operations, then shared state/model tests;
 7. one PIPE target cutover/deletion per commit;
 8. NFC shared state/tests;
 9. one NFC target cutover/deletion per commit; and
