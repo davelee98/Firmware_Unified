@@ -6,10 +6,13 @@
 
 **Source snapshot:** `main` at `d2190cc`
 
-**Status:** Phase 1 software-complete on `feat/transfer-promotion`. The shared inflate pump and
-target-selected backend seam are implemented and all five target-local pump loops are gone. Target
-builds pass, but no compressed transfer has run on hardware, so the Phase 1 exit gate remains open
-and Phases 2-5 are deliberately not stacked on top of it.
+**Phase 2 revision:** `main` at `c41f3f5`
+
+**Status:** Phase 1 landed on `main` at `a9a4ac5`; its hardware rows remain open in
+`docs/HARDWARE_VERIFICATION_CHECKLIST.md`. Phase 2 steps 1-9 are dormant shared design, tests and
+adapters and may proceed without changing a production opcode or cleanup path. Step 10 is the first
+production cutover and remains blocked by the checklist's Phase 1 hardware gate. No hardware result
+is assumed or recorded by this plan revision.
 
 This is the active plan for the remaining transfer-plane work. It supersedes the transfer sequence
 in `PLAN_MIGRATION_ENDGAME_2026-08-17.md` and the geometry/compression phases in the original
@@ -31,9 +34,54 @@ version of this file. The detailed C14 and color plans remain the record of what
   three Nordic boards build; and BG22 builds at 251,236 bytes flash and 32,284 bytes static RAM
   (480 bytes headroom). Leak detection was disabled for the clang/fuzz and sanitizer runs because
   LeakSanitizer cannot operate under this environment's ptrace wrapper.
-- Hardware evidence remains absent: no board or serial device was attached. Per the phase ordering,
-  direct/partial promotion cannot begin until compressed direct, partial and PIPE exercise this pump
-  on the capable hardware rows.
+- Hardware evidence remains absent: no board or serial device was attached. Direct/partial
+  production cutover remains blocked until the Phase 1 compressed direct, partial and PIPE results
+  required by the hardware checklist are recorded.
+
+### Phase 2 shared-side checkpoint — 2026-08-18
+
+- On `feat/transfer-phase2`, steps 1-8 are implemented as dormant shared production code:
+  `od_xfer`, `od_xfer_direct`, `od_xfer_partial` and the `od_xfer_app` seam. Dispatch still routes
+  all four opcodes to the existing target hooks, and production reset/disconnect paths are
+  unchanged; step 10 has not begun.
+- The private singleton owns mode, immutable reply owner, timing and byte totals. DATA/END route
+  once on that mode. The write seam receives a non-empty span and its pre-write offset; short
+  consumption refuses the stream. Ownership is the complete `{origin, tag}` identity, and a
+  read-only owner accessor exists for disconnect cleanup. This deliberately tightens ESP32's
+  origin-only continuation rule: a reconnected instance cannot resume an abandoned transfer.
+  The capability-off build retains only BG22's explicit partial unsupported reply.
+- START calls a target pre-validation hook after replacing shared legacy-transfer state and before
+  panel/geometry validation. That hook is the home for cancelling target-owned PIPE state and
+  resetting transfer diagnostics even when START is rejected; it performs no panel activation.
+  Abort calls carry a semantic reason so targets can preserve warm release for replacement and
+  incomplete END while forcing power off for terminal stream/reset failures.
+- END behavior pins application-vs-plain replies, enqueue failure, target drain, recovery exactly
+  once, refresh and final status. A live-session host case proves the START ACK is sealed while its
+  hard NACK remains plaintext.
+- Host coverage includes raw truncation, START lengths 0..5, replacement, wrong-origin and
+  stale-tag owners, empty DATA, compressed inline input and truncation, all direct and partial END
+  lengths/selectors, refresh success/timeout/call failure, reply substitution at START/DATA/END/
+  final status, partial validation/etag/plane offsets, raw and compressed partial, every
+  plane-boundary split, controller-plane geometry and incomplete-END warm abort, every short sink
+  consumption, both barrier failure positions, reset, ESP32 auto-END and the BG22 capability-off
+  ABI. A live-session and
+  security-disabled case cover START/DATA/END/final-status reply protection rather than START
+  alone. The shared sources compile under both gcc and clang and under ASan/UBSan.
+- ESP32's compressed-DATA failure previously emitted a hard NACK but returned `OD_CMD_OK`, unlike
+  its partial path. Shared policy deliberately returns `OD_CMD_NACK`; only accepted frames may
+  stamp session activity. This is a truthful-verdict normalization, not byte-level wire drift.
+- All three target toolchains now compile the dormant transfer sources. ESP32 retains archive
+  discard; Nordic and BG22 use compile-only object targets with their real capability definitions
+  and deliberately provide no fake seam. The BG22 linked image remains 251,236 bytes flash and
+  32,284 bytes static RAM (480 bytes headroom), proving the dormant objects add no image or RAM
+  cost while the capability-off ABI still compiles under ARM GCC.
+- Nordic's gate now makes `PURGE=always` literal for the L15 sysbuild composition by removing only
+  its validated generated build directory before configuring. West's ordinary pristine pass can
+  retain outer MCUboot/Partition Manager state across an application CMakeLists change and leave
+  a PM placeholder unexpanded; incremental gate runs therefore remain equivalent to clean trees.
+- `tools/check.sh --targets` passes 18/0/0 with the complete shared-side candidate: gcc, clang,
+  ASan/UBSan, fuzz, the pinned Python wire corpus, all ESP32 configurations and sdkconfig
+  baseline, all three Nordic boards, and the BG22 headless build. No hardware result is claimed.
 
 ## 1. Reconciliation result
 
@@ -41,9 +89,9 @@ The original plan had seven material conflicts with current `main`:
 
 1. **Geometry is already promoted.** `shared/core/od_color.{c,h}` is the sole direct-stream
    geometry authority. There will be no `od_xfer_geometry` module and no second geometry pass.
-2. **The portable inflater is already promoted, but its pump is not.**
-   `shared/core/od_zlib_inflate.{c,h}` and its host suite landed in C14. Five target-local
-   push/poll/sink loops and ESP32 backend selection still need promotion.
+2. **The portable inflater was already promoted, but its pump was not at reconciliation.**
+   `shared/core/od_zlib_inflate.{c,h}` and its host suite landed in C14. Phase 1 subsequently
+   promoted the five target-local push/poll/sink loops and ESP32 backend selection.
 3. **Direct and legacy partial cannot be cut over independently.** `0x76` starts partial state,
    but `0x71` and `0x72` continue and finish it. A shared direct handler cannot replace those
    opcodes while partial state remains target-local without a temporary dual-owner router. The
@@ -87,8 +135,8 @@ Completion means:
 - one shared NFC endpoint state machine for `0x83`, compiled out on ESP32;
 - no target-owned transfer wire parsing, SACK construction, transfer ownership, byte accounting,
   etag policy, compression-finalization policy, or NFC chunk assembly;
-- target command hooks reduced to one-line calls into shared policy or an explicit unsupported
-  response;
+- promoted transfer opcodes routed directly to shared policy, with target completeness enforced by
+  the link-time transfer seam rather than duplicate command wrappers;
 - disabled capabilities contributing no reorder queue, partial context, NFC staging buffer, or
   decompression scratch storage; and
 - each unit independently built, hardware-qualified and revertible before the next starts.
@@ -140,7 +188,7 @@ the one approved target-owned geometry override; it does not authorize Gray8.
 | Legacy partial | `src/display_service.cpp` | `src/opendisplay_display.cpp`, `src/od_cmd_direct.c` | explicit unsupported hook |
 | PIPE | `src/display_service.cpp` | `src/opendisplay_pipe_write.cpp` | explicit unsupported hooks |
 | NFC command state | explicit unknown hook | `src/od_cmd_nfc.c` | `od_cmd_silabs.c` |
-| Inflate pump loops | two in `display_service.cpp` | two in `opendisplay_display.cpp` | one in `opendisplay_display.cpp` |
+| Inflate pump loops | shared `od_zlib_pump` | shared `od_zlib_pump` | shared `od_zlib_pump` |
 | Portable inflate engine | shared C14 source | shared C14 source | shared C14 source |
 | Direct geometry | shared `od_color` | shared `od_color` | shared `od_color` |
 
@@ -297,8 +345,8 @@ not add a timer or preserve a supposed defect without a failing trace.
 - The shared pump owns push/poll/finalize progression, exact output accounting and sink refusal.
 - Backend choice remains a build profile. Exactly one selected backend is called, although the
   unselected portable PURE object may be link-discarded on tinfl builds.
-- Scratch storage is caller/profile supplied so the pump promotion does not create a second
-  output buffer. BG22 and Nordic retain 256 bytes; an ESP32 2,048-byte profile must be measured.
+- Scratch storage is caller/profile supplied, so the pump adds no second output buffer. BG22 and
+  Nordic retain 256 bytes; the measured ESP32 tinfl profile retains 2,048 bytes.
 
 ## 5. Resulting architecture
 
@@ -329,13 +377,28 @@ There is no `shared/compress/`, `od_xfer_geometry`, generic panel vtable or runt
 Every source is listed exactly once in `shared/sources.cmake`. Sources needing target functions use
 an APP seam tier, following `APP_SESSION` and `APP_RXQ`; PURE remains C-library/protocol only.
 
-Shared modules export policy entry points such as `od_xfer_direct_start()`. Each target continues
-to define every `od_cmd_app_*` hook so C11's link-time completeness rule remains intact, but a
-promoted hook is a one-line call and contains no wire bytes or state transition.
+Shared modules export command-signature policy entry points such as `od_xfer_direct_start()`.
+At the Phase 2 exit, `OD_DISPATCH_OPCODE_ROWS` routes `0x70`, `0x71`, `0x72` and `0x76` directly to
+those entry points and `od_cmd_app.h` no longer declares target hooks for them. The capability-off
+`od_xfer_partial_start()` remains linked on BG22 and emits its existing explicit unsupported reply;
+it allocates no partial state.
+
+`od_xfer_data()` and `od_xfer_end()` intentionally live with the common state in `od_xfer.c`.
+Those two opcodes continue either a full or partial stream, so they route once on the private
+`od_xfer_mode_t` and call internal direct/partial operations. That mode switch is a state-machine
+decision, not a second opcode map.
+
+This narrows, rather than weakens, C11's link-time composition rule. Every remaining target command
+hook is still mandatory. The four promoted opcodes instead require every target to define the
+complete `od_xfer_app` seam, so an omitted hardware-policy decision is still a link error. During
+the target-ordered cutover only, an existing target command hook may be a one-line bridge to the
+shared entry point. After the last target passes its gate, the dispatch rows point directly to the
+same functions and all four bridges are deleted. There is never a second opcode map.
 
 ### 5.2 Common image-transfer state
 
-One portable object represents mutually exclusive image modes:
+One private portable object represents mutually exclusive image modes. Its layout is not part of
+`od_xfer.h` or any target seam:
 
 ```c
 typedef enum {
@@ -361,6 +424,13 @@ typedef struct {
 } od_xfer_t;
 ```
 
+The definition lives in a shared internal header used only by the transfer implementation modules.
+All of those modules must be compiled with the same capability definitions. In particular,
+`tests/host` compiles them into the existing separate `od_shared_silabs` library with
+`OD_CAP_PARTIAL=0`; no object built with the default capability set may exchange transfer state
+with that library. Host tests and link-map checks cover both layouts. This is the same ABI boundary
+required by BG22's `OD_CONFIG_MAX_SIZE` build.
+
 There are no independent direct-active, partial-active and PIPE-hardware-active booleans. PIPE owns
 only sequencing/reorder metadata and feeds the same full/partial sink. It does not own a second
 decompressor or byte counter.
@@ -381,9 +451,12 @@ bool od_xfer_app_begin_full(const od_color_geometry_t *geometry);
 bool od_xfer_app_begin_partial(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                                uint32_t plane_bytes);
 #endif
-bool od_xfer_app_write(const uint8_t *data, uint32_t len);
-void od_xfer_app_abort(void);
+uint32_t od_xfer_app_write(uint32_t stream_offset, od_span_t data);
+od_mut_span_t od_xfer_app_inflate_scratch(void);
+void od_xfer_app_prepare_start(void);
+void od_xfer_app_abort(od_xfer_abort_reason_t reason);
 od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *owner);
+void od_xfer_app_barrier_abort(const od_reply_t *owner);
 bool od_xfer_app_refresh(uint8_t mode, bool *completed);
 #if OD_CAP_PARTIAL
 uint32_t od_xfer_app_displayed_etag(void);
@@ -395,14 +468,66 @@ uint32_t od_xfer_app_now_ms(void);
 `od_xfer_panel_info` includes the checked geometry descriptor. Ordinary adapters obtain it from
 `od_color_direct_geometry()`. ESP32 may apply only the already-tested ED103TC2 FastEPD exception;
 BG22 may reject split geometry under its no-dual-CS policy. The target maps parts/planes to
-controller operations and owns plane-switch side effects. Shared code owns byte accounting and
-verifies that every sink call consumes exactly the offered bytes.
+controller operations and owns plane-switch side effects. Shared code owns the sole stream byte
+counter and passes its value as `stream_offset` before each write. The adapter selects and switches
+planes from that offset and the geometry established by `begin_full()` or `begin_partial()`; it
+must not retain a duplicate protocol counter. It returns the number of bytes consumed, and shared
+code accepts the write only when that value equals `data.n`. Short consumption is a transfer
+failure before any success reply.
 
-The barrier has two outcomes: proceed or abort. It preserves current profiles:
+`od_xfer_app_write()` has the precondition `data.n > 0`. Shared policy never calls the seam for an
+empty raw DATA body or when an inflate push produces no output; it applies the frozen command
+verdict and leaves accounting unchanged. Because every offered span is non-empty, a return of zero
+is unambiguously a sink refusal rather than successful consumption of an empty write.
 
-- ESP32/Nordic: enqueue success is mandatory; drain for up to 250 ms, retain late ACKs and proceed
-  on the existing timeout result, including the existing short dwell.
-- BG22: retain its two-second queue/TX-idle requirement and transport recovery on failure.
+`od_xfer_app_inflate_scratch()` lends the target's one existing bounded output buffer to
+`od_zlib_pump`; shared state neither owns nor duplicates it. ESP32 retains its selected 2,048-byte
+profile and Nordic/BG22 retain 256 bytes.
+
+`od_xfer_app_prepare_start()` runs for every structurally valid START, after an old shared legacy
+transfer is replaced but before panel-info validation. It cancels target-owned PIPE state and
+resets target diagnostics. This preserves ESP32's `resetPipeWriteState()` and
+`imageWriteLogReset()` ordering, including rejected STARTs, without moving PIPE state or logging
+into the legacy-transfer machine.
+
+`od_xfer_app_abort()` receives one of `REPLACED`, `START_FAILED`, `STREAM_FAILED`, `INCOMPLETE`,
+`REPLY_FAILED`, `REFRESH_FAILED` or `RESET`. These are policy facts, not power commands: each
+adapter maps them to its existing cleanup profile. ESP32 keeps replacement, START rejection and
+bitplane incompleteness warm; mid-stream/final-inflate failure, reply failure and reset are
+terminal force-off paths. Nordic and BG22 retain their current teardown behavior. No adapter may
+collapse the reason before making its target-specific power/recovery decision.
+
+The END sequence is explicit:
+
+1. shared policy validates completion and queues the END acknowledgement through `od_reply()`;
+2. if enqueue fails, shared policy calls `od_xfer_app_barrier_abort()` exactly once and neither
+   refreshes nor emits another reply;
+3. after a successful enqueue, `od_xfer_app_before_refresh()` drains according to the target
+   profile and returns proceed or abort; and
+4. on abort, shared policy calls `od_xfer_app_barrier_abort()` exactly once and neither refreshes
+   nor emits another reply.
+
+The target abort hook owns the existing recovery operations; shared policy owns the wire decision
+and portable-state reset. The barrier preserves current profiles:
+
+- ESP32/Nordic: retain the existing void flush/short-dwell behavior and return proceed
+  unconditionally once the ACK was queued. `od_xfer_app_barrier_abort()` is a no-op apart from any
+  already-required panel abort; no new timeout refusal is introduced.
+- BG22: retain the two-second queue/TX-idle deadline. Return abort on either failure, and let
+  `od_xfer_app_barrier_abort()` perform the existing display abort, transport reset and owner close.
+  That path emits no additional reply. The same recovery hook runs when ACK enqueue itself fails.
+
+The two abort functions are intentionally distinct. `od_xfer_app_abort(reason)` releases panel/write
+state for replacement START, stream failure, reset or disconnect. `od_xfer_app_barrier_abort()` is
+called only after the END acknowledgement commit is attempted and may additionally reset transport
+state or close the reply owner, as BG22 requires. ESP32 and Nordic may implement both through one
+target-private helper where their recovery is identical; the shared contracts remain separate so
+an ordinary stream abort cannot acquire BG22's barrier-only transport side effects.
+
+Every application ACK, success and refresh-timeout reply uses `od_reply()` and therefore follows
+the live session's seal-or-plain policy. Protocol validation errors and explicit hard NACKs use
+`od_reply_plain()`. Tests must assert this choice under both a live encrypted session and plaintext;
+checking payload bytes alone is insufficient.
 
 The function is deliberately not named `on_air`. Software queue/controller acceptance is not an
 RF observation; the hardware gate uses a trace to prove ordering.
@@ -449,7 +574,9 @@ shared object layout.
 
 Compile-time assertions cover W/N/SACK bounds, reorder slots, RX/TX capacity, 241-byte reorder
 payloads, wire struct sizes and capability booleans. Capability-off builds prove the large objects
-are absent by map/symbol inspection.
+are absent by map/symbol inspection. Dispatch tests also pin the Phase 2 reservation budgets
+(`DIRECT_START=1`, `DIRECT_DATA=2`, `DIRECT_END=2`, `PARTIAL_START=1`) before and after direct
+routing replaces the temporary bridges; a budget change is a separate wire-policy decision.
 
 ### 5.6 Plain-C decision
 
@@ -511,26 +638,66 @@ target family has a recorded compressed hardware result.
 
 ### Phase 2 — promote the legacy direct/partial stream
 
-1. Write header-first fake-target tests for the common state, target seam and reply ordering.
-2. Implement `od_xfer`, `od_xfer_direct` and `od_xfer_partial` together. Partial storage and code
-   are under `#if OD_CAP_PARTIAL`; the unsupported reply remains available without that state.
-3. Consume `od_color_geometry_t`; do not recreate format switches or byte math.
-4. Use `od_zlib_pump` for both full and partial compressed streams.
-5. Split START validation from target activation. Invalid geometry, etag, flags or size touches no
-   panel resource. Compression admission follows section 4.2's authority decision.
-6. Preserve target direct-auto-END and barrier profiles as data/configuration.
-7. Make every target `od_cmd_app_direct_*` and `od_cmd_app_partial_start` a thin shared call and
-   delete its old parsing/state/reply code in the same target cutover.
-8. Update `od_core_reset()` and target disconnect cleanup so portable state resets once and target
-   hardware aborts once.
-9. Cut over and hardware-test each target before the next. On partial-capable targets, direct and
-   partial switch together because they share DATA/END.
+Entry boundary: steps 1-9 may proceed while Phase 1 hardware rows remain open because they neither
+reroute a production opcode nor change a production cleanup path. Step 10 may not begin until the
+Phase 1 gate in `docs/HARDWARE_VERIFICATION_CHECKLIST.md` is satisfied. Do not fold a Phase 1 pump
+correction into this phase; if hardware evidence exposes one, fix and re-qualify Phase 1 first.
+
+Build the shared side as separately reviewable, revertible units. Steps 1-4 do not reroute a
+production opcode:
+
+1. Land `od_xfer_app.h`, the private state boundary and header-first fake-target tests. Pin write
+   offsets/consumption, reply ordering, barrier recovery and reset before implementing a machine.
+2. Land `od_xfer` ownership, arbitration and reset only. It owns the sole mode, owner, elapsed-time
+   record and byte totals; it neither parses a command nor touches hardware.
+3. Land `od_xfer_direct` and its direct-call host tests. Consume `od_color_geometry_t` and
+   `od_zlib_pump`; do not recreate format switches, byte math, an inflater loop or a sink counter.
+4. Land `od_xfer_partial` and its direct-call host tests. Partial storage and implementation are
+   under `#if OD_CAP_PARTIAL`, while the capability-off entry point remains and emits the existing
+   unsupported reply without partial state. Build all transfer modules again in
+   `od_shared_silabs` with `OD_CAP_PARTIAL=0`, and prove the partial object/state is absent.
+5. Split START validation from target activation. Invalid geometry, etag, flags, size or arithmetic
+   touches no panel resource. Compression admission follows section 4.2's authority decision.
+6. Make shared accounting authoritative. Every sink call receives the pre-write stream offset;
+   accept only `consumed == offered`, and delete each target protocol byte counter when its adapter
+   is cut over. Plane selection, address-window reissue and controller side effects remain target
+   operations derived from that offset and the geometry established at START.
+7. Implement the END sequence from section 5.3. Pin ACK-enqueue failure separately from drain
+   failure, invoke target recovery exactly once, emit no substitute reply on either barrier abort,
+   and never mutate or refresh the panel after failure.
+8. Preserve direct-auto-END and the three target barrier profiles explicitly. ESP32/Nordic return
+   proceed after their existing flush/dwell; BG22 alone can abort on its two-second drain/TX-idle
+   deadline and performs its existing recovery through `od_xfer_app_barrier_abort()`.
+9. Prepare and host-test the `od_core_reset()` and disconnect integration so portable state resets
+   once and target hardware aborts once, but do not change a production cleanup path yet. The
+   disconnect bridge uses `od_xfer_owner()` rather than retaining a target-side owner copy. Compile
+   the transfer tier under each target toolchain before cutover; Nordic and BG22 may use a
+   compile-only object target while dormancy is required. Do **not** land fake or forwarding
+   `od_xfer_app` implementations merely to satisfy the linker: a truthful adapter must own the
+   final hardware-only surface and delete the target protocol counters it replaces, so it lands
+   atomically with that target's step-10 cutover. Apply reset/disconnect integration only in that
+   cutover as well.
+10. Cut over in repository target order. For each target, replace its four command implementations
+    with temporary one-line bridges to shared policy, delete its old parsing/state/reply code in the
+    same commit, apply its reset/disconnect integration, and pass that target's hardware gate before
+    changing the next. Direct and partial switch together on capable targets because they share
+    DATA/END; BG22 switches direct plus the capability-off partial reply.
+11. After all targets call the shared policy, route the four `OD_DISPATCH_OPCODE_ROWS` entries
+    directly to `od_xfer_direct_start`, `od_xfer_data`, `od_xfer_end` and
+    `od_xfer_partial_start`. Delete the four declarations from `od_cmd_app.h` and every temporary
+    target bridge. Add a symbol ratchet forbidding their reintroduction and pin the unchanged
+    1/2/2/1 reservation budgets in dispatch tests.
 
 Required tests include START lengths 0..5; compressed inline input; supported and rejected color
 schemes; replacement START; wrong owner; zero/stray DATA; exact, incomplete and overlong streams;
 all END lengths and refresh selectors; reply substitution at each position; barrier proceed/abort;
-refresh success/timeout; reset/disconnect; partial flag/etag/rectangle precedence; arithmetic
-overflow; plane-boundary splits at every byte; raw/compressed partial; and BG22 capability-off RAM.
+ACK enqueue failure; recovery exactly once and no reply after barrier failure; refresh
+success/timeout; reset/disconnect; partial flag/etag/rectangle precedence; arithmetic overflow;
+empty raw DATA and inflate pushes that produce no output never calling the write seam; monotonic
+non-empty offsets and short-consumption results from zero through one less than the offered length;
+plane-boundary splits at every byte; raw/compressed partial; every application reply's sealed/plain
+choice under both a live session and plaintext; identical dispatch outcomes before/after direct
+routing; and BG22 capability-off code, ABI and RAM.
 
 Hardware must cover plaintext/encrypted raw and compressed direct, ACK-before-refresh trace,
 disconnect/reconnect, replacement START and a subsequent successful command. ESP32/Nordic also run
@@ -540,7 +707,10 @@ and verifies that a LAN disconnect affects only a LAN-owned transfer. BG22 runs 
 response and confirms no partial or displayed-etag state in the map.
 
 Exit gate: target code owns hardware operations only; no target parses `0x70`, `0x71`, `0x72` or
-`0x76`, owns transfer byte counters, finalizes zlib, or constructs their replies.
+`0x76`, owns transfer byte counters, finalizes zlib, constructs their replies, or defines a command
+hook for those opcodes. The dispatch map names shared transfer entry points directly, every target
+defines the complete transfer seam, and no capability-mismatched transfer state crosses a library
+boundary.
 
 ### Phase 3 — promote PIPE
 

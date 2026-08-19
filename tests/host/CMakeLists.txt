@@ -107,6 +107,28 @@ add_executable(od_zlib_pump_test zlib_pump_test.c)
 target_link_libraries(od_zlib_pump_test od_shared)
 add_test(NAME zlib_pump COMMAND od_zlib_pump_test)
 
+add_executable(od_xfer_test xfer_test.c)
+target_link_libraries(od_xfer_test od_shared)
+add_test(NAME xfer COMMAND od_xfer_test)
+
+add_executable(od_xfer_silabs_test xfer_silabs_test.c)
+target_link_libraries(od_xfer_silabs_test od_shared_silabs)
+add_test(NAME xfer_silabs COMMAND od_xfer_silabs_test)
+
+add_library(od_xfer_auto STATIC
+    ${CMAKE_CURRENT_LIST_DIR}/../../shared/core/od_xfer.c
+    ${CMAKE_CURRENT_LIST_DIR}/../../shared/core/od_xfer_direct.c
+    ${CMAKE_CURRENT_LIST_DIR}/../../shared/core/od_xfer_partial.c)
+target_include_directories(od_xfer_auto PUBLIC ${OD_SHARED_INCLUDE_DIRS})
+target_compile_definitions(od_xfer_auto PRIVATE OD_XFER_DIRECT_AUTO_END=1)
+add_executable(od_xfer_auto_test xfer_auto_test.c)
+target_link_libraries(od_xfer_auto_test od_xfer_auto od_shared)
+add_test(NAME xfer_auto COMMAND od_xfer_auto_test)
+
+add_executable(od_xfer_reply_session_test xfer_reply_session_test.c)
+target_link_libraries(od_xfer_reply_session_test od_session_fake)
+add_test(NAME xfer_reply_session COMMAND od_xfer_reply_session_test)
+
 # adv_control: the loop-owned advertising policy machine (correctness review F4) driven against
 # a scripted fake HAL. The fake supplies od_hal_adv_{program,start,stop} at LINK time, exactly
 # as a target does — shared/ binds its HAL at link time, so there is no injection seam to fake

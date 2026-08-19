@@ -81,6 +81,22 @@ source "${SCRIPT_DIR}/ncs-env.sh"
 
 CMAKE_ARGS=(-DBOARD_ROOT="${SCRIPT_DIR}")
 
+# `west build -p always` does not fully discard the outer sysbuild state for the L15 MCUboot /
+# Partition Manager composition. After an application CMakeLists change it can reconfigure that
+# tree with an unexpanded PM placeholder. The default/gate contract says "always" means a clean
+# build, so enforce that contract for this one composition instead of leaving the next developer
+# to discover that deleting build-xiao_nrf54l15 fixes it.
+if [[ "${PURGE}" == "always" && "${BOARD}" == xiao_nrf54l15* && -d "${BUILD_DIR}" ]]; then
+  case "${BUILD_DIR}" in
+    "${SCRIPT_DIR}/build"|"${SCRIPT_DIR}/build-xiao_nrf54l15"|"${SCRIPT_DIR}/build-xiao_nrf54l15-debug")
+      rm -rf -- "${BUILD_DIR}"
+      ;;
+    *)
+      echo "Not manually removing external L15 build directory; west will handle pristine: ${BUILD_DIR}" >&2
+      ;;
+  esac
+fi
+
 # nRF52840 keeps the Adafruit bootloader; the nRF54 boards use MCUboot (Milestone 7). The
 # choice lives in a sysbuild Kconfig file, which cannot be overridden from CMake or -D, so the
 # right file is selected here. Without this an xiao_ble build fails at configure with

@@ -493,6 +493,13 @@ set_property(TARGET slc PROPERTY C_STANDARD 17)
 set_property(TARGET slc PROPERTY CXX_STANDARD 17)
 set_property(TARGET slc PROPERTY CXX_EXTENSIONS OFF)
 
+# Compile the dormant Phase 2 machine with the BG22 ABI and ARM compiler, but keep its objects out
+# of the firmware until the direct/partial cutover supplies the real hardware seam. Linking fake
+# adapters here would make an accidental production reference appear valid.
+add_library(od_xfer_compile OBJECT ${OD_SHARED_SOURCES_APP_XFER})
+target_link_libraries(od_xfer_compile PRIVATE slc)
+set_property(TARGET od_xfer_compile PROPERTY C_STANDARD 17)
+
 target_link_options(slc INTERFACE
     -mcpu=cortex-m33
     -mthumb

@@ -1,0 +1,71 @@
+/* Private state shared only by the transfer implementation translation units. */
+#ifndef OD_XFER_INTERNAL_H
+#define OD_XFER_INTERNAL_H
+
+#include "od_caps.h"
+#include "od_color.h"
+#include "od_xfer.h"
+#include "od_xfer_app.h"
+#include "od_zlib_pump.h"
+
+#include <stdint.h>
+
+typedef enum {
+    OD_XFER_IDLE = 0,
+    OD_XFER_DIRECT_FULL,
+    OD_XFER_DIRECT_PARTIAL,
+    OD_XFER_PIPE_FULL,
+    OD_XFER_PIPE_PARTIAL,
+    OD_XFER_FATAL,
+} od_xfer_mode_t;
+
+#if OD_CAP_PARTIAL
+typedef struct {
+    uint32_t new_etag;
+    uint32_t plane_bytes;
+    uint16_t x;
+    uint16_t y;
+    uint16_t width;
+    uint16_t height;
+} od_xfer_partial_state_t;
+#endif
+
+typedef struct {
+    od_xfer_mode_t mode;
+    od_reply_t owner;
+    uint32_t started_ms;
+    uint32_t expected_bytes;
+    uint32_t received_bytes;
+    uint32_t written_bytes;
+    bool compressed;
+    od_color_geometry_t geometry;
+#if OD_CAP_PARTIAL
+    od_xfer_partial_state_t partial;
+#endif
+} od_xfer_state_t;
+
+od_xfer_state_t *od_xfer_state(void);
+bool od_xfer_owner_matches(const od_cmd_ctx_t *ctx);
+void od_xfer_replace_active(void);
+void od_xfer_clear_state(void);
+void od_xfer_abort_active(od_xfer_abort_reason_t reason, bool clear_etag);
+
+od_txq_status_t od_xfer_reply_app(const od_cmd_ctx_t *ctx, const uint8_t *frame, uint16_t len);
+void od_xfer_reply_error(const od_cmd_ctx_t *ctx, const uint8_t *frame, uint16_t len);
+void od_xfer_reply_simple_error(const od_cmd_ctx_t *ctx, uint8_t opcode);
+#if OD_CAP_PARTIAL
+void od_xfer_reply_partial_error(const od_cmd_ctx_t *ctx, uint8_t opcode, uint8_t error,
+                                 bool abort_active, od_xfer_abort_reason_t reason);
+#endif
+
+void od_xfer_stream_reset(uint32_t expected_bytes);
+bool od_xfer_stream_push(od_span_t input, bool final);
+
+od_cmd_result_t od_xfer_direct_data_impl(const od_cmd_ctx_t *ctx, od_span_t body);
+od_cmd_result_t od_xfer_direct_end_impl(const od_cmd_ctx_t *ctx, od_span_t body);
+#if OD_CAP_PARTIAL
+od_cmd_result_t od_xfer_partial_data_impl(const od_cmd_ctx_t *ctx, od_span_t body);
+od_cmd_result_t od_xfer_partial_end_impl(const od_cmd_ctx_t *ctx, od_span_t body);
+#endif
+
+#endif /* OD_XFER_INTERNAL_H */
