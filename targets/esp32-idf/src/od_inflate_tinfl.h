@@ -1,18 +1,13 @@
 /*
  * od_inflate_tinfl — ESP32 inflate adapter backed by the ROM miniz `tinfl`.
  *
- * Drop-in replacement for the portable streaming inflater,
- * od_zlib_stream_*). It exposes the SAME streaming contract (reset / push / poll /
- * error / output_count) and the SAME status type (od_zlib_status_t, reused from
- * od_zlib_inflate.h) so display_service.cpp can bind its existing od_zlib_stream_* call sites
- * to this engine via a compile-time #define remap, with no changes to the portable engine and
- * no changes to the call sites.
+ * Alternative backend for the shared od_zlib_pump. It exposes the same streaming contract and
+ * status type as od_zlib_stream_*; od_inflate_app.cpp selects this backend at compile time.
  *
- * SCOPE — this serves EVERY compressed path, not just WiFi/LAN. The remap in
- * display_service.cpp is an unconditional compile-time #define, so when this engine
- * is enabled it replaces uzlib for direct-write, partial-region, AND PIPE_WRITE
- * regardless of transport. PIPE_WRITE is in fact BLE-only (see "NO PIPE ON LAN" in
- * opendisplay_protocol.h), so the busiest BLE transfer path decodes through tinfl.
+ * SCOPE — this serves EVERY compressed path, not just WiFi/LAN. The selection in
+ * od_inflate_app.cpp is unconditional within a build, so this engine handles direct-write,
+ * partial-region and PIPE_WRITE regardless of transport. PIPE_WRITE is BLE-only (see "NO PIPE ON
+ * LAN" in opendisplay_protocol.h), so the busiest BLE transfer path decodes through tinfl.
  * The gate below keys off OPENDISPLAY_ENABLE_WIFI only as a proxy for "a build that
  * cares about inflate throughput and can spare the RAM" — it does NOT mean the
  * engine is limited to WiFi traffic. Do not read the gate as a transport filter.

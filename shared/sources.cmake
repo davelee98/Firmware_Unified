@@ -158,6 +158,13 @@ set(OD_SHARED_SOURCES_APP_BOOT
     "${CMAKE_CURRENT_LIST_DIR}/core/od_boot_screen.c"
 )
 
+# APP_INFLATE binds the target-selected inflater engine to the shared output pump. Targets keep
+# that choice because ESP32 Wi-Fi builds use ROM tinfl while the other builds use the portable
+# engine. The pump itself owns no storage; callers supply the bounded scratch buffer and sink.
+set(OD_SHARED_SOURCES_APP_INFLATE
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_zlib_pump.c"
+)
+
 set(OD_SHARED_SOURCES_HAL_WDT
     "${CMAKE_CURRENT_LIST_DIR}/core/od_watchdog.c"
 )
@@ -172,6 +179,7 @@ set(OD_SHARED_SOURCES
     ${OD_SHARED_SOURCES_APP_SESSION}
     ${OD_SHARED_SOURCES_APP_RXQ}
     ${OD_SHARED_SOURCES_APP_BOOT}
+    ${OD_SHARED_SOURCES_APP_INFLATE}
     ${OD_SHARED_SOURCES_HAL_WDT}
 )
 

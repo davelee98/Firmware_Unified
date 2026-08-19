@@ -224,6 +224,7 @@ target_sources(app PRIVATE
   ${SRC_DIR}/opendisplay_config_parser.c
   ${SRC_DIR}/opendisplay_config_storage.c
   ${SRC_DIR}/opendisplay_display.cpp
+  ${SRC_DIR}/od_inflate_app.c
   ${SRC_DIR}/boot_screen.cpp
   ${SRC_DIR}/opendisplay_epd_map.c
   ${SRC_DIR}/opendisplay_led.c
@@ -267,7 +268,8 @@ target_sources(app PRIVATE
 target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE} ${OD_SHARED_SOURCES_HAL_CRYPTO}
                            ${OD_SHARED_SOURCES_HAL_WDT} ${OD_SHARED_SOURCES_APP_RXQ}
                            ${OD_SHARED_SOURCES_HAL_RADIO} ${OD_SHARED_SOURCES_APP_SESSION}
-                           ${OD_SHARED_SOURCES_HAL_ADV} ${OD_SHARED_SOURCES_APP_BOOT})
+                           ${OD_SHARED_SOURCES_HAL_ADV} ${OD_SHARED_SOURCES_APP_BOOT}
+                           ${OD_SHARED_SOURCES_APP_INFLATE})
 
 # The per-source INCLUDE_DIRECTORIES property that used to sit here is GONE, and its removal is
 # the point of the header adoption: it existed only to pin these two shared TUs to the canonical

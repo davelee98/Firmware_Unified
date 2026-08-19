@@ -31,6 +31,7 @@ static const char *g_case = "(none)";
 #define CASE(name) (g_case = (name))
 
 static const uint8_t BUF[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+static uint8_t MUT_BUF[8];
 
 /* ------------------------------------------------------------------------------ well-formed --- */
 
@@ -81,6 +82,28 @@ static void test_has(void)
     CASE("an empty but well-formed span holds exactly zero");
     CHECK(od_span_has(od_span_none(), 0u));
     CHECK(!od_span_has(od_span_none(), 1u));
+}
+
+/* ------------------------------------------------------------------------------- mutable --- */
+
+static void test_mutable(void)
+{
+    od_mut_span_t s = od_mut_span_make(MUT_BUF, sizeof MUT_BUF);
+    od_span_t read_only;
+
+    CASE("a mutable span carries writable storage and its bound together");
+    CHECK(od_mut_span_valid(s));
+    CHECK(s.p == MUT_BUF && s.n == sizeof MUT_BUF);
+    s.p[3] = 0xa5u;
+    CHECK(MUT_BUF[3] == 0xa5u);
+
+    CASE("NULL is well-formed for a mutable span only at zero length");
+    CHECK(od_mut_span_valid(od_mut_span_none()));
+    CHECK(!od_mut_span_valid(od_mut_span_make(NULL, 1u)));
+
+    CASE("a mutable span converts to a read-only view without changing its bound");
+    read_only = od_mut_span_const(s);
+    CHECK(read_only.p == MUT_BUF && read_only.n == sizeof MUT_BUF);
 }
 
 /* ----------------------------------------------------------------------------------- split --- */
@@ -215,6 +238,7 @@ int main(void)
 {
     test_valid();
     test_has();
+    test_mutable();
     test_split();
     test_take_drop();
     test_walk_shape();

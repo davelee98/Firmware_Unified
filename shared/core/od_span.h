@@ -43,6 +43,14 @@ typedef struct od_span {
     size_t         n;
 } od_span_t;
 
+/* Writable counterpart used when a caller lends bounded scratch/output storage. It has the same
+ * borrowing and bounds semantics as od_span_t; the distinct type keeps writable memory explicit
+ * and avoids casting const away at a sink boundary. */
+typedef struct od_mut_span {
+    uint8_t *p;
+    size_t   n;
+} od_mut_span_t;
+
 /* A span over n bytes at p. Passing (NULL, n>0) builds a span that od_span_valid() rejects
  * rather than one that traps here: the callee's argument check is where a bad buffer belongs,
  * and every entry point in shared/ has one. */
@@ -57,6 +65,29 @@ static inline od_span_t od_span_make(const uint8_t *p, size_t n)
 static inline od_span_t od_span_none(void)
 {
     return od_span_make(NULL, 0u);
+}
+
+static inline od_mut_span_t od_mut_span_make(uint8_t *p, size_t n)
+{
+    od_mut_span_t s;
+    s.p = p;
+    s.n = n;
+    return s;
+}
+
+static inline od_mut_span_t od_mut_span_none(void)
+{
+    return od_mut_span_make(NULL, 0u);
+}
+
+static inline bool od_mut_span_valid(od_mut_span_t s)
+{
+    return s.p != NULL || s.n == 0u;
+}
+
+static inline od_span_t od_mut_span_const(od_mut_span_t s)
+{
+    return od_span_make(s.p, s.n);
 }
 
 /* Well-formed: a null pointer is only allowed with a zero length. This is the check that
