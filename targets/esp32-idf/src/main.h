@@ -142,14 +142,11 @@ uint32_t tcpReceiveBufferPos = 0;
 bool directWriteActive = false;  // True when direct write mode is active
 bool directWriteCompressed = false;  // True if using compressed direct write
 bool directWriteBitplanes = false;  // True for controller-plane streams (BWR/BWY/GRAY4)
-bool directWritePlane2 = false;  // True when writing plane 2 (R/Y) for bitplanes
 uint32_t directWriteBytesWritten = 0;  // Total bytes written to current plane
 uint32_t directWriteDecompressedTotal = 0;  // Expected decompressed size
 uint16_t directWriteWidth = 0;  // Display width in pixels
 uint16_t directWriteHeight = 0;  // Display height in pixels
 uint32_t directWriteTotalBytes = 0;  // Total bytes expected per plane (for bitplanes) or total (for others)
-uint8_t directWriteRefreshMode = 0;  // 0 = FULL (default), 1 = FAST/PARTIAL (if supported)
-uint8_t directWriteDataKind = 0;  // none; display_service.cpp tracks full vs partial 0x71 streams
 uint32_t directWriteCompressedReceived = 0;  // Total compressed bytes received for diagnostics/overflow guard
 
 uint32_t directWriteStartTime = 0;  // Timestamp when direct write started (for timeout detection)
@@ -207,15 +204,10 @@ od_cmd_result_t handleFirmwareVersion(const od_cmd_ctx_t *ctx);
 od_cmd_result_t handleReadMSD(const od_cmd_ctx_t *ctx);  // Read Manufacturer Specific Data (MSD) payload
 const char* getFirmwareShaString();
 void cleanupDirectWriteState(bool refreshDisplay);
-od_cmd_result_t handleDirectWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
-od_cmd_result_t handleDirectWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
-void handleDirectWriteEnd(uint8_t* data = nullptr, uint16_t len = 0);
-bool handleDirectWriteCompressedData(uint8_t* data, uint16_t len);
 od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 od_cmd_result_t handlePipeWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 od_cmd_result_t handlePipeWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 void resetPipeWriteState(void);
-od_cmd_result_t handlePartialWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 int mapEpd(int id);
 uint8_t getFirmwareMajor();
 uint8_t getFirmwareMinor();

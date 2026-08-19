@@ -195,6 +195,50 @@ c11_structure() {
 }
 check "structure: ownership ratchets"  c11_structure
 
+esp32_xfer_cutover() {
+    local rc=0 hits pipe_start legacy_start
+
+    hits=$(grep -rInE '\b(handleDirectWriteStart|handleDirectWriteData|handleDirectWriteEnd|handlePartialWriteStart)[[:space:]]*\(' \
+           targets/esp32-idf/src 2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "ESP32 legacy direct/partial command policy returned; od_cmd_app must bridge to od_xfer"
+        rc=1
+    fi
+
+    for call in \
+        'od_xfer_direct_start(ctx, body)' \
+        'od_xfer_data(ctx, body)' \
+        'od_xfer_end(ctx, body)' \
+        'od_xfer_partial_start(ctx, body)'; do
+        if ! grep -Fq "return $call;" targets/esp32-idf/src/od_cmd_app.cpp; then
+            echo "ESP32 transfer bridge missing: return $call;"
+            rc=1
+        fi
+    done
+
+    pipe_start=$(sed -n '/^od_cmd_result_t handlePipeWriteStart(/,/^}/p' \
+                 targets/esp32-idf/src/display_service.cpp)
+    if ! grep -q '\bod_xfer_active[[:space:]]*(' <<<"$pipe_start" ||
+       ! grep -q '\bod_xfer_reset[[:space:]]*(' <<<"$pipe_start"; then
+        echo "ESP32 PIPE START must displace a live shared legacy transfer before pump use"
+        rc=1
+    fi
+
+    legacy_start=$(sed -n '/^extern "C" void od_xfer_app_prepare_start(/,/^}/p' \
+                   targets/esp32-idf/src/display_service.cpp)
+    if ! grep -q '\bresetPipeWriteState[[:space:]]*(' <<<"$legacy_start"; then
+        echo "ESP32 legacy START must displace target PIPE through od_xfer_app_prepare_start"
+        rc=1
+    fi
+    if ! grep -q '\bod_xfer_reset[[:space:]]*(' targets/esp32-idf/src/session_guard.cpp; then
+        echo "ESP32 teardown must reset the shared legacy transfer before od_core_reset"
+        rc=1
+    fi
+    return $rc
+}
+check "esp32: shared legacy transfer cutover" esp32_xfer_cutover
+
 od_color_structure() {
     local rc=0 hits count
     for path in \

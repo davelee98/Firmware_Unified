@@ -16,6 +16,7 @@
 #include "communication.h"
 #include "od_core.h"
 #include "od_rxq.h"
+#include "od_xfer.h"
 #include "config_parser.h"
 #include "display_service.h"
 #include "encryption.h"
@@ -140,7 +141,11 @@ void abortToKnownState(const char* reason, bool dropLink, LinkId ownerId) {
                     (unsigned)droppedRx);
     }
 
-    // 9. Every SHARED object that outlives a dispatch, in one call: the config-read producer,
+    // 9. Transfer reset remains target-owned while adapters are staged per target.
+    //    od_core_reset() contains only objects linked by every target.
+    od_xfer_reset();
+
+    // 9b. Every universally shared object that outlives a dispatch, in one call: the config-read producer,
     //    egress, and the session. Cancelling the read is not tidiness -- it holds the config
     //    scratch, and od_dispatch DEFERS every config-mutating opcode while it is active, so a
     //    client that vanishes mid-read would otherwise defer every later config write forever.
