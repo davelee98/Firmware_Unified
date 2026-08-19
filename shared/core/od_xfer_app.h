@@ -32,6 +32,19 @@ typedef enum {
     OD_XFER_BARRIER_ABORT,
 } od_xfer_barrier_t;
 
+/* The target owns panel power policy. In particular, ESP32 distinguishes failures that must
+ * force the panel off from replacement/incomplete paths that may release it warm. */
+typedef enum {
+    OD_XFER_ABORT_REPLACED = 0,
+    OD_XFER_ABORT_START_FAILED,
+    OD_XFER_ABORT_STREAM_FAILED,
+    OD_XFER_ABORT_INCOMPLETE,
+    OD_XFER_ABORT_REPLY_FAILED,
+    OD_XFER_ABORT_REFRESH_FAILED,
+    OD_XFER_ABORT_RESET,
+} od_xfer_abort_reason_t;
+
+void od_xfer_app_prepare_start(void);
 bool od_xfer_app_panel_info(od_xfer_panel_info_t *out);
 bool od_xfer_app_begin_full(const od_color_geometry_t *geometry);
 #if OD_CAP_PARTIAL
@@ -40,7 +53,7 @@ bool od_xfer_app_begin_partial(uint16_t x, uint16_t y, uint16_t width, uint16_t 
 #endif
 uint32_t od_xfer_app_write(uint32_t stream_offset, od_span_t data);
 od_mut_span_t od_xfer_app_inflate_scratch(void);
-void od_xfer_app_abort(void);
+void od_xfer_app_abort(od_xfer_abort_reason_t reason);
 od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *owner);
 void od_xfer_app_barrier_abort(const od_reply_t *owner);
 bool od_xfer_app_refresh(uint8_t mode, bool *completed);

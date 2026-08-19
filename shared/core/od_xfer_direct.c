@@ -38,6 +38,7 @@ od_cmd_result_t od_xfer_direct_start(const od_cmd_ctx_t *ctx, od_span_t body)
     }
 
     od_xfer_replace_active();
+    od_xfer_app_prepare_start();
     memset(&panel, 0, sizeof panel);
     if (!od_xfer_app_panel_info(&panel)
         || panel.geometry.total_bytes == 0u
@@ -60,7 +61,7 @@ od_cmd_result_t od_xfer_direct_start(const od_cmd_ctx_t *ctx, od_span_t body)
     state->geometry = panel.geometry;
 
     if (!od_xfer_app_begin_full(&state->geometry)) {
-        od_xfer_abort_active(false);
+        od_xfer_abort_active(OD_XFER_ABORT_START_FAILED, false);
         od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_START_ACK);
         return OD_CMD_NACK;
     }
@@ -70,14 +71,14 @@ od_cmd_result_t od_xfer_direct_start(const od_cmd_ctx_t *ctx, od_span_t body)
         if (inline_input.n > 0u) {
             state->received_bytes = (uint32_t)inline_input.n;
             if (!od_xfer_stream_push(inline_input, false)) {
-                od_xfer_abort_active(false);
+                od_xfer_abort_active(OD_XFER_ABORT_START_FAILED, false);
                 od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_START_ACK);
                 return OD_CMD_NACK;
             }
         }
     }
     if (od_xfer_reply_app(ctx, ack, (uint16_t)sizeof ack) != OD_TXQ_OK) {
-        od_xfer_abort_active(false);
+        od_xfer_abort_active(OD_XFER_ABORT_REPLY_FAILED, false);
         return OD_CMD_NACK;
     }
     return OD_CMD_OK;
@@ -92,19 +93,19 @@ od_cmd_result_t od_xfer_direct_data_impl(const od_cmd_ctx_t *ctx, od_span_t body
         return OD_CMD_OK;
     }
     if (body.n > UINT32_MAX) {
-        od_xfer_abort_active(false);
+        od_xfer_abort_active(OD_XFER_ABORT_STREAM_FAILED, false);
         od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_DATA_ACK);
         return OD_CMD_NACK;
     }
     if (state->compressed) {
         if (body.n > UINT32_MAX - state->received_bytes) {
-            od_xfer_abort_active(false);
+            od_xfer_abort_active(OD_XFER_ABORT_STREAM_FAILED, false);
             od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_DATA_ACK);
             return OD_CMD_NACK;
         }
         state->received_bytes += (uint32_t)body.n;
         if (!od_xfer_stream_push(body, false)) {
-            od_xfer_abort_active(false);
+            od_xfer_abort_active(OD_XFER_ABORT_STREAM_FAILED, false);
             od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_DATA_ACK);
             return OD_CMD_NACK;
         }
@@ -117,7 +118,7 @@ od_cmd_result_t od_xfer_direct_data_impl(const od_cmd_ctx_t *ctx, od_span_t body
             const od_span_t prefix = od_span_take(body, offered);
             const uint32_t consumed = od_xfer_app_write(state->written_bytes, prefix);
             if (consumed != offered) {
-                od_xfer_abort_active(false);
+                od_xfer_abort_active(OD_XFER_ABORT_STREAM_FAILED, false);
                 od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_DATA_ACK);
                 return OD_CMD_NACK;
             }
@@ -130,7 +131,7 @@ od_cmd_result_t od_xfer_direct_data_impl(const od_cmd_ctx_t *ctx, od_span_t body
 #endif
     }
     if (od_xfer_reply_app(ctx, ack, (uint16_t)sizeof ack) != OD_TXQ_OK) {
-        od_xfer_abort_active(false);
+        od_xfer_abort_active(OD_XFER_ABORT_REPLY_FAILED, false);
         return OD_CMD_NACK;
     }
     return OD_CMD_OK;
@@ -159,7 +160,7 @@ static od_cmd_result_t finish_refresh(const od_cmd_ctx_t *ctx, od_span_t body)
         return OD_CMD_NACK;
     }
     if (!od_xfer_app_refresh(refresh_mode, &completed)) {
-        od_xfer_abort_active(false);
+        od_xfer_abort_active(OD_XFER_ABORT_REFRESH_FAILED, false);
         od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_END_ACK);
         return OD_CMD_NACK;
     }
@@ -190,13 +191,13 @@ od_cmd_result_t od_xfer_direct_end_impl(const od_cmd_ctx_t *ctx, od_span_t body)
     }
     if (state->compressed) {
         if (!od_xfer_stream_push(od_span_none(), true)) {
-            od_xfer_abort_active(false);
+            od_xfer_abort_active(OD_XFER_ABORT_STREAM_FAILED, false);
             od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_END_ACK);
             return OD_CMD_NACK;
         }
     } else if (state->geometry.layout == OD_COLOR_LAYOUT_CONTROLLER_PLANES
                && state->written_bytes != state->expected_bytes) {
-        od_xfer_abort_active(false);
+        od_xfer_abort_active(OD_XFER_ABORT_INCOMPLETE, false);
         od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_END_ACK);
         return OD_CMD_NACK;
     }

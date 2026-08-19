@@ -48,14 +48,14 @@ od_xfer_state_t *od_xfer_state(void);
 bool od_xfer_owner_matches(const od_cmd_ctx_t *ctx);
 void od_xfer_replace_active(void);
 void od_xfer_clear_state(void);
-void od_xfer_abort_active(bool clear_etag);
+void od_xfer_abort_active(od_xfer_abort_reason_t reason, bool clear_etag);
 
 od_txq_status_t od_xfer_reply_app(const od_cmd_ctx_t *ctx, const uint8_t *frame, uint16_t len);
 void od_xfer_reply_error(const od_cmd_ctx_t *ctx, const uint8_t *frame, uint16_t len);
 void od_xfer_reply_simple_error(const od_cmd_ctx_t *ctx, uint8_t opcode);
 #if OD_CAP_PARTIAL
 void od_xfer_reply_partial_error(const od_cmd_ctx_t *ctx, uint8_t opcode, uint8_t error,
-                                 bool abort_active);
+                                 bool abort_active, od_xfer_abort_reason_t reason);
 #endif
 
 void od_xfer_stream_reset(uint32_t expected_bytes);

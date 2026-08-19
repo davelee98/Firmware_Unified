@@ -18,6 +18,15 @@ bool od_xfer_active(void)
     return s_xfer.mode != OD_XFER_IDLE;
 }
 
+bool od_xfer_owner(od_reply_t *out)
+{
+    if (!od_xfer_active() || out == NULL) {
+        return false;
+    }
+    *out = s_xfer.owner;
+    return true;
+}
+
 bool od_xfer_owner_matches(const od_cmd_ctx_t *ctx)
 {
     return ctx != NULL && ctx->rp.origin == s_xfer.owner.origin && ctx->rp.tag == s_xfer.owner.tag;
@@ -32,15 +41,15 @@ void od_xfer_clear_state(void)
 void od_xfer_replace_active(void)
 {
     if (od_xfer_active()) {
-        od_xfer_app_abort();
+        od_xfer_app_abort(OD_XFER_ABORT_REPLACED);
         od_xfer_clear_state();
     }
 }
 
-void od_xfer_abort_active(bool clear_etag)
+void od_xfer_abort_active(od_xfer_abort_reason_t reason, bool clear_etag)
 {
     if (od_xfer_active()) {
-        od_xfer_app_abort();
+        od_xfer_app_abort(reason);
     }
 #if OD_CAP_PARTIAL
     if (clear_etag) {
@@ -54,7 +63,7 @@ void od_xfer_abort_active(bool clear_etag)
 
 void od_xfer_reset(void)
 {
-    od_xfer_abort_active(false);
+    od_xfer_abort_active(OD_XFER_ABORT_RESET, false);
 }
 
 od_txq_status_t od_xfer_reply_app(const od_cmd_ctx_t *ctx, const uint8_t *frame, uint16_t len)
@@ -80,13 +89,13 @@ void od_xfer_reply_simple_error(const od_cmd_ctx_t *ctx, uint8_t opcode)
 
 #if OD_CAP_PARTIAL
 void od_xfer_reply_partial_error(const od_cmd_ctx_t *ctx, uint8_t opcode, uint8_t error,
-                                 bool abort_active)
+                                 bool abort_active, od_xfer_abort_reason_t reason)
 {
     const uint8_t frame[] = { RESP_NACK, opcode, error, 0u };
 
     od_xfer_app_set_displayed_etag(0u);
     if (abort_active) {
-        od_xfer_abort_active(false);
+        od_xfer_abort_active(reason, false);
     }
     od_xfer_reply_error(ctx, frame, (uint16_t)sizeof frame);
 }

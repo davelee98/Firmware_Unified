@@ -26,9 +26,9 @@ static uint16_t read_be16(const uint8_t *p)
 }
 
 static od_cmd_result_t partial_fail(const od_cmd_ctx_t *ctx, uint8_t opcode, uint8_t error,
-                                    bool abort_active)
+                                    bool abort_active, od_xfer_abort_reason_t reason)
 {
-    od_xfer_reply_partial_error(ctx, opcode, error, abort_active);
+    od_xfer_reply_partial_error(ctx, opcode, error, abort_active, reason);
     return OD_CMD_NACK;
 }
 
@@ -49,11 +49,14 @@ od_cmd_result_t od_xfer_partial_start(const od_cmd_ctx_t *ctx, od_span_t body)
     const uint8_t ack[] = { RESP_ACK, 0x76u };
 
     if (ctx == NULL || !od_span_valid(body) || body.n > UINT32_MAX) {
-        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_STREAM, false);
+        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_STREAM, false,
+                            OD_XFER_ABORT_START_FAILED);
     }
     od_xfer_replace_active();
+    od_xfer_app_prepare_start();
     if (body.n < 17u) {
-        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_STREAM, false);
+        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_STREAM, false,
+                            OD_XFER_ABORT_START_FAILED);
     }
 
     flags = body.p[0];
@@ -65,29 +68,35 @@ od_cmd_result_t od_xfer_partial_start(const od_cmd_ctx_t *ctx, od_span_t body)
     height = read_be16(body.p + 15u);
 
     if ((flags & (uint8_t)~OD_PARTIAL_ALLOWED_FLAGS) != 0u) {
-        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_FLAGS, false);
+        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_FLAGS, false,
+                            OD_XFER_ABORT_START_FAILED);
     }
     if (old_etag == 0u || old_etag != od_xfer_app_displayed_etag() || new_etag == 0u) {
-        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_ETAG_MISMATCH, false);
+        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_ETAG_MISMATCH, false,
+                            OD_XFER_ABORT_START_FAILED);
     }
     memset(&panel, 0, sizeof panel);
     if (!od_xfer_app_panel_info(&panel) || !panel.partial_enabled
         || !panel.geometry.partial_supported) {
-        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_UNSUPPORTED, false);
+        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_UNSUPPORTED, false,
+                            OD_XFER_ABORT_START_FAILED);
     }
     if (width == 0u || height == 0u
         || (uint32_t)x + width > panel.width
         || (uint32_t)y + height > panel.height) {
-        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_RECT_OOB, false);
+        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_RECT_OOB, false,
+                            OD_XFER_ABORT_START_FAILED);
     }
     if ((x & 7u) != 0u || (width & 7u) != 0u) {
-        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_RECT_ALIGN, false);
+        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_RECT_ALIGN, false,
+                            OD_XFER_ABORT_START_FAILED);
     }
     if (od_color_direct_geometry(OD_COLOR_SCHEME_MONO, width, height, &rect_geometry)
             != OD_COLOR_OK
         || rect_geometry.part_bytes[0] == 0u
         || rect_geometry.part_bytes[0] > UINT32_MAX / 2u) {
-        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_STREAM, false);
+        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_STREAM, false,
+                            OD_XFER_ABORT_START_FAILED);
     }
     plane_bytes = rect_geometry.part_bytes[0];
     expected = plane_bytes * 2u;
@@ -107,7 +116,8 @@ od_cmd_result_t od_xfer_partial_start(const od_cmd_ctx_t *ctx, od_span_t body)
     state->partial.height = height;
 
     if (!od_xfer_app_begin_partial(x, y, width, height, plane_bytes)) {
-        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_STREAM, true);
+        return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_STREAM, true,
+                            OD_XFER_ABORT_START_FAILED);
     }
     if (state->compressed) {
         od_xfer_stream_reset(expected);
@@ -117,22 +127,25 @@ od_cmd_result_t od_xfer_partial_start(const od_cmd_ctx_t *ctx, od_span_t body)
         state->received_bytes = (uint32_t)inline_input.n;
         if (state->compressed) {
             if (!od_xfer_stream_push(inline_input, false)) {
-                return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_STREAM, true);
+                return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_STREAM, true,
+                                    OD_XFER_ABORT_START_FAILED);
             }
         } else {
             uint32_t consumed;
             if (inline_input.n > expected) {
-                return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_STREAM, true);
+                return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_STREAM, true,
+                                    OD_XFER_ABORT_START_FAILED);
             }
             consumed = od_xfer_app_write(0u, inline_input);
             if (consumed != inline_input.n) {
-                return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_STREAM, true);
+                return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_STREAM, true,
+                                    OD_XFER_ABORT_START_FAILED);
             }
             state->written_bytes = consumed;
         }
     }
     if (od_xfer_reply_app(ctx, ack, (uint16_t)sizeof ack) != OD_TXQ_OK) {
-        od_xfer_abort_active(true);
+        od_xfer_abort_active(OD_XFER_ABORT_REPLY_FAILED, true);
         return OD_CMD_NACK;
     }
     return OD_CMD_OK;
@@ -147,30 +160,35 @@ od_cmd_result_t od_xfer_partial_data_impl(const od_cmd_ctx_t *ctx, od_span_t bod
         return OD_CMD_OK;
     }
     if (body.n > UINT32_MAX) {
-        return partial_fail(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true);
+        return partial_fail(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true,
+                            OD_XFER_ABORT_STREAM_FAILED);
     }
     if (state->compressed) {
         if (body.n > UINT32_MAX - state->received_bytes) {
-            return partial_fail(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true);
+            return partial_fail(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true,
+                                OD_XFER_ABORT_STREAM_FAILED);
         }
         state->received_bytes += (uint32_t)body.n;
         if (!od_xfer_stream_push(body, false)) {
-            return partial_fail(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true);
+            return partial_fail(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true,
+                                OD_XFER_ABORT_STREAM_FAILED);
         }
     } else {
         uint32_t consumed;
         if (state->written_bytes > state->expected_bytes
             || body.n > (size_t)(state->expected_bytes - state->written_bytes)) {
-            return partial_fail(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true);
+            return partial_fail(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true,
+                                OD_XFER_ABORT_STREAM_FAILED);
         }
         consumed = od_xfer_app_write(state->written_bytes, body);
         if (consumed != (uint32_t)body.n) {
-            return partial_fail(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true);
+            return partial_fail(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true,
+                                OD_XFER_ABORT_STREAM_FAILED);
         }
         state->written_bytes += consumed;
     }
     if (od_xfer_reply_app(ctx, ack, (uint16_t)sizeof ack) != OD_TXQ_OK) {
-        od_xfer_abort_active(true);
+        od_xfer_abort_active(OD_XFER_ABORT_REPLY_FAILED, true);
         return OD_CMD_NACK;
     }
     return OD_CMD_OK;
@@ -189,14 +207,17 @@ od_cmd_result_t od_xfer_partial_end_impl(const od_cmd_ctx_t *ctx, od_span_t body
         return OD_CMD_OK;
     }
     if (body.n > 1u) {
-        return partial_fail(ctx, RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true);
+        return partial_fail(ctx, RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true,
+                            OD_XFER_ABORT_STREAM_FAILED);
     }
     if (state->compressed) {
         if (state->received_bytes == 0u || !od_xfer_stream_push(od_span_none(), true)) {
-            return partial_fail(ctx, RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true);
+            return partial_fail(ctx, RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true,
+                                OD_XFER_ABORT_STREAM_FAILED);
         }
     } else if (state->written_bytes != state->expected_bytes) {
-        return partial_fail(ctx, RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true);
+        return partial_fail(ctx, RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true,
+                            OD_XFER_ABORT_INCOMPLETE);
     }
 
     if (od_xfer_reply_app(ctx, ack, (uint16_t)sizeof ack) != OD_TXQ_OK) {
@@ -217,7 +238,8 @@ od_cmd_result_t od_xfer_partial_end_impl(const od_cmd_ctx_t *ctx, od_span_t body
         refresh_mode = OD_REFRESH_FAST;
     }
     if (!od_xfer_app_refresh(refresh_mode, &completed)) {
-        return partial_fail(ctx, RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true);
+        return partial_fail(ctx, RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true,
+                            OD_XFER_ABORT_REFRESH_FAILED);
     }
     od_xfer_app_set_displayed_etag(completed ? state->partial.new_etag : 0u);
     od_xfer_clear_state();

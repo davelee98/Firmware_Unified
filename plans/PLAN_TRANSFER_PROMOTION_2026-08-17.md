@@ -46,15 +46,39 @@ version of this file. The detailed C14 and color plans remain the record of what
   unchanged; step 10 has not begun.
 - The private singleton owns mode, immutable reply owner, timing and byte totals. DATA/END route
   once on that mode. The write seam receives a non-empty span and its pre-write offset; short
-  consumption refuses the stream. The capability-off build retains only BG22's explicit partial
-  unsupported reply.
+  consumption refuses the stream. Ownership is the complete `{origin, tag}` identity, and a
+  read-only owner accessor exists for disconnect cleanup. This deliberately tightens ESP32's
+  origin-only continuation rule: a reconnected instance cannot resume an abandoned transfer.
+  The capability-off build retains only BG22's explicit partial unsupported reply.
+- START calls a target pre-validation hook after replacing shared legacy-transfer state and before
+  panel/geometry validation. That hook is the home for cancelling target-owned PIPE state and
+  resetting transfer diagnostics even when START is rejected; it performs no panel activation.
+  Abort calls carry a semantic reason so targets can preserve warm release for replacement and
+  incomplete END while forcing power off for terminal stream/reset failures.
 - END behavior pins application-vs-plain replies, enqueue failure, target drain, recovery exactly
   once, refresh and final status. A live-session host case proves the START ACK is sealed while its
   hard NACK remains plaintext.
-- Host coverage includes raw truncation, START lengths 0..5, replacement, wrong-owner and empty
-  DATA, compressed inline input and truncation, partial validation/etag/plane offsets, short sink
+- Host coverage includes raw truncation, START lengths 0..5, replacement, wrong-origin and
+  stale-tag owners, empty DATA, compressed inline input and truncation, all direct and partial END
+  lengths/selectors, refresh success/timeout/call failure, reply substitution at START/DATA/END/
+  final status, partial validation/etag/plane offsets, raw and compressed partial, every
+  plane-boundary split, controller-plane geometry and incomplete-END warm abort, every short sink
   consumption, both barrier failure positions, reset, ESP32 auto-END and the BG22 capability-off
-  ABI. The shared sources compile under both gcc and clang and under ASan/UBSan.
+  ABI. A live-session and
+  security-disabled case cover START/DATA/END/final-status reply protection rather than START
+  alone. The shared sources compile under both gcc and clang and under ASan/UBSan.
+- ESP32's compressed-DATA failure previously emitted a hard NACK but returned `OD_CMD_OK`, unlike
+  its partial path. Shared policy deliberately returns `OD_CMD_NACK`; only accepted frames may
+  stamp session activity. This is a truthful-verdict normalization, not byte-level wire drift.
+- All three target toolchains now compile the dormant transfer sources. ESP32 retains archive
+  discard; Nordic and BG22 use compile-only object targets with their real capability definitions
+  and deliberately provide no fake seam. The BG22 linked image remains 251,236 bytes flash and
+  32,284 bytes static RAM (480 bytes headroom), proving the dormant objects add no image or RAM
+  cost while the capability-off ABI still compiles under ARM GCC.
+- Nordic's gate now makes `PURGE=always` literal for the L15 sysbuild composition by removing only
+  its validated generated build directory before configuring. West's ordinary pristine pass can
+  retain outer MCUboot/Partition Manager state across an application CMakeLists change and leave
+  a PM placeholder unexpanded; incremental gate runs therefore remain equivalent to clean trees.
 - `tools/check.sh --targets` passes 18/0/0 with the complete shared-side candidate: gcc, clang,
   ASan/UBSan, fuzz, the pinned Python wire corpus, all ESP32 configurations and sdkconfig
   baseline, all three Nordic boards, and the BG22 headless build. No hardware result is claimed.
@@ -429,7 +453,8 @@ bool od_xfer_app_begin_partial(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
 #endif
 uint32_t od_xfer_app_write(uint32_t stream_offset, od_span_t data);
 od_mut_span_t od_xfer_app_inflate_scratch(void);
-void od_xfer_app_abort(void);
+void od_xfer_app_prepare_start(void);
+void od_xfer_app_abort(od_xfer_abort_reason_t reason);
 od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *owner);
 void od_xfer_app_barrier_abort(const od_reply_t *owner);
 bool od_xfer_app_refresh(uint8_t mode, bool *completed);
@@ -459,6 +484,19 @@ is unambiguously a sink refusal rather than successful consumption of an empty w
 `od_zlib_pump`; shared state neither owns nor duplicates it. ESP32 retains its selected 2,048-byte
 profile and Nordic/BG22 retain 256 bytes.
 
+`od_xfer_app_prepare_start()` runs for every structurally valid START, after an old shared legacy
+transfer is replaced but before panel-info validation. It cancels target-owned PIPE state and
+resets target diagnostics. This preserves ESP32's `resetPipeWriteState()` and
+`imageWriteLogReset()` ordering, including rejected STARTs, without moving PIPE state or logging
+into the legacy-transfer machine.
+
+`od_xfer_app_abort()` receives one of `REPLACED`, `START_FAILED`, `STREAM_FAILED`, `INCOMPLETE`,
+`REPLY_FAILED`, `REFRESH_FAILED` or `RESET`. These are policy facts, not power commands: each
+adapter maps them to its existing cleanup profile. ESP32 keeps replacement, START rejection and
+bitplane incompleteness warm; mid-stream/final-inflate failure, reply failure and reset are
+terminal force-off paths. Nordic and BG22 retain their current teardown behavior. No adapter may
+collapse the reason before making its target-specific power/recovery decision.
+
 The END sequence is explicit:
 
 1. shared policy validates completion and queues the END acknowledgement through `od_reply()`;
@@ -479,7 +517,7 @@ and portable-state reset. The barrier preserves current profiles:
   `od_xfer_app_barrier_abort()` perform the existing display abort, transport reset and owner close.
   That path emits no additional reply. The same recovery hook runs when ACK enqueue itself fails.
 
-The two abort functions are intentionally distinct. `od_xfer_app_abort()` releases panel/write
+The two abort functions are intentionally distinct. `od_xfer_app_abort(reason)` releases panel/write
 state for replacement START, stream failure, reset or disconnect. `od_xfer_app_barrier_abort()` is
 called only after the END acknowledgement commit is attempted and may additionally reset transport
 state or close the reply owner, as BG22 requires. ESP32 and Nordic may implement both through one
@@ -631,8 +669,14 @@ production opcode:
    proceed after their existing flush/dwell; BG22 alone can abort on its two-second drain/TX-idle
    deadline and performs its existing recovery through `od_xfer_app_barrier_abort()`.
 9. Prepare and host-test the `od_core_reset()` and disconnect integration so portable state resets
-   once and target hardware aborts once, but do not change a production cleanup path yet. Apply the
-   prepared integration for a target only in that target's step-10 cutover.
+   once and target hardware aborts once, but do not change a production cleanup path yet. The
+   disconnect bridge uses `od_xfer_owner()` rather than retaining a target-side owner copy. Compile
+   the transfer tier under each target toolchain before cutover; Nordic and BG22 may use a
+   compile-only object target while dormancy is required. Do **not** land fake or forwarding
+   `od_xfer_app` implementations merely to satisfy the linker: a truthful adapter must own the
+   final hardware-only surface and delete the target protocol counters it replaces, so it lands
+   atomically with that target's step-10 cutover. Apply reset/disconnect integration only in that
+   cutover as well.
 10. Cut over in repository target order. For each target, replace its four command implementations
     with temporary one-line bridges to shared policy, delete its old parsing/state/reply code in the
     same commit, apply its reset/disconnect integration, and pass that target's hardware gate before

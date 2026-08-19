@@ -18,6 +18,7 @@ od_cmd_result_t od_xfer_partial_start(const od_cmd_ctx_t *ctx, od_span_t body);
 
 void od_xfer_reset(void);
 bool od_xfer_active(void);
+bool od_xfer_owner(od_reply_t *out);
 
 #ifdef __cplusplus
 }

@@ -40,6 +40,7 @@ bool od_xfer_app_panel_info(od_xfer_panel_info_t *out)
     return od_color_direct_geometry(OD_COLOR_SCHEME_MONO, out->width, out->height,
                                     &out->geometry) == OD_COLOR_OK;
 }
+void od_xfer_app_prepare_start(void) { }
 bool od_xfer_app_begin_full(const od_color_geometry_t *g) { return g != NULL; }
 bool od_xfer_app_begin_partial(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint32_t p)
 { (void)x; (void)y; (void)w; (void)h; (void)p; return false; }
@@ -47,7 +48,7 @@ uint32_t od_xfer_app_write(uint32_t offset, od_span_t data)
 { (void)offset; ++g_writes; return (uint32_t)data.n; }
 od_mut_span_t od_xfer_app_inflate_scratch(void)
 { return od_mut_span_make(g_scratch, sizeof g_scratch); }
-void od_xfer_app_abort(void) { }
+void od_xfer_app_abort(od_xfer_abort_reason_t reason) { (void)reason; }
 od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *owner)
 { (void)owner; return OD_XFER_BARRIER_PROCEED; }
 void od_xfer_app_barrier_abort(const od_reply_t *owner) { (void)owner; }

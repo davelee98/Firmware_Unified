@@ -39,10 +39,11 @@ od_txq_status_t od_reply_plain(od_tx_reservation_t *r, const od_reply_t *rp,
 
 /* Unused by the capability-off entry point, but required if another transfer object is linked. */
 bool od_xfer_app_panel_info(od_xfer_panel_info_t *out) { (void)out; return false; }
+void od_xfer_app_prepare_start(void) { }
 bool od_xfer_app_begin_full(const od_color_geometry_t *g) { (void)g; return false; }
 uint32_t od_xfer_app_write(uint32_t o, od_span_t d) { (void)o; (void)d; return 0u; }
 od_mut_span_t od_xfer_app_inflate_scratch(void) { return od_mut_span_none(); }
-void od_xfer_app_abort(void) { }
+void od_xfer_app_abort(od_xfer_abort_reason_t reason) { (void)reason; }
 od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *o)
 { (void)o; return OD_XFER_BARRIER_ABORT; }
 void od_xfer_app_barrier_abort(const od_reply_t *o) { (void)o; }

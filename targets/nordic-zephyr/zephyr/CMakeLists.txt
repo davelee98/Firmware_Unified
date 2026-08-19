@@ -271,6 +271,13 @@ target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE} ${OD_SHARED_SOURCES_HAL_CRY
                            ${OD_SHARED_SOURCES_HAL_ADV} ${OD_SHARED_SOURCES_APP_BOOT}
                            ${OD_SHARED_SOURCES_APP_INFLATE})
 
+# Phase 2 remains dormant until its hardware entry gate clears. Compile the complete transfer
+# machine with this target's ARM toolchain without linking it into the firmware; a real
+# od_xfer_app adapter lands atomically with the production cutover, never as a fake linker shim.
+add_library(od_xfer_compile OBJECT ${OD_SHARED_SOURCES_APP_XFER})
+target_include_directories(od_xfer_compile PRIVATE ${OD_SHARED_INCLUDE_DIRS})
+target_link_libraries(od_xfer_compile PRIVATE zephyr_interface)
+
 # The per-source INCLUDE_DIRECTORIES property that used to sit here is GONE, and its removal is
 # the point of the header adoption: it existed only to pin these two shared TUs to the canonical
 # opendisplay_protocol.h / opendisplay_structs.h while ${SRC_DIR} still carried subsets of the
