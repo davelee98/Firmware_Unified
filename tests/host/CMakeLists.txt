@@ -54,6 +54,29 @@ if(OD_SHARED_SOURCES)
         OD_CAP_RXQ=0
         OD_CAP_DUAL_CS=0
         OD_BOOT_LOGO_SIZES=2)
+
+    # Dispatch-only fixtures define the four promoted od_xfer command entry points so they can
+    # observe routing and scripted verdicts. Keep production od_xfer objects out of these archives;
+    # otherwise any unrelated state query pulls them in and collides with the fixture definitions.
+    # od_core is excluded too because reset composition owns transfer lifecycle, not dispatch tests.
+    set(OD_SHARED_DISPATCH_FIXTURE_SOURCES
+        ${OD_SHARED_SOURCES_PURE}
+        ${OD_SHARED_SOURCES_HAL_CRYPTO}
+        ${OD_SHARED_SOURCES_HAL_RADIO}
+        ${OD_SHARED_SOURCES_APP_SESSION})
+    list(FILTER OD_SHARED_DISPATCH_FIXTURE_SOURCES EXCLUDE REGEX "/core/od_core\\.c$")
+    add_library(od_shared_dispatch_fixture STATIC ${OD_SHARED_DISPATCH_FIXTURE_SOURCES})
+    target_include_directories(od_shared_dispatch_fixture PUBLIC ${OD_SHARED_INCLUDE_DIRS})
+    add_library(od_shared_dispatch_fixture_silabs STATIC ${OD_SHARED_DISPATCH_FIXTURE_SOURCES})
+    target_include_directories(od_shared_dispatch_fixture_silabs PUBLIC ${OD_SHARED_INCLUDE_DIRS})
+    target_compile_definitions(od_shared_dispatch_fixture_silabs PUBLIC
+        OD_CONFIG_MAX_SIZE=2048u
+        OD_TXQ_SLOTS=3u
+        OD_CAP_PIPE=0
+        OD_CAP_PARTIAL=0
+        OD_CAP_RXQ=0
+        OD_CAP_DUAL_CS=0
+        OD_BOOT_LOGO_SIZES=2)
     message(STATUS "od: shared/ has ${CMAKE_CURRENT_LIST_DIR} sources — building od_shared")
 else()
     # No target code is imported yet. An INTERFACE library keeps every consumer below
@@ -242,8 +265,13 @@ add_test(NAME config_read COMMAND od_config_read_test)
 # cannot then report; defer after decrypt advances the replay window so the re-dispatched frame is
 # refused the second time; and a late producer-conflict check splices two configs into one
 # CRC-valid read-back.
+add_library(od_session_fake_dispatch STATIC session_fake.c aes128.c)
+target_link_libraries(od_session_fake_dispatch PUBLIC od_shared_dispatch_fixture)
+add_library(od_session_fake_dispatch_silabs STATIC session_fake.c aes128.c)
+target_link_libraries(od_session_fake_dispatch_silabs PUBLIC od_shared_dispatch_fixture_silabs)
+
 add_executable(od_dispatch_test dispatch_test.c)
-target_link_libraries(od_dispatch_test od_session_fake)
+target_link_libraries(od_dispatch_test od_session_fake_dispatch)
 add_test(NAME dispatch COMMAND od_dispatch_test)
 
 # The same ordering suite against BG22's actual shared ABI: 2 KB config buffer, three TX slots,
@@ -252,7 +280,7 @@ add_test(NAME dispatch COMMAND od_dispatch_test)
 add_library(od_session_fake_silabs STATIC session_fake.c aes128.c)
 target_link_libraries(od_session_fake_silabs PUBLIC od_shared_silabs)
 add_executable(od_dispatch_silabs_test dispatch_test.c)
-target_link_libraries(od_dispatch_silabs_test od_session_fake_silabs)
+target_link_libraries(od_dispatch_silabs_test od_session_fake_dispatch_silabs)
 add_test(NAME dispatch_silabs COMMAND od_dispatch_silabs_test)
 
 # dispatch_route: the opcode map, one case per canonical opcode.
@@ -263,7 +291,7 @@ add_test(NAME dispatch_silabs COMMAND od_dispatch_silabs_test)
 # unknown on the other with nothing to say so -- and "unknown" is wire-visible, since it carries no
 # activity stamp. A new opcode must fail here until its route and capability behaviour are chosen.
 add_executable(od_dispatch_route_test dispatch_route_test.c)
-target_link_libraries(od_dispatch_route_test od_session_fake)
+target_link_libraries(od_dispatch_route_test od_session_fake_dispatch)
 add_test(NAME dispatch_route COMMAND od_dispatch_route_test)
 
 # core_reset: the shared half of a teardown -- producer, egress and session, in that order.
@@ -468,7 +496,7 @@ if(Python3_FOUND)
         corpus_runner.c
         corpus_profile_portable.c
         ${OD_VEC_INC})
-    target_link_libraries(od_dispatch_corpus_portable_test od_session_fake)
+    target_link_libraries(od_dispatch_corpus_portable_test od_session_fake_dispatch)
     add_dependencies(od_dispatch_corpus_portable_test od_vectors_generated)
     add_test(NAME dispatch_corpus_portable COMMAND od_dispatch_corpus_portable_test)
 

@@ -87,6 +87,11 @@ The BG22 software candidate was implemented by project direction before these ro
 That sequencing exception is not hardware evidence. The bidirectional-replacement row is
 Nordic-specific and cannot inherit the ESP32 result.
 
+A `xiao_nrf52840` flash of post-step-11 HEAD on 2026-08-19 completed an encrypted PIPE upload and
+a config read and config write (recorded in the board section below). That shows the promoted
+routing did not regress the PIPE and command paths; it exercises none of the `0x70`/`0x71`/`0x72`/
+`0x76` rows above, which stay open.
+
 ---
 
 ## Transfer Phase 2 — EFR32BG22 step 10a
@@ -137,15 +142,18 @@ BG22 has no PIPE, so it has no bidirectional legacy/PIPE replacement row and no 
 
 ## Nordic `xiao_nrf52840`
 
-- [x] Encrypted PIPE upload, image displayed correctly — 2026-08-17
+- [x] Encrypted PIPE upload, image displayed correctly — 2026-08-17; re-run at current HEAD
+      (post Transfer Phase 2 step 11) — 2026-08-19
 - [x] Advertising resumes reliably after disconnect, repeated connect/disconnect cycles —
       2026-08-17 (the `od_adv_control` wiring fix, PR #40)
 - [x] Direct/PIPE END: ACK observed on air before refresh begins — 2026-08-17, confirmed in
       device log
-- [x] Config write + reload verified — 2026-08-15 (Gate 2 pass; not re-run this session)
-- [ ] Disconnect/reconnect, then re-authenticate — confirm a *new* session succeeds
-- [ ] Config write/read/reload/reboot-persist, re-run against current HEAD (last direct
-      evidence is 2026-08-15, predates C8-C12)
+- [x] Config write + reload verified — 2026-08-15 (Gate 2 pass), re-run 2026-08-19
+- [x] Disconnect/reconnect, then re-authenticate — confirm a *new* session succeeds — 2026-08-19
+      (BLE dropped mid-PIPE, reconnected, new session carried a fresh upload through refresh)
+- [x] Config read, re-run against current HEAD — 2026-08-19
+- [x] Config write, re-run against current HEAD — 2026-08-19
+- [x] Config reload-after-write and reboot-persist, re-run against current HEAD — 2026-08-19
 - [ ] Config read under TX backpressure
 - [ ] `CMD_PARTIAL_WRITE`
 - [ ] LED / buzzer / READ_MSD / FIRMWARE_VERSION
@@ -153,9 +161,16 @@ BG22 has no PIPE, so it has no bidirectional legacy/PIPE replacement row and no 
 - [ ] Unknown opcode silence; 245-byte value ceiling NACK
 - [ ] NFC 218/219-byte ceiling
 - [ ] Plaintext (unencrypted) PIPE upload and config round-trip
-- [ ] Successful PSA key-replacement / re-authentication cycle
+- [ ] PIPE-partial (0x0080 flags bit1): START accepted, region streamed, partial refresh, new
+      etag committed. Refused on every attempt until 2026-08-19 — the START handler passed the
+      PIPE flags word to a validator that only defines the 0x76 partial flags, so bit1 always
+      read as an unknown flag (`FOLLOWUPS.md` § 6). Fixed and host-tested; never run on a board.
+- [x] Successful PSA key-replacement / re-authentication cycle — 2026-08-19, one cycle via the
+      mid-PIPE disconnect above (the prepared-key slot released and re-prepared; a repeated
+      many-cycle soak has not been run)
 - [ ] `OD-S1` replay injection via `dispatch-gate`
-- [ ] Interrupted-transfer recovery
+- [x] Interrupted-transfer recovery — 2026-08-19, PIPE abandoned mid-transfer by BLE disconnect;
+      a fresh upload then completed through refresh
 
 **Known live defect, not yet fixed:** small/sub-window PIPE uploads can stall indefinitely —
 `opendisplay_pipe_write.cpp` only SACKs on an N-chunk cadence, with no time-based flush for a

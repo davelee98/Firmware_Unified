@@ -28,6 +28,8 @@ uint32_t opendisplay_display_partial_expected(void);
 bool opendisplay_display_partial_compressed(void);
 uint32_t opendisplay_display_calc_plane_bytes(uint16_t width, uint16_t height);
 int opendisplay_display_pipe_full_start(bool compressed, uint32_t total_size);
+/* flags is the PARTIAL flag set (0x76's: bit0 compression), not the PIPE START flags word --
+ * PIPE_FLAG_PARTIAL is the transport's selector and is rejected here as unknown. */
 int opendisplay_display_pipe_partial_arm(uint8_t flags, uint32_t old_etag, uint16_t x, uint16_t y,
                                          uint16_t w, uint16_t h, uint32_t total_size,
                                          uint8_t *err_code_out);

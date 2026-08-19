@@ -132,10 +132,10 @@ set(OD_SHARED_SOURCES_HAL_RADIO
     "${CMAKE_CURRENT_LIST_DIR}/core/od_txq.c"
 )
 
-# APP_SESSION needs MORE than a HAL: the target must also supply the od_session_app seam
-# (shared/core/od_session_app.h) -- which session object, which security config, which clock,
-# which device id, and where reports go. It is the first tier that is not purely about linkage to
-# a driver, which is why it is named for the seam rather than for a HAL.
+# APP_SESSION needs MORE than a HAL: the target must supply the od_session_app seam and pair this
+# tier with APP_XFER. Dispatch routes the mandatory direct/partial opcode family straight to
+# od_xfer, so a consumer taking APP_SESSION must also implement od_xfer_app. APP_XFER in turn
+# requires APP_INFLATE. These are source-list dependencies, not optional target policy.
 set(OD_SHARED_SOURCES_APP_SESSION
     "${CMAKE_CURRENT_LIST_DIR}/core/od_reply.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_gate.c"
@@ -166,8 +166,9 @@ set(OD_SHARED_SOURCES_APP_INFLATE
 )
 
 # APP_XFER is the portable legacy direct/partial command machine. It calls the target's
-# od_xfer_app seam for panel writes, refresh and recovery, and reuses APP_INFLATE for compressed
-# streams. Targets may compile this tier before routing production opcodes to it.
+# od_xfer_app seam for panel writes, refresh and recovery, and requires APP_INFLATE for compressed
+# streams. Every APP_SESSION consumer takes this tier; capability-off behaviour remains inside the
+# shared machine rather than removing its linkage.
 set(OD_SHARED_SOURCES_APP_XFER
     "${CMAKE_CURRENT_LIST_DIR}/core/od_xfer.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_xfer_direct.c"
