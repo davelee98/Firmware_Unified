@@ -8,17 +8,15 @@
 #include "od_session.h"
 #include "od_session_app.h"
 #include "od_txq.h"
+#include "od_xfer.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_config_storage.h"
 #include "opendisplay_constants.h"
-#include "opendisplay_display.h"
 #include "opendisplay_led.h"
-#include "opendisplay_pipe.h"
 #include "opendisplay_protocol.h"
 
 #include "em_device.h"
-#include "sl_bt_api.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -220,79 +218,22 @@ bool od_cmd_allow_unauthenticated(uint16_t cmd)
 
 od_cmd_result_t od_cmd_app_direct_start(const od_cmd_ctx_t *ctx, od_span_t body)
 {
-  uint8_t ok[] = { RESP_ACK, RESP_DIRECT_WRITE_START_ACK };
-  uint8_t err[] = { RESP_NACK, RESP_DIRECT_WRITE_START_ACK };
-  if (opendisplay_display_direct_write_start(body.p, (uint16_t)body.n) != 0) {
-    (void)reply_plain(ctx, err, sizeof(err));
-    return OD_CMD_NACK;
-  }
-  (void)reply(ctx, ok, sizeof(ok));
-  return OD_CMD_OK;
+  return od_xfer_direct_start(ctx, body);
 }
 
 od_cmd_result_t od_cmd_app_direct_data(const od_cmd_ctx_t *ctx, od_span_t body)
 {
-  uint8_t ok[] = { RESP_ACK, RESP_DIRECT_WRITE_DATA_ACK };
-  uint8_t err[] = { RESP_NACK, RESP_DIRECT_WRITE_DATA_ACK };
-  if (opendisplay_display_direct_write_data(body.p, (uint16_t)body.n) != 0) {
-    opendisplay_display_abort();
-    (void)reply_plain(ctx, err, sizeof(err));
-    return OD_CMD_NACK;
-  }
-  (void)reply(ctx, ok, sizeof(ok));
-  return OD_CMD_OK;
-}
-
-static bool flush_end_ack(uint32_t deadline)
-{
-  do {
-    od_txq_status_t rc = od_txq_flush(od_session_app_now_ms(), deadline);
-    if (rc == OD_TXQ_OK) return true;
-    if (rc == OD_TXQ_TIMEOUT) return false;
-    sl_bt_run();
-  } while (true);
+  return od_xfer_data(ctx, body);
 }
 
 od_cmd_result_t od_cmd_app_direct_end(const od_cmd_ctx_t *ctx, od_span_t body)
 {
-  uint8_t ack[] = { RESP_ACK, RESP_DIRECT_WRITE_END_ACK };
-  uint8_t success[] = { RESP_ACK, RESP_DIRECT_WRITE_REFRESH_SUCCESS };
-  uint8_t timeout[] = { RESP_ACK, RESP_DIRECT_WRITE_REFRESH_TIMEOUT };
-  uint8_t err[] = { RESP_NACK, RESP_DIRECT_WRITE_END_ACK };
-  bool refresh_ok = false;
-  const uint32_t tag = ctx->rp.tag;
-  uint32_t deadline;
-
-  if (opendisplay_display_direct_write_end_prepare(body.p, (uint16_t)body.n) != 0) {
-    (void)reply_plain(ctx, err, sizeof(err));
-    return OD_CMD_NACK;
-  }
-  /* Finalising a compressed stream belongs to validation, not to the transmission budget. Start
-   * the shared acceptance/on-air deadline only after prepare has accepted the END. */
-  deadline = od_session_app_now_ms() + 2000u;
-  if (reply(ctx, ack, sizeof(ack)) != OD_TXQ_OK || !flush_end_ack(deadline) ||
-      !opendisplay_pipe_wait_tx_idle(tag, deadline)) {
-    opendisplay_display_abort();
-    opendisplay_pipe_reset_transport();
-    opendisplay_pipe_close_tag(tag);
-    return OD_CMD_NACK;
-  }
-  if (opendisplay_display_direct_write_end_refresh(&refresh_ok) != 0) {
-    opendisplay_display_abort();
-    (void)reply_plain(ctx, err, sizeof(err));
-    return OD_CMD_NACK;
-  }
-  (void)reply(ctx, refresh_ok ? success : timeout,
-              refresh_ok ? sizeof(success) : sizeof(timeout));
-  return OD_CMD_OK;
+  return od_xfer_end(ctx, body);
 }
 
 od_cmd_result_t od_cmd_app_partial_start(const od_cmd_ctx_t *ctx, od_span_t body)
 {
-  uint8_t err[] = { RESP_NACK, 0x76u, OD_ERR_PARTIAL_UNSUPPORTED, 0u };
-  (void)body;
-  (void)reply_plain(ctx, err, sizeof(err));
-  return OD_CMD_NACK;
+  return od_xfer_partial_start(ctx, body);
 }
 
 od_cmd_result_t od_cmd_app_pipe_start(const od_cmd_ctx_t *ctx, od_span_t body)

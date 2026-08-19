@@ -14,10 +14,12 @@ through PR #47 at `d83a41a`. The ESP32 step-10a software candidate now routes th
 opcodes through shared policy and supplies the real hardware seam. Step 10b now freezes the
 ESP32 PIPE-only delete inventory, adapter-primitive retain inventory and transitional arbitration
 ratchet. The Nordic step-10a software candidate now does the same and freezes its own 10b boundary.
-Neither target cutover is hardware-qualified. Nordic was implemented by explicit project direction
-before the ESP32 cutover rows were run; that sequencing exception does not clear either target's
-gate or authorize the BG22 cutover. Both PIPE-capable targets retain only the target machinery still
-called by PIPE, with PIPE and `od_xfer` made mutually exclusive owners of the singleton pump.
+The BG22 step-10a software candidate now routes direct plus the capability-off partial reply through
+the same policy and deletes its entire legacy transfer machine; it has no PIPE-dependent 10b debt.
+No target cutover is hardware-qualified. Nordic and BG22 were implemented by explicit project
+direction before the preceding target rows were run; those sequencing exceptions do not clear any
+target's gate. Both PIPE-capable targets retain only the target machinery still called by PIPE,
+with PIPE and `od_xfer` made mutually exclusive owners of the singleton pump.
 
 This is the active plan for the remaining transfer-plane work. It supersedes the transfer sequence
 in `PLAN_MIGRATION_ENDGAME_2026-08-17.md` and the geometry/compression phases in the original
@@ -164,6 +166,30 @@ version of this file. The detailed C14 and color plans remain the record of what
   22 passed, 0 failed, 2 skipped (the unrequested ESP32 and BG22 builds), with LeakSanitizer
   disabled because it cannot run under the environment's ptrace wrapper. No board was flashed and
   every Nordic Phase 2 hardware row remains open.
+
+### Phase 2 BG22 step-10a candidate — 2026-08-19
+
+- The four BG22 hooks are policy-free bridges to `od_xfer`; `APP_XFER` is linked into the headless
+  image and its compile-only object is gone. Because BG22 has neither PIPE nor partial support, all
+  target-local direct parsing, compression, accounting and reply construction is deleted in this
+  cutover and there is no 10b inventory.
+- `opendisplay_display.cpp` retains only full-frame hardware state: geometry, controller plane and
+  panel-power state. Writes derive plane selection from the shared pre-write offset, the inflater
+  scratch remains 256 bytes, split-buffer panels remain silently unsupported by target policy, and
+  no displayed-etag or partial state is allocated.
+- The two-second END barrier remains target policy. It drains the sealed END ACK, waits for the
+  issuing connection's TX completion report, and on failure powers the panel off, resets
+  transport/session state through a non-recursive recovery path and closes only that connection
+  tag. No substitute reply is emitted after a barrier failure.
+- Reset/disconnect clears `od_xfer` before common egress/session teardown and retains BG22's
+  fail-safe panel power-off even when no shared transfer is active. The production-source corpus
+  and fault suite exercise the shared machine, portable inflater binding, ACK ordering, deadline,
+  TX-report failures and connection-instance replacement. The ARM production image links at
+  250,292 bytes flash and 32,284 bytes static RAM: 944 bytes less flash than the dormant baseline,
+  unchanged RAM and the same 480-byte main-RAM headroom. Host gcc passes 43/43; clang passes 46/46
+  and ASan/UBSan passes 43/43 with leak detection disabled under the ptrace runner. All 11 ESP32
+  configurations, all three Nordic boards and the BG22 production image build. No board was
+  flashed; every BG22 Phase 2 hardware row remains open.
 
 ## 1. Reconciliation result
 
@@ -874,7 +900,10 @@ production opcode:
         by `od_xfer_app_prepare_start()` while target PIPE remains. Phase 3 removes that bridge call
         and deletes both only after no non-PIPE caller remains.
 
-      BG22 has no PIPE and therefore no 10b delete inventory.
+      BG22 has no PIPE and therefore no 10b delete inventory. Its 10a cutover deletes all legacy
+      direct parser/state/sink code in the same commit and installs a permanent target ratchet:
+      production BG22 code may not call `od_zlib_pump_reset()` or `od_zlib_pump_push()` outside the
+      shared machine.
 11. After all targets call the shared policy, route the four `OD_DISPATCH_OPCODE_ROWS` entries
     directly to `od_xfer_direct_start`, `od_xfer_data`, `od_xfer_end` and
     `od_xfer_partial_start`. Delete the four declarations from `od_cmd_app.h` and every temporary

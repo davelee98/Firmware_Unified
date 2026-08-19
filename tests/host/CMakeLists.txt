@@ -510,6 +510,7 @@ if(Python3_FOUND)
         corpus_profile_silabs.c
         fake_silabs/fake_silabs.c
         ../../targets/efr32bg22-slc/od_cmd_silabs.c
+        ../../targets/efr32bg22-slc/od_inflate_app.c
         ${OD_VEC_INC})
     target_include_directories(od_dispatch_corpus_silabs_test PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/fake_silabs
@@ -528,6 +529,7 @@ if(Python3_FOUND)
         fake_silabs/fake_silabs.c
         fake_silabs/fake_silabs_bgapi.c
         ../../targets/efr32bg22-slc/od_cmd_silabs.c
+        ../../targets/efr32bg22-slc/od_inflate_app.c
         ../../targets/efr32bg22-slc/opendisplay_pipe.c
         ../../targets/efr32bg22-slc/od_hal_radio.c)
     target_include_directories(od_silabs_fault_test PRIVATE

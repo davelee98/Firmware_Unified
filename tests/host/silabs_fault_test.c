@@ -7,6 +7,7 @@
 #include "od_session.h"
 #include "od_session_app.h"
 #include "od_txq.h"
+#include "od_xfer.h"
 #include "opendisplay_display.h"
 #include "opendisplay_pipe.h"
 #include "session_fake.h"
@@ -223,7 +224,17 @@ static void test_nfc_exact_limit(void)
 
 static void arm_direct_end(od_cmd_ctx_t *ctx, od_tx_reservation_t *r)
 {
-    CHECK(opendisplay_display_direct_write_start(NULL, 0u) == 0);
+    static const uint8_t image[4096];
+    od_tx_reservation_t setup_reservation;
+
+    *ctx = reserve_ctx(1u, &setup_reservation);
+    CHECK(od_xfer_direct_start(ctx, od_span_none()) == OD_CMD_OK);
+    od_txq_release(&setup_reservation);
+    od_txq_reset();
+    *ctx = reserve_ctx(2u, &setup_reservation);
+    CHECK(od_xfer_data(ctx, od_span_make(image, sizeof image)) == OD_CMD_OK);
+    od_txq_release(&setup_reservation);
+    od_txq_reset();
     *ctx = reserve_ctx(2u, r);
 }
 
@@ -259,6 +270,7 @@ static void test_direct_end_barrier(void)
     CHECK(fake_silabs_resource_calls == 2u);
     CHECK(fake_silabs_run_calls == 1u);
     CHECK(fake_silabs_refreshes == 1u);
+    CHECK(fake_silabs_aborts == 0u);
     CHECK(fake_silabs_sent_n == 2u);
     CHECK(fake_silabs_sent[0].data[1] == RESP_DIRECT_WRITE_END_ACK);
     CHECK(fake_silabs_sent[1].data[1] == RESP_DIRECT_WRITE_REFRESH_SUCCESS);
@@ -271,8 +283,13 @@ static void test_direct_end_barrier(void)
     fake_silabs_resource_script_n = 1u;
     run_direct_end(&ctx, &r, OD_CMD_NACK);
     CHECK(fake_silabs_refreshes == 0u);
+    CHECK(fake_silabs_aborts == 1u);
     CHECK(fake_silabs_close_calls == 1u);
     CHECK(fake_silabs_closed_connection == 7u);
+    CHECK(fake_silabs_sent_n == 1u);
+    CHECK(fake_silabs_sent[0].data[0] == RESP_ACK);
+    CHECK(fake_silabs_sent[0].data[1] == RESP_DIRECT_WRITE_END_ACK);
+    CHECK(!od_xfer_active());
     CHECK(od_txq_depth() == 0u);
 
     CASE("resource-report overflow/corruption flags fail closed before refresh");
@@ -285,6 +302,7 @@ static void test_direct_end_barrier(void)
     fake_silabs_resource_script_n = 1u;
     run_direct_end(&ctx, &r, OD_CMD_NACK);
     CHECK(fake_silabs_refreshes == 0u);
+    CHECK(fake_silabs_aborts == 1u);
     CHECK(fake_silabs_close_calls == 1u);
 
     CASE("a permanently pending packet reaches the shared two-second deadline and fails closed");
@@ -297,6 +315,7 @@ static void test_direct_end_barrier(void)
     run_direct_end(&ctx, &r, OD_CMD_NACK);
     CHECK(fake_silabs_run_calls == 2u);
     CHECK(fake_silabs_refreshes == 0u);
+    CHECK(fake_silabs_aborts == 1u);
     CHECK(fake_silabs_close_calls == 1u);
 
     CASE("connection-instance replacement prevents refresh and never closes the replacement");
@@ -308,6 +327,7 @@ static void test_direct_end_barrier(void)
     fake_silabs_run_hook = replace_connection_on_run;
     run_direct_end(&ctx, &r, OD_CMD_NACK);
     CHECK(fake_silabs_refreshes == 0u);
+    CHECK(fake_silabs_aborts == 1u);
     CHECK(opendisplay_pipe_connection() == 8u);
     CHECK(fake_silabs_close_calls == 0u);
 }
@@ -497,6 +517,7 @@ static void test_degraded_boot_contracts(void)
     arm_direct_end(&ctx, &r);
     run_direct_end(&ctx, &r, OD_CMD_NACK);
     CHECK(fake_silabs_refreshes == 0u);
+    CHECK(fake_silabs_aborts == 1u);
     CHECK(fake_silabs_resource_calls == 0u);  /* fails closed without polling a dead API */
     CHECK(fake_silabs_close_calls == 1u);
     CHECK(od_txq_depth() == 0u);

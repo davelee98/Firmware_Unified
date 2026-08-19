@@ -5,6 +5,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void opendisplay_pipe_set_characteristic(uint16_t pipe_value_handle);
 
 void opendisplay_pipe_on_connection_closed(void);
@@ -26,10 +30,17 @@ uint32_t opendisplay_pipe_connection_tag(void);
 void opendisplay_pipe_set_tx_report_available(bool available);
 
 /* Bounded post-acceptance barrier used by DIRECT END before panel refresh. */
-bool opendisplay_pipe_wait_tx_idle(uint32_t tag, uint32_t deadline_ms);
+bool opendisplay_pipe_flush_before_refresh(uint32_t tag, uint32_t deadline_ms);
 void opendisplay_pipe_close_tag(uint32_t tag);
+
+/* Recover a failed transfer barrier without recursively resetting the active shared machine. */
+void opendisplay_pipe_abort_xfer_barrier(uint32_t tag);
 
 /* Drop target command state plus the shared producer/queue/session state. */
 void opendisplay_pipe_reset_transport(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
