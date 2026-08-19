@@ -83,8 +83,30 @@ them.
 - [ ] Shared-policy normalizations: an etag-less successful full refresh clears the prior etag;
       controller-plane incomplete END refuses; packed-row incomplete END proceeds to refresh
 
-These rows must be recorded before the next target cutover. The bidirectional-replacement row is
+The BG22 software candidate was implemented by project direction before these rows were recorded.
+That sequencing exception is not hardware evidence. The bidirectional-replacement row is
 Nordic-specific and cannot inherit the ESP32 result.
+
+---
+
+## Transfer Phase 2 — EFR32BG22 step 10a
+
+The BG22 software candidate replaces `0x70`, `0x71`, `0x72` and capability-off `0x76` with shared
+`od_xfer`. All rows are new evidence requirements; builds and the Phase 1 result do not qualify
+them.
+
+- [ ] Plaintext and encrypted raw direct through refresh
+- [ ] Plaintext and encrypted compressed direct through refresh
+- [ ] Controller-plane split crossed in one DATA frame; both planes arrive in controller order
+- [ ] Disconnect/reconnect during direct, followed by a successful authenticated push
+- [ ] END ACK observed on air before refresh begins; refresh success and timeout paths observed
+- [ ] TX-report failure and two-second timeout: no refresh, panel powered off, issuing connection
+      closed, replacement connection left open
+- [ ] `CMD_PARTIAL_WRITE` returns `FF 76 02 00`; map confirms no partial or displayed-etag state
+- [ ] Shared-policy normalization: controller-plane incomplete END refuses, while packed-row
+      incomplete END proceeds to refresh
+
+BG22 has no PIPE, so it has no bidirectional legacy/PIPE replacement row and no Phase 2 10b debt.
 
 ---
 

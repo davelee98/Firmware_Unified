@@ -450,6 +450,56 @@ nordic_xfer_10b_inventory() {
 }
 check "nordic: Phase 2 step 10b inventory" nordic_xfer_10b_inventory
 
+silabs_xfer_cutover() {
+    local rc=0 hits teardown reset_line core_line
+    local bridge=targets/efr32bg22-slc/od_cmd_silabs.c
+    local display=targets/efr32bg22-slc/opendisplay_display.cpp
+    local cmake=targets/efr32bg22-slc/cmake_gcc/opendisplay-bg22.cmake
+
+    for call in \
+        'od_xfer_direct_start(ctx, body)' \
+        'od_xfer_data(ctx, body)' \
+        'od_xfer_end(ctx, body)' \
+        'od_xfer_partial_start(ctx, body)'; do
+        if ! grep -Fq "return $call;" "$bridge"; then
+            echo "Silabs transfer bridge missing: return $call;"
+            rc=1
+        fi
+    done
+
+    hits=$(grep -InE '\bopendisplay_display_direct_write_(start|data|end|end_prepare|end_refresh)[[:space:]]*\(' \
+           "$bridge" "$display" targets/efr32bg22-slc/opendisplay_display.h 2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "Silabs legacy direct command policy returned; the target must expose hardware only"
+        rc=1
+    fi
+    if ! grep -q '\${OD_SHARED_SOURCES_APP_XFER}' "$cmake" || grep -q 'od_xfer_compile' "$cmake"; then
+        echo "Silabs production image must link APP_XFER directly, without a compile-only target"
+        rc=1
+    fi
+
+    teardown=$(sed -n '/^void opendisplay_pipe_reset_transport(/,/^}/p' \
+               targets/efr32bg22-slc/opendisplay_pipe.c)
+    reset_line=$(grep -n '\bod_xfer_reset[[:space:]]*(' <<<"$teardown" | head -n 1 | cut -d: -f1)
+    core_line=$(grep -n '\breset_transport_state[[:space:]]*(' <<<"$teardown" | head -n 1 | cut -d: -f1)
+    if [ -z "$reset_line" ] || [ -z "$core_line" ] || [ "$reset_line" -ge "$core_line" ]; then
+        echo "Silabs teardown must reset od_xfer before common transport/session state"
+        rc=1
+    fi
+
+    hits=$(grep -RInE '\bod_zlib_pump_(reset|push)[[:space:]]*\(' \
+        targets/efr32bg22-slc --include='*.c' --include='*.cpp' --include='*.h' \
+        --exclude-dir=build 2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "Silabs target code bypassed shared od_xfer pump ownership"
+        rc=1
+    fi
+    return $rc
+}
+check "silabs: shared legacy transfer cutover" silabs_xfer_cutover
+
 od_color_structure() {
     local rc=0 hits count
     for path in \

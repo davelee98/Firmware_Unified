@@ -9,6 +9,8 @@
 #include "od_bbep_efr32.h"
 #include "od_boot_payload.h"
 #include "od_caps.h"
+#include "od_xfer_app.h"
+#include "opendisplay_pipe.h"
 #include "em_cmu.h"
 #include "em_gpio.h"
 #include "em_system.h"
@@ -17,39 +19,32 @@
 #include <stdio.h>
 #include <string.h>
 
-extern "C" {
-#include "od_zlib_pump.h"
-}
-
 #define OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE 256u
 
 /* Raw BBEPDISP, not the vendored BBEPAPER C++ class -- see panel/od_bbep_efr32.h. The class is
  * not compiled on this target, matching esp32-idf and nordic-zephyr. */
 static BBEPDISP s_epd;
-static bool s_active;
-static uint32_t s_total_bytes;
-static uint32_t s_written_bytes;
-static uint32_t s_dw_chunk_n;
-static uint8_t s_dw_log_pct;
-static uint8_t s_dw_trailing_ignores;
-static uint32_t s_dw_init_t0;
-static uint8_t s_color_scheme;
-static uint32_t s_plane_size;
-static bool s_plane2_started;
 static bool s_boot_applied;
-static bool s_dw_compressed;
-static uint32_t s_dw_decompressed_total;
 static uint8_t s_decompression_chunk[OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE];
+
+enum XferAppMode {
+  XFER_APP_IDLE = 0,
+  XFER_APP_FULL,
+};
+
+struct XferAppHardwareState {
+  XferAppMode mode;
+  od_color_geometry_t geometry;
+  uint32_t plane_size;
+  uint8_t current_plane;
+  bool panel_up;
+};
+
+static XferAppHardwareState s_xfer_app;
 
 #ifndef OD_FALLBACK_DISPLAY_PWR_PIN
 #define OD_FALLBACK_DISPLAY_PWR_PIN 0x00u
 #endif
-
-static void dw_init_mark(const char *tag)
-{
-  uint32_t now = sl_sleeptimer_get_tick_count();
-  printf("[OD] dw init %-26s %lu ms\r\n", tag, (unsigned long)sl_sleeptimer_tick_to_ms(now - s_dw_init_t0));
-}
 
 static const struct DisplayConfig *display_cfg(void)
 {
@@ -592,98 +587,48 @@ static bool wait_for_refresh(uint32_t timeout_ms)
 
 extern "C" void opendisplay_display_abort(void)
 {
-  if (s_active) {
+  if (s_xfer_app.panel_up) {
     bbepSleep(&s_epd, DEEP_SLEEP);
   }
   display_power_set(false);
-  s_active = false;
-  s_total_bytes = 0;
-  s_written_bytes = 0;
-  s_dw_chunk_n = 0;
-  s_dw_log_pct = 0;
-  s_dw_trailing_ignores = 0;
-  s_plane_size = 0;
-  s_plane2_started = false;
-  s_dw_compressed = false;
-  s_dw_decompressed_total = 0;
+  memset(&s_xfer_app, 0, sizeof(s_xfer_app));
 }
 
-static void dw_log_progress(void)
+static bool xfer_app_write_full(uint32_t stream_offset, od_span_t data)
 {
-  if (s_total_bytes == 0u) {
-    return;
-  }
-  uint8_t pct = (uint8_t)((100u * s_written_bytes) / s_total_bytes);
-  if (pct >= s_dw_log_pct + 25u) {
-    printf("[OD] dw data #%lu %lu/%lu B (%u%%)%s\r\n", (unsigned long)s_dw_chunk_n,
-           (unsigned long)s_written_bytes, (unsigned long)s_total_bytes, (unsigned)pct,
-           s_dw_compressed ? " zlib" : "");
-    s_dw_log_pct = (pct / 25u) * 25u;
-  }
-}
+  uint32_t consumed = 0u;
 
-static int dw_stream_raw_bytes(const uint8_t *payload, uint32_t payload_len)
-{
-  uint32_t remaining = (s_written_bytes < s_total_bytes) ? (s_total_bytes - s_written_bytes) : 0u;
-  const bool bitplanes = s_plane_size != 0u;
-  const uint8_t *p = payload;
-  uint32_t left = payload_len;
-  const uint32_t written_before = s_written_bytes;
+  if (stream_offset > s_xfer_app.geometry.total_bytes
+      || data.n > s_xfer_app.geometry.total_bytes - stream_offset) {
+    return false;
+  }
+  if (s_xfer_app.geometry.layout != OD_COLOR_LAYOUT_CONTROLLER_PLANES) {
+    bbepWriteData(&s_epd, (uint8_t *)(uintptr_t)data.p, (int)data.n);
+    return true;
+  }
 
-  while (left > 0u && remaining > 0u) {
-    uint32_t rem = remaining;
-    uint32_t chunk = left;
-    if (bitplanes && !s_plane2_started && s_plane_size > 0u) {
-      uint32_t to_plane_end = s_plane_size - s_written_bytes;
-      if (chunk > to_plane_end) {
-        chunk = to_plane_end;
+  while (consumed < data.n) {
+    const uint32_t logical = stream_offset + consumed;
+    const uint8_t plane = logical < s_xfer_app.plane_size ? PLANE_0 : PLANE_1;
+    const uint32_t plane_end = plane == PLANE_0 ? s_xfer_app.plane_size
+                                                 : s_xfer_app.geometry.total_bytes;
+    uint32_t chunk;
+
+    if (s_xfer_app.current_plane != plane) {
+      if (logical != 0u && logical != s_xfer_app.plane_size) {
+        return false;
       }
+      bbepStartWrite(&s_epd, plane);
+      s_xfer_app.current_plane = plane;
     }
-    if (chunk > rem) {
-      chunk = rem;
+    chunk = plane_end - logical;
+    if (chunk > data.n - consumed) {
+      chunk = (uint32_t)data.n - consumed;
     }
-    if (chunk == 0u) {
-      break;
-    }
-    bbepWriteData(&s_epd, (uint8_t *)(void *)p, (int)chunk);
-    p += chunk;
-    left -= chunk;
-    s_written_bytes += chunk;
-    remaining -= chunk;
-    if (bitplanes && !s_plane2_started && s_plane_size > 0u && s_written_bytes >= s_plane_size) {
-      bbepStartWrite(&s_epd, PLANE_1);
-      s_plane2_started = true;
-    }
+    bbepWriteData(&s_epd, (uint8_t *)(uintptr_t)(data.p + consumed), (int)chunk);
+    consumed += chunk;
   }
-
-  if (s_written_bytes > written_before) {
-    dw_log_progress();
-  }
-  return 0;
-}
-
-static bool direct_zlib_sink(void *, od_mut_span_t bytes)
-{
-  uint32_t before = s_written_bytes;
-  if (dw_stream_raw_bytes(bytes.p, (uint32_t)bytes.n) != 0) {
-    return false;
-  }
-  return s_written_bytes - before == (uint32_t)bytes.n
-         && s_written_bytes <= s_dw_decompressed_total;
-}
-
-static bool zlib_stream_to_direct_write(const uint8_t *data, uint32_t len, bool final)
-{
-  od_mut_span_t scratch = od_mut_span_make(s_decompression_chunk,
-                                           OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE);
-  od_zlib_pump_status_t status = od_zlib_pump_push(
-    od_span_make(data, len), final, scratch, direct_zlib_sink, nullptr);
-  if (status == OD_ZLIB_PUMP_ERROR) {
-    printf("[OD] zlib error: %s\r\n", od_zlib_pump_error());
-    return false;
-  }
-  return !final || (status == OD_ZLIB_PUMP_DONE
-                    && s_written_bytes == s_dw_decompressed_total);
+  return true;
 }
 
 extern "C" void opendisplay_display_boot_apply(void)
@@ -729,212 +674,129 @@ extern "C" void opendisplay_display_boot_apply(void)
   display_power_set(false);
 }
 
-extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, uint16_t payload_len)
+extern "C" void od_xfer_app_prepare_start(void)
 {
-  s_dw_init_t0 = sl_sleeptimer_get_tick_count();
-  printf("[OD] dw init begin\r\n");
+  if (s_xfer_app.mode != XFER_APP_IDLE) {
+    opendisplay_display_abort();
+  }
+}
 
+extern "C" bool od_xfer_app_panel_info(od_xfer_panel_info_t *out)
+{
   const struct DisplayConfig *d = display_cfg();
-  if (d == nullptr) {
-    printf("[OD] dw start err no display cfg\r\n");
-    return -1;
-  }
-  dw_init_mark("after cfg");
 
-  od_color_geometry_t geometry;
-  od_color_status_t color_status =
-    od_color_direct_geometry(d->color_scheme, d->pixel_width, d->pixel_height, &geometry);
-  if (color_status != OD_COLOR_OK || geometry.layout == OD_COLOR_LAYOUT_SPLIT_HALVES) {
-    printf("[OD] dw start err unsupported color geometry cs=%u status=%d layout=%d\r\n",
-           (unsigned)d->color_scheme, (int)color_status,
-           color_status == OD_COLOR_OK ? (int)geometry.layout : -1);
-    return -2;
+  if (out == nullptr || d == nullptr) {
+    return false;
   }
+  memset(out, 0, sizeof(*out));
+  if (od_color_direct_geometry(d->color_scheme, d->pixel_width, d->pixel_height,
+                               &out->geometry) != OD_COLOR_OK) {
+    return false;
+  }
+  out->width = d->pixel_width;
+  out->height = d->pixel_height;
+  out->partial_enabled = false;
+  return true;
+}
 
-  int panel = opendisplay_map_epd(d->panel_ic_type);
+extern "C" bool od_xfer_app_begin_full(const od_color_geometry_t *geometry)
+{
+  const struct DisplayConfig *d = display_cfg();
+  int panel;
+
+  if (d == nullptr || geometry == nullptr || geometry->total_bytes == 0u
+      || geometry->layout == OD_COLOR_LAYOUT_SPLIT_HALVES) {
+    return false;
+  }
+  panel = opendisplay_map_epd(d->panel_ic_type);
   if (panel == EP_PANEL_UNDEFINED) {
-    printf("[OD] dw start err bad panel_ic_type=%u\r\n", (unsigned)d->panel_ic_type);
-    return -2;
+    return false;
   }
 
-  opendisplay_display_abort();
-  dw_init_mark("after abort");
   display_power_set(true);
   memset(&s_epd, 0, sizeof(s_epd));
   if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
-    printf("[OD] dw start err setPanelType panel=%d\r\n", panel);
     display_power_set(false);
-    return -3;
+    return false;
   }
 #if OD_CAP_DUAL_CS == 0
   if ((s_epd.iFlags & BBEP_SPLIT_BUFFER) != 0u) {
     display_power_set(false);
-    return -4;
+    return false;
   }
 #endif
-  dw_init_mark("after setPanelType");
 
   bbepSetRotation(&s_epd, (int)d->rotation * 90);
   bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
-  dw_init_mark("after initIO");
   od_bbep_wake(&s_epd);
-  dw_init_mark("after wake (reset + busy)");
   od_bbep_send_panel_init_full(&s_epd);
-  dw_init_mark("after pInitFull");
   bbepSetAddrWindow(&s_epd, 0, 0, d->pixel_width, d->pixel_height);
-  dw_init_mark("after setAddrWindow");
-
-  s_color_scheme = d->color_scheme;
-  s_plane_size = geometry.layout == OD_COLOR_LAYOUT_CONTROLLER_PLANES
-      ? geometry.part_bytes[0] : 0u;
-  s_plane2_started = false;
-  s_total_bytes = geometry.total_bytes;
-  bbepStartWrite(&s_epd, geometry.initial_plane == OD_COLOR_PLANE_0 ? PLANE_0 : PLANE_1);
-  dw_init_mark("after startWrite");
-
-  s_written_bytes = 0;
-  s_dw_chunk_n = 0;
-  s_dw_log_pct = 0;
-  s_dw_trailing_ignores = 0;
-  s_dw_compressed = (payload != nullptr && payload_len >= 4u);
-  s_dw_decompressed_total = 0;
-  s_active = true;
-
-  if (s_dw_compressed) {
-    /* ZIP (0x02) and/or streaming_decompression / ZIPXL (0x01): both mean
-     * streaming zlib inflate. Post-2.0 configs may set only bit 0. */
-    if ((d->transmission_modes & (TRANSMISSION_MODE_ZIP | TRANSMISSION_MODE_ZIPXL)) == 0u) {
-      printf("[OD] dw start err compression not enabled in transmission_modes\r\n");
-      opendisplay_display_abort();
-      return -4;
-    }
-    s_dw_decompressed_total =
-      (uint32_t)payload[0]
-      | ((uint32_t)payload[1] << 8)
-      | ((uint32_t)payload[2] << 16)
-      | ((uint32_t)payload[3] << 24);
-    if (s_dw_decompressed_total != s_total_bytes) {
-      printf("[OD] dw start err zlib size %lu != %lu\r\n",
-             (unsigned long)s_dw_decompressed_total, (unsigned long)s_total_bytes);
-      opendisplay_display_abort();
-      return -5;
-    }
-    od_zlib_pump_reset(s_dw_decompressed_total);
-    if (payload_len > 4u) {
-      if (!zlib_stream_to_direct_write(payload + 4, (uint32_t)payload_len - 4u, false)) {
-        opendisplay_display_abort();
-        return -6;
-      }
-    }
-  } else if (payload_len != 0u) {
-    printf("[OD] dw start note non-empty payload len=%u (ignored)\r\n", (unsigned)payload_len);
-  }
-
-  printf("[OD] dw start total=%lu B bpp=%u cs=%u panel=%u %ux%u layout=%d%s\r\n",
-         (unsigned long)s_total_bytes, (unsigned)geometry.bits_per_pixel,
-         (unsigned)s_color_scheme, (unsigned)d->panel_ic_type, (unsigned)d->pixel_width,
-         (unsigned)d->pixel_height, (int)geometry.layout,
-         s_dw_compressed ? " zlib" : "");
-  return 0;
+  memset(&s_xfer_app, 0, sizeof(s_xfer_app));
+  s_xfer_app.mode = XFER_APP_FULL;
+  s_xfer_app.geometry = *geometry;
+  s_xfer_app.plane_size = geometry->layout == OD_COLOR_LAYOUT_CONTROLLER_PLANES
+      ? geometry->part_bytes[0] : 0u;
+  s_xfer_app.current_plane = geometry->initial_plane == OD_COLOR_PLANE_0 ? PLANE_0 : PLANE_1;
+  s_xfer_app.panel_up = true;
+  bbepStartWrite(&s_epd, s_xfer_app.current_plane);
+  return true;
 }
 
-extern "C" int opendisplay_display_direct_write_data(const uint8_t *payload, uint16_t payload_len)
+extern "C" uint32_t od_xfer_app_write(uint32_t stream_offset, od_span_t data)
 {
-  if (!s_active || payload == nullptr || payload_len == 0u) {
-    printf("[OD] dw data bad arg active=%d len=%u\r\n", (int)s_active, (unsigned)payload_len);
-    return -1;
+  if (!od_span_valid(data) || data.n == 0u || data.n > UINT32_MAX
+      || s_xfer_app.mode != XFER_APP_FULL) {
+    return 0u;
   }
-
-  if (s_dw_compressed) {
-    const uint32_t written_before = s_written_bytes;
-    if (!zlib_stream_to_direct_write(payload, payload_len, false)) {
-      return -3;
-    }
-    if (s_written_bytes > written_before) {
-      s_dw_chunk_n++;
-    }
-    return 0;
-  }
-
-  uint32_t remaining = (s_written_bytes < s_total_bytes) ? (s_total_bytes - s_written_bytes) : 0u;
-  if (remaining == 0u) {
-    if (payload_len > 0u) {
-      if (s_dw_trailing_ignores < 4u) {
-        printf("[OD] dw data ignore trailing chunk #%u len=%u (have %lu/%lu B)\r\n",
-               (unsigned)s_dw_trailing_ignores + 1u, (unsigned)payload_len,
-               (unsigned long)s_written_bytes, (unsigned long)s_total_bytes);
-        s_dw_trailing_ignores++;
-      }
-    }
-    return 0;
-  }
-
-  const uint32_t written_before = s_written_bytes;
-  if (dw_stream_raw_bytes(payload, payload_len) != 0) {
-    return -2;
-  }
-  if (s_written_bytes > written_before) {
-    s_dw_chunk_n++;
-  }
-  return 0;
+  return xfer_app_write_full(stream_offset, data) ? (uint32_t)data.n : 0u;
 }
 
-static int s_dw_refresh_mode = REFRESH_FULL;
-
-extern "C" int opendisplay_display_direct_write_end_prepare(const uint8_t *payload,
-                                                              uint16_t payload_len)
+extern "C" od_mut_span_t od_xfer_app_inflate_scratch(void)
 {
-  if (!s_active) {
-    printf("[OD] dw end err inactive\r\n");
-    return -1;
-  }
-  if (s_dw_compressed) {
-    if (!zlib_stream_to_direct_write(nullptr, 0, true)) {
-      printf("[OD] dw end err zlib finalize\r\n");
-      return -3;
-    }
-  }
-  if (s_written_bytes < s_total_bytes) {
-    printf("[OD] dw end err incomplete wr=%lu need=%lu\r\n", (unsigned long)s_written_bytes,
-         (unsigned long)s_total_bytes);
-    return -2;
-  }
-  s_dw_refresh_mode = REFRESH_FULL;
-  if (payload != nullptr && payload_len >= 1u && payload[0] == 1u) {
-    s_dw_refresh_mode = REFRESH_FAST;
-  }
-  return 0;
+  return od_mut_span_make(s_decompression_chunk, OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE);
 }
 
-extern "C" int opendisplay_display_direct_write_end_refresh(bool *refresh_ok)
+extern "C" void od_xfer_app_abort(od_xfer_abort_reason_t reason)
 {
-  if (!s_active) {
-    return -1;
-  }
-  if (refresh_ok != nullptr) {
-    *refresh_ok = false;
-  }
+  (void)reason;
+  opendisplay_display_abort();
+}
 
-  printf("[OD] dw refresh start mode=%d\r\n", s_dw_refresh_mode);
-  (void)bbepRefresh(&s_epd, s_dw_refresh_mode);
-  bool ok = wait_for_refresh(60000u);
-  printf("[OD] dw refresh done ok=%d busy=%d\r\n", (int)ok, (int)bbepIsBusy(&s_epd));
+extern "C" od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *owner)
+{
+  const uint32_t deadline = od_xfer_app_now_ms() + 2000u;
+  return owner != nullptr
+      && opendisplay_pipe_flush_before_refresh(owner->tag, deadline)
+      ? OD_XFER_BARRIER_PROCEED : OD_XFER_BARRIER_ABORT;
+}
+
+extern "C" void od_xfer_app_barrier_abort(const od_reply_t *owner)
+{
+  opendisplay_display_abort();
+  if (owner != nullptr) {
+    opendisplay_pipe_abort_xfer_barrier(owner->tag);
+  }
+}
+
+extern "C" bool od_xfer_app_refresh(uint8_t mode, bool *completed)
+{
+  bool ok;
+  const int refresh_mode = mode == 1u ? REFRESH_FAST : REFRESH_FULL;
+
+  if (completed == nullptr || s_xfer_app.mode != XFER_APP_FULL
+      || !s_xfer_app.panel_up) {
+    return false;
+  }
+  (void)bbepRefresh(&s_epd, refresh_mode);
+  ok = wait_for_refresh(60000u);
   bbepSleep(&s_epd, DEEP_SLEEP);
-  s_active = false;
-  s_dw_compressed = false;
-  s_dw_decompressed_total = 0;
   display_power_set(false);
-
-  if (refresh_ok != nullptr) {
-    *refresh_ok = ok;
-  }
-  return 0;
+  memset(&s_xfer_app, 0, sizeof(s_xfer_app));
+  *completed = ok;
+  return true;
 }
 
-extern "C" int opendisplay_display_direct_write_end(const uint8_t *payload,
-                                                      uint16_t payload_len,
-                                                      bool *refresh_ok)
+extern "C" uint32_t od_xfer_app_now_ms(void)
 {
-  int rc = opendisplay_display_direct_write_end_prepare(payload, payload_len);
-  return rc == 0 ? opendisplay_display_direct_write_end_refresh(refresh_ok) : rc;
+  return sl_sleeptimer_tick_to_ms(sl_sleeptimer_get_tick_count());
 }

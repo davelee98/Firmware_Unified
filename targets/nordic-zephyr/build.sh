@@ -81,18 +81,28 @@ source "${SCRIPT_DIR}/ncs-env.sh"
 
 CMAKE_ARGS=(-DBOARD_ROOT="${SCRIPT_DIR}")
 
-# `west build -p always` does not fully discard the outer sysbuild state for the L15 MCUboot /
+# Which bootloader composition this board builds. nRF52840 keeps the Adafruit bootloader; every
+# other board here uses MCUboot + Partition Manager. Pristine handling and sysbuild Kconfig
+# selection derive from the same predicate so their board scopes cannot diverge.
+OD_BOARD_TAG="${BOARD%%/*}"
+OD_USES_MCUBOOT=1
+if [[ "${OD_BOARD_TAG}" == xiao_ble* ]]; then
+  OD_USES_MCUBOOT=0
+fi
+
+# `west build -p always` does not fully discard the outer sysbuild state for an MCUboot /
 # Partition Manager composition. After an application CMakeLists change it can reconfigure that
-# tree with an unexpanded PM placeholder. The default/gate contract says "always" means a clean
-# build, so enforce that contract for this one composition instead of leaving the next developer
-# to discover that deleting build-xiao_nrf54l15 fixes it.
-if [[ "${PURGE}" == "always" && "${BOARD}" == xiao_nrf54l15* && -d "${BUILD_DIR}" ]]; then
+# tree with an unexpanded PM placeholder, and signing then dies on
+# `--slot-size @PM_MCUBOOT_PRIMARY_SIZE@`. The default/gate contract says "always" means a clean
+# build, so enforce that contract here. Only directories this script names are removed; an
+# externally supplied BUILD_DIR is left to west.
+if [[ "${PURGE}" == "always" && "${OD_USES_MCUBOOT}" == 1 && -d "${BUILD_DIR}" ]]; then
   case "${BUILD_DIR}" in
-    "${SCRIPT_DIR}/build"|"${SCRIPT_DIR}/build-xiao_nrf54l15"|"${SCRIPT_DIR}/build-xiao_nrf54l15-debug")
+    "${SCRIPT_DIR}/build"|"${SCRIPT_DIR}/build-${OD_BOARD_TAG}"|"${SCRIPT_DIR}/build-${OD_BOARD_TAG}-debug")
       rm -rf -- "${BUILD_DIR}"
       ;;
     *)
-      echo "Not manually removing external L15 build directory; west will handle pristine: ${BUILD_DIR}" >&2
+      echo "Not manually removing external MCUboot build directory; west will handle pristine: ${BUILD_DIR}" >&2
       ;;
   esac
 fi
@@ -102,7 +112,7 @@ fi
 # right file is selected here. Without this an xiao_ble build fails at configure with
 # "required nodelabel not found: slot0_partition" -- upstream xiao_ble ships pm_static.yml for
 # the Adafruit layout and has no MCUboot partitions.
-if [[ "${BOARD}" == xiao_ble* ]]; then
+if [[ "${OD_USES_MCUBOOT}" == 0 ]]; then
   CMAKE_ARGS+=(-DSB_CONF_FILE="${SCRIPT_DIR}/zephyr/sysbuild_adafruit.conf")
 fi
 if [[ "${PROFILE}" == "uart" ]]; then

@@ -270,26 +270,15 @@ add_library(slc OBJECT
     "${CMAKE_CURRENT_LIST_DIR}/../panel/od_bbep_efr32.cpp"
     "${OD_REPO_ROOT}/third_party/bb_epaper/src/Group5.cpp"
 
-    # shared/ -- the PURE TIER ONLY: needs the C standard library and shared/protocol, nothing
-    # else, both of which this target already has. od_adv_control.c (HAL_ADV) and od_watchdog.c
-    # (HAL_WDT) are deliberately absent: this target implements neither od_hal_adv.h nor
-    # od_hal_wdt.h, and od_adv_control.c would fail the link with three undefined references --
-    # the intended failure, per README.md "Required at import: the advertising HAL". Add each
-    # tier when its HAL lands, not before.
-    #
-    # COMPILED, NOT YET CALLED, same as nordic-zephyr took it. ../opendisplay_config_parser.c
-    # still owns config parsing here; retiring it for od_config_tlv is a subsystem swap that
-    # needs its own commit and a hardware verify, and it is what actually spends the 4 KB
-    # od_config_asm buffer on a 32 KB part. Wiring the sources in first proves shared/ compiles
-    # under ARM GCC -- a third toolchain, a third warning set, and the smallest target -- ahead
-    # of the swap that makes them load-bearing. Cost today is nil: -ffunction-sections +
-    # -fdata-sections + --gc-sections (below) drop what nothing calls, and neither TU defines a
-    # static instance, so struct od_config_asm costs RAM only once something declares one.
+    # Shared tiers selected for the seams this target implements. HAL_ADV, HAL_WDT, APP_RXQ and
+    # APP_BOOT remain absent. APP_XFER is production code: direct and capability-off partial route
+    # through it, with panel and transport behavior supplied by od_xfer_app in target sources.
     ${OD_SHARED_SOURCES_PURE}
     ${OD_SHARED_SOURCES_HAL_CRYPTO}
     ${OD_SHARED_SOURCES_HAL_RADIO}
     ${OD_SHARED_SOURCES_APP_SESSION}
     ${OD_SHARED_SOURCES_APP_INFLATE}
+    ${OD_SHARED_SOURCES_APP_XFER}
 )
 
 target_include_directories(slc PUBLIC
@@ -492,13 +481,6 @@ set(post_build_command )
 set_property(TARGET slc PROPERTY C_STANDARD 17)
 set_property(TARGET slc PROPERTY CXX_STANDARD 17)
 set_property(TARGET slc PROPERTY CXX_EXTENSIONS OFF)
-
-# Compile the dormant Phase 2 machine with the BG22 ABI and ARM compiler, but keep its objects out
-# of the firmware until the direct/partial cutover supplies the real hardware seam. Linking fake
-# adapters here would make an accidental production reference appear valid.
-add_library(od_xfer_compile OBJECT ${OD_SHARED_SOURCES_APP_XFER})
-target_link_libraries(od_xfer_compile PRIVATE slc)
-set_property(TARGET od_xfer_compile PROPERTY C_STANDARD 17)
 
 target_link_options(slc INTERFACE
     -mcpu=cortex-m33

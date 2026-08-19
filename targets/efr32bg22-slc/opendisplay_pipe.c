@@ -10,6 +10,7 @@
 #include "od_session_app.h"
 #include "od_span.h"
 #include "od_txq.h"
+#include "od_xfer.h"
 #include "opendisplay_display.h"
 
 #include "sl_component_catalog.h"
@@ -59,7 +60,7 @@ void opendisplay_pipe_set_tx_report_available(bool available)
   s_tx_report_warned = false;
 }
 
-bool opendisplay_pipe_wait_tx_idle(uint32_t tag, uint32_t deadline_ms)
+static bool wait_tx_idle(uint32_t tag, uint32_t deadline_ms)
 {
   if (!s_tx_report_ok) {
     /* Fail closed rather than fall back to stack acceptance. "Accepted by the stack" is not
@@ -106,16 +107,47 @@ void opendisplay_pipe_close_tag(uint32_t tag)
   }
 }
 
-void opendisplay_pipe_reset_transport(void)
+bool opendisplay_pipe_flush_before_refresh(uint32_t tag, uint32_t deadline_ms)
+{
+  for (;;) {
+    od_txq_status_t rc = od_txq_flush(now_ms(), deadline_ms);
+    if (rc == OD_TXQ_OK) {
+      break;
+    }
+    if (rc == OD_TXQ_TIMEOUT) {
+      return false;
+    }
+    sl_bt_run();
+  }
+  return wait_tx_idle(tag, deadline_ms);
+}
+
+static void reset_transport_state(void)
 {
   od_core_reset();
   od_cmd_silabs_reset();
-  opendisplay_display_abort();
   s_auth_abuse = 0u;
   s_hold_started_ms = 0u;
   s_read_started_ms = 0u;
   s_hold_active = false;
   s_read_active = false;
+}
+
+void opendisplay_pipe_abort_xfer_barrier(uint32_t tag)
+{
+  reset_transport_state();
+  opendisplay_pipe_close_tag(tag);
+}
+
+void opendisplay_pipe_reset_transport(void)
+{
+  if (od_xfer_active()) {
+    od_xfer_reset();
+  } else {
+    /* A transport reset is also the target's fail-safe panel power-off path. */
+    opendisplay_display_abort();
+  }
+  reset_transport_state();
 }
 
 void opendisplay_pipe_set_characteristic(uint16_t pipe_value_handle)

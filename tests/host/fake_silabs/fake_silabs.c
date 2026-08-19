@@ -3,10 +3,13 @@
 #include "fake_silabs.h"
 
 #include "od_config_asm.h"
+#include "od_color.h"
 #include "od_core.h"
 #include "od_session.h"
 #include "od_session_app.h"
 #include "od_txq.h"
+#include "od_xfer.h"
+#include "od_xfer_app.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_config_storage.h"
@@ -35,6 +38,8 @@ bool fake_silabs_nfc_read_ok;
 uint16_t fake_silabs_nfc_read_len;
 
 static struct od_config_asm s_assembler;
+static uint32_t s_xfer_written;
+static uint8_t s_inflate_scratch[256];
 
 void fake_silabs_reset(void)
 {
@@ -47,6 +52,7 @@ void fake_silabs_reset(void)
     fake_silabs_reload_saw_queued = false;
     fake_silabs_reload_saw_authenticated = false;
     fake_silabs_xfer_active = false;
+    s_xfer_written = 0u;
     fake_silabs_refresh_ok = true;
     fake_silabs_refreshes = 0u;
     fake_silabs_aborts = 0u;
@@ -121,28 +127,69 @@ bool opendisplay_ble_nfc_read(uint8_t *type, uint8_t *data, uint16_t *len, uint1
 bool opendisplay_ble_nfc_write(uint8_t type, const uint8_t *data, uint16_t len)
 { (void)type; (void)data; (void)len; return true; }
 
-int opendisplay_display_direct_write_start(const uint8_t *data, uint16_t len)
-{ (void)data; (void)len; fake_silabs_xfer_active = true; return 0; }
-
-int opendisplay_display_direct_write_data(const uint8_t *data, uint16_t len)
-{ (void)data; (void)len; return fake_silabs_xfer_active ? 0 : -1; }
-
-int opendisplay_display_direct_write_end_prepare(const uint8_t *data, uint16_t len)
-{ (void)data; (void)len; return fake_silabs_xfer_active ? 0 : -1; }
-
-int opendisplay_display_direct_write_end_refresh(bool *ok)
+void od_xfer_app_prepare_start(void)
 {
+    if (fake_silabs_xfer_active) opendisplay_display_abort();
+}
+
+bool od_xfer_app_panel_info(od_xfer_panel_info_t *out)
+{
+    if (out == NULL) return false;
+    memset(out, 0, sizeof *out);
+    if (od_color_direct_geometry(OD_COLOR_SCHEME_MONO, 128u, 256u, &out->geometry)
+        != OD_COLOR_OK) return false;
+    out->width = 128u;
+    out->height = 256u;
+    out->partial_enabled = false;
+    return true;
+}
+
+bool od_xfer_app_begin_full(const od_color_geometry_t *geometry)
+{
+    if (geometry == NULL || geometry->total_bytes != 4096u) return false;
+    fake_silabs_xfer_active = true;
+    s_xfer_written = 0u;
+    return true;
+}
+
+uint32_t od_xfer_app_write(uint32_t stream_offset, od_span_t data)
+{
+    if (!fake_silabs_xfer_active || stream_offset != s_xfer_written || data.n > UINT32_MAX)
+        return 0u;
+    s_xfer_written += (uint32_t)data.n;
+    return (uint32_t)data.n;
+}
+
+od_mut_span_t od_xfer_app_inflate_scratch(void)
+{ return od_mut_span_make(s_inflate_scratch, sizeof s_inflate_scratch); }
+
+void od_xfer_app_abort(od_xfer_abort_reason_t reason)
+{ (void)reason; opendisplay_display_abort(); }
+
+od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *owner)
+{
+    uint32_t deadline = od_xfer_app_now_ms() + 2000u;
+    return owner != NULL && opendisplay_pipe_flush_before_refresh(owner->tag, deadline)
+        ? OD_XFER_BARRIER_PROCEED : OD_XFER_BARRIER_ABORT;
+}
+
+void od_xfer_app_barrier_abort(const od_reply_t *owner)
+{
+    opendisplay_display_abort();
+    if (owner != NULL) opendisplay_pipe_abort_xfer_barrier(owner->tag);
+}
+
+bool od_xfer_app_refresh(uint8_t mode, bool *completed)
+{
+    (void)mode;
+    if (!fake_silabs_xfer_active || completed == NULL) return false;
     ++fake_silabs_refreshes;
     fake_silabs_xfer_active = false;
-    if (ok != NULL) *ok = fake_silabs_refresh_ok;
-    return 0;
+    *completed = fake_silabs_refresh_ok;
+    return true;
 }
 
-int opendisplay_display_direct_write_end(const uint8_t *data, uint16_t len, bool *ok)
-{
-    int rc = opendisplay_display_direct_write_end_prepare(data, len);
-    return rc == 0 ? opendisplay_display_direct_write_end_refresh(ok) : rc;
-}
+uint32_t od_xfer_app_now_ms(void) { return od_session_app_now_ms(); }
 
 void opendisplay_display_abort(void)
 { ++fake_silabs_aborts; fake_silabs_xfer_active = false; }
@@ -156,10 +203,18 @@ int opendisplay_led_stop(uint8_t index, bool present)
 { (void)index; (void)present; return 0; }
 
 #ifndef OD_TEST_REAL_SILABS_PIPE
-bool opendisplay_pipe_wait_tx_idle(uint32_t tag, uint32_t deadline_ms)
+bool opendisplay_pipe_flush_before_refresh(uint32_t tag, uint32_t deadline_ms)
 { (void)tag; (void)deadline_ms; return true; }
 void opendisplay_pipe_close_tag(uint32_t tag) { (void)tag; }
-void opendisplay_pipe_reset_transport(void) { ++fake_silabs_resets; od_core_reset(); }
+void opendisplay_pipe_abort_xfer_barrier(uint32_t tag)
+{ (void)tag; ++fake_silabs_resets; od_core_reset(); }
+void opendisplay_pipe_reset_transport(void)
+{
+    ++fake_silabs_resets;
+    if (od_xfer_active()) od_xfer_reset();
+    else opendisplay_display_abort();
+    od_core_reset();
+}
 void sl_bt_run(void) { }
 #endif
 void NVIC_SystemReset(void) { ++fake_silabs_resets; }

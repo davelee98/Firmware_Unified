@@ -58,14 +58,14 @@ looks arbitrary and is not); delete the story.
   --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF.
   `tools/sdkconfig_baseline.sh` is a gate a change must not break.
 - **`shared/` is no longer empty** —
-  `core/od_{adv_control,advert,cmd,color,config,config_asm,config_read,config_tlv,core,dispatch,gate,reply,rxq,session,txq,watchdog,zlib_inflate,zlib_pump}.c`
+  `core/od_{adv_control,advert,cmd,color,config,config_asm,config_read,config_tlv,core,dispatch,gate,reply,rxq,session,txq,watchdog,xfer,xfer_direct,xfer_partial,zlib_inflate,zlib_pump}.c`
   listed in `shared/sources.cmake` (never globbed) in per-HAL tiers, plus the two all-inline
   headers `od_span.h` and `od_nonce_window.h` and pure seam headers including `od_cmd_app.h`,
-  `od_session_app.h` and `od_inflate_app.h`, which correctly have no entry there. Consumers:
+  `od_session_app.h`, `od_inflate_app.h` and `od_xfer_app.h`, which correctly have no entry there. Consumers:
   host tests and `esp32-idf` take the aggregate; `nordic-zephyr` takes PURE + HAL_CRYPTO +
-  HAL_RADIO + HAL_WDT + APP_SESSION + APP_RXQ + APP_INFLATE; `efr32bg22-slc` takes PURE +
-  HAL_CRYPTO + HAL_RADIO + APP_SESSION + APP_INFLATE and deliberately declines APP_RXQ, HAL_ADV
-  and HAL_WDT. APP tiers are named for a **seam** rather than a HAL because they need a target
+  HAL_RADIO + HAL_WDT + APP_SESSION + APP_RXQ + APP_INFLATE + APP_XFER; `efr32bg22-slc` takes PURE +
+  HAL_CRYPTO + HAL_RADIO + APP_SESSION + APP_INFLATE + APP_XFER and deliberately declines APP_RXQ,
+  HAL_ADV and HAL_WDT. APP tiers are named for a **seam** rather than a HAL because they need a target
   function rather than a driver.
 - **THE WHOLE COMMAND PATH IS SHARED ON BOTH TARGETS.** (C8 2026-08-15, C10 2026-08-15,
   C11 2026-08-16). **NOW HARDWARE-VERIFIED on `esp32-idf`** (`s3-n16r8-extuart-debug`,
@@ -206,8 +206,9 @@ looks arbitrary and is not); delete the story.
   fault suite covers persistence ordering/failure, event pressure/deadlines, DIRECT END completion,
   and NFC limits with 232 assertions. Phase 1 compressed direct is cleared, but the rest of C13's
   behavior is not hardware-qualified. The remaining
-  unpromoted protocol logic is **the transfer state machines** — direct, partial, PIPE and NFC,
-  target-owned on purpose (C11 § 1) and now smaller, explicit inputs to their own promotions.
+  unpromoted protocol logic is **PIPE and NFC**. Direct and legacy partial now use shared
+  `od_xfer`; the PIPE-capable targets retain only the explicitly inventoried machinery that target
+  PIPE still calls until Phase 3.
 - **C14 canonical portable inflater (2026-08-18):** `shared/core/od_zlib_inflate.{c,h}` is the
   only portable implementation. The former target-local/vendor copies, checksum helpers,
   heap-window mode, obsolete headers, and placeholder compression directory are gone. The
@@ -225,6 +226,18 @@ looks arbitrary and is not); delete the story.
   480 B headroom. The project marked all six pump rows cleared in
   `docs/HARDWARE_VERIFICATION_CHECKLIST.md` on 2026-08-18, unblocking the Phase 2 direct/partial
   per-target cutovers. Each cutover retains its own mandatory hardware gate.
+- **Transfer Phase 2 software candidates exist on ESP32, Nordic and BG22 (2026-08-19); none is
+  hardware-qualified.** The four legacy hooks are policy-free bridges to shared `od_xfer` while
+  dispatch remains on the temporary C11 hook surface until every target is cut over. ESP32 and
+  Nordic retain explicitly ratcheted target machinery still required by PIPE; either START
+  displaces the other owner before the singleton pump can be reset or pushed. BG22 has no PIPE, so
+  its cutover deletes the entire target-local direct parser, inflater loop, counters and reply
+  construction. Its adapter retains the 256-byte scratch buffer, capability-off `0x76` reply and
+  aborting two-second TX drain/completion barrier. Barrier recovery powers the panel off, resets
+  transport/session state without recursively resetting the active transfer and closes only the
+  issuing connection tag. The BG22 image is 250,292 B flash and 32,284 B static RAM: 944 B less
+  flash than the dormant candidate with RAM unchanged and 480 B headroom. Per-target evidence rows remain open in
+  `docs/HARDWARE_VERIFICATION_CHECKLIST.md`; implementation by project direction is not a pass.
 - `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel,crypto}`;
   `od_hal_crypto_random.c` is its own translation unit so a host test can compile the RNG arm
   without mbedTLS.
