@@ -42,7 +42,7 @@ cutover is unblocked; its own per-target hardware gates remain mandatory.
 
 ---
 
-## Transfer Phase 2 — ESP32 step 10a
+## Transfer Phase 2 — ESP32 steps 10a/10b
 
 The ESP32 software candidate replaces `0x70`, `0x71`, `0x72` and `0x76` with shared `od_xfer`.
 These rows are new evidence requirements; the older transfer results below do not qualify it.
@@ -59,6 +59,9 @@ These rows are new evidence requirements; the older transfer results below do no
       only a LAN-owned transfer
 
 Nordic step 10a remains blocked until these ESP32 rows have recorded results.
+The bidirectional-replacement row above qualifies ESP32 only. Nordic's 10a change must add and run
+its own row for the same two directions; ESP32 evidence cannot qualify Nordic's separate interim
+adapter/PIPE arbitration.
 
 ---
 
