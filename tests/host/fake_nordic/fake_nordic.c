@@ -8,12 +8,14 @@
 
 #include "fake_nordic.h"
 
+#include "od_xfer_app.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_buzzer.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_config_storage.h"
 #include "opendisplay_display.h"
 #include "opendisplay_led.h"
+#include "opendisplay_pipe_write.h"
 
 #include <stdarg.h>
 #include <string.h>
@@ -30,6 +32,9 @@ uint32_t fake_disp_written;
 bool     fake_disp_dw_active;
 unsigned fake_disp_aborts;
 unsigned fake_disp_refreshes;
+
+static uint32_t fake_displayed_etag;
+static uint8_t fake_inflate_scratch[256];
 
 bool     fake_store_init_ok;
 bool     fake_store_save_ok;
@@ -62,6 +67,7 @@ void fake_nordic_reset(void)
 {
     /* A benign, working device. Every knob a vector cares about is then set from its state,
      * so a vector's declared preconditions are the only thing that differs between runs. */
+    opendisplay_pipe_write_reset();
     fake_disp_data_rc = 0;
     fake_disp_prepare_rc = 0;
     fake_disp_refresh_rc = 0;
@@ -74,6 +80,7 @@ void fake_nordic_reset(void)
     fake_disp_dw_active = false;
     fake_disp_aborts = 0u;
     fake_disp_refreshes = 0u;
+    fake_displayed_etag = 0u;
 
     fake_store_init_ok = true;
     fake_store_save_ok = true;
@@ -180,6 +187,102 @@ void opendisplay_display_abort(void)   { ++fake_disp_aborts; fake_disp_dw_active
 bool opendisplay_display_boot_apply(void) { return false; }
 void opendisplay_display_park_pins(void)  { }
 void opendisplay_display_power_off(void)  { }
+
+/* ---------------------------------------------------------------------- shared transfer seam --- */
+
+void od_xfer_app_prepare_start(void)
+{
+    if (opendisplay_pipe_write_active()) {
+        opendisplay_display_abort();
+    }
+    opendisplay_pipe_write_reset();
+}
+
+bool od_xfer_app_panel_info(od_xfer_panel_info_t *out)
+{
+    if (out == NULL || fake_disp_total_bytes == 0u) {
+        return false;
+    }
+    memset(out, 0, sizeof *out);
+    if (od_color_direct_geometry(OD_COLOR_SCHEME_MONO, 128u, 256u, &out->geometry)
+        != OD_COLOR_OK || out->geometry.total_bytes != fake_disp_total_bytes) {
+        return false;
+    }
+    out->width = 128u;
+    out->height = 256u;
+    out->partial_enabled = true;
+    return true;
+}
+
+bool od_xfer_app_begin_full(const od_color_geometry_t *geometry)
+{
+    if (geometry == NULL || fake_disp_start_rc != 0) {
+        return false;
+    }
+    fake_disp_dw_active = true;
+    fake_disp_written = 0u;
+    return true;
+}
+
+bool od_xfer_app_begin_partial(uint16_t x, uint16_t y, uint16_t width, uint16_t height,
+                               uint32_t plane_bytes)
+{
+    (void)x; (void)y; (void)width; (void)height; (void)plane_bytes;
+    if (fake_disp_partial_start_rc != 0) {
+        return false;
+    }
+    fake_disp_dw_active = true;
+    fake_disp_written = 0u;
+    return true;
+}
+
+uint32_t od_xfer_app_write(uint32_t stream_offset, od_span_t data)
+{
+    if (fake_disp_data_rc != 0 || stream_offset != fake_disp_written) {
+        return 0u;
+    }
+    fake_disp_written += (uint32_t)data.n;
+    return (uint32_t)data.n;
+}
+
+od_mut_span_t od_xfer_app_inflate_scratch(void)
+{
+    return od_mut_span_make(fake_inflate_scratch, sizeof fake_inflate_scratch);
+}
+
+void od_xfer_app_abort(od_xfer_abort_reason_t reason)
+{
+    (void)reason;
+    opendisplay_display_abort();
+}
+
+od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *owner)
+{
+    (void)owner;
+    return OD_XFER_BARRIER_PROCEED;
+}
+
+void od_xfer_app_barrier_abort(const od_reply_t *owner)
+{
+    (void)owner;
+    opendisplay_display_abort();
+}
+
+bool od_xfer_app_refresh(uint8_t mode, bool *completed)
+{
+    (void)mode;
+    ++fake_disp_refreshes;
+    if (fake_disp_refresh_rc != 0 || completed == NULL) {
+        return false;
+    }
+    *completed = fake_disp_refresh_ok;
+    fake_disp_dw_active = false;
+    return true;
+}
+
+uint32_t od_xfer_app_displayed_etag(void) { return fake_displayed_etag; }
+void od_xfer_app_set_displayed_etag(uint32_t etag) { fake_displayed_etag = etag; }
+uint32_t od_xfer_app_now_ms(void) { return fake_k_uptime_ms; }
 
 /* ----------------------------------------------------------------------------------- storage --- */
 

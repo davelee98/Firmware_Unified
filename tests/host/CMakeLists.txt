@@ -485,6 +485,7 @@ if(Python3_FOUND)
         ../../targets/nordic-zephyr/src/od_cmd_direct.c
         ../../targets/nordic-zephyr/src/od_cmd_nfc.c
         ../../targets/nordic-zephyr/src/od_cmd_reply.c
+        ../../targets/nordic-zephyr/src/od_inflate_app.c
         ../../targets/nordic-zephyr/src/opendisplay_pipe_write.cpp
         ${OD_VEC_INC})
     target_include_directories(od_dispatch_corpus_nordic_test PRIVATE

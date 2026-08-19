@@ -14,7 +14,7 @@
 #include "corpus_runner.h"
 
 #include "fake_nordic.h"
-#include "opendisplay_display.h"
+#include "od_xfer.h"
 
 #include <string.h>
 
@@ -35,6 +35,7 @@ const char *od_corpus_profile_name(void) { return "nordic-production"; }
 
 void od_corpus_profile_reset(const od_vec_t *vec)
 {
+    od_xfer_reset();
     fake_nordic_reset();
 
     /* THE VERSION FIELDS ARE THE VECTOR'S, not a constant, because a device really does report
@@ -51,9 +52,26 @@ void od_corpus_profile_reset(const od_vec_t *vec)
     fake_store_init_ok = (vec->storage_ok != 0u);
     fake_store_save_ok = (vec->storage_ok != 0u);
 
-    /* A transfer the vector declares already open. The production handler asks the panel, so the
-     * panel is what has to believe it. */
+    /* Arm the real shared machine under the identity the runner will dispatch. Fill it completely:
+     * a DATA vector still receives its ordinary trailing-chunk ACK, while an END vector reaches
+     * the refresh ordering it exists to prove. */
     if (vec->xfer_active) {
-        (void)opendisplay_display_direct_write_start(NULL, 0u);
+        static const uint8_t image[4096];
+        od_tx_reservation_t reservation;
+        od_cmd_ctx_t ctx;
+
+        ctx.rp.origin = OD_ORIGIN_BLE;
+        ctx.rp.tag = 9u;
+        ctx.r = &reservation;
+        if (od_txq_reserve(1u, &reservation) == OD_TXQ_OK) {
+            (void)od_xfer_direct_start(&ctx, od_span_none());
+            od_txq_release(&reservation);
+        }
+        od_txq_reset();
+        if (od_txq_reserve(2u, &reservation) == OD_TXQ_OK) {
+            (void)od_xfer_data(&ctx, od_span_make(image, sizeof image));
+            od_txq_release(&reservation);
+        }
+        od_txq_reset();
     }
 }
