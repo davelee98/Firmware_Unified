@@ -482,7 +482,6 @@ if(Python3_FOUND)
         fake_nordic/fake_nordic.c
         ../../targets/nordic-zephyr/src/od_cmd_device.c
         ../../targets/nordic-zephyr/src/od_cmd_config.c
-        ../../targets/nordic-zephyr/src/od_cmd_direct.c
         ../../targets/nordic-zephyr/src/od_cmd_nfc.c
         ../../targets/nordic-zephyr/src/od_cmd_reply.c
         ../../targets/nordic-zephyr/src/od_inflate_app.c

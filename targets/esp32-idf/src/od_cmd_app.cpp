@@ -1,9 +1,8 @@
 /* od_cmd_app.cpp -- this target's implementation of shared/core/od_cmd_app.h.
  *
- * ONE FUNCTION PER OPCODE, and no switch. The opcode map is od_dispatch.c's; what is here is what
- * THIS target does about each command. A capability it lacks still gets a definition, because a
- * missing one is a link error -- which is the point: an opcode cannot be added to the shared map
- * without every target stating its answer.
+ * ONE FUNCTION PER TARGET-OWNED OPCODE, and no switch. Promoted transfer opcodes route straight
+ * to their shared machines. A capability represented here still gets a definition, so an
+ * incomplete target-specific opcode addition is a link error.
  *
  * The predicates below (mutates-config, allow-unauthenticated) are questions the dispatcher asks
  * ABOUT an opcode before any handler runs, so they stay on od_dispatch.h rather than moving here.
@@ -16,7 +15,6 @@
 #include "device_control.h"
 #include "display_service.h"
 #include "od_dispatch.h"
-#include "od_xfer.h"
 
 #include "od_cmd_reply.h"
 #include "od_hal_time.h"
@@ -96,28 +94,6 @@ extern "C" od_cmd_result_t od_cmd_app_config_clear(const od_cmd_ctx_t *ctx, od_s
 {
     (void)body;
     return handleClearConfig(ctx);
-}
-
-/* ----------------------------------------------------------------------------- transfer --- */
-
-extern "C" od_cmd_result_t od_cmd_app_direct_start(const od_cmd_ctx_t *ctx, od_span_t body)
-{
-    return od_xfer_direct_start(ctx, body);
-}
-
-extern "C" od_cmd_result_t od_cmd_app_direct_data(const od_cmd_ctx_t *ctx, od_span_t body)
-{
-    return od_xfer_data(ctx, body);
-}
-
-extern "C" od_cmd_result_t od_cmd_app_direct_end(const od_cmd_ctx_t *ctx, od_span_t body)
-{
-    return od_xfer_end(ctx, body);
-}
-
-extern "C" od_cmd_result_t od_cmd_app_partial_start(const od_cmd_ctx_t *ctx, od_span_t body)
-{
-    return od_xfer_partial_start(ctx, body);
 }
 
 /* ------------------------------------------------------------- NO PIPE ON LAN (review F5) ---

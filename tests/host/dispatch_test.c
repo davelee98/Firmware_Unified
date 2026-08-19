@@ -18,6 +18,7 @@
 #include "od_reply.h"
 #include "od_session.h"
 #include "od_session_app.h"
+#include "od_xfer.h"
 #include "session_fake.h"
 
 #include <stdio.h>
@@ -146,10 +147,10 @@ HOOK(od_cmd_app_config_read,      CMD_CONFIG_READ)
 HOOK(od_cmd_app_config_write,     CMD_CONFIG_WRITE)
 HOOK(od_cmd_app_config_chunk,     CMD_CONFIG_CHUNK)
 HOOK(od_cmd_app_config_clear,     CMD_CONFIG_CLEAR)
-HOOK(od_cmd_app_direct_start,     CMD_DIRECT_WRITE_START)
-HOOK(od_cmd_app_direct_data,      CMD_DIRECT_WRITE_DATA)
-HOOK(od_cmd_app_direct_end,       CMD_DIRECT_WRITE_END)
-HOOK(od_cmd_app_partial_start,    CMD_PARTIAL_WRITE_START)
+HOOK(od_xfer_direct_start,        CMD_DIRECT_WRITE_START)
+HOOK(od_xfer_data,                CMD_DIRECT_WRITE_DATA)
+HOOK(od_xfer_end,                 CMD_DIRECT_WRITE_END)
+HOOK(od_xfer_partial_start,       CMD_PARTIAL_WRITE_START)
 HOOK(od_cmd_app_pipe_start,       CMD_PIPE_WRITE_START)
 HOOK(od_cmd_app_pipe_data,        CMD_PIPE_WRITE_DATA)
 HOOK(od_cmd_app_pipe_end,         CMD_PIPE_WRITE_END)

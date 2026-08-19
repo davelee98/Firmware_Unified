@@ -195,6 +195,37 @@ c11_structure() {
 }
 check "structure: ownership ratchets"  c11_structure
 
+xfer_direct_dispatch() {
+    local rc=0 hits
+    local rows=shared/core/od_dispatch_ops.h
+
+    for row in \
+        'X(CMD_DIRECT_WRITE_START,  od_xfer_direct_start,       1u)' \
+        'X(CMD_DIRECT_WRITE_DATA,   od_xfer_data,               2u)' \
+        'X(CMD_DIRECT_WRITE_END,    od_xfer_end,                2u)' \
+        'X(CMD_PARTIAL_WRITE_START, od_xfer_partial_start,      1u)'; do
+        if ! grep -Fq "$row" "$rows"; then
+            echo "shared transfer dispatch row or reservation budget drifted: $row"
+            rc=1
+        fi
+    done
+
+    hits=$(grep -RInE '\bod_cmd_app_(direct_start|direct_data|direct_end|partial_start)\b' \
+        shared/core targets --include='*.c' --include='*.cpp' --include='*.h' \
+        --exclude-dir=build 2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "legacy direct/partial target hook returned; dispatch must route straight to od_xfer"
+        rc=1
+    fi
+    if [ -e targets/nordic-zephyr/src/od_cmd_direct.c ]; then
+        echo "Nordic's retired direct/partial bridge translation unit returned"
+        rc=1
+    fi
+    return $rc
+}
+check "structure: direct transfer dispatch ownership" xfer_direct_dispatch
+
 esp32_xfer_cutover() {
     local rc=0 hits
 
@@ -202,20 +233,9 @@ esp32_xfer_cutover() {
            targets/esp32-idf/src 2>/dev/null || true)
     if [ -n "$hits" ]; then
         echo "$hits"
-        echo "ESP32 legacy direct/partial command policy returned; od_cmd_app must bridge to od_xfer"
+        echo "ESP32 legacy direct/partial command policy returned; shared od_xfer owns it"
         rc=1
     fi
-
-    for call in \
-        'od_xfer_direct_start(ctx, body)' \
-        'od_xfer_data(ctx, body)' \
-        'od_xfer_end(ctx, body)' \
-        'od_xfer_partial_start(ctx, body)'; do
-        if ! grep -Fq "return $call;" targets/esp32-idf/src/od_cmd_app.cpp; then
-            echo "ESP32 transfer bridge missing: return $call;"
-            rc=1
-        fi
-    done
 
     if ! grep -q '\bod_xfer_reset[[:space:]]*(' targets/esp32-idf/src/session_guard.cpp; then
         echo "ESP32 teardown must reset the shared legacy transfer before od_core_reset"
@@ -315,22 +335,6 @@ check "esp32: Phase 2 step 10b inventory" esp32_xfer_10b_inventory
 
 nordic_xfer_cutover() {
     local rc=0 teardown reset_line core_line
-    local bridge=targets/nordic-zephyr/src/od_cmd_direct.c
-
-    for call in \
-        'od_xfer_direct_start(ctx, body)' \
-        'od_xfer_data(ctx, body)' \
-        'od_xfer_end(ctx, body)' \
-        'od_xfer_partial_start(ctx, body)'; do
-        if ! grep -Fq "return $call;" "$bridge"; then
-            echo "Nordic transfer bridge missing: return $call;"
-            rc=1
-        fi
-    done
-    if grep -Eq '\b(od_cmd_reply|opendisplay_display_(direct|partial))' "$bridge"; then
-        echo "Nordic legacy direct/partial policy returned to od_cmd_direct.c"
-        rc=1
-    fi
     if ! grep -q '\${OD_SHARED_SOURCES_APP_XFER}' \
             targets/nordic-zephyr/zephyr/CMakeLists.txt \
        || grep -q 'od_xfer_compile' targets/nordic-zephyr/zephyr/CMakeLists.txt; then
@@ -452,23 +456,12 @@ check "nordic: Phase 2 step 10b inventory" nordic_xfer_10b_inventory
 
 silabs_xfer_cutover() {
     local rc=0 hits teardown reset_line core_line
-    local bridge=targets/efr32bg22-slc/od_cmd_silabs.c
+    local commands=targets/efr32bg22-slc/od_cmd_silabs.c
     local display=targets/efr32bg22-slc/opendisplay_display.cpp
     local cmake=targets/efr32bg22-slc/cmake_gcc/opendisplay-bg22.cmake
 
-    for call in \
-        'od_xfer_direct_start(ctx, body)' \
-        'od_xfer_data(ctx, body)' \
-        'od_xfer_end(ctx, body)' \
-        'od_xfer_partial_start(ctx, body)'; do
-        if ! grep -Fq "return $call;" "$bridge"; then
-            echo "Silabs transfer bridge missing: return $call;"
-            rc=1
-        fi
-    done
-
     hits=$(grep -InE '\bopendisplay_display_direct_write_(start|data|end|end_prepare|end_refresh)[[:space:]]*\(' \
-           "$bridge" "$display" targets/efr32bg22-slc/opendisplay_display.h 2>/dev/null || true)
+           "$commands" "$display" targets/efr32bg22-slc/opendisplay_display.h 2>/dev/null || true)
     if [ -n "$hits" ]; then
         echo "$hits"
         echo "Silabs legacy direct command policy returned; the target must expose hardware only"

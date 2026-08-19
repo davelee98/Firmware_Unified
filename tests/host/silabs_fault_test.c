@@ -242,7 +242,7 @@ static void run_direct_end(od_cmd_ctx_t *ctx, od_tx_reservation_t *r,
                            od_cmd_result_t expected)
 {
     const uint8_t full[] = { 0u };
-    CHECK(od_cmd_app_direct_end(ctx, od_span_make(full, sizeof full)) == expected);
+    CHECK(od_xfer_end(ctx, od_span_make(full, sizeof full)) == expected);
     od_txq_release(r);
     (void)od_txq_process();
 }
