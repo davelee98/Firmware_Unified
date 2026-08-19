@@ -13,9 +13,11 @@
 through PR #47 at `d83a41a`. The ESP32 step-10a software candidate now routes the four legacy
 opcodes through shared policy and supplies the real hardware seam. Step 10b now freezes the
 ESP32 PIPE-only delete inventory, adapter-primitive retain inventory and transitional arbitration
-ratchet; neither step is hardware-qualified. Nordic may not begin until the ESP32 cutover gate
-passes. ESP32 retains only the target machinery still called by PIPE, with PIPE and `od_xfer` made
-mutually exclusive owners of the singleton pump.
+ratchet. The Nordic step-10a software candidate now does the same and freezes its own 10b boundary.
+Neither target cutover is hardware-qualified. Nordic was implemented by explicit project direction
+before the ESP32 cutover rows were run; that sequencing exception does not clear either target's
+gate or authorize the BG22 cutover. Both PIPE-capable targets retain only the target machinery still
+called by PIPE, with PIPE and `od_xfer` made mutually exclusive owners of the singleton pump.
 
 This is the active plan for the remaining transfer-plane work. It supersedes the transfer sequence
 in `PLAN_MIGRATION_ENDGAME_2026-08-17.md` and the geometry/compression phases in the original
@@ -134,6 +136,34 @@ version of this file. The detailed C14 and color plans remain the record of what
 - The hardware checklist labels the interim gate as ESP32-specific and requires Nordic to add its
   own bidirectional-replacement row at its 10a cutover. This boundary changes no production code;
   PIPE-dependent deletion remains Phase 3 step 6.
+
+### Phase 2 Nordic step-10a/10b candidate — 2026-08-19
+
+- The four Nordic command hooks are policy-free bridges to `od_xfer`. The production Zephyr image
+  links `APP_XFER` directly; the compile-only object is gone, and all three Nordic board images
+  compile and link the real `od_xfer_app` seam.
+- `opendisplay_display.cpp` owns hardware state only for the shared path: geometry, rectangle,
+  controller plane and panel-power state. Every write derives plane selection from the shared
+  pre-write offset; no Nordic protocol byte counter mirrors or influences `od_xfer` accounting.
+- Arbitration is bidirectional before pump use. Target PIPE START resets a live `od_xfer`, while
+  `od_xfer_app_prepare_start()` aborts and resets target PIPE before shared START can activate.
+  Disconnect resets `od_xfer` before common egress/session teardown and separately tears down
+  target PIPE only when it is active.
+- The cutover deliberately adopts the already-tested ESP32-authority decisions in shared policy:
+  START bytes select compression without rechecking `transmission_modes`; ownership is the full
+  `{origin, tag}`; stray or displaced DATA/END is inert; explicit END may refresh an incomplete raw
+  packed-row upload while controller-plane uploads require both planes;
+  and a successful etag-less full refresh clears a stale displayed etag. These replace Nordic's
+  target-local variants and are hardware-gate observations, not adapter options.
+- Nordic retains its target PIPE machine and the legacy display sinks it calls. The exact delete
+  and retain inventories below are executable in `tools/check.sh`; their five target pump calls
+  and both arbitration arms are transitional through Nordic Phase 3 step 6.
+- Software evidence: the production corpus and focused host suite pass 43/43, including a PIPE
+  START that displaces a live shared transfer before panel activation. Production builds
+  pass for `xiao_nrf54l15`, `xiao_nrf54lm20a` and `xiao_nrf52840`. The Nordic aggregate gate is
+  22 passed, 0 failed, 2 skipped (the unrequested ESP32 and BG22 builds), with LeakSanitizer
+  disabled because it cannot run under the environment's ptrace wrapper. No board was flashed and
+  every Nordic Phase 2 hardware row remains open.
 
 ## 1. Reconciliation result
 
@@ -802,21 +832,47 @@ production opcode:
         bulk-delete them. When shared PIPE uses `xferApp`, remove those two prepare-start calls and
         delete each cleanup helper only after it has no remaining caller.
 
-      **Nordic inventory, to be frozen by its 10a commit before its hardware gate:**
+      **Nordic inventory, frozen by the step-10a cutover:**
 
-      - **Delete candidates:** all state and policy in `opendisplay_pipe_write.cpp`, including
-        `PipeWriteState`, `PipeReorderSlot`, `s_pipe`, `s_reorder`, the
-        `opendisplay_pipe_write_{start,data,end,reset,active}()` surface and its ACK/reorder/consume
-        helpers; the PIPE-only display bridges `opendisplay_display_pipe_full_start()`,
-        `opendisplay_display_pipe_partial_arm()` and
-        `opendisplay_display_pipe_partial_prepare()`; and any legacy direct/partial counters,
-        sink/pump loops or query functions retained at 10a only because those bridges still call
-        them. The 10a checkpoint must replace this candidate description with the exact surviving
-        symbol list; “display helpers” is not an inventory.
-      - **Retain:** Nordic's complete `od_xfer_app_*` adapter and every named low-level panel,
-        power, touch, address-window and refresh primitive it calls. Helpers shared between that
-        adapter and target PIPE stay in this list even if PIPE is their second caller. The 10a
-        checkpoint must name them individually after the adapter refactor fixes their final names.
+      - **Delete in Nordic Phase 3 step 6 — target PIPE policy/state:** `PipeWriteState`,
+        `PipeReorderSlot`, `s_pipe`, `s_reorder`, `pipe_slot()`, `pipe_chunk_received()`,
+        `pipe_build_ack_payload()`, `pipe_abort_no_reply()`, `send_pipe_ack()`, `sack_or_abort()`,
+        `send_pipe_nack()`, `send_pipe_start_nack()`, `pipe_update_highest_seen()`,
+        `pipe_consume_payload()`, `finish_and_refresh()`,
+        `opendisplay_pipe_write_{start,data,end,reset,active}()` and
+        `od_cmd_app_pipe_{start,data,end}()`.
+      - **Delete in the same commit — display state retained only for target PIPE:** `s_active`,
+        `s_total_bytes`, `s_written_bytes`, `s_dw_chunk_n`, `s_dw_log_pct`,
+        `s_dw_trailing_ignores`, `s_dw_init_t0`, `s_color_scheme`, `s_plane_size`,
+        `s_plane2_started`, `s_dw_compressed`, `s_dw_decompressed_total`,
+        `PartialStreamContext`, `s_partial`, `s_partial_panel_up`, `parse_be_u32()`,
+        `mono_plane_bytes()`, `partial_write_stream_bytes()`, `partial_zlib_sink()`,
+        `zlib_stream_to_partial_write()`, `partial_consume_bytes()`,
+        `partial_prepare_panel_ram()`, `partial_write_to_panel()`, `dw_init_mark()`,
+        `dw_log_progress()`, `dw_stream_raw_bytes()`, `direct_zlib_sink()`,
+        `zlib_stream_to_direct_write()`, every legacy `opendisplay_display_direct_write_*()`,
+        `opendisplay_display_partial_write_start()`, `opendisplay_display_partial_active()`,
+        `opendisplay_display_dw_active()`, `opendisplay_display_bytes_written()`,
+        `opendisplay_display_total_bytes()`, `opendisplay_display_expected_dw_bytes()`,
+        `opendisplay_display_displayed_etag()`, `opendisplay_display_clear_etag()`,
+        `opendisplay_display_set_partial_new_etag()`,
+        `opendisplay_display_partial_bytes_written()`, `opendisplay_display_partial_expected()`,
+        `opendisplay_display_partial_compressed()`, `opendisplay_display_calc_plane_bytes()` and
+        `opendisplay_display_pipe_{full_start,partial_arm,partial_prepare}()`. Remove their
+        declarations from `opendisplay_display.h` and `opendisplay_pipe_write.h` together.
+      - **Retain as adapter hardware primitives:** `XferAppMode`, `XferAppHardwareState`,
+        `s_xfer_app`, `xfer_app_clear()`, `xfer_app_write_full()`, `xfer_app_write_partial()`, every
+        `od_xfer_app_*` function, `s_epd`, `s_decompression_chunk`, `s_displayed_etag`,
+        `display_cfg()`, `display_power_set()`, `wait_for_refresh()`,
+        `panel_skips_bbep_set_addr_window()`, `panel_uses_pixel_ram_x()`,
+        `panel_uses_ep397_y_decrement()`, `panel_uses_ep426_x_decrement()`,
+        `panel_skips_reinit_on_partial_refresh()`, `partial_set_ep397_ram_y()`,
+        `partial_set_ep426_ram_y()`, `partial_set_pixel_ram_x()`, `partial_set_addr_window()`,
+        `partial_trigger_refresh()` and `partial_prepare_panel_ram_hardware()`, plus the lower panel,
+        power and touch operations they call.
+        `partial_cleanup()` and `opendisplay_display_abort()` are transitional bridge helpers used
+        by `od_xfer_app_prepare_start()` while target PIPE remains. Phase 3 removes that bridge call
+        and deletes both only after no non-PIPE caller remains.
 
       BG22 has no PIPE and therefore no 10b delete inventory.
 11. After all targets call the shared policy, route the four `OD_DISPATCH_OPCODE_ROWS` entries

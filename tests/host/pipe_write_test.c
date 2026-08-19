@@ -16,6 +16,7 @@
 
 #include "od_cmd.h"
 #include "od_txq.h"
+#include "od_xfer.h"
 #include "opendisplay_display.h"
 #include "opendisplay_protocol.h"
 #include "opendisplay_structs.h"
@@ -111,6 +112,9 @@ static int      g_full_start_rc;
 static int      g_partial_arm_rc;
 static uint8_t  g_partial_arm_err = OD_ERR_PIPE_START_BAD_HEADER;
 static int      g_partial_prepare_rc;
+static bool     g_shared_xfer_active;
+static unsigned g_shared_xfer_resets;
+static bool     g_pipe_started_before_shared_reset;
 
 int opendisplay_display_direct_write_start(const uint8_t *p, uint16_t n) { (void)p; (void)n; return 0; }
 
@@ -159,7 +163,14 @@ uint32_t opendisplay_display_partial_bytes_written(void)  { return g_dw_written;
 uint32_t opendisplay_display_partial_expected(void)       { return g_dw_total; }
 bool     opendisplay_display_partial_compressed(void)     { return false; }
 uint32_t opendisplay_display_calc_plane_bytes(uint16_t w, uint16_t h) { return (uint32_t)w * h; }
-int      opendisplay_display_pipe_full_start(bool c, uint32_t n) { (void)c; (void)n; return g_full_start_rc; }
+int opendisplay_display_pipe_full_start(bool c, uint32_t n)
+{
+    (void)c; (void)n;
+    if (g_shared_xfer_active) {
+        g_pipe_started_before_shared_reset = true;
+    }
+    return g_full_start_rc;
+}
 
 int opendisplay_display_pipe_partial_arm(uint8_t flags, uint32_t old_etag, uint16_t x, uint16_t y,
                                          uint16_t w, uint16_t h, uint32_t total, uint8_t *err)
@@ -176,6 +187,13 @@ void opendisplay_display_abort(void)                { ++g_aborts; g_dw_written =
 bool opendisplay_display_boot_apply(void)           { return false; }
 void opendisplay_display_park_pins(void)            { }
 void opendisplay_display_power_off(void)            { }
+
+bool od_xfer_active(void) { return g_shared_xfer_active; }
+void od_xfer_reset(void)
+{
+    ++g_shared_xfer_resets;
+    g_shared_xfer_active = false;
+}
 
 /* ------------------------------------------------------------------------------ fake kernel --- */
 
@@ -212,6 +230,9 @@ static void reset_all(uint32_t total)
     g_full_start_rc = 0;
     g_partial_arm_rc = 0;
     g_partial_prepare_rc = 0;
+    g_shared_xfer_active = false;
+    g_shared_xfer_resets = 0u;
+    g_pipe_started_before_shared_reset = false;
     fake_zephyr_reset();
     opendisplay_pipe_write_reset();
 }
@@ -297,6 +318,18 @@ static void test_start_ok(void)
     CHECK(g_sent_n == 1u);
     CHECK(last_is(RESP_ACK, 0x80u));
     CHECK(!g_sent[0].plain);
+    CHECK(opendisplay_pipe_write_active());
+}
+
+static void test_start_displaces_shared_transfer(void)
+{
+    CASE("PIPE START resets a live shared transfer before target PIPE activates");
+    reset_all(1000u);
+    g_shared_xfer_active = true;
+    CHECK(start_ok(1000u, 4u, 2u) == OD_CMD_OK);
+    CHECK(g_shared_xfer_resets == 1u);
+    CHECK(!g_shared_xfer_active);
+    CHECK(!g_pipe_started_before_shared_reset);
     CHECK(opendisplay_pipe_write_active());
 }
 
@@ -534,6 +567,7 @@ int main(void)
 {
     test_start_bad_header_nacks();
     test_start_ok();
+    test_start_displaces_shared_transfer();
     test_cadence_ack();
     test_data_outside_window_nacks();
     test_data_for_a_dead_transfer_is_silent_but_refused();

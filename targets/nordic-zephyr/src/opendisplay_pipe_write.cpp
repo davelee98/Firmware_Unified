@@ -1,6 +1,7 @@
 #include "od_cmd_app.h"
 #include "od_cmd_reply.h"
 #include "od_rxq.h"
+#include "od_xfer.h"
 #include "opendisplay_pipe_write.h"
 #include "opendisplay_display.h"
 #include "opendisplay_protocol.h"
@@ -268,6 +269,11 @@ extern "C" od_cmd_result_t opendisplay_pipe_write_start(const od_cmd_ctx_t *ctx,
   uint16_t frame_eff;
   uint8_t resp[8];
 
+  /* Both transfer families share one inflater. Displace shared legacy ownership before PIPE
+   * clears or drives the pump. */
+  if (od_xfer_active()) {
+    od_xfer_reset();
+  }
   if (opendisplay_display_partial_active() || opendisplay_display_dw_active()) {
     opendisplay_display_abort();
   }

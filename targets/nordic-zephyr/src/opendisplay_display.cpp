@@ -1,11 +1,14 @@
 #include "opendisplay_display.h"
 
 #include "od_color.h"
+#include "od_cmd_reply.h"
 #include "od_log.h"
+#include "od_xfer_app.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_constants.h"
 #include "opendisplay_epd_map.h"
+#include "opendisplay_pipe_write.h"
 #include "opendisplay_protocol.h"
 #include "od_runtime_types.h"
 #include "opendisplay_touch.h"
@@ -68,6 +71,26 @@ struct PartialStreamContext {
 
 static PartialStreamContext s_partial;
 static bool s_partial_panel_up;
+
+enum XferAppMode {
+  XFER_APP_IDLE = 0,
+  XFER_APP_FULL,
+  XFER_APP_PARTIAL,
+};
+
+struct XferAppHardwareState {
+  XferAppMode mode;
+  od_color_geometry_t geometry;
+  uint16_t x;
+  uint16_t y;
+  uint16_t width;
+  uint16_t height;
+  uint32_t plane_size;
+  uint8_t current_plane;
+  bool panel_up;
+};
+
+static XferAppHardwareState s_xfer_app;
 
 static void dw_init_mark(const char *tag)
 {
@@ -512,7 +535,7 @@ static bool partial_trigger_refresh(int refresh_mode)
   return wait_for_refresh(60000u);
 }
 
-static bool partial_prepare_panel_ram(void)
+static bool partial_prepare_panel_ram_hardware(void)
 {
   const struct DisplayConfig *d = display_cfg();
   int panel;
@@ -547,6 +570,14 @@ static bool partial_prepare_panel_ram(void)
   }
   bbepFill(&s_epd, BBEP_WHITE, PLANE_1);
   bbepFill(&s_epd, BBEP_WHITE, PLANE_0);
+  return true;
+}
+
+static bool partial_prepare_panel_ram(void)
+{
+  if (!partial_prepare_panel_ram_hardware()) {
+    return false;
+  }
   s_partial_panel_up = true;
   return true;
 }
@@ -939,6 +970,266 @@ extern "C" bool opendisplay_display_boot_apply(void)
     }
   }
   return false;
+}
+
+static void xfer_app_clear(void)
+{
+  if (s_xfer_app.panel_up) {
+    bbepSleep(&s_epd, DEEP_SLEEP);
+    display_power_set(false);
+  }
+  memset(&s_xfer_app, 0, sizeof(s_xfer_app));
+}
+
+static bool xfer_app_write_full(uint32_t stream_offset, od_span_t data)
+{
+  uint32_t consumed = 0u;
+
+  if (stream_offset > s_xfer_app.geometry.total_bytes
+      || data.n > s_xfer_app.geometry.total_bytes - stream_offset) {
+    return false;
+  }
+  if (s_xfer_app.geometry.layout != OD_COLOR_LAYOUT_CONTROLLER_PLANES) {
+    bbepWriteData(&s_epd, (uint8_t *)(uintptr_t)data.p, (int)data.n);
+    return true;
+  }
+
+  while (consumed < data.n) {
+    const uint32_t logical = stream_offset + consumed;
+    const uint8_t plane = logical < s_xfer_app.plane_size ? PLANE_0 : PLANE_1;
+    const uint32_t plane_end = plane == PLANE_0 ? s_xfer_app.plane_size
+                                                 : s_xfer_app.geometry.total_bytes;
+    uint32_t chunk;
+
+    if (s_xfer_app.current_plane != plane) {
+      if (logical != 0u && logical != s_xfer_app.plane_size) {
+        return false;
+      }
+      bbepStartWrite(&s_epd, plane);
+      s_xfer_app.current_plane = plane;
+    }
+    chunk = plane_end - logical;
+    if (chunk > data.n - consumed) {
+      chunk = (uint32_t)data.n - consumed;
+    }
+    bbepWriteData(&s_epd, (uint8_t *)(uintptr_t)(data.p + consumed), (int)chunk);
+    consumed += chunk;
+  }
+  return true;
+}
+
+static bool xfer_app_write_partial(uint32_t stream_offset, od_span_t data)
+{
+  const uint32_t total = s_xfer_app.plane_size * 2u;
+  uint32_t consumed = 0u;
+
+  if (stream_offset > total || data.n > total - stream_offset) {
+    return false;
+  }
+  while (consumed < data.n) {
+    const uint32_t logical = stream_offset + consumed;
+    const uint8_t plane = logical < s_xfer_app.plane_size ? PLANE_1 : PLANE_0;
+    const uint32_t plane_end = plane == PLANE_1 ? s_xfer_app.plane_size : total;
+    uint32_t chunk;
+
+    if (s_xfer_app.current_plane != plane) {
+      if (logical != 0u && logical != s_xfer_app.plane_size) {
+        return false;
+      }
+      partial_set_addr_window(&s_epd, s_xfer_app.x, s_xfer_app.y,
+                              s_xfer_app.width, s_xfer_app.height);
+      bbepStartWrite(&s_epd, plane);
+      s_xfer_app.current_plane = plane;
+    }
+    chunk = plane_end - logical;
+    if (chunk > data.n - consumed) {
+      chunk = (uint32_t)data.n - consumed;
+    }
+    bbepWriteData(&s_epd, (uint8_t *)(uintptr_t)(data.p + consumed), (int)chunk);
+    consumed += chunk;
+  }
+  return true;
+}
+
+extern "C" void od_xfer_app_prepare_start(void)
+{
+  if (s_xfer_app.mode != XFER_APP_IDLE) {
+    xfer_app_clear();
+  }
+  if (s_active || s_partial.active) {
+    opendisplay_display_abort();
+  }
+  opendisplay_pipe_write_reset();
+}
+
+extern "C" bool od_xfer_app_panel_info(od_xfer_panel_info_t *out)
+{
+  const struct DisplayConfig *d = display_cfg();
+
+  if (out == nullptr || d == nullptr) {
+    return false;
+  }
+  memset(out, 0, sizeof(*out));
+  if (od_color_direct_geometry(d->color_scheme, d->pixel_width, d->pixel_height,
+                               &out->geometry) != OD_COLOR_OK) {
+    return false;
+  }
+  out->width = d->pixel_width;
+  out->height = d->pixel_height;
+  out->partial_enabled = d->partial_update_support != 0u;
+  return true;
+}
+
+extern "C" bool od_xfer_app_begin_full(const od_color_geometry_t *geometry)
+{
+  const struct DisplayConfig *d = display_cfg();
+  int panel;
+
+  if (d == nullptr || geometry == nullptr || geometry->total_bytes == 0u
+      || geometry->layout == OD_COLOR_LAYOUT_SPLIT_HALVES) {
+    return false;
+  }
+  panel = opendisplay_map_epd(d->panel_ic_type);
+  if (panel == EP_PANEL_UNDEFINED) {
+    return false;
+  }
+
+  od_log_info("dw init begin");
+  if (!display_power_set(true)) {
+    return false;
+  }
+  memset(&s_epd, 0, sizeof(s_epd));
+  if (bbepSetPanelType(&s_epd, panel) != BBEP_SUCCESS) {
+    display_power_set(false);
+    return false;
+  }
+  if ((s_epd.iFlags & BBEP_SPLIT_BUFFER) != 0u) {
+    od_log_error("split-panel transport is not hardware-qualified on this target");
+    display_power_set(false);
+    return false;
+  }
+  bbepSetRotation(&s_epd, (int)d->rotation * 90);
+  bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
+  od_bbep_wake(&s_epd);
+  od_watchdog_app_phase(OD_WDT_PHASE_INIT_SEQ);
+  od_bbep_send_panel_init_full(&s_epd);
+  bbepSetAddrWindow(&s_epd, 0, 0, d->pixel_width, d->pixel_height);
+
+  memset(&s_xfer_app, 0, sizeof(s_xfer_app));
+  s_xfer_app.mode = XFER_APP_FULL;
+  s_xfer_app.geometry = *geometry;
+  s_xfer_app.width = d->pixel_width;
+  s_xfer_app.height = d->pixel_height;
+  s_xfer_app.plane_size = geometry->layout == OD_COLOR_LAYOUT_CONTROLLER_PLANES
+      ? geometry->part_bytes[0] : 0u;
+  s_xfer_app.current_plane = geometry->initial_plane == OD_COLOR_PLANE_0 ? PLANE_0 : PLANE_1;
+  s_xfer_app.panel_up = true;
+  bbepStartWrite(&s_epd, s_xfer_app.current_plane);
+  return true;
+}
+
+extern "C" bool od_xfer_app_begin_partial(uint16_t x, uint16_t y, uint16_t width,
+                                            uint16_t height, uint32_t plane_bytes)
+{
+  if (plane_bytes == 0u || plane_bytes > UINT32_MAX / 2u) {
+    return false;
+  }
+  if (!partial_prepare_panel_ram_hardware()) {
+    return false;
+  }
+  memset(&s_xfer_app, 0, sizeof(s_xfer_app));
+  s_xfer_app.mode = XFER_APP_PARTIAL;
+  s_xfer_app.x = x;
+  s_xfer_app.y = y;
+  s_xfer_app.width = width;
+  s_xfer_app.height = height;
+  s_xfer_app.plane_size = plane_bytes;
+  s_xfer_app.current_plane = 0xFFu;
+  s_xfer_app.panel_up = true;
+  return true;
+}
+
+extern "C" uint32_t od_xfer_app_write(uint32_t stream_offset, od_span_t data)
+{
+  bool accepted;
+
+  if (!od_span_valid(data) || data.n == 0u || data.n > UINT32_MAX) {
+    return 0u;
+  }
+  od_watchdog_app_phase(OD_WDT_PHASE_STREAM);
+  accepted = s_xfer_app.mode == XFER_APP_FULL
+      ? xfer_app_write_full(stream_offset, data)
+      : s_xfer_app.mode == XFER_APP_PARTIAL
+          && xfer_app_write_partial(stream_offset, data);
+  return accepted ? (uint32_t)data.n : 0u;
+}
+
+extern "C" od_mut_span_t od_xfer_app_inflate_scratch(void)
+{
+  return od_mut_span_make(s_decompression_chunk, OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE);
+}
+
+extern "C" void od_xfer_app_abort(od_xfer_abort_reason_t reason)
+{
+  (void)reason;
+  xfer_app_clear();
+}
+
+extern "C" od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *owner)
+{
+  (void)owner;
+  od_cmd_flush_before_refresh();
+  od_msleep(20);
+  return OD_XFER_BARRIER_PROCEED;
+}
+
+extern "C" void od_xfer_app_barrier_abort(const od_reply_t *owner)
+{
+  (void)owner;
+  xfer_app_clear();
+}
+
+extern "C" bool od_xfer_app_refresh(uint8_t mode, bool *completed)
+{
+  bool ok;
+
+  if (completed == nullptr || s_xfer_app.mode == XFER_APP_IDLE || !s_xfer_app.panel_up) {
+    return false;
+  }
+  if (s_xfer_app.mode == XFER_APP_PARTIAL) {
+    int refresh_mode = REFRESH_PARTIAL;
+    if (mode == REFRESH_FULL || mode == REFRESH_FAST) {
+      refresh_mode = mode;
+    }
+    od_msleep(20);
+    ok = partial_trigger_refresh(refresh_mode);
+  } else {
+    const int refresh_mode = mode == REFRESH_FAST ? REFRESH_FAST : REFRESH_FULL;
+    (void)bbepRefresh(&s_epd, refresh_mode);
+    ok = wait_for_refresh(60000u);
+  }
+  bbepSleep(&s_epd, DEEP_SLEEP);
+  display_power_set(false);
+  s_xfer_app.panel_up = false;
+  memset(&s_xfer_app, 0, sizeof(s_xfer_app));
+  opendisplay_touch_resume_after_refresh();
+  *completed = ok;
+  return true;
+}
+
+extern "C" uint32_t od_xfer_app_displayed_etag(void)
+{
+  return s_displayed_etag;
+}
+
+extern "C" void od_xfer_app_set_displayed_etag(uint32_t etag)
+{
+  s_displayed_etag = etag;
+}
+
+extern "C" uint32_t od_xfer_app_now_ms(void)
+{
+  return od_uptime_get_32();
 }
 
 extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, uint16_t payload_len)

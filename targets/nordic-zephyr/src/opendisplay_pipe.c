@@ -10,6 +10,7 @@
 
 #include "od_cmd_config.h"
 #include "od_cmd_nfc.h"
+#include "od_config_read.h"
 #include "od_core.h"
 #include "od_dispatch.h"
 #include "od_log.h"
@@ -17,6 +18,7 @@
 #include "od_session.h"
 #include "od_session_app.h"
 #include "od_span.h"
+#include "od_xfer.h"
 #include "opendisplay_display.h"
 #include "opendisplay_pipe_write.h"
 #include "opendisplay_protocol.h"
@@ -113,21 +115,16 @@ void opendisplay_pipe_process(void)
   uint8_t drained;
 
   if (atomic_cas(&s_close_pending, 1, 0)) {
-    /* THE SHARED HALF IS ONE CALL. od_core_reset() cancels the config-read producer, drops
-     * queued egress and clears the session -- a list that was hand-written here and would lose an
-     * entry the next time a shared object was added. Its own reasons are in od_core.h; the one
-     * worth restating is the producer: it holds the config scratch, and od_dispatch DEFERS every
-     * config-mutating opcode while a read is active, so a client that vanishes mid-read would
-     * otherwise defer every later config write for the life of the boot.
-     *
-     * The target half stays here, because these are not shared objects. Each command module owns
-     * its multi-frame state and exports the one call that drops it; reaching into their statics
-     * from this file is what made it a second command subsystem in the first place. */
+    /* Drop the shared transfer before egress/session teardown so its target abort still has the
+     * departed owner's hardware context. Target PIPE remains separate until Phase 3. */
+    od_xfer_reset();
     od_core_reset();
     od_cmd_config_reset();
     od_cmd_nfc_reset();
+    if (opendisplay_pipe_write_active()) {
+      opendisplay_display_abort();
+    }
     opendisplay_pipe_write_reset();
-    opendisplay_display_abort();
   }
 
   /* BOUNDED, and the bound is not defensive tidiness. A central issuing write-without-response can

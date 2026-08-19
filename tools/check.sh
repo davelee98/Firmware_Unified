@@ -313,6 +313,143 @@ esp32_xfer_10b_inventory() {
 }
 check "esp32: Phase 2 step 10b inventory" esp32_xfer_10b_inventory
 
+nordic_xfer_cutover() {
+    local rc=0 teardown reset_line core_line
+    local bridge=targets/nordic-zephyr/src/od_cmd_direct.c
+
+    for call in \
+        'od_xfer_direct_start(ctx, body)' \
+        'od_xfer_data(ctx, body)' \
+        'od_xfer_end(ctx, body)' \
+        'od_xfer_partial_start(ctx, body)'; do
+        if ! grep -Fq "return $call;" "$bridge"; then
+            echo "Nordic transfer bridge missing: return $call;"
+            rc=1
+        fi
+    done
+    if grep -Eq '\b(od_cmd_reply|opendisplay_display_(direct|partial))' "$bridge"; then
+        echo "Nordic legacy direct/partial policy returned to od_cmd_direct.c"
+        rc=1
+    fi
+    if ! grep -q '\${OD_SHARED_SOURCES_APP_XFER}' \
+            targets/nordic-zephyr/zephyr/CMakeLists.txt \
+       || grep -q 'od_xfer_compile' targets/nordic-zephyr/zephyr/CMakeLists.txt; then
+        echo "Nordic production image must link APP_XFER directly, without a compile-only target"
+        rc=1
+    fi
+
+    teardown=$(sed -n '/if (atomic_cas(&s_close_pending/,/\/\* BOUNDED/p' \
+               targets/nordic-zephyr/src/opendisplay_pipe.c)
+    reset_line=$(grep -n '\bod_xfer_reset[[:space:]]*(' <<<"$teardown" | head -n 1 | cut -d: -f1)
+    core_line=$(grep -n '\bod_core_reset[[:space:]]*(' <<<"$teardown" | head -n 1 | cut -d: -f1)
+    if [ -z "$reset_line" ] || [ -z "$core_line" ] || [ "$reset_line" -ge "$core_line" ]; then
+        echo "Nordic disconnect must reset od_xfer before od_core_reset"
+        rc=1
+    fi
+    return $rc
+}
+check "nordic: shared legacy transfer cutover" nordic_xfer_cutover
+
+# TRANSITIONAL THROUGH NORDIC PHASE 3 STEP 6. Retire this with the target PIPE machine and replace
+# it with the permanent production invariant that only shared/core/od_xfer.c resets or pushes the
+# zlib pump.
+nordic_xfer_interim_pipe_arbitration() {
+    local rc=0 pipe_start legacy_start
+
+    pipe_start=$(sed -n '/^extern "C" od_cmd_result_t opendisplay_pipe_write_start(/,/^}/p' \
+                 targets/nordic-zephyr/src/opendisplay_pipe_write.cpp)
+    if ! grep -q '\bod_xfer_active[[:space:]]*(' <<<"$pipe_start" ||
+       ! grep -q '\bod_xfer_reset[[:space:]]*(' <<<"$pipe_start"; then
+        echo "Nordic PIPE START must displace a live shared legacy transfer before pump use"
+        rc=1
+    fi
+
+    legacy_start=$(sed -n '/^extern "C" void od_xfer_app_prepare_start(/,/^}/p' \
+                   targets/nordic-zephyr/src/opendisplay_display.cpp)
+    if ! grep -q '\bopendisplay_pipe_write_reset[[:space:]]*(' <<<"$legacy_start"; then
+        echo "Nordic legacy START must displace target PIPE through od_xfer_app_prepare_start"
+        rc=1
+    fi
+    return $rc
+}
+check "nordic: interim PIPE/od_xfer arbitration" nordic_xfer_interim_pipe_arbitration
+
+# Phase 2 step 10b's Nordic executable boundary. Phase 3 step 6 removes this check with the delete
+# inventory, preserves the adapter primitives, and installs the single-pump-owner ratchet above.
+nordic_xfer_10b_inventory() {
+    local rc=0 symbol pump_hits pump_count
+    local files=(
+        targets/nordic-zephyr/src/opendisplay_display.cpp
+        targets/nordic-zephyr/src/opendisplay_display.h
+        targets/nordic-zephyr/src/opendisplay_pipe_write.cpp
+        targets/nordic-zephyr/src/opendisplay_pipe_write.h
+    )
+    local delete_symbols=(
+        PipeWriteState PipeReorderSlot s_pipe s_reorder pipe_slot pipe_chunk_received
+        pipe_build_ack_payload pipe_abort_no_reply send_pipe_ack sack_or_abort send_pipe_nack
+        send_pipe_start_nack pipe_update_highest_seen pipe_consume_payload finish_and_refresh
+        opendisplay_pipe_write_start opendisplay_pipe_write_data opendisplay_pipe_write_end
+        opendisplay_pipe_write_reset opendisplay_pipe_write_active od_cmd_app_pipe_start
+        od_cmd_app_pipe_data od_cmd_app_pipe_end s_active s_total_bytes s_written_bytes
+        s_dw_chunk_n s_dw_log_pct s_dw_trailing_ignores s_dw_init_t0 s_color_scheme s_plane_size
+        s_plane2_started s_dw_compressed s_dw_decompressed_total PartialStreamContext s_partial
+        s_partial_panel_up parse_be_u32 mono_plane_bytes partial_write_stream_bytes
+        partial_zlib_sink zlib_stream_to_partial_write partial_consume_bytes
+        partial_prepare_panel_ram partial_write_to_panel opendisplay_display_partial_active
+        opendisplay_display_dw_active opendisplay_display_bytes_written
+        opendisplay_display_total_bytes opendisplay_display_expected_dw_bytes
+        opendisplay_display_displayed_etag opendisplay_display_clear_etag
+        opendisplay_display_set_partial_new_etag opendisplay_display_partial_bytes_written
+        opendisplay_display_partial_expected opendisplay_display_partial_compressed
+        opendisplay_display_calc_plane_bytes opendisplay_display_partial_write_start
+        dw_init_mark dw_log_progress dw_stream_raw_bytes direct_zlib_sink
+        zlib_stream_to_direct_write opendisplay_display_direct_write_start
+        opendisplay_display_direct_write_data opendisplay_display_direct_write_end_prepare
+        opendisplay_display_direct_write_end_refresh opendisplay_display_pipe_full_start
+        opendisplay_display_pipe_partial_arm opendisplay_display_pipe_partial_prepare
+    )
+    local retain_symbols=(
+        XferAppMode XferAppHardwareState s_xfer_app xfer_app_clear xfer_app_write_full
+        xfer_app_write_partial od_xfer_app_prepare_start od_xfer_app_panel_info
+        od_xfer_app_begin_full od_xfer_app_begin_partial od_xfer_app_write
+        od_xfer_app_inflate_scratch od_xfer_app_abort od_xfer_app_before_refresh
+        od_xfer_app_barrier_abort od_xfer_app_refresh od_xfer_app_displayed_etag
+        od_xfer_app_set_displayed_etag od_xfer_app_now_ms s_epd s_decompression_chunk
+        s_displayed_etag display_cfg display_power_set wait_for_refresh
+        panel_skips_bbep_set_addr_window panel_uses_pixel_ram_x
+        panel_uses_ep397_y_decrement panel_uses_ep426_x_decrement
+        panel_skips_reinit_on_partial_refresh partial_set_ep397_ram_y partial_set_ep426_ram_y
+        partial_set_pixel_ram_x partial_set_addr_window partial_trigger_refresh
+        partial_prepare_panel_ram_hardware partial_cleanup opendisplay_display_abort
+    )
+
+    for symbol in "${delete_symbols[@]}"; do
+        if ! grep -wq "$symbol" "${files[@]}"; then
+            echo "Nordic 10b delete inventory drifted before Phase 3: $symbol"
+            rc=1
+        fi
+    done
+    for symbol in "${retain_symbols[@]}"; do
+        if ! grep -wq "$symbol" targets/nordic-zephyr/src/opendisplay_display.cpp; then
+            echo "Nordic adapter primitive missing from the 10b retain inventory: $symbol"
+            rc=1
+        fi
+    done
+
+    pump_hits=$(grep -RInE '\bod_zlib_pump_(reset|push)[[:space:]]*\(' \
+        targets/nordic-zephyr/src --include='*.c' --include='*.cpp' --include='*.h' \
+        2>/dev/null || true)
+    pump_count=$(grep -c . <<<"$pump_hits")
+    if [ "$pump_count" -ne 5 ] ||
+       grep -v '^targets/nordic-zephyr/src/opendisplay_display\.cpp:' <<<"$pump_hits" | grep -q .; then
+        echo "$pump_hits"
+        echo "Nordic interim pump ownership drifted: expected five target-PIPE calls in opendisplay_display.cpp"
+        rc=1
+    fi
+    return $rc
+}
+check "nordic: Phase 2 step 10b inventory" nordic_xfer_10b_inventory
+
 od_color_structure() {
     local rc=0 hits count
     for path in \

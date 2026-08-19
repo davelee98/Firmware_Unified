@@ -58,10 +58,33 @@ These rows are new evidence requirements; the older transfer results below do no
 - [ ] Plaintext LAN and TLS-LAN direct, including a 4,092-byte DATA chunk; LAN disconnect affects
       only a LAN-owned transfer
 
-Nordic step 10a remains blocked until these ESP32 rows have recorded results.
+The Nordic software candidate was implemented by project direction before these ESP32 rows were
+recorded. That sequencing exception is not hardware evidence and does not qualify either target.
 The bidirectional-replacement row above qualifies ESP32 only. Nordic's 10a change must add and run
 its own row for the same two directions; ESP32 evidence cannot qualify Nordic's separate interim
 adapter/PIPE arbitration.
+
+---
+
+## Transfer Phase 2 — Nordic steps 10a/10b
+
+The Nordic software candidate replaces `0x70`, `0x71`, `0x72` and `0x76` with shared `od_xfer`.
+All rows are new evidence requirements; builds and the older transfer results below do not qualify
+them.
+
+- [ ] nRF54 class: plaintext and encrypted raw/compressed direct through refresh
+- [ ] `xiao_nrf52840`: plaintext and encrypted raw/compressed direct through refresh
+- [ ] Partial: etag match/mismatch, valid/invalid rectangles, both plane boundaries and failure
+      clearing the etag
+- [ ] Nordic replacement in both directions: PIPE START aborts live `od_xfer`; legacy START aborts
+      live target PIPE; the displaced owner's DATA/END is inert; a fresh transfer then succeeds
+- [ ] Disconnect/reconnect during direct and partial, followed by a successful authenticated push
+- [ ] END ACK observed before refresh begins; refresh success and timeout paths observed
+- [ ] Shared-policy normalizations: an etag-less successful full refresh clears the prior etag;
+      controller-plane incomplete END refuses; packed-row incomplete END proceeds to refresh
+
+These rows must be recorded before the next target cutover. The bidirectional-replacement row is
+Nordic-specific and cannot inherit the ESP32 result.
 
 ---
 
