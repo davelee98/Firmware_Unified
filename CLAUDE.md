@@ -57,16 +57,15 @@ looks arbitrary and is not); delete the story.
   --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF.
   `tools/sdkconfig_baseline.sh` is a gate a change must not break.
 - **`shared/` is no longer empty** —
-  `core/od_{adv_control,advert,cmd,color,config,config_asm,config_read,config_tlv,core,dispatch,gate,reply,rxq,session,txq,watchdog,zlib_inflate}.c`
+  `core/od_{adv_control,advert,cmd,color,config,config_asm,config_read,config_tlv,core,dispatch,gate,reply,rxq,session,txq,watchdog,zlib_inflate,zlib_pump}.c`
   listed in `shared/sources.cmake` (never globbed) in per-HAL tiers, plus the two all-inline
-  headers `od_span.h` and `od_nonce_window.h` and the two pure seam headers `od_cmd_app.h` and
-  `od_session_app.h`, which correctly have no entry there. Consumers:
+  headers `od_span.h` and `od_nonce_window.h` and pure seam headers including `od_cmd_app.h`,
+  `od_session_app.h` and `od_inflate_app.h`, which correctly have no entry there. Consumers:
   host tests and `esp32-idf` take the aggregate; `nordic-zephyr` takes PURE + HAL_CRYPTO +
-  HAL_RADIO + HAL_WDT + APP_SESSION + APP_RXQ; `efr32bg22-slc` takes PURE + HAL_CRYPTO +
-  HAL_RADIO + APP_SESSION and deliberately declines APP_RXQ, HAL_ADV and HAL_WDT.
-  Two tiers are named for a **seam** rather than a HAL, because what they need is a target
-  function rather than a driver: APP_SESSION (`od_session_app.h`) and APP_RXQ
-  (`od_rxq_app_report`).
+  HAL_RADIO + HAL_WDT + APP_SESSION + APP_RXQ + APP_INFLATE; `efr32bg22-slc` takes PURE +
+  HAL_CRYPTO + HAL_RADIO + APP_SESSION + APP_INFLATE and deliberately declines APP_RXQ, HAL_ADV
+  and HAL_WDT. APP tiers are named for a **seam** rather than a HAL because they need a target
+  function rather than a driver.
 - **THE WHOLE COMMAND PATH IS SHARED ON BOTH TARGETS.** (C8 2026-08-15, C10 2026-08-15,
   C11 2026-08-16). **NOW HARDWARE-VERIFIED on `esp32-idf`** (`s3-n16r8-extuart-debug`,
   2026-08-17): PIPE upload, `CMD_PARTIAL_WRITE` (0x76), config read, and config write
@@ -211,10 +210,19 @@ looks arbitrary and is not); delete the story.
   only portable implementation. The former target-local/vendor copies, checksum helpers,
   heap-window mode, obsolete headers, and placeholder compression directory are gone. The
   source is in the PURE tier; every target receives it through `shared/sources.cmake`, while ESP32
-  Wi-Fi builds retain their existing tinfl symbol remap. `tools/check.sh --targets` passed 16/0/0,
+  Wi-Fi builds select tinfl through `od_inflate_app`. `tools/check.sh --targets` passed 16/0/0,
   including all 11 ESP32 configurations, all three Nordic boards, and BG22. No C14 compressed-upload
   hardware case has run; the four-device matrix remains in
   `plans/PLAN_UZLIB_TO_SHARED_CORE_2026-08-17.md` §5.
+- **Transfer Phase 1 software candidate (2026-08-18):** `od_zlib_pump` is the single
+  push/poll/finalization loop on all targets, with exact output accounting and a target-selected
+  backend behind `od_inflate_app.h`. Callers retain the only decompression scratch buffer (2,048 B
+  on the measured ESP32 tinfl profile, 256 B on Nordic/BG22), and link maps show one inflater
+  history object per image. The host pump suite covers split input/output, back-references,
+  truncation, checksum and size failures, reset, sink refusal and backend-count mismatch.
+  `tools/check.sh --targets` passed 17/0/0 in review; BG22 remains at 32,284 B static RAM with
+  480 B headroom. **No compressed transfer through this pump has run on hardware**, so direct,
+  partial, PIPE and NFC promotion remains gated.
 - `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel,crypto}`;
   `od_hal_crypto_random.c` is its own translation unit so a host test can compile the RNG arm
   without mbedTLS.
@@ -260,8 +268,8 @@ looks arbitrary and is not); delete the story.
   No fake ever sees an expected reply: the generated table is included by the runner and nothing
   else, and profiles get semantic knobs instead. That is what stops the corpus becoming its own
   oracle.
-- Live plan: plans/PLAN_MIGRATION_ENDGAME_2026-08-17.md (docs/NEXT_STEPS_2026-08-05.md is
-  superseded — six of its eight steps are done; docs/NEXT_STEPS.md is historical). Dispatch
+- Live plan: plans/PLAN_TRANSFER_PROMOTION_2026-08-17.md (the transfer sequence in
+  PLAN_MIGRATION_ENDGAME_2026-08-17.md is superseded; docs/NEXT_STEPS.md is historical). Dispatch
   C8–C12 landed. C13's Silabs implementation candidate is on `codex/silabs-c13`; hardware Gate 2
   remains. **docs/HARDWARE_VERIFICATION_CHECKLIST.md is the itemized per-target hardware
   checklist** — update it alongside this section whenever a hardware test runs.

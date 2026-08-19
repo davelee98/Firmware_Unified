@@ -20,7 +20,7 @@
 #include <string.h>
 
 extern "C" {
-#include "od_zlib_inflate.h"
+#include "od_zlib_pump.h"
 }
 
 void bbepSendCMDSequence(BBEPDISP *pBBEP, const uint8_t *pSeq);
@@ -456,32 +456,23 @@ static bool partial_write_stream_bytes(uint8_t *data, uint32_t len)
   return true;
 }
 
+static bool partial_zlib_sink(void *, od_mut_span_t bytes)
+{
+  return partial_write_stream_bytes(bytes.p, (uint32_t)bytes.n);
+}
+
 static bool zlib_stream_to_partial_write(const uint8_t *data, uint32_t len, bool final)
 {
-  od_zlib_status_t status = od_zlib_stream_push(data, len, final);
-  if (status == OD_ZLIB_STATUS_ERROR) {
-    od_log_info("partial zlib push error: %s", od_zlib_stream_error());
+  od_mut_span_t scratch = od_mut_span_make(s_decompression_chunk,
+                                           OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE);
+  od_zlib_pump_status_t status = od_zlib_pump_push(
+    od_span_make(data, len), final, scratch, partial_zlib_sink, nullptr);
+  if (status == OD_ZLIB_PUMP_ERROR) {
+    od_log_info("partial zlib error: %s", od_zlib_pump_error());
     return false;
   }
-
-  for (;;) {
-    size_t bytes_out = 0;
-    status = od_zlib_stream_poll(s_decompression_chunk, OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE, &bytes_out);
-    if (bytes_out > 0u && !partial_write_stream_bytes(s_decompression_chunk, (uint32_t)bytes_out)) {
-      return false;
-    }
-    if (status == OD_ZLIB_STATUS_OUTPUT_READY) {
-      continue;
-    }
-    if (status == OD_ZLIB_STATUS_NEEDS_INPUT) {
-      return !final;
-    }
-    if (status == OD_ZLIB_STATUS_DONE) {
-      return s_partial.bytes_written == s_partial.expected_stream_size;
-    }
-    od_log_info("partial zlib poll error: %s", od_zlib_stream_error());
-    return false;
-  }
+  return !final || (status == OD_ZLIB_PUMP_DONE
+                    && s_partial.bytes_written == s_partial.expected_stream_size);
 }
 
 static bool partial_consume_bytes(uint8_t *data, uint32_t len)
@@ -748,7 +739,7 @@ extern "C" int opendisplay_display_partial_write_start(const uint8_t *payload, u
   }
 
   if (s_partial.compressed) {
-    od_zlib_stream_reset(expected_size);
+    od_zlib_pump_reset(expected_size);
   }
 
   if (payload_len > 17u) {
@@ -844,41 +835,28 @@ static int dw_stream_raw_bytes(const uint8_t *payload, uint32_t payload_len)
   return 0;
 }
 
+static bool direct_zlib_sink(void *, od_mut_span_t bytes)
+{
+  uint32_t before = s_written_bytes;
+  if (dw_stream_raw_bytes(bytes.p, (uint32_t)bytes.n) != 0) {
+    return false;
+  }
+  return s_written_bytes - before == (uint32_t)bytes.n
+         && s_written_bytes <= s_dw_decompressed_total;
+}
+
 static bool zlib_stream_to_direct_write(const uint8_t *data, uint32_t len, bool final)
 {
-  od_zlib_status_t status = od_zlib_stream_push(data, len, final);
-  if (status == OD_ZLIB_STATUS_ERROR) {
-    od_log_info("zlib push error: %s", od_zlib_stream_error());
+  od_mut_span_t scratch = od_mut_span_make(s_decompression_chunk,
+                                           OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE);
+  od_zlib_pump_status_t status = od_zlib_pump_push(
+    od_span_make(data, len), final, scratch, direct_zlib_sink, nullptr);
+  if (status == OD_ZLIB_PUMP_ERROR) {
+    od_log_info("zlib error: %s", od_zlib_pump_error());
     return false;
   }
-
-  for (;;) {
-    size_t bytes_out = 0;
-    status = od_zlib_stream_poll(s_decompression_chunk, OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE, &bytes_out);
-    if (bytes_out > 0u) {
-      uint32_t before = s_written_bytes;
-      if (dw_stream_raw_bytes(s_decompression_chunk, (uint32_t)bytes_out) != 0) {
-        return false;
-      }
-      if (s_written_bytes - before != (uint32_t)bytes_out) {
-        return false;
-      }
-      if (s_written_bytes > s_dw_decompressed_total) {
-        return false;
-      }
-    }
-    if (status == OD_ZLIB_STATUS_OUTPUT_READY) {
-      continue;
-    }
-    if (status == OD_ZLIB_STATUS_NEEDS_INPUT) {
-      return !final;
-    }
-    if (status == OD_ZLIB_STATUS_DONE) {
-      return s_written_bytes == s_dw_decompressed_total;
-    }
-    od_log_info("zlib poll error: %s", od_zlib_stream_error());
-    return false;
-  }
+  return !final || (status == OD_ZLIB_PUMP_DONE
+                    && s_written_bytes == s_dw_decompressed_total);
 }
 
 extern "C" bool opendisplay_display_boot_apply(void)
@@ -1059,7 +1037,7 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
       opendisplay_display_abort();
       return -5;
     }
-    od_zlib_stream_reset(s_dw_decompressed_total);
+    od_zlib_pump_reset(s_dw_decompressed_total);
     if (payload_len > 4u) {
       if (!zlib_stream_to_direct_write(payload + 4, (uint32_t)payload_len - 4u, false)) {
         opendisplay_display_abort();
@@ -1357,7 +1335,7 @@ extern "C" int opendisplay_display_pipe_partial_prepare(void)
     return -1;
   }
   if (s_partial.compressed) {
-    od_zlib_stream_reset(s_partial.expected_stream_size);
+    od_zlib_pump_reset(s_partial.expected_stream_size);
   }
   return 0;
 }

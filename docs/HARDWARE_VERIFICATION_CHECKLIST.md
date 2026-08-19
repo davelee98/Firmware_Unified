@@ -22,6 +22,24 @@ right SHA to reach for; it just isn't a gate this checklist enforces.
 
 ---
 
+## Transfer Phase 1 — shared `od_zlib_pump`
+
+These rows apply to the Phase 1 candidate introduced after the dated transfer results below; an
+older compressed upload does not qualify the shared pump.
+
+- [ ] ESP32 tinfl profile: compressed direct, partial and PIPE through refresh
+- [ ] ESP32 portable-inflater profile: compressed direct, partial and PIPE through refresh
+- [ ] Nordic nRF54 class: compressed direct, partial and PIPE through refresh
+- [ ] Nordic `xiao_nrf52840`: compressed direct, partial and PIPE through refresh
+- [ ] EFR32BG22: compressed direct through refresh
+- [ ] Each exercised target: truncated/failed stream aborts, then a fresh compressed transfer
+      succeeds
+
+Phase 2 direct/partial promotion remains blocked until every available target-family row has a
+recorded result and unavailable hardware is explicitly recorded in the active transfer plan.
+
+---
+
 ## ESP32-S3 (`s3-n16r8-extuart-debug`, FastEPD)
 
 - [x] Two fresh authentications — 2026-08-17

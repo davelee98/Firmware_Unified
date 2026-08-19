@@ -231,6 +231,56 @@ od_color_structure() {
 }
 check "structure: od_color is the direct geometry authority"  od_color_structure
 
+inflate_pump_structure() {
+    local rc=0 hits count
+    local target_sources=(
+        targets/esp32-idf/src
+        targets/nordic-zephyr/src
+        targets/efr32bg22-slc/*.c
+        targets/efr32bg22-slc/*.cpp
+    )
+
+    # Targets reach an inflater only through their selected od_inflate_app adapter. Direct engine
+    # calls would restore a target-local push/poll loop and bypass the shared final/accounting
+    # policy.
+    hits=$(grep -rInE '\bod_zlib_stream_(reset|push|poll|error|output_count)[[:space:]]*\(' \
+           "${target_sources[@]}" 2>/dev/null \
+           | grep -vE '/od_inflate_app\.(c|cpp):' || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "portable inflater bypassed od_inflate_app; target transfer code must call od_zlib_pump"
+        rc=1
+    fi
+
+    hits=$(grep -rInE '\bod_inflate_tinfl_(reset|push|poll|error|output_count)[[:space:]]*\(' \
+           "${target_sources[@]}" 2>/dev/null \
+           | grep -vE '/od_inflate_(app|tinfl)\.(cpp|h):' || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "tinfl bypassed od_inflate_app; target transfer code must call od_zlib_pump"
+        rc=1
+    fi
+
+    hits=$(grep -rInE '\bod_inflate_app_(reset|push|poll|error|output_count)[[:space:]]*\(' \
+           "${target_sources[@]}" 2>/dev/null \
+           | grep -vE '/od_inflate_app\.(c|cpp):' || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "target transfer code bypassed od_zlib_pump through the backend seam"
+        rc=1
+    fi
+
+    count=$(grep -RFl 'core/od_zlib_pump.c' shared/sources.cmake targets/*/CMakeLists.txt \
+            targets/*/*/CMakeLists.txt targets/efr32bg22-slc/cmake_gcc/opendisplay-bg22.cmake \
+            2>/dev/null | wc -l)
+    if [ "$count" -ne 1 ] || ! grep -q 'core/od_zlib_pump.c' shared/sources.cmake; then
+        echo "od_zlib_pump.c must be registered exactly once, in shared/sources.cmake (found $count)"
+        rc=1
+    fi
+    return $rc
+}
+check "structure: od_zlib_pump owns inflater progression"  inflate_pump_structure
+
 silabs_c13_config() {
     grep -q '^#define PSA_WANT_ALG_CCM 1$' \
         targets/efr32bg22-slc/config/od_psa_config_autogen.h || {

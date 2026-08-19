@@ -255,6 +255,7 @@ add_library(slc OBJECT
     "../opendisplay_config_storage.c"
     "../opendisplay_config_parser.c"
     "../opendisplay_display.cpp"
+    "../od_inflate_app.c"
     "../opendisplay_epd_map.c"
     "../opendisplay_led.c"
     "${OD_REPO_ROOT}/third_party/qrcode/qrcode.c"
@@ -288,6 +289,7 @@ add_library(slc OBJECT
     ${OD_SHARED_SOURCES_HAL_CRYPTO}
     ${OD_SHARED_SOURCES_HAL_RADIO}
     ${OD_SHARED_SOURCES_APP_SESSION}
+    ${OD_SHARED_SOURCES_APP_INFLATE}
 )
 
 target_include_directories(slc PUBLIC

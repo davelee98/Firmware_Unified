@@ -27,34 +27,10 @@
 #include "link_owner.h"
 #include "session_guard.h"
 #include "touch_input.h"
-#include "od_zlib_inflate.h"
+#include "od_zlib_pump.h"
 #if defined(OPENDISPLAY_FASTEPD)
 #include "display_fastepd.h"
 #endif
-
-// On ESP32-WiFi BUILDS, route this file's streaming-inflate calls to the ROM `tinfl`
-// engine (src/od_inflate_tinfl.*) instead of the portable bit-serial inflater. The
-// portable engine is left completely untouched — it is simply not called here, so the
-// linker drops it. The od_zlib_stream_* call sites below are unchanged; the macros
-// rebind them at compile time. od_zlib_status_t / OD_ZLIB_STATUS_* stay shared
-// (from od_zlib_inflate.h).
-//
-// This remap is UNCONDITIONAL within such a build — it is not gated per transport, so
-// it rebinds EVERY compressed path in this file: direct-write (0x70/0x71), partial
-// region (0x76), and PIPE_WRITE (0x80-0x82). PIPE_WRITE is BLE-only, so BLE transfers
-// decode through tinfl here too. The WiFi keying of OPENDISPLAY_USE_TINFL selects
-// which builds opt in (the LAN wire is what makes software inflate the bottleneck and
-// justifies tinfl's ~11 KB of DRAM tables, and that flag is now set only on PSRAM
-// envs, so a part without the DRAM budget never opts in); it does NOT restrict the
-// engine to LAN traffic. See od_inflate_tinfl.h for the full rationale and RAM cost.
-#include "od_inflate_tinfl.h"
-#if OPENDISPLAY_USE_TINFL
-#define od_zlib_stream_reset  od_inflate_tinfl_reset
-#define od_zlib_stream_push   od_inflate_tinfl_push
-#define od_zlib_stream_poll   od_inflate_tinfl_poll
-#define od_zlib_stream_error  od_inflate_tinfl_error
-#endif
-
 
 #include "wifi_service.h"
 #include "od_bbep_stream.h"
@@ -1960,7 +1936,7 @@ static void directWriteActivatePanel(void) {
                                 ? PLANE_0 : PLANE_1);
     }
     if (directWriteCompressed) {
-        od_zlib_stream_reset(directWriteDecompressedTotal);
+        od_zlib_pump_reset(directWriteDecompressedTotal);
     }
 }
 
@@ -2121,7 +2097,7 @@ od_cmd_result_t handlePartialWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, 
     imageWriteLogStart(expectedLogicalSize);
 
     partial_prepare_panel_ram();
-    if (partialCtx.compressed) od_zlib_stream_reset(expectedLogicalSize);
+    if (partialCtx.compressed) od_zlib_pump_reset(expectedLogicalSize);
 
     // Process optional initial stream bytes before ACK
     if (len > 17) {
@@ -2747,7 +2723,7 @@ od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uin
         imageWriteLogReset();
         imageWriteLogStart(total_size);
         partial_prepare_panel_ram();
-        if (compressed) od_zlib_stream_reset(total_size);
+        if (compressed) od_zlib_pump_reset(total_size);
         return OD_CMD_OK;
     }
 
@@ -3139,71 +3115,55 @@ static bool partial_consume_bytes(uint8_t* data, uint32_t len) {
     return partial_write_stream_bytes(data, len);
 }
 
-static bool zlib_stream_to_direct_write(const uint8_t* data, uint32_t len, bool final) {
-    od_zlib_status_t status = od_zlib_stream_push(data, len, final);
-    if (status == OD_ZLIB_STATUS_ERROR) {
-        const char* zlibErr = od_zlib_stream_error();
-        od_log_error("zlib stream error: %s", zlibErr);
-        return false;
-    }
-
-    for (;;) {
-        size_t bytesOut = 0;
-        status = od_zlib_stream_poll(decompressionChunk, OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE, &bytesOut);
-        if (bytesOut > 0) {
+static bool direct_zlib_sink(void*, od_mut_span_t bytes) {
 #if defined(OPENDISPLAY_FASTEPD)
-            if (fastepd_driver_used()) {
-                fastepd_direct_write_chunk(decompressionChunk, (uint32_t)bytesOut);
-                directWriteBytesWritten += (uint32_t)bytesOut;
-            } else
+    if (fastepd_driver_used()) {
+        fastepd_direct_write_chunk(bytes.p, (uint32_t)bytes.n);
+        directWriteBytesWritten += (uint32_t)bytes.n;
+    } else
 #endif
-            if (directWriteBitplanes) {
-                uint32_t before = directWriteBytesWritten;
-                streamControllerPlaneBytes(decompressionChunk, (uint32_t)bytesOut);
-                if (directWriteBytesWritten - before != (uint32_t)bytesOut) {
-                    return false;
-                }
-            } else
-            {
-                directWriteSinkBytes(decompressionChunk, (uint32_t)bytesOut);
-            }
-            if (directWriteBytesWritten > directWriteDecompressedTotal) {
-                return false;
-            }
+    if (directWriteBitplanes) {
+        uint32_t before = directWriteBytesWritten;
+        streamControllerPlaneBytes(bytes.p, (uint32_t)bytes.n);
+        if (directWriteBytesWritten - before != (uint32_t)bytes.n) {
+            return false;
         }
-        if (status == OD_ZLIB_STATUS_OUTPUT_READY) continue;
-        if (status == OD_ZLIB_STATUS_NEEDS_INPUT) return !final;
-        if (status == OD_ZLIB_STATUS_DONE) {
-            if (directWriteBytesWritten != directWriteDecompressedTotal) {
-                return false;
-            }
-            return true;
-        }
-        const char* zlibErr = od_zlib_stream_error();
+    } else {
+        directWriteSinkBytes(bytes.p, (uint32_t)bytes.n);
+    }
+    return directWriteBytesWritten <= directWriteDecompressedTotal;
+}
+
+static bool zlib_stream_to_direct_write(const uint8_t* data, uint32_t len, bool final) {
+    od_mut_span_t scratch = od_mut_span_make(decompressionChunk,
+                                             OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE);
+    od_zlib_pump_status_t status = od_zlib_pump_push(
+        od_span_make(data, len), final, scratch, direct_zlib_sink, nullptr);
+    if (status == OD_ZLIB_PUMP_ERROR) {
+        const char* zlibErr = od_zlib_pump_error();
         od_log_error("zlib stream error: %s", zlibErr);
         return false;
     }
+    return !final || (status == OD_ZLIB_PUMP_DONE &&
+                      directWriteBytesWritten == directWriteDecompressedTotal);
+}
+
+static bool partial_zlib_sink(void*, od_mut_span_t bytes) {
+    return partial_write_stream_bytes(bytes.p, (uint32_t)bytes.n);
 }
 
 static bool zlib_stream_to_partial_write(const uint8_t* data, uint32_t len, bool final) {
-    od_zlib_status_t status = od_zlib_stream_push(data, len, final);
-    if (status == OD_ZLIB_STATUS_ERROR) {
-        const char* zlibErr = od_zlib_stream_error();
+    od_mut_span_t scratch = od_mut_span_make(decompressionChunk,
+                                             OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE);
+    od_zlib_pump_status_t status = od_zlib_pump_push(
+        od_span_make(data, len), final, scratch, partial_zlib_sink, nullptr);
+    if (status == OD_ZLIB_PUMP_ERROR) {
+        const char* zlibErr = od_zlib_pump_error();
         od_log_error("partial zlib stream error: %s", zlibErr);
         return false;
     }
-
-    for (;;) {
-        size_t bytesOut = 0;
-        status = od_zlib_stream_poll(decompressionChunk, OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE, &bytesOut);
-        if (bytesOut > 0 && !partial_write_stream_bytes(decompressionChunk, (uint32_t)bytesOut)) return false;
-        if (status == OD_ZLIB_STATUS_OUTPUT_READY) continue;
-        if (status == OD_ZLIB_STATUS_NEEDS_INPUT) return !final;
-        if (status == OD_ZLIB_STATUS_DONE) return partialCtx.bytes_written == partialCtx.expected_stream_size;
-        const char* zlibErr = od_zlib_stream_error();
-        od_log_error("partial zlib stream error: %s", zlibErr);
-        return false;
-    }
+    return !final || (status == OD_ZLIB_PUMP_DONE &&
+                      partialCtx.bytes_written == partialCtx.expected_stream_size);
 }
 
 static bool partial_write_stream_bytes(uint8_t* data, uint32_t len) {
