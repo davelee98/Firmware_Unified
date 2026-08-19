@@ -1974,7 +1974,7 @@ static bool xferAppWritePartial(uint32_t streamOffset, od_span_t data) {
 }
 
 extern "C" void od_xfer_app_prepare_start(void) {
-    if (xferApp.mode != XFER_APP_IDLE) xferAppClear(true);
+    if (xferApp.mode != XFER_APP_IDLE) xferAppClear(false);
     if (partialCtx.active) cleanup_partial_write_state();
     if (directWriteActive) cleanupDirectWriteState(false);
     resetPipeWriteState();
@@ -2453,8 +2453,8 @@ static void sendPipeNack(const od_cmd_ctx_t *ctx, uint8_t err) {
     (void)od_cmd_reply_plain(ctx, r, sizeof(r)); /* {RESP_NACK,0x81,..} -- a hard NACK */
     pipeState.error = true;
     // Partial transfers own partialCtx, not the full-frame direct-write session:
-    // clear the negotiated etag (any partial NACK invalidates it, parity with
-    // send_direct_write_nack) and power the panel down via the partial cleanup.
+    // any partial NACK invalidates the negotiated etag and powers the panel down
+    // through the partial cleanup.
     if (pipeState.partial) {
         displayed_etag = 0;
         cleanup_partial_write_state();
@@ -2567,8 +2567,8 @@ od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uin
         rectH = ext.h;
 
         // Partial validations (plan 1.2, order 5-7). All precede any hardware touch; any
-        // failure clears displayed_etag for parity with send_direct_write_nack. These are
-        // the same checks shared 0x76 policy applies (bpp, etag, bounds, alignment).
+        // failure clears displayed_etag, matching shared 0x76 policy. These are the same
+        // checks shared 0x76 applies (bpp, etag, bounds, alignment).
         uint16_t dispW = globalConfig.displays[0].pixel_width;
         uint16_t dispH = globalConfig.displays[0].pixel_height;
         // 5: partial uses two 1bpp planes (old+new). FastEPD IT8951 accepts that stream
@@ -2596,8 +2596,7 @@ od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uin
     if (partial) {
         planeBytes = mono_plane_bytes(rectW, rectH);
         if (planeBytes == 0 || total_size != planeBytes * 2u) {
-            // Plan 1.2: every partial-request NACK at steps 5-8 clears the etag
-            // (parity with send_direct_write_nack).
+            // Plan 1.2: every partial-request NACK at steps 5-8 clears the etag.
             displayed_etag = 0; sendPipeStartNack(ctx, OD_ERR_PIPE_START_SIZE_MISMATCH); return OD_CMD_NACK;
         }
     } else {
