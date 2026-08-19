@@ -8,11 +8,12 @@
 
 **Phase 2 revision:** `main` at `c41f3f5`
 
-**Status:** Phase 1 landed on `main` at `a9a4ac5`; its hardware rows remain open in
-`docs/HARDWARE_VERIFICATION_CHECKLIST.md`. Phase 2 steps 1-9 are dormant shared design, tests and
-adapters and may proceed without changing a production opcode or cleanup path. Step 10 is the first
-production cutover and remains blocked by the checklist's Phase 1 hardware gate. No hardware result
-is assumed or recorded by this plan revision.
+**Status:** Phase 1 landed on `main` at `a9a4ac5` and its hardware gate was marked cleared on
+2026-08-18 in `docs/HARDWARE_VERIFICATION_CHECKLIST.md`. Phase 2's dormant shared machine landed
+through PR #47 at `d83a41a`. The ESP32 step-10a software candidate now routes the four legacy
+opcodes through shared policy and supplies the real hardware seam; it is not hardware-qualified.
+Nordic may not begin until the ESP32 cutover gate passes. ESP32 retains only the target machinery
+still called by PIPE, with PIPE and `od_xfer` made mutually exclusive owners of the singleton pump.
 
 This is the active plan for the remaining transfer-plane work. It supersedes the transfer sequence
 in `PLAN_MIGRATION_ENDGAME_2026-08-17.md` and the geometry/compression phases in the original
@@ -43,7 +44,7 @@ version of this file. The detailed C14 and color plans remain the record of what
 - On `feat/transfer-phase2`, steps 1-8 are implemented as dormant shared production code:
   `od_xfer`, `od_xfer_direct`, `od_xfer_partial` and the `od_xfer_app` seam. Dispatch still routes
   all four opcodes to the existing target hooks, and production reset/disconnect paths are
-  unchanged; step 10 has not begun.
+  unchanged; step 10a has not begun.
 - The private singleton owns mode, immutable reply owner, timing and byte totals. DATA/END route
   once on that mode. The write seam receives a non-empty span and its pre-write offset; short
   consumption refuses the stream. Ownership is the complete `{origin, tag}` identity, and a
@@ -82,6 +83,43 @@ version of this file. The detailed C14 and color plans remain the record of what
 - `tools/check.sh --targets` passes 18/0/0 with the complete shared-side candidate: gcc, clang,
   ASan/UBSan, fuzz, the pinned Python wire corpus, all ESP32 configurations and sdkconfig
   baseline, all three Nordic boards, and the BG22 headless build. No hardware result is claimed.
+- The production cutover is narrower than deletion of every target transfer helper. ESP32 and
+  Nordic PIPE still call legacy direct/partial sinks, counters and finalization helpers. Phase 2
+  removes their command policy for `0x70`, `0x71`, `0x72` and `0x76`, but retains and inventories
+  only the target machinery required by PIPE. Phase 3 step 6 deletes that remainder together with
+  the target PIPE machines. During this interval each PIPE START must displace a live `od_xfer`
+  before touching `od_zlib_pump`, just as `od_xfer_app_prepare_start()` displaces a live PIPE in
+  the reverse direction.
+
+### Phase 1 hardware-gate clearance — 2026-08-18
+
+- The project marked every Phase 1 pump row cleared in the authoritative hardware checklist.
+- This clearance unblocks Phase 2 step 10a. It does not pre-approve any Phase 2 target cutover or
+  replace that cutover's plaintext/encrypted, recovery, ownership and refresh-ordering matrix.
+
+### Phase 2 ESP32 step-10a candidate — 2026-08-18
+
+- The four `od_cmd_app` hooks are one-line bridges to `od_xfer_direct_start()`, `od_xfer_data()`,
+  `od_xfer_end()` and `od_xfer_partial_start()`. ESP32's target-local legacy START/DATA/END parsing,
+  ownership and reply construction are deleted.
+- `display_service.cpp` supplies the complete hardware seam. Full and partial writes derive plane
+  selection from the shared pre-write offset; target state retains geometry, rectangle and current
+  controller plane but no legacy protocol byte counter. The shared owner also supplies the target
+  watchdog's origin and its read-only start timestamp.
+- Arbitration is bidirectional before pump use: PIPE START resets a live `od_xfer`, while
+  `od_xfer_app_prepare_start()` releases target PIPE hardware and clears its state before a legacy
+  START can activate. Disconnect/reset calls `od_xfer_reset()` before the common core teardown.
+- Explicit Phase 3 debt remains because target PIPE calls it directly: `PipeWriteState`,
+  `PipeReorderSlot`, `PartialStreamContext`, the `directWrite*` PIPE hardware fields, target PIPE
+  zlib finalization, and the full/partial PIPE sink, geometry, activation and refresh helpers.
+  None is reachable as command policy for `0x70`, `0x71`, `0x72` or `0x76`.
+- Software evidence: the gcc host suite passes 43/43, and the clang and ASan/UBSan suites pass
+  with leak detection disabled under the ptrace-based runner. All 11 ESP32 configurations build
+  and pass the sdkconfig baseline; all three dormant Nordic configurations and the BG22 headless
+  image also build. FastEPD and bb_epaper images link the shared machine and real seam; map
+  inspection finds the shared entries in the image and no retired handler. BG22 remains at
+  251,236 bytes flash and 32,284 bytes static RAM. Hardware evidence is open, so Nordic remains
+  blocked by repository order.
 
 ## 1. Reconciliation result
 
@@ -435,6 +473,14 @@ There are no independent direct-active, partial-active and PIPE-hardware-active 
 only sequencing/reorder metadata and feeds the same full/partial sink. It does not own a second
 decompressor or byte counter.
 
+The Phase 2-to-3 transition is the temporary exception, not the final design. ESP32 and Nordic
+retain their target PIPE-active state and the target helpers PIPE directly calls until the shared
+PIPE cutover. While that state exists, every target PIPE START first checks `od_xfer_active()` and
+calls `od_xfer_reset()` if needed; only after shared legacy state and hardware are inactive may it
+reset or push `od_zlib_pump`. In the other direction, every structurally valid legacy START reaches
+`od_xfer_app_prepare_start()`, which cancels target PIPE before shared policy resets the pump. Thus
+exactly one machine can own the singleton pump even during the staged migration.
+
 The state machine is single-consumer, like dispatch/session/txq. It adds no lock. The complete
 reply identity is copied at START; the reservation itself is never retained.
 
@@ -488,7 +534,9 @@ profile and Nordic/BG22 retain 256 bytes.
 transfer is replaced but before panel-info validation. It cancels target-owned PIPE state and
 resets target diagnostics. This preserves ESP32's `resetPipeWriteState()` and
 `imageWriteLogReset()` ordering, including rejected STARTs, without moving PIPE state or logging
-into the legacy-transfer machine.
+into the legacy-transfer machine. The target PIPE START performs the opposite arbitration through
+`od_xfer_active()` and `od_xfer_reset()`; this is target integration debt only until Phase 3 owns
+both protocols.
 
 `od_xfer_app_abort()` receives one of `REPLACED`, `START_FAILED`, `STREAM_FAILED`, `INCOMPLETE`,
 `REPLY_FAILED`, `REFRESH_FAILED` or `RESET`. These are policy facts, not power commands: each
@@ -638,10 +686,9 @@ target family has a recorded compressed hardware result.
 
 ### Phase 2 — promote the legacy direct/partial stream
 
-Entry boundary: steps 1-9 may proceed while Phase 1 hardware rows remain open because they neither
-reroute a production opcode nor change a production cleanup path. Step 10 may not begin until the
-Phase 1 gate in `docs/HARDWARE_VERIFICATION_CHECKLIST.md` is satisfied. Do not fold a Phase 1 pump
-correction into this phase; if hardware evidence exposes one, fix and re-qualify Phase 1 first.
+Entry boundary: the Phase 1 gate in `docs/HARDWARE_VERIFICATION_CHECKLIST.md` was marked satisfied
+on 2026-08-18, so step 10a may begin. Do not fold a Phase 1 pump correction into this phase; if later
+hardware evidence exposes one, fix and re-qualify Phase 1 first.
 
 Build the shared side as separately reviewable, revertible units. Steps 1-4 do not reroute a
 production opcode:
@@ -659,9 +706,11 @@ production opcode:
 5. Split START validation from target activation. Invalid geometry, etag, flags, size or arithmetic
    touches no panel resource. Compression admission follows section 4.2's authority decision.
 6. Make shared accounting authoritative. Every sink call receives the pre-write stream offset;
-   accept only `consumed == offered`, and delete each target protocol byte counter when its adapter
-   is cut over. Plane selection, address-window reissue and controller side effects remain target
-   operations derived from that offset and the geometry established at START.
+   accept only `consumed == offered`, and delete each target counter used only by the four legacy
+   opcodes when its adapter is cut over. A counter or helper still called by target PIPE may remain
+   until Phase 3, but it must not mirror or influence `od_xfer` accounting. Plane selection,
+   address-window reissue and controller side effects remain target operations derived from that
+   offset and the geometry established at START.
 7. Implement the END sequence from section 5.3. Pin ACK-enqueue failure separately from drain
    failure, invoke target recovery exactly once, emit no substitute reply on either barrier abort,
    and never mutate or refresh the panel after failure.
@@ -677,11 +726,23 @@ production opcode:
    final hardware-only surface and delete the target protocol counters it replaces, so it lands
    atomically with that target's step-10 cutover. Apply reset/disconnect integration only in that
    cutover as well.
-10. Cut over in repository target order. For each target, replace its four command implementations
-    with temporary one-line bridges to shared policy, delete its old parsing/state/reply code in the
-    same commit, apply its reset/disconnect integration, and pass that target's hardware gate before
-    changing the next. Direct and partial switch together on capable targets because they share
-    DATA/END; BG22 switches direct plus the capability-off partial reply.
+10. Split the production cutover at the PIPE dependency:
+
+    - **10a — target cutover:** proceed in repository target order. For each target, implement the
+      real adapter, replace its four command implementations with temporary one-line bridges to
+      shared policy, and apply its reset/disconnect integration. On ESP32 and Nordic, also rewire
+      PIPE START to displace a live `od_xfer` through `od_xfer_active()`/`od_xfer_reset()` before
+      PIPE resets or pushes the singleton pump. Delete legacy-opcode parsing, ownership and reply
+      construction in the same commit, but retain and inventory any target sink, counter, geometry
+      or finalization helper still called by PIPE. Those retained pieces are PIPE implementation
+      debt, not a second callable implementation of the four legacy opcodes. Pass that target's
+      hardware gate before changing the next. Direct and partial switch together on capable
+      targets because they share DATA/END; BG22 switches direct plus the capability-off partial
+      reply. BG22's simpler no-PIPE cutover does not change the repository order: ESP32 remains the
+      reference, followed by Nordic nRF54, BG22 and the nRF52840 qualification row.
+    - **10b — PIPE-dependent deletion:** defer deletion of the target machinery inventoried solely
+      for PIPE to Phase 3 step 6. It is not part of the Phase 2 exit gate, and no new legacy command
+      path may call it after step 10a.
 11. After all targets call the shared policy, route the four `OD_DISPATCH_OPCODE_ROWS` entries
     directly to `od_xfer_direct_start`, `od_xfer_data`, `od_xfer_end` and
     `od_xfer_partial_start`. Delete the four declarations from `od_cmd_app.h` and every temporary
@@ -697,7 +758,10 @@ empty raw DATA and inflate pushes that produce no output never calling the write
 non-empty offsets and short-consumption results from zero through one less than the offered length;
 plane-boundary splits at every byte; raw/compressed partial; every application reply's sealed/plain
 choice under both a live session and plaintext; identical dispatch outcomes before/after direct
-routing; and BG22 capability-off code, ABI and RAM.
+routing; PIPE START during a live `od_xfer`, proving one shared reset/abort occurs before PIPE can
+reset the pump; legacy START during a live PIPE, proving `od_xfer_app_prepare_start()` cancels PIPE
+before shared policy can reset the pump; displaced-owner DATA/END remaining inert in both
+directions; and BG22 capability-off code, ABI and RAM.
 
 Hardware must cover plaintext/encrypted raw and compressed direct, ACK-before-refresh trace,
 disconnect/reconnect, replacement START and a subsequent successful command. ESP32/Nordic also run
@@ -706,22 +770,29 @@ etag. ESP32 additionally runs plaintext LAN and TLS-LAN direct writes with a 4,0
 and verifies that a LAN disconnect affects only a LAN-owned transfer. BG22 runs the unsupported
 response and confirms no partial or displayed-etag state in the map.
 
-Exit gate: target code owns hardware operations only; no target parses `0x70`, `0x71`, `0x72` or
-`0x76`, owns transfer byte counters, finalizes zlib, constructs their replies, or defines a command
-hook for those opcodes. The dispatch map names shared transfer entry points directly, every target
-defines the complete transfer seam, and no capability-mismatched transfer state crosses a library
-boundary.
+Exit gate: for `0x70`, `0x71`, `0x72` and `0x76`, target code owns hardware operations only; no
+target parses those commands, owns their protocol accounting, finalizes their streams, constructs
+their replies, or defines a command hook for them. The dispatch map names shared transfer entry
+points directly, every target defines the complete transfer seam, and no capability-mismatched
+transfer state crosses a library boundary. ESP32 and Nordic may temporarily retain only the
+explicitly inventoried state and helpers still called by target PIPE. Tests prove that target PIPE
+and `od_xfer` cannot be active together and that either START displaces the other before any reset
+or push of the singleton `od_zlib_pump`; removing that PIPE-owned remainder is Phase 3 debt.
 
 ### Phase 3 — promote PIPE
 
 1. Implement shared START negotiation, owner checks, sequence arithmetic, reorder queue and SACK.
 2. Feed the Phase 2 full/partial sink; do not create a PIPE decompressor or duplicate byte totals.
+   This removes the temporary cross-machine arbitration and makes the shared transfer owner the
+   only authority that may reset or push `od_zlib_pump`.
 3. Derive reorder payload from `PIPE_MAX_FRAME - PIPE_FRAME_OVERHEAD` and enforce negotiated frame
    size on every DATA frame.
 4. Preserve fatal-NACK silence, raw-full auto-END, compressed/partial explicit END and ESP32 LAN
    refusal.
 5. Resolve the current-tail evidence from Phase 0 with a test, not an assumed timer.
-6. Cut over ESP32 and Nordic independently and delete both target PIPE machines. BG22 keeps only
+6. Cut over ESP32 and Nordic independently and delete both target PIPE machines. In the same
+   target commit, delete the sinks, counters, geometry/finalization helpers and arbitration bridge
+   inventoried in Phase 2 step 10a solely because target PIPE still called them. BG22 keeps only
    its explicit unsupported wrapper and links no reorder state.
 
 Deterministic tests cover every START length/version/flag/capability/total; W/N values 0, 1, 16,
@@ -777,7 +848,7 @@ Use independently reviewable commits; do not land unused scaffolding:
 2. inflate selection seam plus pump tests;
 3. one pump target cutover/deletion per commit;
 4. transfer headers, fake target and direct/partial state tests;
-5. one legacy-stream target cutover/deletion per commit;
+5. one legacy-stream target cutover/reduction per commit, with PIPE-only remainder inventoried;
 6. PIPE shared state/model tests;
 7. one PIPE target cutover/deletion per commit;
 8. NFC shared state/tests;
@@ -809,12 +880,12 @@ Current hardware evidence is incomplete and must not be flattened into “Nordic
 
 | Row | Current position | Transfer promotion obligation |
 |---|---|---|
-| ESP32-S3 bb_epaper | shared stack exercised raw/encrypted; C14/color-specific matrix incomplete | all promoted modes plus LAN/TLS and trace |
+| ESP32-S3 bb_epaper | Phase 1 pump gate cleared; broader color/transfer matrix incomplete | all promoted modes plus LAN/TLS and trace |
 | ESP32-S3 FastEPD | color adapter software-tested; transfer failure detection remains follow-up | full direct/PIPE and supported partial behavior |
-| portable-engine ESP32 | C14 compressed case not run | compressed direct after pump cutover |
-| `xiao_nrf52840` | encrypted PIPE only on current C8-C11 stack; matrix incomplete | plaintext/encrypted direct, partial, PIPE loss/replay |
-| `xiao_nrf54l15` / `xiao_nrf54lm20a` | build-only, never flashed | Nordic silicon/boot/NFC distinctions |
-| EFR32BG22 | C13 build-only, never flashed | direct/compression/NFC and unsupported partial/PIPE |
+| portable-engine ESP32 | Phase 1 compressed pump gate cleared | qualify the promoted transfer machine |
+| `xiao_nrf52840` | Phase 1 compressed pump gate cleared; broader matrix incomplete | plaintext/encrypted direct, partial, PIPE loss/replay |
+| `xiao_nrf54l15` / `xiao_nrf54lm20a` | Phase 1 nRF54-class pump gate cleared; broader distinctions remain | Nordic silicon/boot/NFC distinctions |
+| EFR32BG22 | Phase 1 compressed-direct pump gate cleared; broader C13 matrix remains | direct/NFC and unsupported partial/PIPE |
 
 Final release qualification also retains classic ESP32 W=16, C3, C6, S3 bb_epaper/FastEPD,
 nRF52840, both nRF54 boards and BG22 as distinct rows. Hardware availability may leave a row open;
@@ -859,7 +930,9 @@ Stop the current unit when:
 - Gray8 acquires geometry, packing or target admission;
 - BG22 split/dual-CS support or a new FastEPD failure path enters through this work;
 - a sibling repository is modified; or
-- old and new production implementations remain callable at a phase exit.
+- old and new production implementations for the same opcode remain callable at a phase exit; or
+- target PIPE and `od_xfer` can be active together, or either can reset/push the singleton pump
+  without first displacing the other owner.
 
 ## 11. Definition of done
 

@@ -45,6 +45,8 @@ static unsigned g_barrier_calls;
 static unsigned g_barrier_abort_calls;
 static unsigned g_refresh_calls;
 static unsigned g_prepare_start_calls;
+static unsigned g_pipe_cancel_calls;
+static bool g_pipe_active;
 static od_xfer_abort_reason_t g_abort_reasons[16];
 static uint8_t g_refresh_modes[16];
 static uint32_t g_offsets[16];
@@ -126,7 +128,14 @@ bool od_xfer_app_panel_info(od_xfer_panel_info_t *out)
     return g_panel_info_ok;
 }
 
-void od_xfer_app_prepare_start(void) { ++g_prepare_start_calls; }
+void od_xfer_app_prepare_start(void)
+{
+    ++g_prepare_start_calls;
+    if (g_pipe_active) {
+        g_pipe_active = false;
+        ++g_pipe_cancel_calls;
+    }
+}
 
 bool od_xfer_app_begin_full(const od_color_geometry_t *geometry)
 {
@@ -238,6 +247,8 @@ static void setup(void)
     g_barrier_abort_calls = 0u;
     g_refresh_calls = 0u;
     g_prepare_start_calls = 0u;
+    g_pipe_cancel_calls = 0u;
+    g_pipe_active = false;
     g_consume_limit = UINT32_MAX;
     g_etag = 0x11223344u;
     g_written_n = 0u;
@@ -277,16 +288,20 @@ static void test_raw_direct(void)
     od_cmd_ctx_t other = make_ctx(OTHER);
     od_cmd_ctx_t stale = make_ctx((od_reply_t){ OD_ORIGIN_BLE, 8u });
     od_reply_t recorded_owner;
+    uint32_t started_ms = 0u;
     uint8_t tolerated[3] = { 1u, 2u, 3u };
     uint8_t data[6] = { 10u, 11u, 12u, 13u, 14u, 15u };
     uint8_t end[5] = { 1u, 0xAAu, 0xBBu, 0xCCu, 0xDDu };
 
     CASE("raw direct offsets owner and overrun");
     setup();
+    g_pipe_active = true;
     CHECK(od_xfer_direct_start(&owner, od_span_make(tolerated, sizeof tolerated)) == OD_CMD_OK);
     CHECK(g_prepare_start_calls == 1u);
+    CHECK(!g_pipe_active && g_pipe_cancel_calls == 1u);
     CHECK(od_xfer_owner(&recorded_owner) && recorded_owner.origin == OWNER.origin
           && recorded_owner.tag == OWNER.tag);
+    CHECK(od_xfer_started_ms(&started_ms) && started_ms == 1234u);
     CHECK(g_begin_full_calls == 1u && g_reply_n == 1u && !g_replies[0].plain);
     CHECK(od_xfer_data(&other, od_span_make(data, 2u)) == OD_CMD_OK);
     CHECK(g_write_calls == 0u && g_reply_n == 1u);
@@ -300,6 +315,7 @@ static void test_raw_direct(void)
     CHECK(od_xfer_end(&owner, od_span_make(end, sizeof end)) == OD_CMD_OK);
     CHECK(g_barrier_calls == 1u && g_refresh_calls == 1u && !od_xfer_active());
     CHECK(!od_xfer_owner(&recorded_owner));
+    CHECK(!od_xfer_started_ms(&started_ms));
     CHECK(g_etag == 0xAABBCCDDu);
     CHECK(g_reply_n == 4u && !g_replies[1].plain && !g_replies[2].plain
           && !g_replies[3].plain);

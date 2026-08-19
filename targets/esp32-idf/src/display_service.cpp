@@ -28,6 +28,8 @@
 #include "session_guard.h"
 #include "touch_input.h"
 #include "od_zlib_pump.h"
+#include "od_xfer.h"
+#include "od_xfer_app.h"
 #if defined(OPENDISPLAY_FASTEPD)
 #include "display_fastepd.h"
 #endif
@@ -54,13 +56,11 @@ extern uint32_t pwrmgmOffDeadlineMs;
 extern volatile uint8_t pwrmgmLock;
 extern uint32_t directWriteStartTime;
 extern uint32_t directWriteCompressedReceived;
-extern uint8_t directWriteRefreshMode;
 extern uint32_t directWriteTotalBytes;
 extern uint16_t directWriteHeight;
 extern uint16_t directWriteWidth;
 extern uint32_t directWriteDecompressedTotal;
 extern uint32_t directWriteBytesWritten;
-extern bool directWritePlane2;
 extern bool directWriteBitplanes;
 extern bool directWriteCompressed;
 extern bool directWriteActive;
@@ -86,23 +86,6 @@ void endRefresh(void) {
 }
 
 extern uint32_t displayed_etag;
-
-// 0x76 partial-write error codes come from the canonical opendisplay_protocol.h;
-// use OD_ERR_PARTIAL_* directly at the call sites rather than shadowing them here
-// (the OD_ERR_PIPE_START_* family reuses the same byte values with DIFFERENT
-// meanings, so a local copy is a drift/mix-up hazard). For reference:
-//   OD_ERR_PARTIAL_ETAG_MISMATCH  0x01   old_etag != displayed etag
-//   OD_ERR_PARTIAL_RECT_OOB       0x03   rectangle out of panel bounds
-//   OD_ERR_PARTIAL_RECT_ALIGN     0x04   x / width not a multiple of 8
-//   OD_ERR_PARTIAL_FLAGS          0x05   bad / unsupported flags
-//   OD_ERR_PARTIAL_STREAM         0x06   stream / length error
-//   OD_ERR_PARTIAL_UNSUPPORTED    0x07   partial write unsupported (e.g. not 1bpp)
-
-// TODO(protocol): the canonical header defines no partial-write flag constant;
-// the 0x76 path reuses the bit0=compressed convention. Add an OD_PARTIAL_FLAG_*
-// (or reuse a shared flag) upstream in opendisplay-protocol, then drop this local.
-static const uint8_t PARTIAL_FLAG_COMPRESSED = 0x01u;
-static const uint8_t PARTIAL_ALLOWED_FLAGS = PARTIAL_FLAG_COMPRESSED;
 
 struct PartialStreamContext {
     bool active;
@@ -448,17 +431,37 @@ static void partial_set_addr_window(BBEPDISP *pBBEP, int x, int y, int cx, int c
 static bool partial_consume_bytes(uint8_t* data, uint32_t len);
 static void partial_prepare_panel_ram(void);
 static bool partial_write_to_panel(int refreshMode);
+static void partial_prepare_panel_ram_for(uint16_t x, uint16_t y, uint16_t width,
+                                          uint16_t height);
+static bool partial_refresh_for(uint16_t x, uint16_t y, uint16_t width, uint16_t height,
+                                int refreshMode);
 static bool partial_write_stream_bytes(uint8_t* data, uint32_t len);
 static bool zlib_stream_to_direct_write(const uint8_t* data, uint32_t len, bool final);
 static bool zlib_stream_to_partial_write(const uint8_t* data, uint32_t len, bool final);
 static uint32_t mono_plane_bytes(uint16_t width, uint16_t height);
 static uint32_t parse_be_u32(const uint8_t* data);
-static void send_direct_write_nack(const od_cmd_ctx_t *ctx, uint8_t opcode, uint8_t error, bool cleanupState);
 static PartialStreamContext partialCtx = {};
 
-// Direct-write session-setup helpers (shared by legacy 0x70 START and PIPE 0x80 START)
-// and the shared END/refresh tail (shared by legacy 0x72 END, PIPE 0x82 END, and
-// both auto-complete paths). Declared here; defined below near the direct-write handlers.
+enum XferAppMode : uint8_t {
+    XFER_APP_IDLE = 0,
+    XFER_APP_FULL,
+    XFER_APP_PARTIAL,
+};
+
+struct XferAppHardwareState {
+    XferAppMode mode;
+    od_color_geometry_t geometry;
+    uint16_t width;
+    uint16_t height;
+    uint16_t x;
+    uint16_t y;
+    uint32_t plane_bytes;
+    uint8_t current_plane;
+};
+
+static XferAppHardwareState xferApp = {};
+
+// Target PIPE retains its full-frame hardware helpers until the shared PIPE cutover.
 static bool directWriteComputeGeometry(bool compressed);
 static void directWriteActivatePanel(void);
 static od_cmd_result_t directWriteFinishAndRefresh(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len, uint8_t endOpcode);
@@ -518,6 +521,14 @@ void checkTransferTimeouts(void) {
         (lanOwnsTransfer && owner.who == OWNER_LAN) ||
         (!lanOwnsTransfer && owner.who == OWNER_BLE);
 
+    uint32_t xferStarted = 0u;
+    if (od_xfer_started_ms(&xferStarted) &&
+        (od_hal_uptime_ms() - xferStarted) > TRANSFER_WATCHDOG_MS) {
+        od_log_error("ERROR: Shared transfer timeout - aborting session");
+        abortToKnownState("shared transfer watchdog", dropOwnersLink, owner);
+        return;
+    }
+
     if (directWriteActive) {
         uint32_t directWriteDuration = od_hal_uptime_ms() - directWriteStartTime;
         if (directWriteDuration > TRANSFER_WATCHDOG_MS) {
@@ -556,7 +567,7 @@ void checkTransferTimeouts(void) {
     }
 }
 
-// Disconnect hook: a partial session (0x76 or pipe-partial) powers the panel via
+// Disconnect hook: a pipe-partial session powers the panel via
 // partial_prepare_panel_ram but never sets directWriteActive, so the disconnect
 // handlers' cleanupDirectWriteState gate misses it and the panel would stay
 // powered until the 15-min watchdog. cleanup_partial_write_state is file-static;
@@ -1775,10 +1786,9 @@ bool imageWriteLogQuietFrame(const uint8_t* data, uint16_t len) {
 // ---------------------------------------------------------------------------
 
 // Consume one compressed direct-write payload into the panel controller. Returns
-// false on overflow guard or decompress/write failure; the CALLER owns cleanup and
-// ACK/NACK emission (legacy 0x71 caller keeps its byte-identical acks; PIPE reuses
-// the bool core without acking per frame). Does NOT advance directWriteCompressedReceived.
-bool handleDirectWriteCompressedData(uint8_t* data, uint16_t len) {
+// false on overflow guard or decompress/write failure; PIPE owns cleanup and
+// ACK/NACK emission. Does NOT advance directWriteCompressedReceived.
+static bool handleDirectWriteCompressedData(uint8_t* data, uint16_t len) {
     if (len > UINT32_MAX - directWriteCompressedReceived) {
         return false;
     }
@@ -1831,14 +1841,12 @@ void cleanupDirectWriteState(bool refreshDisplay) {
     directWriteActive = false;
     directWriteCompressed = false;
     directWriteBitplanes = false;
-    directWritePlane2 = false;
     directWriteBytesWritten = 0;
     directWriteCompressedReceived = 0;
     directWriteDecompressedTotal = 0;
     directWriteWidth = 0;
     directWriteHeight = 0;
     directWriteTotalBytes = 0;
-    directWriteRefreshMode = 0;
     directWriteStartTime = 0;
     directWritePlaneBytes = 0;
     directWriteInitialPlane = OD_COLOR_PLANE_NONE;
@@ -1888,9 +1896,234 @@ static od_color_status_t directWriteResolveGeometry(od_color_geometry_t* geometr
     return od_color_direct_geometry(d.color_scheme, d.pixel_width, d.pixel_height, geometry);
 }
 
-// Computes the panel geometry and total controller byte count for a direct-write
-// session and records the compressed flag. Sets directWrite{Compressed,Bitplanes,
-// Plane2,Width,Height,TotalBytes}. No panel I/O, no acks. Shared by 0x70 and 0x80.
+static void xferAppClear(bool forceOff) {
+    if (xferApp.mode != XFER_APP_IDLE && pwrmgmState == PWR_ACTIVE) {
+        if (forceOff) epdSessionForceOff();
+        else          epdSessionRelease(true);
+    }
+    if (directWriteTouchSuspended) {
+        touchResumeAfterEpdRefresh();
+        directWriteTouchSuspended = false;
+    }
+    memset(&xferApp, 0, sizeof(xferApp));
+}
+
+static bool xferAppWriteFull(uint32_t streamOffset, od_span_t data) {
+    if (streamOffset > xferApp.geometry.total_bytes ||
+        data.n > xferApp.geometry.total_bytes - streamOffset) {
+        return false;
+    }
+#if defined(OPENDISPLAY_FASTEPD)
+    if (fastepd_driver_used()) {
+        fastepd_direct_write_chunk((uint8_t *)(uintptr_t)data.p, (uint32_t)data.n);
+        return true;
+    }
+#endif
+    if (xferApp.geometry.layout != OD_COLOR_LAYOUT_CONTROLLER_PLANES) {
+        bbepWriteData(&bbep, (uint8_t *)(uintptr_t)data.p, (int)data.n);
+        return true;
+    }
+
+    uint32_t consumed = 0u;
+    while (consumed < data.n) {
+        const uint32_t logical = streamOffset + consumed;
+        const uint8_t plane = logical < xferApp.plane_bytes ? PLANE_0 : PLANE_1;
+        if (xferApp.current_plane != plane) {
+            if (logical != 0u && logical != xferApp.plane_bytes) return false;
+            bbepSetAddrWindow(&bbep, 0, 0, xferApp.width, xferApp.height);
+            bbepStartWrite(&bbep, plane);
+            xferApp.current_plane = plane;
+        }
+        const uint32_t planeEnd = plane == PLANE_0
+            ? xferApp.plane_bytes : xferApp.geometry.total_bytes;
+        uint32_t chunk = planeEnd - logical;
+        if (chunk > data.n - consumed) chunk = (uint32_t)data.n - consumed;
+        bbepWriteData(&bbep, (uint8_t *)(uintptr_t)(data.p + consumed), (int)chunk);
+        consumed += chunk;
+    }
+    return true;
+}
+
+static bool xferAppWritePartial(uint32_t streamOffset, od_span_t data) {
+    const uint32_t total = xferApp.plane_bytes * 2u;
+    if (streamOffset > total || data.n > total - streamOffset) return false;
+#if defined(OPENDISPLAY_FASTEPD)
+    if (fastepd_driver_used()) {
+        return fastepd_partial_write_chunk((uint8_t *)(uintptr_t)data.p, (uint32_t)data.n);
+    }
+#endif
+
+    uint32_t consumed = 0u;
+    while (consumed < data.n) {
+        const uint32_t logical = streamOffset + consumed;
+        const uint8_t plane = logical < xferApp.plane_bytes ? PLANE_1 : PLANE_0;
+        if (xferApp.current_plane != plane) {
+            if (logical != 0u && logical != xferApp.plane_bytes) return false;
+            partial_set_addr_window(&bbep, xferApp.x, xferApp.y,
+                                    xferApp.width, xferApp.height);
+            bbepStartWrite(&bbep, plane);
+            xferApp.current_plane = plane;
+        }
+        const uint32_t planeEnd = plane == PLANE_1 ? xferApp.plane_bytes : total;
+        uint32_t chunk = planeEnd - logical;
+        if (chunk > data.n - consumed) chunk = (uint32_t)data.n - consumed;
+        bbepWriteData(&bbep, (uint8_t *)(uintptr_t)(data.p + consumed), (int)chunk);
+        consumed += chunk;
+    }
+    return true;
+}
+
+extern "C" void od_xfer_app_prepare_start(void) {
+    if (xferApp.mode != XFER_APP_IDLE) xferAppClear(false);
+    if (partialCtx.active) cleanup_partial_write_state();
+    if (directWriteActive) cleanupDirectWriteState(false);
+    resetPipeWriteState();
+    imageWriteLogReset();
+}
+
+extern "C" bool od_xfer_app_panel_info(od_xfer_panel_info_t *out) {
+    if (out == nullptr) return false;
+    memset(out, 0, sizeof(*out));
+    if (directWriteResolveGeometry(&out->geometry) != OD_COLOR_OK) return false;
+    out->width = globalConfig.displays[0].pixel_width;
+    out->height = globalConfig.displays[0].pixel_height;
+    out->partial_enabled = true;
+    xferApp.width = out->width;
+    xferApp.height = out->height;
+    return true;
+}
+
+extern "C" bool od_xfer_app_begin_full(const od_color_geometry_t *geometry) {
+    if (geometry == nullptr || geometry->total_bytes == 0u) return false;
+    xferApp.mode = XFER_APP_FULL;
+    xferApp.geometry = *geometry;
+    xferApp.plane_bytes = geometry->layout == OD_COLOR_LAYOUT_CONTROLLER_PLANES
+        ? geometry->part_bytes[0] : 0u;
+    xferApp.current_plane = 0xFFu;
+    imageWriteLogStart(geometry->total_bytes);
+    touchSuspendForEpdRefresh();
+    directWriteTouchSuspended = true;
+#if defined(OPENDISPLAY_FASTEPD)
+    if (fastepd_driver_used()) {
+        fastepd_prepare_hardware();
+    }
+#endif
+    epdSessionAcquire(false);
+    epdPlanesPrepared = false;
+#if defined(OPENDISPLAY_FASTEPD)
+    if (fastepd_driver_used()) {
+        fastepd_direct_write_reset();
+    } else
+#endif
+    {
+        bbepSetAddrWindow(&bbep, 0, 0, xferApp.width, xferApp.height);
+        const uint8_t plane = geometry->initial_plane == OD_COLOR_PLANE_0 ? PLANE_0 : PLANE_1;
+        bbepStartWrite(&bbep, plane);
+        if (geometry->layout == OD_COLOR_LAYOUT_CONTROLLER_PLANES) {
+            xferApp.current_plane = plane;
+        }
+    }
+    return true;
+}
+
+extern "C" bool od_xfer_app_begin_partial(uint16_t x, uint16_t y, uint16_t width,
+                                            uint16_t height, uint32_t planeBytes) {
+    if (planeBytes == 0u) return false;
+    xferApp.mode = XFER_APP_PARTIAL;
+    xferApp.x = x;
+    xferApp.y = y;
+    xferApp.width = width;
+    xferApp.height = height;
+    xferApp.plane_bytes = planeBytes;
+    xferApp.current_plane = 0xFFu;
+    imageWriteLogStart(planeBytes * 2u);
+    partial_prepare_panel_ram_for(x, y, width, height);
+    return true;
+}
+
+extern "C" uint32_t od_xfer_app_write(uint32_t streamOffset, od_span_t data) {
+    if (!od_span_valid(data) || data.n == 0u || data.n > UINT32_MAX) return 0u;
+    imageWriteLogChunk((uint8_t *)(uintptr_t)data.p, (uint16_t)data.n);
+    const bool accepted = xferApp.mode == XFER_APP_FULL
+        ? xferAppWriteFull(streamOffset, data)
+        : xferApp.mode == XFER_APP_PARTIAL && xferAppWritePartial(streamOffset, data);
+    if (!accepted) return 0u;
+    const uint32_t total = xferApp.mode == XFER_APP_FULL
+        ? xferApp.geometry.total_bytes : xferApp.plane_bytes * 2u;
+    imageWriteLogProgress(streamOffset + (uint32_t)data.n, total);
+    return (uint32_t)data.n;
+}
+
+extern "C" od_mut_span_t od_xfer_app_inflate_scratch(void) {
+    return od_mut_span_make(decompressionChunk, OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE);
+}
+
+extern "C" void od_xfer_app_abort(od_xfer_abort_reason_t reason) {
+    const bool forceOff = reason == OD_XFER_ABORT_STREAM_FAILED ||
+                          reason == OD_XFER_ABORT_REPLY_FAILED ||
+                          reason == OD_XFER_ABORT_REFRESH_FAILED ||
+                          reason == OD_XFER_ABORT_RESET;
+    xferAppClear(forceOff);
+}
+
+extern "C" od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *owner) {
+    (void)owner;
+    const uint32_t total = xferApp.mode == XFER_APP_FULL
+        ? xferApp.geometry.total_bytes : xferApp.plane_bytes * 2u;
+    imageWriteLogFinish(total, total);
+    od_cmd_flush_before_refresh();
+    if (xferApp.mode == XFER_APP_FULL) od_hal_delay_ms(20);
+    return OD_XFER_BARRIER_PROCEED;
+}
+
+extern "C" void od_xfer_app_barrier_abort(const od_reply_t *owner) {
+    (void)owner;
+    xferAppClear(true);
+}
+
+extern "C" bool od_xfer_app_refresh(uint8_t mode, bool *completed) {
+    if (completed == nullptr || xferApp.mode == XFER_APP_IDLE) return false;
+    bool refreshSuccess = false;
+    if (xferApp.mode == XFER_APP_PARTIAL) {
+        refreshSuccess = partial_refresh_for(xferApp.x, xferApp.y, xferApp.width,
+                                             xferApp.height, mode);
+        memset(&xferApp, 0, sizeof(xferApp));
+    } else {
+        const char *modeName = mode == REFRESH_FAST ? "FAST" : "FULL";
+        od_log_info("EPD refresh: %s (mode=%u)", modeName, (unsigned)mode);
+        epdRefreshInProgress = true;
+#if defined(OPENDISPLAY_FASTEPD)
+        if (fastepd_driver_used()) {
+            fastepd_direct_refresh(mode);
+            refreshSuccess = waitforrefresh(60);
+        } else
+#endif
+        {
+            bbepRefresh(&bbep, mode);
+            refreshSuccess = waitforrefresh(60);
+        }
+        endRefresh();
+        xferAppClear(false);
+        requestAdvertisingRestart();
+    }
+    *completed = refreshSuccess;
+    return true;
+}
+
+extern "C" uint32_t od_xfer_app_displayed_etag(void) {
+    return displayed_etag;
+}
+
+extern "C" void od_xfer_app_set_displayed_etag(uint32_t etag) {
+    displayed_etag = etag;
+}
+
+extern "C" uint32_t od_xfer_app_now_ms(void) {
+    return od_hal_uptime_ms();
+}
+
+// Computes the target PIPE full-frame geometry and records its hardware state.
+// No panel I/O and no replies.
 static bool directWriteComputeGeometry(bool compressed) {
     od_color_geometry_t geometry;
     const od_color_status_t status = directWriteResolveGeometry(&geometry);
@@ -1903,7 +2136,6 @@ static bool directWriteComputeGeometry(bool compressed) {
     directWriteBitplanes = geometry.layout == OD_COLOR_LAYOUT_CONTROLLER_PLANES;
     directWritePlaneBytes = directWriteBitplanes ? geometry.part_bytes[0] : 0u;
     directWriteInitialPlane = geometry.initial_plane;
-    directWritePlane2 = false;
     directWriteCompressed = compressed;
     directWriteWidth = globalConfig.displays[0].pixel_width;
     directWriteHeight = globalConfig.displays[0].pixel_height;
@@ -1911,9 +2143,8 @@ static bool directWriteComputeGeometry(bool compressed) {
     return true;
 }
 
-// Powers/initializes the panel, opens the full address window, and (compressed)
-// resets the zlib streamer. directWriteDecompressedTotal must already be set for
-// compressed. Shared by 0x70 and 0x80. No header parsing, no inline data, no acks.
+// Activates target PIPE full-frame hardware and resets the shared pump when compressed.
+// directWriteDecompressedTotal must already be set. No parsing, DATA or replies.
 static void directWriteActivatePanel(void) {
     directWriteActive = true;
     directWriteBytesWritten = 0;
@@ -1940,17 +2171,14 @@ static void directWriteActivatePanel(void) {
     }
 }
 
-// ------------------------------------------------------- session ownership ---
-// Transfer state (directWriteActive, the zlib window, pipeState, partialCtx, panel
-// power) is a single global set, while a frame's origin is per-FRAME. Without an
-// owner recorded at START, a frame from the other transport joins the in-flight
-// session -- feeding a BLE chunk into a LAN transfer's zlib stream corrupts it
-// silently, and its ack goes back to the injector rather than the owning client.
-// The same gap lets a BLE disconnect tear down a live LAN transfer (see
-// transferSessionOrigin() use in main.cpp's serviceBleDisconnectCleanup).
+// Target PIPE owns an origin-only identity; shared legacy transfers use the complete
+// od_reply_t identity held by od_xfer.
 static od_origin_t sessionOrigin = OD_ORIGIN_BLE;
 
-od_origin_t transferSessionOrigin(void) { return sessionOrigin; }
+od_origin_t transferSessionOrigin(void) {
+    od_reply_t owner;
+    return od_xfer_owner(&owner) ? owner.origin : sessionOrigin;
+}
 
 // True when the frame being dispatched belongs to the transport that opened the
 // session. The origin comes from the frame's own reply context rather than from a
@@ -1965,276 +2193,7 @@ static bool frameOwnsSession(const od_cmd_ctx_t *ctx, const char* what) {
     return false;
 }
 
-od_cmd_result_t handleDirectWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
-    sessionOrigin = ctx->rp.origin;
-    if (partialCtx.active) cleanup_partial_write_state();
-    if (directWriteActive) {
-        cleanupDirectWriteState(false);
-    }
-    resetPipeWriteState();
-    imageWriteLogReset();
-    bool compressed = (len >= 4);
-    if (!directWriteComputeGeometry(compressed)) {
-        uint8_t errorResponse[] = {RESP_NACK, RESP_DIRECT_WRITE_START_ACK};
-        (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
-        return OD_CMD_NACK;
-    }
-    touchSuspendForEpdRefresh();
-    directWriteTouchSuspended = true;
-#if defined(OPENDISPLAY_FASTEPD)
-    if (fastepd_driver_used()) {
-        fastepd_prepare_hardware();
-    }
-#endif
-    if (compressed) {
-        memcpy(&directWriteDecompressedTotal, data, 4);
-        if (directWriteDecompressedTotal != directWriteTotalBytes) {
-            cleanupDirectWriteState(false);
-            uint8_t errorResponse[] = {RESP_NACK, RESP_DIRECT_WRITE_START_ACK};
-            (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
-            return OD_CMD_NACK;
-        }
-    }
-    directWriteActivatePanel();
-    if (compressed && len > 4) {
-        uint32_t compressedDataLen = len - 4;
-        if (!zlib_stream_to_direct_write(data + 4, compressedDataLen, false)) {
-            cleanupDirectWriteState(false);
-            uint8_t errorResponse[] = {RESP_NACK, RESP_DIRECT_WRITE_START_ACK};
-            (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
-            return OD_CMD_NACK;
-        }
-        directWriteCompressedReceived = compressedDataLen;
-    }
-    uint8_t ackResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_START_ACK};
-    (void)od_cmd_reply(ctx, ackResponse, sizeof(ackResponse));
-    return OD_CMD_OK;
-}
-
-od_cmd_result_t handlePartialWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
-    sessionOrigin = ctx->rp.origin;
-    if (directWriteActive) cleanupDirectWriteState(false);
-    if (partialCtx.active) cleanup_partial_write_state();
-    resetPipeWriteState();
-    imageWriteLogReset();
-
-    if (len < sizeof(struct PartialWriteStartHeader)) {
-        send_direct_write_nack(ctx, 0x76, OD_ERR_PARTIAL_STREAM, false);
-        return OD_CMD_NACK;
-    }
-
-    // Layout is struct PartialWriteStartHeader (17 B). It is ALL big-endian, unlike
-    // the little-endian PipePartialExt twin, so we parse by hand (the shifts ARE the
-    // byte-swap) rather than overlaying the struct on this LE MCU.
-    uint8_t flags     = data[0];
-    uint32_t oldEtag  = parse_be_u32(data + 1);
-    uint32_t newEtag  = parse_be_u32(data + 5);
-    uint16_t rectX    = ((uint16_t)data[9]  << 8) | data[10];
-    uint16_t rectY    = ((uint16_t)data[11] << 8) | data[12];
-    uint16_t rectW    = ((uint16_t)data[13] << 8) | data[14];
-    uint16_t rectH    = ((uint16_t)data[15] << 8) | data[16];
-
-    if ((flags & ~PARTIAL_ALLOWED_FLAGS) != 0) {
-        send_direct_write_nack(ctx, 0x76, OD_ERR_PARTIAL_FLAGS, false);
-        return OD_CMD_NACK;
-    }
-
-    if (oldEtag == 0 || oldEtag != displayed_etag || newEtag == 0) {
-        send_direct_write_nack(ctx, 0x76, OD_ERR_PARTIAL_ETAG_MISMATCH, false);
-        return OD_CMD_NACK;
-    }
-
-    uint16_t dispW = globalConfig.displays[0].pixel_width;
-    uint16_t dispH = globalConfig.displays[0].pixel_height;
-    od_color_geometry_t displayGeometry;
-    if (directWriteResolveGeometry(&displayGeometry) != OD_COLOR_OK ||
-        !displayGeometry.partial_supported) {
-        // bb_epaper partial refresh support is effectively non-existent for
-        // 2bpp+ panels, and physical panels may not support that mode either.
-        // This protocol uses two 1bpp controller planes as old/new image memory.
-        send_direct_write_nack(ctx, 0x76, OD_ERR_PARTIAL_UNSUPPORTED, false);
-        return OD_CMD_NACK;
-    }
-
-    if (rectW == 0 || rectH == 0 ||
-        (uint32_t)rectX + rectW > dispW ||
-        (uint32_t)rectY + rectH > dispH) {
-        send_direct_write_nack(ctx, 0x76, OD_ERR_PARTIAL_RECT_OOB, false);
-        return OD_CMD_NACK;
-    }
-
-    if ((rectX & 7u) != 0 || (rectW & 7u) != 0) {
-        send_direct_write_nack(ctx, 0x76, OD_ERR_PARTIAL_RECT_ALIGN, false);
-        return OD_CMD_NACK;
-    }
-
-    uint32_t planeBytes = mono_plane_bytes(rectW, rectH);
-    uint32_t expectedLogicalSize = planeBytes * 2u;
-
-    // TODO(protocol): 0x76 (partial-write) has no RESP_* mirror in the canonical
-    // header, so the opcode-echo byte in these frames — and in the send_direct_write_nack(ctx, 0x76, ...)
-    // calls below — stays a raw literal. Add RESP_PARTIAL_WRITE_START upstream in
-    // opendisplay-protocol, then replace the raw 0x76 here.
-    if (expectedLogicalSize == 0) {
-        uint8_t errResponse[] = {RESP_NACK, 0x76};
-        (void)od_cmd_reply_plain(ctx, errResponse, sizeof(errResponse));
-        return OD_CMD_NACK;
-    }
-
-    memset(&partialCtx, 0, sizeof(partialCtx));
-    partialCtx.active = true;
-    partialCtx.compressed = (flags & PARTIAL_FLAG_COMPRESSED) != 0;
-    partialCtx.flags = flags;
-    partialCtx.new_etag = newEtag;
-    partialCtx.x = rectX;
-    partialCtx.y = rectY;
-    partialCtx.width = rectW;
-    partialCtx.height = rectH;
-    partialCtx.expected_stream_size = expectedLogicalSize;
-    partialCtx.plane_size = planeBytes;
-    partialCtx.current_plane = 0xFF;
-    partialCtx.start_time = od_hal_uptime_ms();
-    imageWriteLogStart(expectedLogicalSize);
-
-    partial_prepare_panel_ram();
-    if (partialCtx.compressed) od_zlib_pump_reset(expectedLogicalSize);
-
-    // Process optional initial stream bytes before ACK
-    if (len > 17) {
-        uint16_t initLen = len - 17;
-        if (!partial_consume_bytes(data + 17, (uint32_t)initLen)) {
-            send_direct_write_nack(ctx, 0x76, OD_ERR_PARTIAL_STREAM, true);
-            return OD_CMD_NACK;
-        }
-    }
-
-    uint8_t ackResponse[] = {RESP_ACK, 0x76};
-    (void)od_cmd_reply(ctx, ackResponse, sizeof(ackResponse));
-    return OD_CMD_OK;
-}
-
-od_cmd_result_t handleDirectWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
-    // A pipe transfer (0x0080-0x0082) owns the panel session — and a pipe-partial
-    // one owns partialCtx. A stray legacy 0x71 must not feed that context out of
-    // band from the sliding-window seq accounting. Silent-discard mirrors how the
-    // pipe path treats frames after a fatal error.
-    if (pipeState.active) return OD_CMD_OK;   /* silent discard */
-    if (partialCtx.active) {
-        if (len == 0) return OD_CMD_OK;   /* silent discard */
-        if (!frameOwnsSession(ctx, "0x0071 (partial)")) return OD_CMD_OK;   /* silent discard */
-        imageWriteLogChunk(data, len);
-        if (!partial_consume_bytes(data, (uint32_t)len)) {
-            send_direct_write_nack(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true);
-            return OD_CMD_NACK;
-        }
-        imageWriteLogProgress(partialCtx.bytes_received, partialCtx.expected_stream_size);
-        uint8_t ackResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_DATA_ACK};
-        (void)od_cmd_reply(ctx, ackResponse, sizeof(ackResponse));
-        return OD_CMD_OK;
-    }
-    if (!directWriteActive || len == 0) return OD_CMD_OK;
-    if (!frameOwnsSession(ctx, "0x0071")) return OD_CMD_OK;
-    imageWriteLogChunk(data, len);
-    if (directWriteCompressed) {
-        if (!handleDirectWriteCompressedData(data, len)) {
-            cleanupDirectWriteState(true);
-            uint8_t errorResponse[] = {RESP_NACK, RESP_DIRECT_WRITE_DATA_ACK};
-            (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
-        } else {
-            directWriteCompressedReceived += len;
-            imageWriteLogProgress(directWriteBytesWritten, directWriteTotalBytes);
-            uint8_t ackResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_DATA_ACK};
-            (void)od_cmd_reply(ctx, ackResponse, sizeof(ackResponse));
-        }
-        return OD_CMD_OK;
-    }
-    uint32_t remainingBytes = (directWriteBytesWritten < directWriteTotalBytes) ? (directWriteTotalBytes - directWriteBytesWritten) : 0;
-    uint16_t bytesToWrite = (len > remainingBytes) ? remainingBytes : len;
-    if (bytesToWrite > 0) {
-#if defined(OPENDISPLAY_FASTEPD)
-        if (fastepd_driver_used()) {
-            fastepd_direct_write_chunk(data, bytesToWrite);
-            directWriteBytesWritten += bytesToWrite;
-        } else
-#endif
-        if (directWriteBitplanes) {
-            streamControllerPlaneBytes(data, bytesToWrite);
-        } else {
-            directWriteSinkBytes(data, bytesToWrite);
-        }
-    }
-    imageWriteLogProgress(directWriteBytesWritten, directWriteTotalBytes);
-    if (directWriteBytesWritten >= directWriteTotalBytes) {
-        /* AUTO-COMPLETE: the last data frame finishes the transfer and calls END itself, which is
-         * why 0x71 reserves TWO -- the data ack is NOT sent on this branch, but END emits its own
-         * ack and then a refresh status. Its verdict is this frame's verdict. */
-        return handleDirectWriteEnd(ctx, nullptr, 0);
-    } else {
-        uint8_t ackResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_DATA_ACK};
-        (void)od_cmd_reply(ctx, ackResponse, sizeof(ackResponse));
-    }
-    return OD_CMD_OK;
-}
-
-od_cmd_result_t handleDirectWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
-    // Same guard as handleDirectWriteData: a stray legacy 0x72 mid-pipe must not
-    // finalize/refresh a pipe-owned session (partial would commit new_etag==0 and
-    // leave pipeState zombied; full-frame would refresh with pipeState still active).
-    if (pipeState.active) return OD_CMD_OK;   /* silent discard */
-    if ((directWriteActive || partialCtx.active) && !frameOwnsSession(ctx, "0x0072")) return OD_CMD_OK;   /* silent discard */
-    if (partialCtx.active) {
-        if (data != nullptr && len > 1) {
-            send_direct_write_nack(ctx, RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true);
-            return OD_CMD_NACK;
-        }
-        if (partialCtx.compressed) {
-            if (partialCtx.bytes_received == 0 || !zlib_stream_to_partial_write(nullptr, 0, true)) {
-                send_direct_write_nack(ctx, RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true);
-                return OD_CMD_NACK;
-            }
-        } else if (partialCtx.bytes_written != partialCtx.expected_stream_size) {
-            send_direct_write_nack(ctx, RESP_DIRECT_WRITE_END_ACK, OD_ERR_PARTIAL_STREAM, true);
-            return OD_CMD_NACK;
-        }
-        imageWriteLogFinish(partialCtx.bytes_received, partialCtx.expected_stream_size);
-        uint8_t ackResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_END_ACK};
-    /* THE ACK DECIDES WHETHER THE REFRESH HAPPENS. od_reply() can substitute a plaintext hard NACK
-     * for an END ack it could not seal, and it reports that rather than lying. Emitting the
-     * post-refresh status after such a substitution would queue a success behind a rejection; and
-     * refreshing at all would put content on the panel that the host has just been told was
-     * refused. Neither the wire nor the display may claim what the other denies, so both stop. */
-        if (od_cmd_reply(ctx, ackResponse, sizeof(ackResponse)) != OD_TXQ_OK) {
-            /* Clear the negotiated etag with the state, parity with send_direct_write_nack: the
-             * host was told this END failed, so it must not believe the device holds the new
-             * image. */
-            displayed_etag = 0;
-            cleanup_partial_write_state();
-            return OD_CMD_NACK;
-        }
-        int refreshMode = REFRESH_PARTIAL;
-        if (data != nullptr && len >= 1 && data[0] == REFRESH_FULL) refreshMode = REFRESH_FULL;
-        else if (data != nullptr && len >= 1 && data[0] == REFRESH_FAST) refreshMode = REFRESH_FAST;
-        od_cmd_flush_before_refresh();
-        bool refreshSuccess = partial_write_to_panel(refreshMode);
-        if (refreshSuccess) {
-            displayed_etag = partialCtx.new_etag;
-            uint8_t validatedResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_REFRESH_SUCCESS};
-            (void)od_cmd_reply(ctx, validatedResponse, sizeof(validatedResponse));
-        } else {
-            displayed_etag = 0;
-            uint8_t timeoutResponse[] = {RESP_ACK, RESP_DIRECT_WRITE_REFRESH_TIMEOUT};
-            (void)od_cmd_reply(ctx, timeoutResponse, sizeof(timeoutResponse));
-        }
-        cleanup_partial_write_state();
-        return OD_CMD_OK;
-    }
-    if (!directWriteActive) return OD_CMD_OK;   /* silent discard */
-    return directWriteFinishAndRefresh(ctx, data, len, 0x72);
-    return OD_CMD_OK;
-}
-
-// Shared finalize+refresh tail for a full-frame direct-write session. Emits the
-// END success ack {0x00,endOpcode} (0x72 legacy / 0x82 PIPE) or a NACK
+// PIPE full-frame finalize+refresh tail. Emits the END success ack {0x00,0x82} or a NACK
 // {0xFF,endOpcode} on compressed-flush/completeness failure, then refreshes the
 // panel and emits {0x00,0x73}/{0x00,0x74}. Caller guarantees directWriteActive.
 static od_cmd_result_t directWriteFinishAndRefresh(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len, uint8_t endOpcode) {
@@ -2274,9 +2233,8 @@ static od_cmd_result_t directWriteFinishAndRefresh(const od_cmd_ctx_t *ctx, uint
     if (od_cmd_reply(ctx, ackResponse, sizeof(ackResponse)) != OD_TXQ_OK) {
         /* A hard NACK is already on the wire in place of this ack. Returning without clearing the
          * direct-write session would leave the device mid-transfer -- panel powered, touch
-         * suspended -- for a transfer the host has abandoned. This helper serves 0x76 as well as
-         * PIPE auto-complete, so it cleans the full-frame session it owns and touches no
-         * pipeState; the PIPE caller aborts its own. */
+         * suspended -- for a transfer the host has abandoned. It cleans the full-frame hardware
+         * and touches no pipeState; the PIPE caller aborts its own protocol state. */
         cleanupDirectWriteState(true);
         return OD_CMD_NACK;
     }
@@ -2338,9 +2296,8 @@ static od_cmd_result_t directWriteFinishAndRefresh(const od_cmd_ctx_t *ctx, uint
 
 // ===========================================================================
 // PIPE_WRITE (0x0080-0x0082): sliding-window image transfer with QUIC-style SACK.
-// Reuses the direct-write session machinery (directWriteComputeGeometry /
-// directWriteActivatePanel / pipeConsumePayload -> bbepWriteData / zlib) so the
-// legacy 0x70/0x71/0x72 path is untouched. Out-of-order frames are held in a
+// Reuses the target full/partial hardware machinery until Phase 3 moves PIPE onto
+// od_xfer. Out-of-order frames are held in a
 // 33-slot reorder queue while the controller stream pauses at a hole.
 //
 // PARTIAL-REGION mode (PIPE_FLAG_PARTIAL, flags bit1): a single-rectangle partial
@@ -2398,12 +2355,12 @@ bool pipeWriteActive(void) { return pipeState.active; }
 // task. That predicate is read cross-task; it keeps precisely the field reads it
 // has always made.
 bool transferActive(void) {
-    return directWriteActive || partialCtx.active ||
+    return od_xfer_active() || directWriteActive || partialCtx.active ||
            (pipeState.active && !pipeState.error);
 }
 
 static bool imageWriteFramesMayStillArrive(void) {
-    return directWriteActive || partialCtx.active || pipeState.active;
+    return od_xfer_active() || directWriteActive || partialCtx.active || pipeState.active;
 }
 
 // A chunk c is "received" for ACK purposes if it was accepted in-order (lies just
@@ -2496,8 +2453,8 @@ static void sendPipeNack(const od_cmd_ctx_t *ctx, uint8_t err) {
     (void)od_cmd_reply_plain(ctx, r, sizeof(r)); /* {RESP_NACK,0x81,..} -- a hard NACK */
     pipeState.error = true;
     // Partial transfers own partialCtx, not the full-frame direct-write session:
-    // clear the negotiated etag (any partial NACK invalidates it, parity with
-    // send_direct_write_nack) and power the panel down via the partial cleanup.
+    // any partial NACK invalidates the negotiated etag and powers the panel down
+    // through the partial cleanup.
     if (pipeState.partial) {
         displayed_etag = 0;
         cleanup_partial_write_state();
@@ -2524,8 +2481,8 @@ static void pipeUpdateHighestSeen(uint8_t seq) {
     if (fwd != 0 && fwd <= PIPE_ACK_MASK_BITS) pipeState.highest_seen = seq;
 }
 
-// Feed one DATA payload to the panel controller through the SAME machinery the
-// legacy 0x71 path uses. Returns false on any write/decompress/overflow failure.
+// Feed one DATA payload to the target PIPE hardware. Returns false on any
+// write/decompress/overflow failure.
 static bool pipeConsumePayload(uint8_t* data, uint16_t len) {
     if (len == 0) return true;
     imageWriteLogChunk(data, len);
@@ -2565,8 +2522,9 @@ static bool pipeConsumePayload(uint8_t* data, uint16_t len) {
 
 od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
     sessionOrigin = ctx->rp.origin;
-    // A new START aborts any in-flight transfer of any family and resets pipe state
-    // (mirrors legacy START). Reset happens up-front so even a malformed START is safe.
+    // A new START aborts any in-flight transfer of any family. Reset happens up-front
+    // so even a malformed START cannot leave two owners of the singleton inflater.
+    if (od_xfer_active()) od_xfer_reset();
     if (partialCtx.active) cleanup_partial_write_state();
     if (directWriteActive) cleanupDirectWriteState(false);
     resetPipeWriteState();
@@ -2609,8 +2567,8 @@ od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uin
         rectH = ext.h;
 
         // Partial validations (plan 1.2, order 5-7). All precede any hardware touch; any
-        // failure clears displayed_etag for parity with send_direct_write_nack. These are
-        // the same checks the 0x76 handler runs (bpp, etag, bounds, alignment).
+        // failure clears displayed_etag, matching shared 0x76 policy. These are the same
+        // checks shared 0x76 applies (bpp, etag, bounds, alignment).
         uint16_t dispW = globalConfig.displays[0].pixel_width;
         uint16_t dispH = globalConfig.displays[0].pixel_height;
         // 5: partial uses two 1bpp planes (old+new). FastEPD IT8951 accepts that stream
@@ -2638,8 +2596,7 @@ od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uin
     if (partial) {
         planeBytes = mono_plane_bytes(rectW, rectH);
         if (planeBytes == 0 || total_size != planeBytes * 2u) {
-            // Plan 1.2: every partial-request NACK at steps 5-8 clears the etag
-            // (parity with send_direct_write_nack).
+            // Plan 1.2: every partial-request NACK at steps 5-8 clears the etag.
             displayed_etag = 0; sendPipeStartNack(ctx, OD_ERR_PIPE_START_SIZE_MISMATCH); return OD_CMD_NACK;
         }
     } else {
@@ -2727,7 +2684,7 @@ od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uin
         return OD_CMD_OK;
     }
 
-    // Bring up the full-frame session exactly like legacy START (touch suspend, panel prep).
+    // Bring up the full-frame PIPE hardware (touch suspend, panel prep).
     imageWriteLogReset();
     touchSuspendForEpdRefresh();
     directWriteTouchSuspended = true;
@@ -2774,8 +2731,8 @@ od_cmd_result_t handlePipeWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint
             if (pipeState.frames_since_ack < 0xFF) pipeState.frames_since_ack++;
         }
         if (pipeState.queued_count == 0) pipeState.gap_open = false;
-        // Auto-complete (uncompressed FULL-FRAME only, mirrors legacy handleDirectWriteData
-        // auto-finish). The shared helper emits the single unsolicited {0x00,0x82} END ack then
+        // Auto-complete applies to uncompressed full-frame PIPE only. The helper emits the
+        // single unsolicited {0x00,0x82} END ack then
         // refreshes with a FULL waveform. MUST be gated on !partial: a partial transfer never
         // touches directWrite* (both are 0), so 0>=0 would false-fire a FULL refresh on the very
         // first frame — partial transfers complete only on the explicit 0x0082 END (plan 1.5).
@@ -3217,7 +3174,8 @@ static bool partial_trigger_refresh(int refreshMode) {
     return waitforrefresh(60);
 }
 
-static void partial_prepare_panel_ram(void) {
+static void partial_prepare_panel_ram_for(uint16_t x, uint16_t y, uint16_t width,
+                                          uint16_t height) {
     // Delta in ms since function entry, to profile where prep wall-clock goes.
     uint32_t t0 = od_hal_uptime_ms();
     od_log_debug("[+%ums] EPD partial start: acquire panel session", (unsigned)(od_hal_uptime_ms() - t0));
@@ -3227,7 +3185,7 @@ static void partial_prepare_panel_ram(void) {
     od_log_debug("[+%ums] after epdSessionAcquire (%s)", (unsigned)(od_hal_uptime_ms() - t0), cold ? "cold" : "warm");
 #if defined(OPENDISPLAY_FASTEPD)
     if (fastepd_driver_used()) {
-        fastepd_partial_prepare(partialCtx.x, partialCtx.y, partialCtx.width, partialCtx.height);
+        fastepd_partial_prepare(x, y, width, height);
         od_log_debug("[+%ums] FastEPD partial prepare done", (unsigned)(od_hal_uptime_ms() - t0));
         return;
     }
@@ -3237,9 +3195,9 @@ static void partial_prepare_panel_ram(void) {
     // enforced plane_size*2 stream overwrites 100% of both planes, so there is no
     // "outside the rect" to protect — provably safe to skip even on a cold panel
     // (Phase 1 skip condition 1). Sub-rects still fill.
-    bool fullFrame = partialCtx.x == 0 && partialCtx.y == 0 &&
-                     partialCtx.width  == globalConfig.displays[0].pixel_width &&
-                     partialCtx.height == globalConfig.displays[0].pixel_height;
+    bool fullFrame = x == 0 && y == 0 &&
+                     width == globalConfig.displays[0].pixel_width &&
+                     height == globalConfig.displays[0].pixel_height;
     if (!fullFrame) {
         bbepFill(&bbep, BBEP_WHITE, PLANE_1);
         bbepFill(&bbep, BBEP_WHITE, PLANE_0);
@@ -3249,11 +3207,15 @@ static void partial_prepare_panel_ram(void) {
     }
 }
 
-static bool partial_write_to_panel(int refreshMode) {
-    od_log_info("EPD refresh: PARTIAL (raw rect %u,%u %ux%u)",
-                partialCtx.x, partialCtx.y, partialCtx.width, partialCtx.height);
+static void partial_prepare_panel_ram(void) {
+    partial_prepare_panel_ram_for(partialCtx.x, partialCtx.y,
+                                  partialCtx.width, partialCtx.height);
+}
 
-    if (partialCtx.bytes_written != partialCtx.expected_stream_size) return false;
+static bool partial_refresh_for(uint16_t x, uint16_t y, uint16_t width, uint16_t height,
+                                int refreshMode) {
+    od_log_info("EPD refresh: PARTIAL (raw rect %u,%u %ux%u)",
+                x, y, width, height);
     epdRefreshInProgress = true;
     bool refreshSuccess = false;
 #if defined(OPENDISPLAY_FASTEPD)
@@ -3273,6 +3235,12 @@ static bool partial_write_to_panel(int refreshMode) {
     return refreshSuccess;
 }
 
+static bool partial_write_to_panel(int refreshMode) {
+    if (partialCtx.bytes_written != partialCtx.expected_stream_size) return false;
+    return partial_refresh_for(partialCtx.x, partialCtx.y,
+                               partialCtx.width, partialCtx.height, refreshMode);
+}
+
 static uint32_t mono_plane_bytes(uint16_t width, uint16_t height) {
     od_color_geometry_t geometry;
     return od_color_direct_geometry(OD_COLOR_SCHEME_MONO, width, height, &geometry) == OD_COLOR_OK
@@ -3282,16 +3250,6 @@ static uint32_t mono_plane_bytes(uint16_t width, uint16_t height) {
 static uint32_t parse_be_u32(const uint8_t* data) {
     return ((uint32_t)data[0] << 24) | ((uint32_t)data[1] << 16) |
            ((uint32_t)data[2] << 8)  |  (uint32_t)data[3];
-}
-
-static void send_direct_write_nack(const od_cmd_ctx_t *ctx, uint8_t opcode, uint8_t error, bool cleanupState) {
-    displayed_etag = 0;
-    if (cleanupState) {
-        if (partialCtx.active) cleanup_partial_write_state();
-        else cleanupDirectWriteState(false);
-    }
-    uint8_t errResponse[] = {RESP_NACK, opcode, error, 0x00};
-    (void)od_cmd_reply_plain(ctx, errResponse, sizeof(errResponse));
 }
 
 // See display_service.h for why this exists rather than main.cpp calling SPI.end() itself.

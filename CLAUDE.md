@@ -35,14 +35,15 @@ looks arbitrary and is not); delete the story.
 
 ## Status
 
-- **Two HARDWARE-VERIFIED targets.** `targets/esp32-idf/` — 11 board configurations build, with
+- **Two broadly HARDWARE-VERIFIED targets, plus scoped Phase 1 clearance on every target family.**
+  `targets/esp32-idf/` — 11 board configurations build, with
   hardware verification on an ESP32-S3. And
   `targets/nordic-zephyr/` **as of 2026-08-14, extended 2026-08-15, on the `xiao_nrf52840` board
   only**: image upload, config write + reload and host-side MSD decode, then MIGRATION.md's full
-  Gate 2 including the encrypted/authenticated path, all exercised on a flashed device. Its other
-  two boards (`xiao_nrf54l15`, `xiao_nrf54lm20a`) still build clean but have NOT been flashed, so
-  the target is verified, the L15 is not. `efr32bg22-slc` builds headless
-  (`./build-and-flash.sh --no-flash`) and has never been flashed.
+  Gate 2 including the encrypted/authenticated path, all exercised on a flashed device. Transfer
+  Phase 1's pump matrix was marked cleared on 2026-08-18 for ESP32 tinfl/portable profiles, the
+  nRF54 class, `xiao_nrf52840` and BG22. The broader nRF54-board and BG22 migration matrices remain
+  open; scoped pump clearance is not a complete target Gate 2 pass.
 - **THERE IS NO CI. `tools/check.sh` (repo root) is every gate this repo has, and nothing runs
   it but you.** Boundary greps, the C11 ownership ratchets, the host suite under gcc + clang, the
   same suite under ASan/UBSan, the pre-auth fuzz targets, the py-opendisplay wire corpus, and the
@@ -192,10 +193,10 @@ looks arbitrary and is not); delete the story.
   That upload only passed once BLE TX power was fixed — see `zephyr/CMakeLists.txt`
   `OD_TX_POWER_DBM`, which also records why Zephyr's `BT_CTLR_TX_PWR_*` Kconfig is inert under
   the SoftDevice Controller.
-  **CALLED, NOT YET FLASHED:** `od_advert` on `efr32bg22-slc` — with that, no open-coded MSD copy
+  **CALLED, NOT YET HARDWARE-EXERCISED:** `od_advert` on `efr32bg22-slc` — with that, no open-coded MSD copy
   is left on any target, and `tests/host/advert_test.c` holds the two encoders they shipped as the
   differential reference (do not "update" those to match the encoder).
-  **SOFTWARE CANDIDATE, NOT YET FLASHED on `efr32bg22-slc` (C13, 2026-08-17):** config parsing,
+  **C13 BROADER HARDWARE GATE OPEN on `efr32bg22-slc` (2026-08-17):** config parsing,
   config assembly, session, PSA/CRYPTOACC CCM, egress and dispatch now use the shared path. The
   NVM3 record and assembler overlay one 2,048-byte buffer while retaining the deployed 16-byte
   record header. The headless image links at 249,796 B flash and 32,284 B in the size tool's
@@ -203,7 +204,8 @@ looks arbitrary and is not); delete the story.
   0x2958 to 0x2d58, proving a 1,024 B non-heap static-RAM reduction. The target-production Silabs
   corpus runs the real BG22 command hooks against fake drivers and passes. A second production-source
   fault suite covers persistence ordering/failure, event pressure/deadlines, DIRECT END completion,
-  and NFC limits with 232 assertions; none of the C13 behavior is hardware-verified yet. The remaining
+  and NFC limits with 232 assertions. Phase 1 compressed direct is cleared, but the rest of C13's
+  behavior is not hardware-qualified. The remaining
   unpromoted protocol logic is **the transfer state machines** — direct, partial, PIPE and NFC,
   target-owned on purpose (C11 § 1) and now smaller, explicit inputs to their own promotions.
 - **C14 canonical portable inflater (2026-08-18):** `shared/core/od_zlib_inflate.{c,h}` is the
@@ -211,18 +213,18 @@ looks arbitrary and is not); delete the story.
   heap-window mode, obsolete headers, and placeholder compression directory are gone. The
   source is in the PURE tier; every target receives it through `shared/sources.cmake`, while ESP32
   Wi-Fi builds select tinfl through `od_inflate_app`. `tools/check.sh --targets` passed 16/0/0,
-  including all 11 ESP32 configurations, all three Nordic boards, and BG22. No C14 compressed-upload
-  hardware case has run; the four-device matrix remains in
-  `plans/PLAN_UZLIB_TO_SHARED_CORE_2026-08-17.md` §5.
-- **Transfer Phase 1 software candidate (2026-08-18):** `od_zlib_pump` is the single
+  including all 11 ESP32 configurations, all three Nordic boards, and BG22. Its compressed-upload
+  qualification is recorded through the Transfer Phase 1 hardware clearance below.
+- **Transfer Phase 1 cleared (2026-08-18):** `od_zlib_pump` is the single
   push/poll/finalization loop on all targets, with exact output accounting and a target-selected
   backend behind `od_inflate_app.h`. Callers retain the only decompression scratch buffer (2,048 B
   on the measured ESP32 tinfl profile, 256 B on Nordic/BG22), and link maps show one inflater
   history object per image. The host pump suite covers split input/output, back-references,
   truncation, checksum and size failures, reset, sink refusal and backend-count mismatch.
   `tools/check.sh --targets` passed 17/0/0 in review; BG22 remains at 32,284 B static RAM with
-  480 B headroom. **No compressed transfer through this pump has run on hardware**, so direct,
-  partial, PIPE and NFC promotion remains gated.
+  480 B headroom. The project marked all six pump rows cleared in
+  `docs/HARDWARE_VERIFICATION_CHECKLIST.md` on 2026-08-18, unblocking the Phase 2 direct/partial
+  per-target cutovers. Each cutover retains its own mandatory hardware gate.
 - `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel,crypto}`;
   `od_hal_crypto_random.c` is its own translation unit so a host test can compile the RNG arm
   without mbedTLS.

@@ -48,11 +48,6 @@ void readAXP2101Data();
 void powerDownAXP2101();
 void initDisplay();
 void writeTextAndFill(const char* text);
-od_cmd_result_t handleDirectWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
-od_cmd_result_t handleDirectWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
-// Consumes one direct-write compressed payload into the panel controller. Returns
-// false on overflow/decompress failure; the CALLER owns ACK/NACK emission.
-bool handleDirectWriteCompressedData(uint8_t* data, uint16_t len);
 void cleanupDirectWriteState(bool refreshDisplay);
 // PIPE_WRITE (0x0080-0x0082) sliding-window handlers + state reset.
 od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
@@ -65,7 +60,6 @@ bool pipeWriteActive(void);
 // "is the device busy" gates; test an individual flag only when the logic is
 // genuinely specific to that one transfer type.
 bool transferActive(void);
-od_cmd_result_t handleDirectWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 // True while an image push is mid-stream and the per-frame command/ack logging
 // should be suppressed (chunk 1 still logs in full; the meter covers the rest).
 bool imageWriteLogQuietCmd(void);
@@ -79,7 +73,6 @@ extern volatile bool epdRefreshInProgress;
  * engaged client the moment loop() resumes.
  */
 void endRefresh(void);
-od_cmd_result_t handlePartialWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
 // Both transfer watchdogs, together. They live beside the state they terminate
 // rather than in loop(): pipeState is reachable from main.cpp via
 // resetPipeWriteState(), so this is cohesion rather than necessity -- but keeping
@@ -99,9 +92,8 @@ void cleanupPartialWriteOnDisconnect(void);
  *
  * No-op when the FastEPD parallel driver owns the pins -- that path never took the SPI bus. */
 void displayReleaseSpiBus(void);
-// Origin of the transport that opened the in-flight transfer, recorded from that
-// frame's own reply context at START. A disconnect must only tear down a session
-// its own transport owns.
+// Origin used by the target watchdog to select the link it may drop. Shared legacy
+// transfers take it from od_xfer's owner; target PIPE uses its retained owner.
 od_origin_t transferSessionOrigin(void);
 int displayBootPlane(uint8_t colorScheme);
 int displayBootBitsPerPixel(uint8_t colorScheme);

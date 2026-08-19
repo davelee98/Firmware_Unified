@@ -27,6 +27,15 @@ bool od_xfer_owner(od_reply_t *out)
     return true;
 }
 
+bool od_xfer_started_ms(uint32_t *out)
+{
+    if (!od_xfer_active() || out == NULL) {
+        return false;
+    }
+    *out = s_xfer.started_ms;
+    return true;
+}
+
 bool od_xfer_owner_matches(const od_cmd_ctx_t *ctx)
 {
     return ctx != NULL && ctx->rp.origin == s_xfer.owner.origin && ctx->rp.tag == s_xfer.owner.tag;

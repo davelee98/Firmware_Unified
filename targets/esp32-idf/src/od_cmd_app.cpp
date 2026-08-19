@@ -16,6 +16,7 @@
 #include "device_control.h"
 #include "display_service.h"
 #include "od_dispatch.h"
+#include "od_xfer.h"
 
 #include "od_cmd_reply.h"
 #include "od_hal_time.h"
@@ -101,22 +102,22 @@ extern "C" od_cmd_result_t od_cmd_app_config_clear(const od_cmd_ctx_t *ctx, od_s
 
 extern "C" od_cmd_result_t od_cmd_app_direct_start(const od_cmd_ctx_t *ctx, od_span_t body)
 {
-    return handleDirectWriteStart(ctx, bytes(body), count(body));
+    return od_xfer_direct_start(ctx, body);
 }
 
 extern "C" od_cmd_result_t od_cmd_app_direct_data(const od_cmd_ctx_t *ctx, od_span_t body)
 {
-    return handleDirectWriteData(ctx, bytes(body), count(body));
+    return od_xfer_data(ctx, body);
 }
 
 extern "C" od_cmd_result_t od_cmd_app_direct_end(const od_cmd_ctx_t *ctx, od_span_t body)
 {
-    return handleDirectWriteEnd(ctx, bytes(body), count(body));
+    return od_xfer_end(ctx, body);
 }
 
 extern "C" od_cmd_result_t od_cmd_app_partial_start(const od_cmd_ctx_t *ctx, od_span_t body)
 {
-    return handlePartialWriteStart(ctx, bytes(body), count(body));
+    return od_xfer_partial_start(ctx, body);
 }
 
 /* ------------------------------------------------------------- NO PIPE ON LAN (review F5) ---

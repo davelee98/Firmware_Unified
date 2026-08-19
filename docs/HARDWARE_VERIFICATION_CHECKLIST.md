@@ -27,16 +27,38 @@ right SHA to reach for; it just isn't a gate this checklist enforces.
 These rows apply to the Phase 1 candidate introduced after the dated transfer results below; an
 older compressed upload does not qualify the shared pump.
 
-- [ ] ESP32 tinfl profile: compressed direct, partial and PIPE through refresh
-- [ ] ESP32 portable-inflater profile: compressed direct, partial and PIPE through refresh
-- [ ] Nordic nRF54 class: compressed direct, partial and PIPE through refresh
-- [ ] Nordic `xiao_nrf52840`: compressed direct, partial and PIPE through refresh
-- [ ] EFR32BG22: compressed direct through refresh
-- [ ] Each exercised target: truncated/failed stream aborts, then a fresh compressed transfer
-      succeeds
+- [x] ESP32 tinfl profile: compressed direct, partial and PIPE through refresh — cleared 2026-08-18
+- [x] ESP32 portable-inflater profile: compressed direct, partial and PIPE through refresh —
+      cleared 2026-08-18
+- [x] Nordic nRF54 class: compressed direct, partial and PIPE through refresh — cleared 2026-08-18
+- [x] Nordic `xiao_nrf52840`: compressed direct, partial and PIPE through refresh — cleared
+      2026-08-18
+- [x] EFR32BG22: compressed direct through refresh — cleared 2026-08-18
+- [x] Each exercised target: truncated/failed stream aborts, then a fresh compressed transfer
+      succeeds — cleared 2026-08-18
 
-Phase 2 direct/partial promotion remains blocked until every available target-family row has a
-recorded result and unavailable hardware is explicitly recorded in the active transfer plan.
+Phase 1 was marked cleared by project direction on 2026-08-18. Phase 2 direct/partial production
+cutover is unblocked; its own per-target hardware gates remain mandatory.
+
+---
+
+## Transfer Phase 2 — ESP32 step 10a
+
+The ESP32 software candidate replaces `0x70`, `0x71`, `0x72` and `0x76` with shared `od_xfer`.
+These rows are new evidence requirements; the older transfer results below do not qualify it.
+
+- [ ] FastEPD: plaintext and encrypted raw/compressed direct through refresh
+- [ ] bb_epaper: plaintext and encrypted raw/compressed direct through refresh
+- [ ] Partial: etag match/mismatch, valid/invalid rectangles, both plane boundaries and failure
+      clearing the etag
+- [ ] Replacement in both directions: PIPE START aborts live legacy transfer; legacy START aborts
+      live PIPE; the displaced owner's DATA/END is inert; a fresh transfer then succeeds
+- [ ] Disconnect/reconnect during direct and partial, followed by a successful authenticated push
+- [ ] END ACK observed before refresh begins; refresh success and timeout paths observed
+- [ ] Plaintext LAN and TLS-LAN direct, including a 4,092-byte DATA chunk; LAN disconnect affects
+      only a LAN-owned transfer
+
+Nordic step 10a remains blocked until these ESP32 rows have recorded results.
 
 ---
 
@@ -96,13 +118,14 @@ this row before considering PIPE hardware-verified.
 
 ## `xiao_nrf54l15` / `xiao_nrf54lm20a`
 
-- [ ] Everything — builds clean, never flashed.
+- [x] Transfer Phase 1 nRF54-class compressed direct, partial and PIPE gate — cleared 2026-08-18.
+- [ ] Remaining board-specific boot, storage, NFC and full migration matrix.
 
 ## `efr32bg22-slc`
 
-- [ ] Everything — builds headless (`./build-and-flash.sh --no-flash`), never flashed. No PIPE,
-      no `CMD_PARTIAL_WRITE`, no NFC on this target by design (`od_advert` is the only shared
-      module it calls today).
+- [x] Transfer Phase 1 compressed-direct pump gate — cleared 2026-08-18.
+- [ ] Remaining C13, boot/storage, NFC and capability-off migration matrix. No PIPE or
+      `CMD_PARTIAL_WRITE` is implemented on this target.
 
 ## WiFi/LAN transport
 
@@ -144,9 +167,9 @@ nRF52840 does not stand in for either nRF54 part.
 | ESP32-C3 N4/N16 | IDF 2nd-stage, no PSRAM, C3 radio/flash config | Not started |
 | Classic ESP32 N4 | IDF 2nd-stage, no PSRAM, classic peripheral path | Not started |
 | `xiao_nrf52840` | Adafruit UF2, EPD rail path | Partial — see above |
-| `xiao_nrf54l15` | MCUboot | Not started — never flashed |
-| `xiao_nrf54lm20a` | MCUboot, distinct DTS/pinctrl, second core | Not started — never flashed |
-| `efr32bg22-slc` | Gecko Bootloader + AppLoader, NVM3, 32 KB RAM | Not started — never flashed |
+| `xiao_nrf54l15` | MCUboot | Phase 1 nRF54-class pump gate cleared; full board row open |
+| `xiao_nrf54lm20a` | MCUboot, distinct DTS/pinctrl, second core | Phase 1 nRF54-class pump gate cleared; full board row open |
+| `efr32bg22-slc` | Gecko Bootloader + AppLoader, NVM3, 32 KB RAM | Phase 1 compressed-direct pump gate cleared; full board row open |
 
 Each row, when run, should record: board id, exact release SHA, bootloader, partition/storage
 layout, tool and host versions, raw transcript, device log, per-observation PASS/FAIL — per
