@@ -40,7 +40,10 @@ looks arbitrary and is not); delete the story.
   hardware verification on an ESP32-S3. And
   `targets/nordic-zephyr/` **as of 2026-08-14, extended 2026-08-15, on the `xiao_nrf52840` board
   only**: image upload, config write + reload and host-side MSD decode, then MIGRATION.md's full
-  Gate 2 including the encrypted/authenticated path, all exercised on a flashed device. Transfer
+  Gate 2 including the encrypted/authenticated path, all exercised on a flashed device, and
+  re-confirmed 2026-08-19 at post-Phase-2-step-11 HEAD (encrypted PIPE upload, config read,
+  config write with reload and reboot-persist, plus interrupted-transfer recovery after a
+  mid-PIPE BLE disconnect). Transfer
   Phase 1's pump matrix was marked cleared on 2026-08-18 for ESP32 tinfl/portable profiles, the
   nRF54 class, `xiao_nrf52840` and BG22. The broader nRF54-board and BG22 migration matrices remain
   open; scoped pump clearance is not a complete target Gate 2 pass.
@@ -71,11 +74,15 @@ looks arbitrary and is not); delete the story.
   C11 2026-08-16). **NOW HARDWARE-VERIFIED on `esp32-idf`** (`s3-n16r8-extuart-debug`,
   2026-08-17): PIPE upload, `CMD_PARTIAL_WRITE` (0x76), config read, and config write
   (write + reload-after-write confirmed) all completed, each run twice — once plaintext,
-  once under `od_session` encryption. **Nordic partially verified too**
-  (`xiao_nrf52840`, PROFILE=debug, 2026-08-17): an encrypted PIPE upload completed and the
-  panel displayed the image correctly — `CMD_PARTIAL_WRITE`, config read and config write
-  have not yet been run through this shared stack on Nordic, and plaintext PIPE was not
-  separately confirmed there. `od_txq` is egress (capacity a counter,
+  once under `od_session` encryption. **Nordic verified too**
+  (`xiao_nrf52840`, PROFILE=debug, 2026-08-17, extended 2026-08-19 at post-Phase-2-step-11 HEAD):
+  an encrypted PIPE upload completed with the panel displaying the image correctly, and config
+  read and config write both completed, the write reloading in place and persisting across a
+  reboot. A BLE disconnect mid-PIPE was also survived: the
+  reconnected client re-authenticated and pushed a fresh upload through refresh, so teardown
+  ordering, the disconnect reset path and one PSA key-replacement cycle are exercised.
+  `CMD_PARTIAL_WRITE` has not yet been run through this shared stack on Nordic, and plaintext
+  PIPE was not separately confirmed there. `od_txq` is egress (capacity a counter,
   ownership a generation-tagged token), `od_reply` chooses seal-or-plain **at the call site**
   instead of inferring it from response bytes, `od_gate` maps every `od_session` result to a wire
   action, `od_dispatch` owns the ordering AND the opcode map, `od_config_read` makes CONFIG_READ a
@@ -85,14 +92,18 @@ looks arbitrary and is not); delete the story.
   replay window — so a frame deferred after decrypting is a replay when re-offered. That is why
   `OD_FRAME_DEFERRED` is returnable only before decrypt.
 - **C11 (2026-08-16) retired the dispatch scaffolding. HARDWARE-VERIFIED on `esp32-idf`
-  (2026-08-17, see above); Nordic verified only for the PIPE path so far (see above).**
+  (2026-08-17, see above); Nordic verified for the PIPE and config paths (see above), with
+  `CMD_PARTIAL_WRITE` still open there.**
   - **The opcode map is `od_dispatch.c`'s, once.** Targets supply named per-command hooks
-    (`shared/core/od_cmd_app.h`); `od_cmd_dispatch()` is gone from both. Every target defines
-    every hook, so adding an opcode without every target stating its answer is a **link error** —
-    and that check immediately found a live C8 defect: **ESP32 had answered nothing to
-    `CMD_FIRMWARE_VERSION` since the cutover**, because the pre-gate arm moved into shared dispatch
-    and no target case was left behind it. That is the one command a client must be able to issue
-    before it can authenticate.
+    (`shared/core/od_cmd_app.h`); `od_cmd_dispatch()` is gone from both. Every target defines every
+    hook **still declared there**, so adding a target-owned opcode without every target stating its
+    answer is a **link error** — and that check immediately found a live C8 defect: **ESP32 had
+    answered nothing to `CMD_FIRMWARE_VERSION` since the cutover**, because the pre-gate arm moved
+    into shared dispatch and no target case was left behind it. That is the one command a client
+    must be able to issue before it can authenticate. A **promoted** opcode leaves that surface:
+    its row names the shared state machine directly and capability-off behaviour is compiled into
+    it, so the link-error enforcement covers the target-owned rows only.
+    `0x70`/`0x71`/`0x72`/`0x76` went that way in Phase 2 step 11; PIPE and NFC have not.
   - **One deliberate wire change:** Nordic `0x0052` now answers
     `{FF,52,OD_ERR_POWER_OFF_UNSUPPORTED,00}` instead of falling silent. It has no power latch, and
     silence left a host unable to tell that from firmware older than the command.
@@ -129,8 +140,8 @@ looks arbitrary and is not); delete the story.
   the ACL buffers too). Both queue depths are now derived from the target's own `PIPE_MAX_W + 2`
   and asserted where both constants are visible. HARDWARE-VERIFIED on `esp32-idf`
   (`s3-n16r8-extuart-debug`, 2026-08-17, via the PIPE/config run described above), and on
-  Nordic (`xiao_nrf52840`, 2026-08-17) for the PIPE traffic that ran through it — config
-  read/write and `CMD_PARTIAL_WRITE` have not exercised this ring on Nordic yet.
+  Nordic (`xiao_nrf52840`, 2026-08-17 for PIPE traffic, 2026-08-19 for config read and config
+  write) — `CMD_PARTIAL_WRITE` has not exercised this ring on Nordic yet.
   **`od_session` is CALLED ON BOTH `esp32-idf` AND `nordic-zephyr`, AND NOW
   HARDWARE-VERIFIED ON BOTH** (C5 2026-08-15, C6 2026-08-15; Gate 2 passed on the
   nRF52840 2026-08-15; `esp32-idf`/`s3-n16r8-extuart-debug` 2026-08-17 — PIPE upload,
@@ -149,10 +160,13 @@ looks arbitrary and is not); delete the story.
   **`esp32-idf` C5/C1/C8-C11 ARE NOW HARDWARE-VERIFIED** (2026-08-17, `s3-n16r8-extuart-debug`)
   — C5's swap, C1's mbedTLS CCM arm, and the C8-C11 shared dispatch/txq/reply/gate/config_read
   stack all ran real PIPE upload, `CMD_PARTIAL_WRITE`, config read and config write traffic,
-  plaintext and encrypted. **Nordic (`xiao_nrf52840`, 2026-08-17) now carries C8-C11 partially
-  hardware-verified too** — an encrypted PIPE upload completed through the shared stack and
-  the panel rendered correctly — but `CMD_PARTIAL_WRITE`, config read/write, and a plaintext
-  (unencrypted) run have not been exercised there yet. Two things that only
+  plaintext and encrypted. **Nordic (`xiao_nrf52840`, 2026-08-17 and 2026-08-19) now carries
+  C8-C11 hardware-verified for the same paths bar one** — an encrypted PIPE upload completed
+  through the shared stack with the panel rendering correctly, and config read and config write
+  completed at post-Phase-2-step-11 HEAD (reload-after-write and reboot-persist included), and a
+  mid-PIPE disconnect was followed by a successful
+  re-authenticated upload — but `CMD_PARTIAL_WRITE` and a plaintext (unencrypted) run have not
+  been exercised there yet. Two things that only
   hardware shows, and that neither run specifically exercised: the
   `diff == 0` replay fix and the exact inner-length check are the two behaviour changes
   (`DIVERGENCE_MATRIX` § 6.5-6.9) that can refuse a frame the old code accepted — this was a
@@ -227,17 +241,20 @@ looks arbitrary and is not); delete the story.
   `docs/HARDWARE_VERIFICATION_CHECKLIST.md` on 2026-08-18, unblocking the Phase 2 direct/partial
   per-target cutovers. Each cutover retains its own mandatory hardware gate.
 - **Transfer Phase 2 software candidates exist on ESP32, Nordic and BG22 (2026-08-19); none is
-  hardware-qualified.** The four legacy hooks are policy-free bridges to shared `od_xfer` while
-  dispatch remains on the temporary C11 hook surface until every target is cut over. ESP32 and
-  Nordic retain explicitly ratcheted target machinery still required by PIPE; either START
-  displaces the other owner before the singleton pump can be reset or pushed. BG22 has no PIPE, so
-  its cutover deletes the entire target-local direct parser, inflater loop, counters and reply
-  construction. Its adapter retains the 256-byte scratch buffer, capability-off `0x76` reply and
-  aborting two-second TX drain/completion barrier. Barrier recovery powers the panel off, resets
-  transport/session state without recursively resetting the active transfer and closes only the
-  issuing connection tag. The BG22 image is 250,292 B flash and 32,284 B static RAM: 944 B less
-  flash than the dormant candidate with RAM unchanged and 480 B headroom. Per-target evidence rows remain open in
-  `docs/HARDWARE_VERIFICATION_CHECKLIST.md`; implementation by project direction is not a pass.
+  hardware-qualified.** Dispatch routes `0x70`/`0x71`/`0x72`/`0x76` directly to shared `od_xfer`;
+  the four temporary target hooks are gone and their reservation budgets remain `1`/`2`/`2`/`1`.
+  ESP32 and Nordic retain explicitly ratcheted target machinery still required by PIPE; either
+  START displaces the other owner before the singleton pump can be reset or pushed. BG22 has no
+  PIPE, so its cutover deletes the entire target-local direct parser, inflater loop, counters and
+  reply construction. Its adapter retains the 256-byte scratch buffer, capability-off `0x76` reply
+  and aborting two-second TX drain/completion barrier. Barrier recovery powers the panel off,
+  resets transport/session state without recursively resetting the active transfer and closes only
+  the issuing connection tag. The BG22 image is 250,292 B flash and 32,284 B static RAM: 944 B less
+  flash than the dormant candidate with RAM unchanged and 480 B headroom. Per-target evidence rows
+  remain open in `docs/HARDWARE_VERIFICATION_CHECKLIST.md`; implementation by project direction is
+  not a pass. A `xiao_nrf52840` flash of this HEAD on 2026-08-19 completed an encrypted PIPE
+  upload plus config read and config write, so the promoted routing did not regress the PIPE and
+  command paths — it exercises none of the `0x70`/`0x71`/`0x72`/`0x76` rows, which stay open.
 - `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel,crypto}`;
   `od_hal_crypto_random.c` is its own translation unit so a host test can compile the RNG arm
   without mbedTLS.
@@ -273,13 +290,17 @@ looks arbitrary and is not); delete the story.
   run: C10 had silently replaced Nordic's oversize refusal `[FF][cmd_lo][FE]` — the bytes both
   donors ship — with `[00][cmd][FF]`, which is *also* the decrypt-failure answer, so a host could
   not tell the two apart. Restored, and pinned.
-  **TWO EXECUTABLES, and the difference is what a pass MEANS.** `od_cmd_app_*` is static link-time
-  composition, so two hook sets cannot share a binary — and the answer to that is not a runtime
-  registry. `dispatch_corpus_portable` proves shared dispatch routed and plumbed a vector;
-  `dispatch_corpus_nordic` links Nordic's production command code and proves the firmware emits
-  those bytes. A `historical-fixture` vector is excluded from the production profile by
-  construction, and a `target-production` vector that a capability predicate excludes there is a
-  FAILURE — its claim would otherwise stand with nothing behind it.
+  **THREE EXECUTABLES, and the difference is what a pass MEANS.** `od_cmd_app_*` is static
+  link-time composition, so hook sets cannot share a binary — and the answer to that is not a
+  runtime registry. `dispatch_corpus_portable` defines every routed entry point itself, so it
+  proves shared dispatch routed and plumbed a vector and nothing below that. The Nordic and Silabs
+  binaries link their target's production command code for target-owned opcodes and the real shared
+  `od_xfer` for `0x70`/`0x71`/`0x72`/`0x76`, over target-specific driver and `od_xfer_app` fakes.
+  A production pass therefore means firmware policy emitted those bytes; the fake supplies
+  hardware, not policy.
+  A `historical-fixture` vector is excluded from the production profile by construction, and a
+  `target-production` vector that a capability predicate excludes there is a FAILURE — its claim
+  would otherwise stand with nothing behind it.
   No fake ever sees an expected reply: the generated table is included by the runner and nothing
   else, and profiles get semantic knobs instead. That is what stops the corpus becoming its own
   oracle.
