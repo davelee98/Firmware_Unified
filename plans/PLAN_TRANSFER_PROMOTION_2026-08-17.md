@@ -38,6 +38,27 @@ version of this file. The detailed C14 and color plans remain the record of what
   production cutover remains blocked until the Phase 1 compressed direct, partial and PIPE results
   required by the hardware checklist are recorded.
 
+### Phase 2 shared-side checkpoint — 2026-08-18
+
+- On `feat/transfer-phase2`, steps 1-8 are implemented as dormant shared production code:
+  `od_xfer`, `od_xfer_direct`, `od_xfer_partial` and the `od_xfer_app` seam. Dispatch still routes
+  all four opcodes to the existing target hooks, and production reset/disconnect paths are
+  unchanged; step 10 has not begun.
+- The private singleton owns mode, immutable reply owner, timing and byte totals. DATA/END route
+  once on that mode. The write seam receives a non-empty span and its pre-write offset; short
+  consumption refuses the stream. The capability-off build retains only BG22's explicit partial
+  unsupported reply.
+- END behavior pins application-vs-plain replies, enqueue failure, target drain, recovery exactly
+  once, refresh and final status. A live-session host case proves the START ACK is sealed while its
+  hard NACK remains plaintext.
+- Host coverage includes raw truncation, START lengths 0..5, replacement, wrong-owner and empty
+  DATA, compressed inline input and truncation, partial validation/etag/plane offsets, short sink
+  consumption, both barrier failure positions, reset, ESP32 auto-END and the BG22 capability-off
+  ABI. The shared sources compile under both gcc and clang and under ASan/UBSan.
+- `tools/check.sh --targets` passes 18/0/0 with the complete shared-side candidate: gcc, clang,
+  ASan/UBSan, fuzz, the pinned Python wire corpus, all ESP32 configurations and sdkconfig
+  baseline, all three Nordic boards, and the BG22 headless build. No hardware result is claimed.
+
 ## 1. Reconciliation result
 
 The original plan had seven material conflicts with current `main`:
@@ -407,6 +428,7 @@ bool od_xfer_app_begin_partial(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                                uint32_t plane_bytes);
 #endif
 uint32_t od_xfer_app_write(uint32_t stream_offset, od_span_t data);
+od_mut_span_t od_xfer_app_inflate_scratch(void);
 void od_xfer_app_abort(void);
 od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *owner);
 void od_xfer_app_barrier_abort(const od_reply_t *owner);
@@ -432,6 +454,10 @@ failure before any success reply.
 empty raw DATA body or when an inflate push produces no output; it applies the frozen command
 verdict and leaves accounting unchanged. Because every offered span is non-empty, a return of zero
 is unambiguously a sink refusal rather than successful consumption of an empty write.
+
+`od_xfer_app_inflate_scratch()` lends the target's one existing bounded output buffer to
+`od_zlib_pump`; shared state neither owns nor duplicates it. ESP32 retains its selected 2,048-byte
+profile and Nordic/BG22 retain 256 bytes.
 
 The END sequence is explicit:
 

@@ -248,7 +248,9 @@ endif()
 # Board defines from boards/<board>.cmake. These are the surviving half of the source repo's
 # build_flags: the -D flags that are genuinely application configuration, as opposed to the
 # Arduino/PlatformIO plumbing (ARDUINO_USB_*, board_build.*) which became sdkconfig instead.
-target_compile_definitions(${COMPONENT_LIB} PRIVATE ${OD_BOARD_DEFINES})
+target_compile_definitions(${COMPONENT_LIB} PRIVATE
+    ${OD_BOARD_DEFINES}
+    OD_XFER_DIRECT_AUTO_END=1)
 
 # FastEPD selects its IO backend with `#ifdef ARDUINO / #elif defined(__LINUX__)`. Under IDF
 # NEITHER was defined, so every it8951 transport function in FastEPD.inl compiled to an EMPTY

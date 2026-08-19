@@ -25,6 +25,10 @@
 #define OD_CAP_DUAL_CS 1
 #endif
 
+#ifndef OD_XFER_DIRECT_AUTO_END
+#define OD_XFER_DIRECT_AUTO_END 0
+#endif
+
 #if (OD_CAP_PIPE != 0) && (OD_CAP_PIPE != 1)
 #error "OD_CAP_PIPE must be 0 or 1"
 #endif
@@ -36,6 +40,9 @@
 #endif
 #if (OD_CAP_DUAL_CS != 0) && (OD_CAP_DUAL_CS != 1)
 #error "OD_CAP_DUAL_CS must be 0 or 1"
+#endif
+#if (OD_XFER_DIRECT_AUTO_END != 0) && (OD_XFER_DIRECT_AUTO_END != 1)
+#error "OD_XFER_DIRECT_AUTO_END must be 0 or 1"
 #endif
 
 #endif /* OD_CAPS_H */

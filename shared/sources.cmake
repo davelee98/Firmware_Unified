@@ -165,6 +165,15 @@ set(OD_SHARED_SOURCES_APP_INFLATE
     "${CMAKE_CURRENT_LIST_DIR}/core/od_zlib_pump.c"
 )
 
+# APP_XFER is the portable legacy direct/partial command machine. It calls the target's
+# od_xfer_app seam for panel writes, refresh and recovery, and reuses APP_INFLATE for compressed
+# streams. Targets may compile this tier before routing production opcodes to it.
+set(OD_SHARED_SOURCES_APP_XFER
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_xfer.c"
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_xfer_direct.c"
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_xfer_partial.c"
+)
+
 set(OD_SHARED_SOURCES_HAL_WDT
     "${CMAKE_CURRENT_LIST_DIR}/core/od_watchdog.c"
 )
@@ -180,6 +189,7 @@ set(OD_SHARED_SOURCES
     ${OD_SHARED_SOURCES_APP_RXQ}
     ${OD_SHARED_SOURCES_APP_BOOT}
     ${OD_SHARED_SOURCES_APP_INFLATE}
+    ${OD_SHARED_SOURCES_APP_XFER}
     ${OD_SHARED_SOURCES_HAL_WDT}
 )
 
