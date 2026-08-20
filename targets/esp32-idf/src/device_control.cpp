@@ -13,6 +13,7 @@ void enterDeepSleep(bool force = false, uint16_t overrideSleepSeconds = 0);
 #include "od_hal_adc.h"
 #include "od_hal_gpio.h"
 #include "od_hal_time.h"
+#include "od_hal_sleep.h"
 #include "od_txq.h"
 #include "wifi_service.h"      // OPENDISPLAY_HAS_WIFI + opendisplay_lan_teardown()
 

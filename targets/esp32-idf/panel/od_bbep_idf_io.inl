@@ -57,7 +57,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 
-#include "od_hal_time.h"
+#include "od_hal_sleep.h"
 
 /* Arduino spellings bb_ep.inl uses. Guarded: this file is never compiled together with
  * compat/arduino_compat.h today, but a future TU that includes both must not fail on a

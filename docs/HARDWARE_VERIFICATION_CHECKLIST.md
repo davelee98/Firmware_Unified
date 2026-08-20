@@ -22,6 +22,18 @@ right SHA to reach for; it just isn't a gate this checklist enforces.
 
 ---
 
+## Shared time HAL Phase 1
+
+- [ ] ESP32: exercise the D-FF clock path and verify the retained 50 us setup/hold timing.
+- [ ] Nordic: exercise the `bb_epaper` busy-wait path on each available board class after the
+      shared-name migration.
+- [ ] EFR32BG22: compare `od_hal_uptime_ms()` with a known hardware interval. Production currently
+      has no caller and section GC removes the adapter, so use a temporary instrumented build or
+      defer this row until the first linked consumer; an unchanged production image cannot qualify
+      it.
+
+---
+
 ## Transfer Phase 1 — shared `od_zlib_pump`
 
 These rows apply to the Phase 1 candidate introduced after the dated transfer results below; an

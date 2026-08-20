@@ -3,6 +3,7 @@
 #include "od_cmd_reply.h"
 
 #include "od_hal_time.h"
+#include "od_hal_sleep.h"
 #include "od_reply.h"
 #include "od_watchdog_app.h"
 

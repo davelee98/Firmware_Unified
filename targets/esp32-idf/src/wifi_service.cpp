@@ -11,6 +11,7 @@
 #include "ble_transport.h"
 #include "link_owner.h"
 #include "od_hal_time.h"
+#include "od_hal_sleep.h"
 #include <errno.h>
 #include <mdns.h>
 #include <esp_err.h>

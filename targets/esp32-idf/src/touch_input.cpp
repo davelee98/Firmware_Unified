@@ -5,6 +5,7 @@
 #include "od_hal_gpio.h"
 #include "od_hal_i2c.h"
 #include "od_hal_time.h"
+#include "od_hal_sleep.h"
 #include <string.h>
 
 #include "esp_attr.h"      // IRAM_ATTR -- an IDF macro that arrived via <Arduino.h>

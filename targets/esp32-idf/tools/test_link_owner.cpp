@@ -4,7 +4,7 @@
 // backslash inside a // comment is itself a line continuation and -Wcomment
 // rejects it):
 //
-//   g++ -std=c++17 -Wall -Wextra -Werror -O1 -fsanitize=undefined,address -I tools/hostshim tools/test_link_owner.cpp src/link_owner.cpp -o /tmp/test_link_owner -pthread
+//   g++ -std=c++17 -Wall -Wextra -Werror -O1 -fsanitize=undefined,address -I tools/hostshim -I ../../shared/hal tools/test_link_owner.cpp src/link_owner.cpp -o /tmp/test_link_owner -pthread
 //   /tmp/test_link_owner
 //
 // Like tools/test_nonce_window.cpp, this is as much a written-down statement of
@@ -31,6 +31,11 @@
 #include <vector>
 
 volatile uint32_t od_test_millis = 0;
+
+extern "C" uint32_t od_hal_uptime_ms(void)
+{
+    return __atomic_load_n(&od_test_millis, __ATOMIC_RELAXED);
+}
 
 // --- tiny harness ------------------------------------------------------------
 static int g_checks = 0;

@@ -17,6 +17,7 @@
 #define NRF54_ZEPHYR_IO_INL
 
 #include "od_gpio.h"
+#include "od_hal_time.h"
 #include "od_zephyr_compat.h"
 #include "od_log.h"
 
@@ -112,12 +113,12 @@ void delayMicroseconds(long us)
 		od_msleep((int32_t)(us / 1000L));
 		return;
 	}
-	od_busy_wait((uint32_t)us);
+	od_hal_delay_us((uint32_t)us);
 }
 
 long millis(void)
 {
-	return (long)od_uptime_get_32();
+	return (long)od_hal_uptime_ms();
 }
 
 /* ------------------------------------------------------- cs_mode (bb_epaper 5dccfbb) ---

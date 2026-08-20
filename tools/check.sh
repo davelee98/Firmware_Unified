@@ -155,6 +155,58 @@ session_constant_time() {
 }
 check "shared boundary: od_session uses no memcmp"  session_constant_time
 
+# od_hal_time is the two-function ambient/busy-wait seam. Millisecond sleep stays private until
+# ESP32's unsigned round-up contract is reconciled with Nordic's signed k_msleep contract, and the
+# BG22 wrapper must convert the SDK's extended tick count before narrowing to uint32_t milliseconds.
+time_hal_structure() {
+    local rc=0 hits
+
+    hits=$(find targets -name od_hal_time.h \
+           ! -path '*/build/*' ! -path '*/build-*/*' -print 2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "target-local od_hal_time.h shadows shared/hal/od_hal_time.h"
+        rc=1
+    fi
+
+    hits=$(grep -rInE '\b(od_uptime_get_32|od_busy_wait)[[:space:]]*\(' \
+           --exclude-dir='build*' targets/nordic-zephyr 2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "retired Nordic time wrapper returned"
+        rc=1
+    fi
+
+    if grep -qE '^[[:space:]]*void[[:space:]]+od_hal_delay_ms[[:space:]]*\(' \
+            shared/hal/od_hal_time.h; then
+        echo "bounded millisecond sleep entered the shared time HAL without its contract decision"
+        rc=1
+    fi
+    if ! grep -qE '^uint32_t od_hal_uptime_ms\(void\);' shared/hal/od_hal_time.h ||
+       ! grep -qE '^void od_hal_delay_us\(uint32_t us\);' shared/hal/od_hal_time.h; then
+        echo "shared time HAL declaration drifted"
+        rc=1
+    fi
+    if ! grep -qE '\bod_hal_delay_ms[[:space:]]*\(' targets/esp32-idf/hal/od_hal_sleep.h; then
+        echo "ESP32 private millisecond-sleep declaration is missing"
+        rc=1
+    fi
+
+    if ! grep -q 'sl_sleeptimer_get_tick_count64()' targets/efr32bg22-slc/od_hal_time.c ||
+       ! grep -q 'sl_sleeptimer_tick64_to_ms' targets/efr32bg22-slc/od_hal_time.c; then
+        echo "BG22 uptime must convert the 64-bit tick count before narrowing"
+        rc=1
+    fi
+    if grep -qE 'sl_sleeptimer_tick_to_ms|sl_sleeptimer_get_tick_count\(' \
+            targets/efr32bg22-slc/od_hal_time.c; then
+        echo "BG22 time HAL reintroduced the 32-bit tick-domain clock"
+        rc=1
+    fi
+
+    return "$rc"
+}
+check "structure: shared time HAL" time_hal_structure
+
 # ARCHITECTURE, RATCHETED BY SYMBOL. Each name below is one whose ABSENCE is the property: a
 # second opcode map, an implicit frame context, an exported session singleton. Grepping for them
 # is crude but it is what stops a well-meaning "just for now" reintroduction, and unlike a line

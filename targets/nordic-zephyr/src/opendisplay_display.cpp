@@ -15,6 +15,7 @@
 #include "od_board.h"
 #include "boot_screen.h"
 #include "od_gpio.h"
+#include "od_hal_time.h"
 #include "od_zephyr_compat.h"
 #include "od_watchdog_app.h"
 #include "bb_epaper.h"
@@ -94,7 +95,7 @@ static XferAppHardwareState s_xfer_app;
 
 static void dw_init_mark(const char *tag)
 {
-  uint32_t now = od_uptime_get_32();
+  uint32_t now = od_hal_uptime_ms();
   od_log_info("dw init %-26s %lu ms", tag, (unsigned long)(now - s_dw_init_t0));
 }
 
@@ -1229,12 +1230,12 @@ extern "C" void od_xfer_app_set_displayed_etag(uint32_t etag)
 
 extern "C" uint32_t od_xfer_app_now_ms(void)
 {
-  return od_uptime_get_32();
+  return od_hal_uptime_ms();
 }
 
 extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, uint16_t payload_len)
 {
-  s_dw_init_t0 = od_uptime_get_32();
+  s_dw_init_t0 = od_hal_uptime_ms();
   od_log_info("dw init begin");
 
   if (s_partial.active) {

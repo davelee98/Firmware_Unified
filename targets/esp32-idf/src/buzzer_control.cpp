@@ -3,6 +3,7 @@
 #include "structs.h"
 #include "od_hal_gpio.h"
 #include "od_hal_time.h"
+#include "od_hal_sleep.h"
 #include <string.h>
 
 extern struct od_config globalConfig;
