@@ -758,6 +758,74 @@ log_hal_structure() {
 }
 check "structure: shared logging ownership" log_hal_structure
 
+nordic_epd_spi_ownership() {
+    local rc=0 hits count
+    local adapter=targets/nordic-zephyr/panel/od_bbep_zephyr_io.inl
+    local backend=targets/nordic-zephyr/src/od_epd_spi_nrfx.c
+    local fallback=targets/nordic-zephyr/src/od_epd_spi_bitbang.c
+
+    hits=$(grep -nE '\bbb_spi_bitbang\b|od_gpio_write[[:space:]]*\([[:space:]]*pBBEP->i(CLK|MOSI)' \
+           "$adapter" || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "bb_epaper adapter regained a per-edge generic GPIO loop"
+        rc=1
+    fi
+
+    hits=$(grep -nE '\bod_(pin_decode|gpio_write)[[:space:]]*\(|\bgpio_pin_(set|configure)[[:space:]]*\(' \
+           "$fallback" || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "EPD fallback inner path must use pre-decoded nRF GPIO registers"
+        rc=1
+    fi
+
+    for selection in 'NRF_SPIM2' 'NRF_SPIM00' 'NRF_SPIM23'; do
+        count=$(grep -c "$selection" "$backend" || true)
+        if [ "$count" -lt 1 ]; then
+            echo "missing Nordic EPD SPIM selection: $selection"
+            rc=1
+        fi
+    done
+
+    count=$(grep -c '^CONFIG_NRFX_SPIM=y$' targets/nordic-zephyr/zephyr/prj.conf || true)
+    if [ "$count" -ne 1 ]; then
+        echo "common Nordic config must enable the nrfx SPIM family exactly once (found $count)"
+        rc=1
+    fi
+
+    if ! sed -n '/^&spi2 {/,/^};/p' \
+          targets/nordic-zephyr/zephyr/boards/xiao_ble_nrf52840.overlay \
+          | grep -q 'status = "disabled";'; then
+        echo "xiao_nrf52840: application-owned SPIM2 must remain disabled in devicetree"
+        rc=1
+    fi
+    if ! sed -n '/^&spi00 {/,/^};/p' \
+          targets/nordic-zephyr/zephyr/boards/xiao_nrf54l15_nrf54l15_cpuapp.overlay \
+          | grep -q 'status = "disabled";'; then
+        echo "xiao_nrf54l15: application-owned SPIM00 must remain disabled in devicetree"
+        rc=1
+    fi
+    for node in spi23 spi00; do
+        if ! sed -n "/^&${node} {/,/^};/p" \
+              targets/nordic-zephyr/zephyr/boards/xiao_nrf54lm20a_nrf54lm20a_cpuapp.overlay \
+              | grep -q 'status = "disabled";'; then
+            echo "xiao_nrf54lm20a: ${node} must remain disabled in devicetree"
+            rc=1
+        fi
+    done
+
+    if ! grep -q 'if(NOT OD_EPD_SPI_REQUIRE_SPIM)' targets/nordic-zephyr/zephyr/CMakeLists.txt ||
+       ! grep -q -- '-DOD_EPD_SPI_REQUIRE_SPIM=ON' targets/nordic-zephyr/build.sh ||
+       ! grep -q 'zephyr_get(OD_EPD_SPI_REQUIRE_SPIM)' targets/nordic-zephyr/zephyr/CMakeLists.txt; then
+        echo "OD_EPD_SPI_REQUIRE_SPIM must both omit fallback code and cross the sysbuild boundary"
+        rc=1
+    fi
+
+    return $rc
+}
+check "nordic: EPD SPI ownership" nordic_epd_spi_ownership
+
 # ================================================================================== host suites ==
 # The real boundary enforcement: shared/ compiled for the host at -std=c99 -Wall -Wextra -Werror
 # under BOTH compilers. A GNU-ism gcc accepts is a failure discovered later on a target instead.

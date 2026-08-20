@@ -137,6 +137,9 @@ fi
 if [[ "${OPENDISPLAY_FACTORY_CLEAR_CONFIG:-}" =~ ^(1|true|yes|on)$ ]]; then
   CMAKE_ARGS+=(-DFACTORY_CLEAR_CONFIG_ON_BOOT=ON)
 fi
+if [[ "${OD_EPD_SPI_REQUIRE_SPIM:-}" =~ ^(1|true|yes|on)$ ]]; then
+  CMAKE_ARGS+=(-DOD_EPD_SPI_REQUIRE_SPIM=ON)
+fi
 
 west build -p "${PURGE}" -d "${BUILD_DIR}" -b "${BOARD}" "${APP_DIR}" -- "${CMAKE_ARGS[@]}"
 

@@ -138,10 +138,9 @@
 };
 
 /*
- * The display is a GPIO bit-bang SPI on the OpenDisplay config pins. xiao_ble_common.dtsi
- * enables spi2 on the XIAO connector pads, and leaving a SPIM peripheral driving pads the
- * firmware also bit-bangs corrupts panel data — the same failure the nRF54 overlay disables
- * spi00 for. No firmware path uses the Zephyr SPI API.
+ * The application owns SPIM2 directly through nrfx so runtime configuration can select its
+ * SCK/MOSI pins. Keep the Zephyr SPI device disabled: status controls Zephyr device ownership,
+ * while CONFIG_NRFX_SPIM still compiles the generic nrfx driver used by the panel backend.
  */
 &spi2 {
 	status = "disabled";
@@ -221,7 +220,8 @@
  * Nothing needs uart0 here: the console is USB CDC ACM (see the .conf), and this board has no
  * on-board debug UART. spi2 was already disabled for the same class of reason (its SPIM_SCK
  * psel is P1.13, the panel SCK); its pinctrl is inert because the node is disabled, and the
- * same is now true of uart0's.
+ * same is now true of uart0's. SPIM2 remains disabled in devicetree because the application
+ * owns that peripheral directly through nrfx.
  *
  * IF A UART CONSOLE IS EVER WANTED ON THIS BOARD, it cannot use the default pins -- they are
  * the panel bus. Remap uart0's pinctrl to free pads first.

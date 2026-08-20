@@ -1,5 +1,5 @@
 //
-// bb_epaper I/O for nRF54 + Zephyr (OpenDisplay) -- bit-bang SPI only.
+// bb_epaper I/O for Nordic + Zephyr (OpenDisplay).
 //
 // TARGET-OWNED, NOT VENDORED. Imported from Firmware_NRF54's
 // third_party/bb_epaper/src/nrf54_zephyr_io.inl and moved here so that
@@ -17,6 +17,7 @@
 #define NRF54_ZEPHYR_IO_INL
 
 #include "od_gpio.h"
+#include "od_epd_spi.h"
 #include "od_hal_time.h"
 #include "od_zephyr_compat.h"
 #include "od_log.h"
@@ -41,37 +42,18 @@
 void bbepWakeUp(BBEPDISP *pBBEP);
 void bbepSendCMDSequence(BBEPDISP *pBBEP, const uint8_t *pSeq);
 
-static void bb_spi_bitbang(BBEPDISP *pBBEP, const uint8_t *pData, int iLen)
-{
-	for (int i = 0; i < iLen; i++) {
-		uint8_t uc = pData[i];
-		for (int j = 0; j < 8; j++) {
-			od_gpio_write(pBBEP->iCLKPin, false);
-			od_gpio_write(pBBEP->iMOSIPin, (uc & 0x80u) != 0u);
-			od_gpio_write(pBBEP->iCLKPin, true);
-			uc <<= 1;
-		}
-	}
-	od_gpio_write(pBBEP->iCLKPin, false);
-}
-
 static void bb_spi_write(BBEPDISP *pBBEP, const uint8_t *pData, int iLen)
 {
-	bb_spi_bitbang(pBBEP, pData, iLen);
+	(void)pBBEP;
+	if (iLen > 0) {
+		(void)od_epd_spi_write(pData, (size_t)iLen);
+	}
 }
 
 static void bb_spi_init(uint8_t mosi, uint8_t sck, uint32_t speed)
 {
-	uint8_t port;
-	uint8_t pin;
-
 	(void)speed;
-	if (od_pin_decode(mosi, &port, &pin)) {
-		od_gpio_configure_output(mosi, false);
-	}
-	if (od_pin_decode(sck, &port, &pin)) {
-		od_gpio_configure_output(sck, false);
-	}
+	(void)od_epd_spi_init(mosi, sck);
 }
 
 void digitalWrite(int iPin, int iState)
@@ -173,7 +155,9 @@ void bbepInitIO(BBEPDISP *pBBEP, uint8_t u8DC, uint8_t u8RST, uint8_t u8BUSY, ui
 		static const char *const names[6] = { "DC", "RST", "BUSY", "CS", "MOSI", "SCK" };
 		const uint8_t cfgs[6] = { u8DC, u8RST, u8BUSY, u8CS, u8MOSI, u8SCK };
 
-		od_log_debug("panel pins (speed=%u Hz):", (unsigned)u32Speed);
+		od_log_debug("panel pins (requested=%u Hz backend=%d actual=%u Hz):",
+			     (unsigned)u32Speed, (int)od_epd_spi_backend(),
+			     (unsigned)od_epd_spi_hz());
 		for (unsigned i = 0; i < 6u; i++) {
 			uint8_t port = 0;
 			uint8_t pin = 0;
