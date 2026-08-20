@@ -149,6 +149,7 @@ if(OD_DEBUG_BUILD)
 else()
   target_compile_definitions(app PRIVATE OD_LOG_LEVEL=OD_LOG_INFO)
 endif()
+target_compile_definitions(app PRIVATE OD_LOG_TEXT_MAX=253u OD_LOG_RAW_TEXT_MAX=255u)
 
 # Default BLE TX power in dBm, used when the stored config leaves PowerOption.tx_power at 0.
 #
@@ -210,7 +211,7 @@ target_sources(app PRIVATE
   ${SRC_DIR}/od_pin_codec.c
   ${SRC_DIR}/od_zephyr_time.c
   ${SRC_DIR}/newlib_stubs.c
-  ${SRC_DIR}/od_log.c
+  ${SRC_DIR}/od_hal_log.c
   ${SRC_DIR}/od_hal_wdt.c
   ${SRC_DIR}/od_hal_crypto.c
   ${SRC_DIR}/od_watchdog_app.c
@@ -268,7 +269,8 @@ target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE} ${OD_SHARED_SOURCES_HAL_CRY
                            ${OD_SHARED_SOURCES_HAL_WDT} ${OD_SHARED_SOURCES_APP_RXQ}
                            ${OD_SHARED_SOURCES_HAL_RADIO} ${OD_SHARED_SOURCES_APP_SESSION}
                            ${OD_SHARED_SOURCES_HAL_ADV} ${OD_SHARED_SOURCES_APP_BOOT}
-                           ${OD_SHARED_SOURCES_APP_INFLATE} ${OD_SHARED_SOURCES_APP_XFER})
+                           ${OD_SHARED_SOURCES_APP_INFLATE} ${OD_SHARED_SOURCES_APP_XFER}
+                           ${OD_SHARED_SOURCES_HAL_LOG})
 
 # The per-source INCLUDE_DIRECTORIES property that used to sit here is GONE, and its removal is
 # the point of the header adoption: it existed only to pin these two shared TUs to the canonical

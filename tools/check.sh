@@ -685,6 +685,79 @@ silabs_advertising_ownership() {
 }
 check "silabs: advertising lifecycle ownership" silabs_advertising_ownership
 
+log_hal_structure() {
+    local rc=0 hits count
+
+    hits=$(find targets \( -name od_log.c -o -name od_log.cpp -o -name od_log.h \
+             -o -name od_hal_log.h \) \
+           ! -path '*/build/*' ! -path '*/build-*/*' -print 2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "target-local logger API or implementation shadows shared ownership"
+        rc=1
+    fi
+
+    count=$(grep -c '^void _od_log(' shared/core/od_log.c || true)
+    if [ "$count" -ne 1 ]; then
+        echo "shared od_log.c must contain exactly one _od_log definition (found $count)"
+        rc=1
+    fi
+    count=$(grep -c '^void od_log_hex_line(' shared/core/od_log.c || true)
+    if [ "$count" -ne 1 ]; then
+        echo "shared od_log.c must contain exactly one od_log_hex_line definition (found $count)"
+        rc=1
+    fi
+
+    hits=$(grep -rInE '\b(od_hal_log_room|od_log_set_ready_hook|od_log_set_loop_task)[[:space:]]*\(|\[DROP:' \
+           shared targets/esp32-idf/src targets/esp32-idf/hal targets/esp32-idf/panel \
+           targets/nordic-zephyr/src targets/nordic-zephyr/panel \
+           targets/efr32bg22-slc --include='*.c' --include='*.cpp' --include='*.h' \
+           --include='*.inl' --exclude-dir='build*' 2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "retired logging backpressure or loop-task machinery returned"
+        rc=1
+    fi
+
+    if ! grep -q '"OD_CAP_LOG=0"' targets/efr32bg22-slc/cmake_gcc/opendisplay-bg22.cmake; then
+        echo "BG22 must state logging capability-off explicitly"
+        rc=1
+    fi
+    hits=$(grep -rInE '^([A-Za-z_][A-Za-z0-9_]*[[:space:]]+)+od_hal_log_[A-Za-z0-9_]+[[:space:]]*\(' \
+           targets/efr32bg22-slc --include='*.c' --include='*.cpp' --exclude-dir='build*' \
+           2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "BG22 capability-off target must not implement the log HAL"
+        rc=1
+    fi
+
+    hits=$(grep -rInE '\bod_hal_uptime_ms[[:space:]]*\(' shared/core --include='*.c' \
+           | grep -v '/od_log.c:' || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "shared policy replaced an explicit clock with the ambient time HAL"
+        rc=1
+    fi
+
+    if grep -q '%\.\*s' targets/nordic-zephyr/src/od_hal_log.c ||
+       grep -qE '\(const[[:space:]]+char[[:space:]]*\*\)' targets/nordic-zephyr/src/od_hal_log.c; then
+        echo "Nordic logger must submit the mutable transient record as LOG_RAW(\"%s\", record)"
+        rc=1
+    fi
+
+    hits=$(grep -rInE '\bod_log_(error|warn|info|debug|raw)[[:space:]]*\([^;]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(' \
+           shared/core --include='*.c' --exclude='od_log.c' 2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "shared log argument contains a nested function call; capability-off must not hide side effects"
+        rc=1
+    fi
+
+    return $rc
+}
+check "structure: shared logging ownership" log_hal_structure
+
 # ================================================================================== host suites ==
 # The real boundary enforcement: shared/ compiled for the host at -std=c99 -Wall -Wextra -Werror
 # under BOTH compilers. A GNU-ism gcc accepts is a failure discovered later on a target instead.
@@ -703,6 +776,19 @@ for cc in gcc clang; do
         skip "host suite ($cc)" "$cc not installed"
     fi
 done
+
+log_off_link_proof() {
+    local binary="$BUILD_ROOT/host-gcc/od_log_off_test" hits
+
+    [ -x "$binary" ] || { echo "capability-off logging fixture was not built"; return 1; }
+    hits=$(nm "$binary" | grep -E 'od_hal_log_|s_armed|s_level_chars' || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "OD_CAP_LOG=0 retained log-HAL linkage or logger state at -O0"
+        return 1
+    fi
+}
+check "host: logging capability-off link proof" log_off_link_proof
 
 # ASan + UBSan over every host test at once -- including the two PRE-AUTH parsers, od_config_tlv
 # and od_session, whose inputs an unauthenticated peer controls. halt_on_error is not decoration:

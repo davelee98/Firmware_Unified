@@ -175,6 +175,12 @@ set(OD_SHARED_SOURCES_APP_XFER
     "${CMAKE_CURRENT_LIST_DIR}/core/od_xfer_partial.c"
 )
 
+# HAL_LOG owns portable record formatting. Enabled targets must implement od_hal_log and
+# od_hal_time; OD_CAP_LOG=0 compiles explicit no-op entry points with no HAL references or state.
+set(OD_SHARED_SOURCES_HAL_LOG
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_log.c"
+)
+
 set(OD_SHARED_SOURCES_HAL_WDT
     "${CMAKE_CURRENT_LIST_DIR}/core/od_watchdog.c"
 )
@@ -191,6 +197,7 @@ set(OD_SHARED_SOURCES
     ${OD_SHARED_SOURCES_APP_BOOT}
     ${OD_SHARED_SOURCES_APP_INFLATE}
     ${OD_SHARED_SOURCES_APP_XFER}
+    ${OD_SHARED_SOURCES_HAL_LOG}
     ${OD_SHARED_SOURCES_HAL_WDT}
 )
 

@@ -1,4 +1,5 @@
 #include "od_board.h"
+#include "od_hal_log.h"
 #include "od_log.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
@@ -36,7 +37,7 @@ int main(void)
 	const struct od_config *cfg;
 	uint32_t ticks = 0;
 
-	/* Compatibility hook before the first application record. */
+	od_hal_log_open();
 	od_log_init();
 #if defined(OD_DEBUG_BUILD)
 	od_log_info("OpenDisplay %s DEBUG starting", od_board_name());

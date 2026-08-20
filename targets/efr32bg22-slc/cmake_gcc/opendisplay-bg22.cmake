@@ -280,6 +280,7 @@ add_library(slc OBJECT
     ${OD_SHARED_SOURCES_APP_SESSION}
     ${OD_SHARED_SOURCES_APP_INFLATE}
     ${OD_SHARED_SOURCES_APP_XFER}
+    ${OD_SHARED_SOURCES_HAL_LOG}
 )
 
 target_include_directories(slc PUBLIC
@@ -375,6 +376,7 @@ target_compile_definitions(slc PUBLIC
     "OD_CAP_PARTIAL=0"
     "OD_CAP_RXQ=0"
     "OD_CAP_DUAL_CS=0"
+    "OD_CAP_LOG=0"
     "OD_CONFIG_WITH_TOUCH=0"
     "OD_CONFIG_WITH_BUZZER=0"
     "OD_CONFIG_WITH_WIFI=0"

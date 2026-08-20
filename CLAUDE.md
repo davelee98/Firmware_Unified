@@ -61,15 +61,16 @@ looks arbitrary and is not); delete the story.
   --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF.
   `tools/sdkconfig_baseline.sh` is a gate a change must not break.
 - **`shared/` is no longer empty** —
-  `core/od_{adv_control,advert,cmd,color,config,config_asm,config_read,config_tlv,core,dispatch,gate,reply,rxq,session,txq,watchdog,xfer,xfer_direct,xfer_partial,zlib_inflate,zlib_pump}.c`
+  `core/od_{adv_control,advert,cmd,color,config,config_asm,config_read,config_tlv,core,dispatch,gate,log,reply,rxq,session,txq,watchdog,xfer,xfer_direct,xfer_partial,zlib_inflate,zlib_pump}.c`
   listed in `shared/sources.cmake` (never globbed) in per-HAL tiers, plus the two all-inline
   headers `od_span.h` and `od_nonce_window.h` and pure seam headers including `od_cmd_app.h`,
   `od_session_app.h`, `od_inflate_app.h` and `od_xfer_app.h`, which correctly have no entry there. Consumers:
   host tests and `esp32-idf` take the aggregate; `nordic-zephyr` takes PURE + HAL_CRYPTO +
-  HAL_RADIO + HAL_WDT + APP_SESSION + APP_RXQ + APP_INFLATE + APP_XFER; `efr32bg22-slc` takes PURE +
-  HAL_CRYPTO + HAL_RADIO + APP_SESSION + APP_INFLATE + APP_XFER and deliberately declines APP_RXQ,
-  HAL_ADV and HAL_WDT. APP tiers are named for a **seam** rather than a HAL because they need a target
-  function rather than a driver.
+  HAL_RADIO + HAL_WDT + HAL_LOG + APP_SESSION + APP_RXQ + APP_INFLATE + APP_XFER;
+  `efr32bg22-slc` takes PURE + HAL_CRYPTO + HAL_RADIO + HAL_LOG + APP_SESSION + APP_INFLATE +
+  APP_XFER and deliberately compiles HAL_LOG capability-off while declining APP_RXQ, HAL_ADV and
+  HAL_WDT. APP tiers are named for a **seam** rather than a HAL because they need a target function
+  rather than a driver.
 - **THE WHOLE COMMAND PATH IS SHARED ON BOTH TARGETS.** (C8 2026-08-15, C10 2026-08-15,
   C11 2026-08-16). **NOW HARDWARE-VERIFIED on `esp32-idf`** (`s3-n16r8-extuart-debug`,
   2026-08-17): PIPE upload, `CMD_PARTIAL_WRITE` (0x76), config read, and config write
@@ -268,6 +269,19 @@ looks arbitrary and is not); delete the story.
   **Not hardware-qualified:** ESP32 D-FF timing, Nordic panel timing and an instrumented BG22
   known-interval check remain open. Ten existing BG22 raw 32-bit tick conversions are deliberately
   not swept into this promotion and are tracked in `docs/FOLLOWUPS.md` § 7.
+- **Shared logging software candidate (2026-08-19):** `shared/core/od_log.{c,h}` owns record
+  formatting, level filtering, raw output, the hex renderer and a real-zero dropped count.
+  ESP32 and Nordic implement the five-function complete-record seam in `od_hal_log.h`; every
+  emission crosses it once, with transport serialization left below the seam. Nordic preserves
+  `LOG_RAW` and passes its mutable stack record so Zephyr's deferred logger copies it before return;
+  a production-adapter host test clobbers the source stack and verifies the queued bytes survive.
+  ESP32 preserves its UART/stdout selection and moves bounded drain plus the 5 ms settlement into
+  the HAL. Target-local logger copies, ready/loop-task hooks, multipart writes, the logger mutex and
+  application drop accounting are gone. BG22 sets `OD_CAP_LOG=0`, implements no log HAL and links
+  no logger symbol or state; its image remains 250,196 B flash / 32,284 B static RAM. The host suite
+  is 48/48 and `tools/check.sh --targets` passes 29/0/0. **Not hardware-qualified:** normalized
+  ESP32/Nordic log captures, concurrent transport submission and the earlier time-HAL timing rows
+  remain open in `docs/HARDWARE_VERIFICATION_CHECKLIST.md`.
 - `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel,crypto}`;
   `od_hal_crypto_random.c` is its own translation unit so a host test can compile the RNG arm
   without mbedTLS.

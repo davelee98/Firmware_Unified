@@ -14,14 +14,22 @@ current target uses them.
 complete-emission HAL. `efr32bg22-slc` deliberately keeps its bare `printf()` output and links
 explicit capability-off logger stubs.
 
-**Implementation checkpoint — 2026-08-19:** the standalone time-HAL portion of Phase 1 is a
-software-complete candidate on `codex/hal-time-phase1`. `tools/check.sh --targets` passes 27/0/0,
-including all ESP32 configurations, all three Nordic boards and BG22; the host suite is 44/44.
-BG22 remains 250,196 B flash and 32,284 B static RAM, exactly matching an `e965dd9` baseline build.
-Both BG22 functions are currently removed by section GC because that target has no production
-caller; the unchanged size proves zero dormant footprint rather than device execution. No hardware
-timing or instrumented known-interval row has run, so Phase 1 is not hardware-qualified and the
-logging-specific steps have not started.
+**Implementation checkpoint — 2026-08-19:** Phase 1 and the logging promotion are software-complete
+on `codex/log-promotion`. `tools/check.sh --targets` passes 29/0/0, including all ESP32
+configurations, all three Nordic boards and BG22; the host suite is 48/48 under its normal profile
+and also passes GCC, Clang and ASan/UBSan in the gate. ESP32 and Nordic use the shared logger and
+their complete-record HALs; both target-local logger copies, ESP32's logger-only FreeRTOS shims,
+the ready/loop-task hooks and application drop accounting are gone. The Nordic production-adapter
+fixture queues a mutable record, clobbers its source stack and proves the deferred package retained
+the original bytes. BG22 states `OD_CAP_LOG=0`, defines no log HAL, and its linked image contains no
+logger/HAL symbol or state. It remains 250,196 B flash and 32,284 B static RAM, exactly matching the
+post-time-HAL baseline.
+
+The time-HAL timing/known-interval rows and the normalized ESP32/Nordic hardware log captures remain
+open. Implementation proceeded by project direction; the software gate does not qualify those
+hardware rows. The cutover also exposed and removed one accidental include dependency: ESP32
+`main.cpp` now includes `esp_heap_caps.h` directly instead of receiving its heap API transitively
+through the deleted logger/FreeRTOS header.
 
 This answers `PLAN_DEDUP_CONSOLIDATED_2026-08-17.md` Part 6 question 5 and discharges the deferral
 in `targets/esp32-idf/hal/od_hal_log.h`.
