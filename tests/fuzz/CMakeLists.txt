@@ -34,3 +34,18 @@ foreach(target session_open_raw session_open_sealed session_auth)
     set_tests_properties(fuzz_${target} PROPERTIES
                          ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
 endforeach()
+
+foreach(target pipe_start pipe_data)
+    add_executable(od_fuzz_${target}
+        fuzz_${target}.c
+        fuzz_pipe_support.c)
+    target_link_libraries(od_fuzz_${target} od_shared)
+    target_include_directories(od_fuzz_${target} PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+    target_compile_options(od_fuzz_${target} PRIVATE ${OD_FUZZ_FLAGS})
+    target_link_options(od_fuzz_${target} PRIVATE ${OD_FUZZ_FLAGS})
+    add_test(NAME fuzz_${target}
+             COMMAND od_fuzz_${target} -runs=2000 -print_final_stats=0
+                     ${CMAKE_CURRENT_LIST_DIR}/corpus/${target})
+    set_tests_properties(fuzz_${target} PROPERTIES
+                         ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
+endforeach()

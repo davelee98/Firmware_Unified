@@ -48,17 +48,7 @@ void readAXP2101Data();
 void powerDownAXP2101();
 void initDisplay();
 void writeTextAndFill(const char* text);
-void cleanupDirectWriteState(bool refreshDisplay);
-// PIPE_WRITE (0x0080-0x0082) sliding-window handlers + state reset.
-od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
-od_cmd_result_t handlePipeWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
-od_cmd_result_t handlePipeWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
-void resetPipeWriteState(void);
-// True while a PIPE_WRITE stream is active (mid-transfer log suppression, resets).
-bool pipeWriteActive(void);
-// True while ANY transfer (DIRECT / PIPE / PARTIAL) is streaming. Use this for
-// "is the device busy" gates; test an individual flag only when the logic is
-// genuinely specific to that one transfer type.
+// True while shared transfer hardware is active.
 bool transferActive(void);
 // True while an image push is mid-stream and the per-frame command/ack logging
 // should be suppressed (chunk 1 still logs in full; the meter covers the rest).
@@ -73,13 +63,8 @@ extern volatile bool epdRefreshInProgress;
  * engaged client the moment loop() resumes.
  */
 void endRefresh(void);
-// Both transfer watchdogs, together. They live beside the state they terminate
-// rather than in loop(): pipeState is reachable from main.cpp via
-// resetPipeWriteState(), so this is cohesion rather than necessity -- but keeping
-// the two apart is exactly how the direct-write timeout came to tear down the
-// panel and leave its enclosing PIPE session running.
+// Shared transfer timeout policy.
 void checkTransferTimeouts(void);
-void cleanupPartialWriteOnDisconnect(void);
 
 /* Release the panel SPI bus. Called from main.cpp's deep-sleep teardown, which used to reach
  * for SPI.end() itself -- the last thing keeping <SPI.h> in that file (phase C step 12).
@@ -92,8 +77,7 @@ void cleanupPartialWriteOnDisconnect(void);
  *
  * No-op when the FastEPD parallel driver owns the pins -- that path never took the SPI bus. */
 void displayReleaseSpiBus(void);
-// Origin used by the target watchdog to select the link it may drop. Shared legacy
-// transfers take it from od_xfer's owner; target PIPE uses its retained owner.
+// Origin used by the target watchdog to select the link it may drop.
 od_origin_t transferSessionOrigin(void);
 int displayBootPlane(uint8_t colorScheme);
 int displayBootBitsPerPixel(uint8_t colorScheme);

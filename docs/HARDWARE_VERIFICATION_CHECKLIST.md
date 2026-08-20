@@ -142,6 +142,71 @@ BG22 has no PIPE, so it has no bidirectional legacy/PIPE replacement row and no 
 
 ---
 
+## Transfer Phase 3 — PIPE
+
+The shared-machine software candidate was implemented by project direction on 2026-08-20 while
+the Phase 2 and Nordic SPIM hardware entry rows remained open. No compatible hardware was
+available in the implementation environment. That sequencing exception is not qualification:
+every row below requires new post-promotion evidence, and no Phase 1, Phase 2 or earlier PIPE run
+qualifies it.
+
+Software evidence captured 2026-08-20: the host suite passes 58/58 under GCC, Clang and
+ASan/UBSan; W=32, W=16 and capability-off PIPE builds pass; the five pre-auth fuzz targets and
+the pinned py-opendisplay 7.14.0 corpus pass; and all 11 ESP32 configurations, all three Nordic
+boards and the BG22 headless image build. Handwritten production source is +907/−2,934 lines
+(net −2,027); test/tool source is +1,187/−1,060 (net +127). Reorder storage is 7,953 B at W=32
+and 4,097 B at W=16. The BG22 link contains only the three small `od_pipe_*` entry points, no
+PIPE state/reorder symbol, and remains 250,292 B flash / 32,284 B static RAM (480 B headroom).
+Board-only throughput, retransmission, refresh-time and stack-high-water measurements remain
+unavailable and do not qualify any row below.
+
+### ESP32 (`s3-n16r8-extuart-debug`, plus a classic ESP32 W=16 board if available)
+
+- [ ] Plaintext and encrypted full-frame PIPE, raw and compressed, through refresh
+- [ ] PIPE-partial: region streamed, partial refresh, new etag committed; etag mismatch refused
+- [ ] Forced loss, reorder and retransmission; gap SACK observed and transfer recovery
+- [ ] Negotiated on-wire maximum in plaintext and encrypted sessions: boundary accepted and
+      one-byte-over refused, including a CCM frame whose decrypted body alone fits
+- [ ] Tail below cadence completes without a stall
+- [ ] Sequence wraps past 255 inside one transfer
+- [ ] END ACK observed on air before refresh; refresh success and timeout both observed
+- [ ] `OD-S1` replay injection via `dispatch-gate`, including the corrupted-tag control
+- [ ] Inactive/fatal/zero-length DATA is silent; inactive/fatal END answers plaintext `FF 82`
+- [ ] Second-connection DATA during a live PIPE is inert
+- [ ] LAN and TLS-LAN `0x80`/`0x81`/`0x82` produce the exact four-byte refusals with the deployed
+      seal-or-plain choice and leave a live BLE-owned transfer untouched
+- [ ] Replacement in every direction: PIPE↔PIPE, PIPE↔legacy, and malformed BLE PIPE START
+      displacing the live owner; displaced owner inert and a fresh transfer succeeds
+- [ ] Disconnect mid-PIPE, reconnect, re-authenticate and complete a fresh upload
+- [ ] Classic ESP32 `OD_PIPE_MAX_W=16`: negotiated W=16 honoured and reorder queue sized 17
+
+### Nordic (`xiao_nrf52840` mandatory; one nRF54-class board)
+
+- [ ] Plaintext and encrypted full-frame PIPE, raw and compressed, through refresh
+- [ ] PIPE-partial: region streamed, partial refresh, new etag committed; etag mismatch refused
+- [ ] Forced loss, reorder and retransmission; gap SACK observed and transfer recovery
+- [ ] Negotiated on-wire maximum in plaintext and encrypted sessions: boundary accepted and
+      one-byte-over refused, including a CCM frame whose decrypted body alone fits
+- [ ] Tail below cadence completes without a stall
+- [ ] Sequence wraps past 255 inside one transfer
+- [ ] END ACK observed on air before refresh; refresh success and timeout both observed
+- [ ] `OD-S1` replay injection via `dispatch-gate`, including the corrupted-tag control
+- [ ] Inactive/fatal/zero-length DATA is silent; inactive/fatal END answers plaintext `FF 82`
+- [ ] Replacement in every direction: PIPE↔PIPE, PIPE↔legacy, and malformed BLE PIPE START
+      displacing the live owner; displaced owner inert and a fresh transfer succeeds
+- [ ] Disconnect mid-PIPE, reconnect, re-authenticate and complete a fresh upload
+- [ ] Compressed PIPE is accepted when the config lacks the streaming-decompression bit
+- [ ] One nRF54-class board repeats full raw/compressed PIPE, forced reorder/recovery and the
+      negotiated-frame bound
+
+### EFR32BG22 (`efr32bg22-slc`)
+
+- [ ] `0x80` answers `FF 80 04 00`; `0x81` and `0x82` answer nothing
+- [ ] Link map confirms zero PIPE state/reorder storage and static RAM at or below the recaptured
+      Phase 0 baseline
+
+---
+
 ## ESP32-S3 (`s3-n16r8-extuart-debug`, FastEPD)
 
 - [x] Two fresh authentications — 2026-08-17
@@ -199,12 +264,11 @@ BG22 has no PIPE, so it has no bidirectional legacy/PIPE replacement row and no 
 - [x] Interrupted-transfer recovery — 2026-08-19, PIPE abandoned mid-transfer by BLE disconnect;
       a fresh upload then completed through refresh
 
-**Known live defect, not yet fixed:** small/sub-window PIPE uploads can stall indefinitely —
-`opendisplay_pipe_write.cpp` only SACKs on an N-chunk cadence, with no time-based flush for a
-trailing batch smaller than N, so the client's own probe timeout aborts a transfer the device
-had actually completed. Diagnosed 2026-08-17, confirmed identical on ESP32
-(`display_service.cpp:2780`). Not yet filed as a fix — file in `FOLLOWUPS.md` and re-check
-this row before considering PIPE hardware-verified.
+**Unresolved pre-promotion observation:** a 2026-08-17 run reported small/sub-window PIPE uploads
+stalling, but the target machines and sender probe policy disagreed with that diagnosis. Hardware
+was unavailable on 2026-08-20, so the claim could be neither reproduced nor retired before the
+project-directed cutover. No flush timer was added. The post-promotion tail-below-cadence rows
+above must close before PIPE is hardware-qualified.
 
 ## `xiao_nrf54l15` / `xiao_nrf54lm20a`
 

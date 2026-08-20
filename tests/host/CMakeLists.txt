@@ -56,6 +56,15 @@ if(OD_SHARED_SOURCES)
         OD_CAP_LOG=0
         OD_BOOT_LOGO_SIZES=2)
 
+    # The classic ESP32 profile negotiates a 16-frame PIPE window. Compile the complete shared
+    # archive under that geometry so the derived reorder storage and queue assertions are tested,
+    # rather than changing only the test translation unit after the archive was built.
+    add_library(od_shared_pipe_w16 STATIC ${OD_SHARED_SOURCES})
+    target_include_directories(od_shared_pipe_w16 PUBLIC ${OD_SHARED_INCLUDE_DIRS})
+    target_compile_definitions(od_shared_pipe_w16 PUBLIC
+        OD_PIPE_MAX_W=16u
+        OD_PIPE_MAX_N=16u)
+
     # Dispatch-only fixtures define the four promoted od_xfer command entry points so they can
     # observe routing and scripted verdicts. Keep production od_xfer objects out of these archives;
     # otherwise any unrelated state query pulls them in and collides with the fixture definitions.
@@ -131,11 +140,11 @@ add_executable(od_zlib_pump_test zlib_pump_test.c)
 target_link_libraries(od_zlib_pump_test od_shared)
 add_test(NAME zlib_pump COMMAND od_zlib_pump_test)
 
-add_executable(od_xfer_test xfer_test.c)
+add_executable(od_xfer_test xfer_test.c od_log_test_stub.c)
 target_link_libraries(od_xfer_test od_shared)
 add_test(NAME xfer COMMAND od_xfer_test)
 
-add_executable(od_xfer_silabs_test xfer_silabs_test.c)
+add_executable(od_xfer_silabs_test xfer_silabs_test.c od_log_test_stub.c)
 target_link_libraries(od_xfer_silabs_test od_shared_silabs)
 add_test(NAME xfer_silabs COMMAND od_xfer_silabs_test)
 
@@ -145,13 +154,26 @@ add_library(od_xfer_auto STATIC
     ${CMAKE_CURRENT_LIST_DIR}/../../shared/core/od_xfer_partial.c)
 target_include_directories(od_xfer_auto PUBLIC ${OD_SHARED_INCLUDE_DIRS})
 target_compile_definitions(od_xfer_auto PRIVATE OD_XFER_DIRECT_AUTO_END=1)
-add_executable(od_xfer_auto_test xfer_auto_test.c)
+add_executable(od_xfer_auto_test xfer_auto_test.c od_log_test_stub.c)
 target_link_libraries(od_xfer_auto_test od_xfer_auto od_shared)
 add_test(NAME xfer_auto COMMAND od_xfer_auto_test)
 
-add_executable(od_xfer_reply_session_test xfer_reply_session_test.c)
+add_executable(od_xfer_reply_session_test xfer_reply_session_test.c od_log_test_stub.c)
 target_link_libraries(od_xfer_reply_session_test od_session_fake)
 add_test(NAME xfer_reply_session COMMAND od_xfer_reply_session_test)
+
+add_executable(od_pipe_test pipe_test.c od_log_test_stub.c)
+target_link_libraries(od_pipe_test od_shared)
+add_test(NAME pipe COMMAND od_pipe_test)
+
+add_executable(od_pipe_w16_test pipe_test.c od_log_test_stub.c)
+target_link_libraries(od_pipe_w16_test od_shared_pipe_w16)
+add_test(NAME pipe_w16 COMMAND od_pipe_w16_test)
+
+add_executable(od_pipe_off_test
+    pipe_off_test.c od_xfer_app_test_stub.c od_log_test_stub.c)
+target_link_libraries(od_pipe_off_test od_shared_silabs)
+add_test(NAME pipe_off COMMAND od_pipe_off_test)
 
 # adv_control: the loop-owned advertising policy machine (correctness review F4) driven against
 # a scripted fake HAL. The fake supplies od_hal_adv_{program,start,stop} at LINK time, exactly
@@ -398,13 +420,14 @@ add_executable(od_dispatch_route_test dispatch_route_test.c)
 target_link_libraries(od_dispatch_route_test od_session_fake_dispatch)
 add_test(NAME dispatch_route COMMAND od_dispatch_route_test)
 
-# core_reset: the shared half of a teardown -- producer, egress and session, in that order.
+# core_reset: the shared half of a teardown -- transfer, producer, egress and session, in that
+# order.
 #
 # The cases that carry weight are the negative ones: RX must NOT be in it (its producer differs per
 # target, so a shared reset would race one and reorder the other), and the session must go through
 # od_session_clear() rather than a memset, or its prepared HAL key slot is stranded in a finite
 # pool with nothing left naming it.
-add_executable(od_core_reset_test core_reset_test.c)
+add_executable(od_core_reset_test core_reset_test.c od_xfer_app_test_stub.c od_log_test_stub.c)
 target_link_libraries(od_core_reset_test od_session_fake)
 add_test(NAME core_reset COMMAND od_core_reset_test)
 
@@ -492,24 +515,6 @@ target_include_directories(od_esp_crypto_random_test PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/fake_esp)
 target_link_libraries(od_esp_crypto_random_test od_shared od_fake_psa)
 add_test(NAME esp_crypto_random COMMAND od_esp_crypto_random_test)
-
-# pipe_write: the Nordic PIPE state machine's VERDICTS, against fake display/reply/kernel seams.
-#
-# A verdict is invisible in a packet capture -- both sides see the same NACK -- but it decides
-# whether the frame stamps the session's activity clock, so a wrong OK on a refused frame keeps a
-# link alive on traffic the device rejected. Each case asserts the verdict AND the frames.
-add_executable(od_pipe_write_test
-    pipe_write_test.c
-    ../../targets/nordic-zephyr/src/opendisplay_pipe_write.cpp)
-target_include_directories(od_pipe_write_test PRIVATE
-    ../../targets/nordic-zephyr/src
-    ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr)
-target_link_libraries(od_pipe_write_test od_shared)
-# The production file is C++ and the target builds it with exceptions and RTTI off; match that so
-# the host is not compiling a different language from the device.
-target_compile_options(od_pipe_write_test PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions -fno-rtti>)
-add_test(NAME pipe_write COMMAND od_pipe_write_test)
 
 # nordic_session_app: the device-id packing, which is WIRE-VISIBLE -- four bytes of the silicon id
 # feed both the KDF and the AUTHENTICATE proof, so a different selection is a different device to
@@ -617,7 +622,6 @@ if(Python3_FOUND)
         ../../targets/nordic-zephyr/src/od_cmd_nfc.c
         ../../targets/nordic-zephyr/src/od_cmd_reply.c
         ../../targets/nordic-zephyr/src/od_inflate_app.c
-        ../../targets/nordic-zephyr/src/opendisplay_pipe_write.cpp
         ${OD_VEC_INC})
     target_include_directories(od_dispatch_corpus_nordic_test PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/fake_nordic

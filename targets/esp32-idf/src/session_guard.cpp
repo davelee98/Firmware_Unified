@@ -29,7 +29,6 @@
 #include "wifi_service.h"
 #endif
 
-extern bool directWriteActive;
 
 // How long to wait for a requested drop to actually take the link down.
 //
@@ -103,19 +102,7 @@ void abortToKnownState(const char* reason, bool dropLink, LinkId ownerId) {
     //    than asking the abort to hold the link open. Two contradictory jobs in one
     //    routine is what that split avoids.
 
-    // 3-5. Transfer state. cleanupDirectWriteState forces power off only for a
-    //      mid-transfer (PWR_ACTIVE) session and no-ops on WARM, which preserves the
-    //      ACTIVE-only-teardown invariant: a WARM keep-alive panel SURVIVES an abort,
-    //      including an idle or watchdog drop while the panel is warm from a prior
-    //      push. epdSessionForceOff() is deliberately NOT called here -- it powers off
-    //      every state except PWR_OFF, WARM included, so it would kill exactly the
-    //      panel that must survive. Deep sleep calls it separately, from the sleep
-    //      path, because no panel may stay powered through sleep.
-    if (directWriteActive) cleanupDirectWriteState(true);
-    cleanupPartialWriteOnDisconnect();
-    resetPipeWriteState();
-
-    // 6. Config chunked upload -- previously had no reset function at all, only
+    // 3. Config chunked upload -- previously had no reset function at all, only
     //    open-coded inline assignments, so no teardown or watchdog touched it.
     resetChunkedWriteState();
 
@@ -142,12 +129,8 @@ void abortToKnownState(const char* reason, bool dropLink, LinkId ownerId) {
                     (unsigned)droppedRx);
     }
 
-    // 9. Transfer reset remains target-owned while adapters are staged per target.
-    //    od_core_reset() contains only objects linked by every target.
-    od_xfer_reset();
-
-    // 9b. Every universally shared object that outlives a dispatch, in one call: the config-read producer,
-    //    egress, and the session. Cancelling the read is not tidiness -- it holds the config
+    // 9. Every shared object that outlives a dispatch, in one call: transfer state, the
+    //    config-read producer, egress, and the session. Cancelling the read is not tidiness -- it holds the config
     //    scratch, and od_dispatch DEFERS every config-mutating opcode while it is active, so a
     //    client that vanishes mid-read would otherwise defer every later config write forever.
     //    The session clear was step 8 and moves here with it; nothing between the two reads it,

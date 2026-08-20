@@ -61,7 +61,7 @@ looks arbitrary and is not); delete the story.
   --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF.
   `tools/sdkconfig_baseline.sh` is a gate a change must not break.
 - **`shared/` is no longer empty** —
-  `core/od_{adv_control,advert,cmd,color,config,config_asm,config_read,config_tlv,core,dispatch,gate,log,reply,rxq,session,txq,watchdog,xfer,xfer_direct,xfer_partial,zlib_inflate,zlib_pump}.c`
+  `core/od_{adv_control,advert,cmd,color,config,config_asm,config_read,config_tlv,core,dispatch,gate,log,pipe,reply,rxq,session,txq,watchdog,xfer,xfer_direct,xfer_partial,zlib_inflate,zlib_pump}.c`
   listed in `shared/sources.cmake` (never globbed) in per-HAL tiers, plus the two all-inline
   headers `od_span.h` and `od_nonce_window.h` and pure seam headers including `od_cmd_app.h`,
   `od_session_app.h`, `od_inflate_app.h` and `od_xfer_app.h`, which correctly have no entry there. Consumers:
@@ -256,6 +256,16 @@ looks arbitrary and is not); delete the story.
   not a pass. A `xiao_nrf52840` flash of this HEAD on 2026-08-19 completed an encrypted PIPE
   upload plus config read and config write, so the promoted routing did not regress the PIPE and
   command paths — it exercises none of the `0x70`/`0x71`/`0x72`/`0x76` rows, which stay open.
+- **Transfer Phase 3 shared PIPE software candidate (2026-08-20); not hardware-qualified.**
+  `shared/core/od_pipe.{c,h}` is the only `0x80`/`0x81`/`0x82` state machine. Dispatch routes the
+  three opcodes directly to it with budgets `1`/`3`/`3`; ESP32 and Nordic retain only panel/write
+  adapter operations, and BG22's capability-off build keeps the deployed `FF 80 04 00` START
+  refusal with silent unknown DATA/END and no reorder state. `od_xfer` owns PIPE accounting,
+  inflater use, hardware lifecycle and fatal state; `od_core_reset()` owns transfer teardown.
+  The host suite builds the production machine at W=32, W=16 and capability-off. Hardware rows
+  are itemized and remain open in `docs/HARDWARE_VERIFICATION_CHECKLIST.md`; implementation by
+  project direction is not a pass. The all-target software gate passes 32/0/0; BG22 remains
+  250,292 B flash / 32,284 B static RAM with 480 B headroom and retains no PIPE state symbol.
 - **Shared time HAL software candidate (2026-08-19):** `shared/hal/od_hal_time.h` is the canonical
   two-function ambient-clock/busy-wait seam. ESP32 keeps its unreconciled bounded millisecond sleep
   in target-private `od_hal_sleep.h`; Nordic's `od_uptime_get_32`/`od_busy_wait` names are gone;

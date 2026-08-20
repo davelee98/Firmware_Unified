@@ -52,12 +52,6 @@ od_cmd_result_t od_cmd_app_config_write(const od_cmd_ctx_t *ctx, od_span_t body)
 od_cmd_result_t od_cmd_app_config_chunk(const od_cmd_ctx_t *ctx, od_span_t body);      /* 0x0042 */
 od_cmd_result_t od_cmd_app_config_clear(const od_cmd_ctx_t *ctx, od_span_t body);      /* 0x0045 */
 
-/* --- image transfer ------------------------------------------------------------------------ */
-
-od_cmd_result_t od_cmd_app_pipe_start(const od_cmd_ctx_t *ctx, od_span_t body);        /* 0x0080 */
-od_cmd_result_t od_cmd_app_pipe_data(const od_cmd_ctx_t *ctx, od_span_t body);         /* 0x0081 */
-od_cmd_result_t od_cmd_app_pipe_end(const od_cmd_ctx_t *ctx, od_span_t body);          /* 0x0082 */
-
 /* --- peripherals --------------------------------------------------------------------------- */
 
 od_cmd_result_t od_cmd_app_led_activate(const od_cmd_ctx_t *ctx, od_span_t body);      /* 0x0073 */

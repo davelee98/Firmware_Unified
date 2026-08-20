@@ -96,69 +96,6 @@ extern "C" od_cmd_result_t od_cmd_app_config_clear(const od_cmd_ctx_t *ctx, od_s
     return handleClearConfig(ctx);
 }
 
-/* ------------------------------------------------------------- NO PIPE ON LAN (review F5) ---
- *
- * SECTION 9 rule 2 of the canonical header: the sliding-window image PIPE (0x0080 / 0x0081 /
- * 0x0082) MUST NOT be used on the LAN transport, because TCP already provides the ordered,
- * reliable, flow-controlled delivery PIPE reimplements; a host is directed to DIRECT_WRITE
- * instead. DIVERGENCE_MATRIX.md 9.4 states the same rule as a dispatcher obligation.
- *
- * INSIDE THE HOOK, NOT IN od_dispatch, and that is the post-gate position the rule has always
- * occupied. Moving it ahead of the session gate would answer an unauthenticated plaintext-LAN
- * client BAD_HEADER where it is answered AUTH_REQUIRED today -- a wire change, and one that leaks
- * which opcodes exist to a peer that has not authenticated.
- *
- * REFUSAL IS INERT. No transfer state is touched, no session aborted, no panel session torn down:
- * a stray PIPE frame from a confused LAN client must not disturb a BLE transfer that legitimately
- * owns the slot. Same rule LAN client refusal follows, and for the same reason. */
-static bool pipe_refused_on_lan(const od_cmd_ctx_t *ctx, uint16_t cmd)
-{
-    if (ctx->rp.origin == OD_ORIGIN_BLE) {
-        return false;
-    }
-    od_log_error("ERROR: PIPE 0x%04X is BLE-only -- rejected (use DIRECT_WRITE)", (unsigned)cmd);
-    /* ERROR CODE, AND THE COMPROMISE IN IT. The 0x80 NACK shape is
-     * [0xFF][0x80][OD_ERR_PIPE_START_*][0x00], and that namespace has no "wrong transport" member
-     * -- 0x04 is explicitly marked unused in the canonical header. Claiming 0x04 would be inventing
-     * a wire meaning unilaterally, which is exactly the divergence this repo exists to prevent, and
-     * the header is frozen. BAD_HEADER is reused: it is the one existing code meaning "this frame
-     * is not acceptable as sent", it invents nothing, and the log line above carries the real
-     * reason. A dedicated OD_ERR_PIPE_START_WRONG_TRANSPORT should be added upstream when the
-     * freeze lifts.
-     *
-     * 0x81 and 0x82 have no canonical error namespace at all, so they get the bare NACK shape
-     * their acks already use. */
-    const uint8_t err = (cmd == CMD_PIPE_WRITE_START)
-                            ? (uint8_t)OD_ERR_PIPE_START_BAD_HEADER : (uint8_t)0x00;
-    uint8_t nack[4] = {RESP_NACK, (uint8_t)(cmd & 0xFF), err, 0x00};
-    (void)od_cmd_reply(ctx, nack, sizeof(nack));
-    return true;
-}
-
-extern "C" od_cmd_result_t od_cmd_app_pipe_start(const od_cmd_ctx_t *ctx, od_span_t body)
-{
-    if (pipe_refused_on_lan(ctx, CMD_PIPE_WRITE_START)) {
-        return OD_CMD_NACK;
-    }
-    return handlePipeWriteStart(ctx, bytes(body), count(body));
-}
-
-extern "C" od_cmd_result_t od_cmd_app_pipe_data(const od_cmd_ctx_t *ctx, od_span_t body)
-{
-    if (pipe_refused_on_lan(ctx, CMD_PIPE_WRITE_DATA)) {
-        return OD_CMD_NACK;
-    }
-    return handlePipeWriteData(ctx, bytes(body), count(body));
-}
-
-extern "C" od_cmd_result_t od_cmd_app_pipe_end(const od_cmd_ctx_t *ctx, od_span_t body)
-{
-    if (pipe_refused_on_lan(ctx, CMD_PIPE_WRITE_END)) {
-        return OD_CMD_NACK;
-    }
-    return handlePipeWriteEnd(ctx, bytes(body), count(body));
-}
-
 /* -------------------------------------------------------------------------- peripherals --- */
 
 extern "C" od_cmd_result_t od_cmd_app_led_activate(const od_cmd_ctx_t *ctx, od_span_t body)

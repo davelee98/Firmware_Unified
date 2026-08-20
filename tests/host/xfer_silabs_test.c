@@ -4,6 +4,7 @@
 #include "od_xfer.h"
 #include "od_xfer_app.h"
 #include "od_zlib_inflate.h"
+#include "od_cmd_test_ctx.h"
 
 #include <stdio.h>
 
@@ -53,7 +54,8 @@ uint32_t od_xfer_app_now_ms(void) { return 0u; }
 int main(void)
 {
     od_tx_reservation_t reservation = { 0u, 0u };
-    od_cmd_ctx_t ctx = { { OD_ORIGIN_BLE, 1u }, &reservation };
+    od_cmd_ctx_t ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE, 1u },
+                                       &reservation, 19u, false);
     uint8_t body[17] = { 0u };
     if (od_xfer_partial_start(&ctx, od_span_make(body, sizeof body)) != OD_CMD_NACK
         || g_plain != 1u || od_xfer_active()) {

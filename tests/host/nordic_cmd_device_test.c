@@ -17,6 +17,7 @@
  */
 
 #include "od_cmd_app.h"
+#include "od_cmd_test_ctx.h"
 
 #include "od_cmd_reply.h"
 #include "opendisplay_ble.h"
@@ -143,10 +144,11 @@ void _od_log(int level, const char *fmt, ...)
 
 /* --------------------------------------------------------------------------------- helpers --- */
 
-static const od_cmd_ctx_t CTX = { { OD_ORIGIN_BLE, 1u }, NULL };
+static od_cmd_ctx_t CTX;
 
 static void reset_all(void)
 {
+    CTX = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE, 1u }, NULL, 2u, false);
     memset(g_sent, 0, sizeof g_sent);
     g_sent_n = 0u;
     g_dfu_scheduled = 0u;

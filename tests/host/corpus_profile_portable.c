@@ -18,6 +18,7 @@
 #include "corpus_runner.h"
 
 #include "od_cmd_app.h"
+#include "od_pipe.h"
 #include "od_reply.h"
 #include "od_xfer.h"
 #include "opendisplay_protocol.h"
@@ -249,19 +250,19 @@ od_cmd_result_t od_xfer_partial_start(const od_cmd_ctx_t *ctx, od_span_t body)
     return ack2(ctx, 0x76u);
 }
 
-od_cmd_result_t od_cmd_app_pipe_start(const od_cmd_ctx_t *ctx, od_span_t body)
+od_cmd_result_t od_pipe_start(const od_cmd_ctx_t *ctx, od_span_t body)
 {
     (void)body;
     return ack2(ctx, 0x80u);
 }
 
-od_cmd_result_t od_cmd_app_pipe_data(const od_cmd_ctx_t *ctx, od_span_t body)
+od_cmd_result_t od_pipe_data(const od_cmd_ctx_t *ctx, od_span_t body)
 {
     (void)body;
     return ack2(ctx, 0x81u);
 }
 
-od_cmd_result_t od_cmd_app_pipe_end(const od_cmd_ctx_t *ctx, od_span_t body)
+od_cmd_result_t od_pipe_end(const od_cmd_ctx_t *ctx, od_span_t body)
 {
     (void)body;
     return ack2(ctx, 0x82u);

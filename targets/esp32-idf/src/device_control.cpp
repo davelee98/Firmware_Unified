@@ -29,9 +29,6 @@ extern uint8_t buttonStateCount;
 extern volatile bool buttonEventPending;
 extern volatile uint8_t lastChangedButtonIndex;
 void updatemsdata();
-void cleanupDirectWriteState(bool refreshDisplay);
-void cleanupPartialWriteOnDisconnect(void);
-void resetPipeWriteState(void);
 #include "od_cmd_reply.h"
 
 extern ButtonState buttonStates[MAX_BUTTONS];

@@ -38,8 +38,8 @@ extern "C" {
 #define OD_TX_FRAME_MAX      OD_BLE_MAX_FRAME              /* 256 */
 #define OD_TXQ_VALUE_MAX_BLE (OD_BLE_MAX_FRAME - 3u)       /* 253 */
 
-/* Depth. PIPE_MAX_W + 2 so usable capacity (SLOTS - 1) covers a full window plus its END; the
- * target sets PIPE_MAX_W and this must not be sized independently of it. */
+/* Depth. OD_PIPE_MAX_W + 2 leaves usable capacity (SLOTS - 1) for a full window plus END.
+ * od_pipe.h asserts the relationship for PIPE-capable builds. */
 #ifndef OD_TXQ_SLOTS
 #define OD_TXQ_SLOTS 34u
 #endif

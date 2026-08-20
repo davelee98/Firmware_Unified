@@ -14,6 +14,7 @@
 
 #include "od_caps.h"
 #include "od_cmd_app.h"
+#include "od_pipe.h"
 #include "od_config_read.h"
 #include "od_reply.h"
 #include "od_session.h"
@@ -101,6 +102,8 @@ static uint16_t        g_handler_cmd;
  * but by memory corruption rather than by an assertion. */
 static uint8_t         g_handler_body[OD_TX_FRAME_MAX];
 static uint16_t        g_handler_body_len;
+static uint16_t        g_handler_wire_len;
+static bool            g_handler_was_protected;
 static od_cmd_result_t g_handler_result;
 static uint8_t         g_handler_replies;   /* how many frames the fake handler emits */
 
@@ -118,6 +121,8 @@ static od_cmd_result_t handler(const od_cmd_ctx_t *ctx, uint16_t cmd, od_span_t 
     ++g_handler_calls;
     g_handler_cmd = cmd;
     g_handler_body_len = (uint16_t)body.n;
+    g_handler_wire_len = ctx->wire_len;
+    g_handler_was_protected = ctx->was_protected;
     if (body.n > 0u && body.p != NULL) {
         const size_t n = (body.n < sizeof g_handler_body) ? body.n : sizeof g_handler_body;
         memcpy(g_handler_body, body.p, n);
@@ -151,9 +156,9 @@ HOOK(od_xfer_direct_start,        CMD_DIRECT_WRITE_START)
 HOOK(od_xfer_data,                CMD_DIRECT_WRITE_DATA)
 HOOK(od_xfer_end,                 CMD_DIRECT_WRITE_END)
 HOOK(od_xfer_partial_start,       CMD_PARTIAL_WRITE_START)
-HOOK(od_cmd_app_pipe_start,       CMD_PIPE_WRITE_START)
-HOOK(od_cmd_app_pipe_data,        CMD_PIPE_WRITE_DATA)
-HOOK(od_cmd_app_pipe_end,         CMD_PIPE_WRITE_END)
+HOOK(od_pipe_start,               CMD_PIPE_WRITE_START)
+HOOK(od_pipe_data,                CMD_PIPE_WRITE_DATA)
+HOOK(od_pipe_end,                 CMD_PIPE_WRITE_END)
 HOOK(od_cmd_app_led_activate,     CMD_LED_ACTIVATE)
 HOOK(od_cmd_app_led_stop,         CMD_LED_STOP)
 HOOK(od_cmd_app_buzzer,           CMD_BUZZER)
@@ -203,6 +208,8 @@ static void setup(bool security_on, bool open_session)
     g_handler_calls = 0u;
     g_handler_cmd = 0u;
     g_handler_body_len = 0u;
+    g_handler_wire_len = 0u;
+    g_handler_was_protected = false;
     g_handler_result = OD_CMD_OK;
     g_handler_replies = 1u;
     g_mutates_config = false;
@@ -243,6 +250,7 @@ static void test_plaintext_path(void)
     CHECK(g_handler_calls == 1u);
     CHECK(g_handler_cmd == 0x0077u);
     CHECK(g_handler_body_len == 4u);
+    CHECK(g_handler_wire_len == sizeof frame && !g_handler_was_protected);
     CHECK(memcmp(g_handler_body, frame + 2, 4u) == 0);
     CHECK(od_txq_reserved() == 0u);        /* the reservation was released either way */
 }
@@ -260,6 +268,7 @@ static void test_encrypted_path(void)
     CHECK(od_dispatch_frame(&BLE, od_span_make(wire, n)) == OD_FRAME_ACCEPTED);
     CHECK(g_handler_calls == 1u);
     CHECK(g_handler_body_len == sizeof payload);
+    CHECK(g_handler_wire_len == n && g_handler_was_protected);
     CHECK(memcmp(g_handler_body, payload, sizeof payload) == 0);
 
     CASE("security on with no session: AUTH_REQUIRED, and the handler never runs");
@@ -284,6 +293,7 @@ static void test_encrypted_path(void)
         CHECK(od_dispatch_frame(&LAN_TLS, od_span_make(plain, sizeof plain)) == OD_FRAME_ACCEPTED);
         CHECK(g_handler_calls == 1u);
         CHECK(g_handler_body_len == 4u);
+        CHECK(g_handler_wire_len == sizeof plain && !g_handler_was_protected);
         CHECK(memcmp(g_handler_body, plain + 2, 4u) == 0);
     }
 

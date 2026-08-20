@@ -18,6 +18,8 @@ od_cmd_result_t od_xfer_partial_start(const od_cmd_ctx_t *ctx, od_span_t body);
 
 void od_xfer_reset(void);
 bool od_xfer_active(void);
+bool od_xfer_owns_hardware(void);
+bool od_xfer_frames_may_arrive(void);
 bool od_xfer_owner(od_reply_t *out);
 bool od_xfer_started_ms(uint32_t *out);
 

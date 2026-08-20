@@ -13,6 +13,7 @@
 // The parsed-config aggregate, the instance caps and the two storage normalisations are
 // shared/core/od_config.h. `struct GlobalConfig` was this file's copy of it.
 #include "od_config.h"
+#include "od_pipe.h"
 
 #define BOOT_ROW_BUFFER_SIZE 960
 
@@ -34,47 +35,6 @@ struct ImageData {
     uint32_t* blockPacketsReceived; // Track packets received per block
 };
 
-// PIPE_WRITE (0x0080-0x0082) sliding-window receive state. Out-of-order frames
-// are held in a small reorder queue while the controller stream pauses at a hole;
-// when the missing frame arrives in-order it is written and the contiguous run of
-// queued successors drains. 33 slots = 32 (max window) + 1 safety; the sender's
-// span-based window rule bounds occupancy to <=32 so overflow is a protocol
-// violation, not an expected condition. Indexing by seq % PIPE_REORDER_SLOTS is
-// collision-free because any live window spans <=W < PIPE_REORDER_SLOTS seqs.
-//
-// PIPE_SMALL_DRAM_WINDOW is set by classic-ESP32 envs esp32-N4 (esp32dev) and
-// esp32-wrover-e-N4R8 (esp-wrover-kit). Their static DRAM is far tighter than the
-// S3/C3/C6 parts, so the full 33-slot x 248 B queue (~8.3KB .bss) overflows
-// dram0_0_seg by ~672 B at link. Cap those envs to W=16 / 17 slots (~4.2KB);
-// 17 = W+1 keeps seq%SLOTS collision-free (a live window spans <=16 < 17).
-// All other ESP32 envs keep the full 32-deep window.
-#ifdef PIPE_SMALL_DRAM_WINDOW
-#define PIPE_REORDER_SLOTS      17
-#define PIPE_MAX_W      16
-#define PIPE_MAX_N      16
-#else
-#define PIPE_REORDER_SLOTS      33
-#define PIPE_MAX_W      32
-#define PIPE_MAX_N      32
-#endif
-/* Both queues are sized from the window they have to cover: PIPE_MAX_W + 2, so usable capacity
- * (SLOTS - 1) holds a full window plus its END. shared/ cannot see PIPE_MAX_W, so the targets set
- * these and assert the relationship here, where both are visible. Setting either BELOW the derived
- * value caps the effective window and costs throughput -- a deliberate trade, never a link-time
- * discovery. */
-OD_STATIC_ASSERT(OD_RXQ_SLOTS >= (PIPE_MAX_W + 2u),
-                 "RX ring is too shallow for this board's PIPE window");
-
-/* The egress queue must be able to hold a whole window plus its END, or a saturating PIPE client
- * deadlocks: every slot is an unacknowledged ACK, the reserve for the next DATA frame fails, and
- * od_dispatch defers the very command that would refund a slot. od_txq.h states the relationship
- * and cannot check it -- shared/ may not see PIPE_MAX_W -- so it is checked here, where both are
- * visible. Boards that narrow the window narrow OD_TXQ_SLOTS with it (boards/esp32-n4.cmake). */
-OD_STATIC_ASSERT(OD_TXQ_SLOTS >= (PIPE_MAX_W + 2u),
-                 "egress queue is too shallow for this board's PIPE window");
-
-#define PIPE_REORDER_SLOT_SIZE  248    // >= max plaintext data payload (241 @ frame 244; 212 encrypted)
-
 // LOCAL link policy: the ATT MTU this device asks the stack to negotiate on the
 // BLE transport. "Preferred" is literal -- the central drives the exchange and may
 // settle lower, so nothing may assume this value was granted. Deliberately
@@ -94,7 +54,7 @@ OD_STATIC_ASSERT(OD_TXQ_SLOTS >= (PIPE_MAX_W + 2u),
 // A single-PDU write carries OD_BLE_PREFERRED_ATT_MTU - 3 value bytes (ATT opcode 1 +
 // handle 2). It must (a) still admit the largest legitimate inbound frame, and (b) never
 // exceed the slot the payload is copied into.
-static_assert(OD_BLE_PREFERRED_ATT_MTU - 3u >= PIPE_REORDER_SLOT_SIZE,
+static_assert(OD_BLE_PREFERRED_ATT_MTU - 3u >= PIPE_MAX_FRAME,
               "negotiated MTU too small for the largest pipe frame");
 static_assert(OD_BLE_PREFERRED_ATT_MTU - 3u <= OD_BLE_MAX_FRAME,
               "a single-PDU write could overrun an OD_BLE_MAX_FRAME-sized slot");
@@ -102,39 +62,6 @@ static_assert(OD_BLE_PREFERRED_ATT_MTU - 3u <= OD_BLE_MAX_FRAME,
 // The BLE RX command ring (od_rxq_item_t and its sizes) lives in shared/core/od_rxq.h; egress is
 // shared/core/od_txq.c. Neither is a config-packet or wire-protocol definition, so neither belongs
 // in this hub.
-
-// PIPE_WRITE protocol constants (PIPE_ACK_MASK_BITS, PIPE_MAX_FRAME, PIPE_VERSION,
-// PIPE_FLAG_COMPRESSED, PIPE_FLAG_PARTIAL) come from the canonical opendisplay_protocol.h.
-// PIPE_FLAG_PARTIAL bit1: partial-region refresh. START carries a 12-byte LE extension
-// [old_etag:4][x:2][y:2][w:2][h:2]; geometry/etag validated like 0x76, refresh
-// mode + new_etag ride the 0x0082 END. See PIPE_WRITE section in display_service.cpp.
-
-struct PipeReorderSlot {
-    bool     occupied;
-    uint8_t  seq;
-    uint16_t len;
-    uint8_t  data[PIPE_REORDER_SLOT_SIZE];
-};
-
-struct PipeWriteState {
-    bool     active;
-    bool     error;             // fatal: silently discard 0x0081 until next 0x0080 / disconnect
-    bool     compressed;
-    bool     partial;           // partial-region transfer: route DATA to partialCtx, END drives REFRESH_PARTIAL
-    bool     gap_open;          // true while a hole is outstanding (queue non-empty)
-    uint8_t  window;            // W_eff
-    uint8_t  ack_every;         // N_eff
-    uint16_t max_frame;         // frame_eff
-    uint8_t  expected_seq;      // next in-order seq (mod 256)
-    bool     has_received;      // false until first accepted-or-queued frame (highest_seen valid)
-    uint8_t  highest_seen;      // highest received seq (accepted or queued), mod 256
-    uint32_t received_count;    // accepted+queued distinct frames (diagnostics)
-    uint8_t  frames_since_ack;  // cadence counter (in-order accepts)
-    uint8_t  ooo_acks_since_gap;// rate-limit counter for out-of-order / duplicate gap ACKs
-    uint32_t total_size;        // negotiated decompressed panel byte total
-    uint8_t  queued_count;      // reorder-queue occupancy
-    uint8_t  queue_high_water;  // diagnostics: max occupancy seen this transfer
-};
 
 #define MAX_BUTTONS 32  // Up to 4 instances * 8 pins = 32 buttons max
 struct ButtonState {

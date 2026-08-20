@@ -18,6 +18,16 @@ bool od_xfer_active(void)
     return s_xfer.mode != OD_XFER_IDLE;
 }
 
+bool od_xfer_owns_hardware(void)
+{
+    return s_xfer.mode != OD_XFER_IDLE && s_xfer.mode != OD_XFER_FATAL;
+}
+
+bool od_xfer_frames_may_arrive(void)
+{
+    return s_xfer.mode != OD_XFER_IDLE;
+}
+
 bool od_xfer_owner(od_reply_t *out)
 {
     if (!od_xfer_active() || out == NULL) {
@@ -45,19 +55,22 @@ void od_xfer_clear_state(void)
 {
     memset(&s_xfer, 0, sizeof s_xfer);
     s_xfer.mode = OD_XFER_IDLE;
+    od_pipe_reset_state();
 }
 
 void od_xfer_replace_active(void)
 {
     if (od_xfer_active()) {
-        od_xfer_app_abort(OD_XFER_ABORT_REPLACED);
+        if (od_xfer_owns_hardware()) {
+            od_xfer_app_abort(OD_XFER_ABORT_REPLACED);
+        }
         od_xfer_clear_state();
     }
 }
 
 void od_xfer_abort_active(od_xfer_abort_reason_t reason, bool clear_etag)
 {
-    if (od_xfer_active()) {
+    if (od_xfer_owns_hardware()) {
         od_xfer_app_abort(reason);
     }
 #if OD_CAP_PARTIAL
@@ -148,6 +161,253 @@ bool od_xfer_stream_push(od_span_t input, bool final)
         return false;
     }
     return !final || status == OD_ZLIB_PUMP_DONE;
+}
+
+bool od_xfer_pipe_arm_full(const od_cmd_ctx_t *ctx, uint32_t total, bool compressed)
+{
+    od_xfer_panel_info_t panel;
+
+    if (ctx == NULL || total == 0u || s_xfer.mode != OD_XFER_IDLE) {
+        return false;
+    }
+    memset(&panel, 0, sizeof panel);
+    if (!od_xfer_app_panel_info(&panel)
+        || panel.geometry.total_bytes == 0u
+        || panel.geometry.layout == OD_COLOR_LAYOUT_SPLIT_HALVES
+        || total != panel.geometry.total_bytes) {
+        return false;
+    }
+
+    s_xfer.mode = OD_XFER_PIPE_FULL;
+    s_xfer.owner = ctx->rp;
+    s_xfer.started_ms = od_xfer_app_now_ms();
+    s_xfer.expected_bytes = total;
+    s_xfer.compressed = compressed;
+    s_xfer.geometry = panel.geometry;
+    if (compressed) {
+        od_xfer_stream_reset(total);
+    }
+    return true;
+}
+
+#if OD_CAP_PARTIAL
+bool od_xfer_pipe_arm_partial(const od_cmd_ctx_t *ctx, uint32_t total, bool compressed,
+                              uint32_t old_etag, uint16_t x, uint16_t y,
+                              uint16_t width, uint16_t height, uint8_t *err_out)
+{
+    od_xfer_panel_info_t panel;
+    od_color_geometry_t rect;
+    uint32_t plane_bytes;
+
+    if (err_out != NULL) {
+        *err_out = OD_ERR_PIPE_START_BAD_HEADER;
+    }
+    if (ctx == NULL || total == 0u || s_xfer.mode != OD_XFER_IDLE) {
+        return false;
+    }
+    memset(&panel, 0, sizeof panel);
+    if (!od_xfer_app_panel_info(&panel) || !panel.partial_enabled
+        || !panel.geometry.partial_supported) {
+        od_xfer_app_set_displayed_etag(0u);
+        if (err_out != NULL) {
+            *err_out = OD_ERR_PIPE_START_PARTIAL_UNSUPPORTED;
+        }
+        return false;
+    }
+    if (old_etag == 0u || old_etag != od_xfer_app_displayed_etag()) {
+        od_xfer_app_set_displayed_etag(0u);
+        if (err_out != NULL) {
+            *err_out = OD_ERR_PIPE_START_ETAG_MISMATCH;
+        }
+        return false;
+    }
+    if (width == 0u || height == 0u
+        || (uint32_t)x + width > panel.width
+        || (uint32_t)y + height > panel.height
+        || (x & 7u) != 0u || (width & 7u) != 0u) {
+        od_xfer_app_set_displayed_etag(0u);
+        if (err_out != NULL) {
+            *err_out = OD_ERR_PIPE_START_RECT_INVALID;
+        }
+        return false;
+    }
+    if (od_color_direct_geometry(OD_COLOR_SCHEME_MONO, width, height, &rect) != OD_COLOR_OK
+        || rect.part_bytes[0] == 0u || rect.part_bytes[0] > UINT32_MAX / 2u) {
+        od_xfer_app_set_displayed_etag(0u);
+        if (err_out != NULL) {
+            *err_out = OD_ERR_PIPE_START_RECT_INVALID;
+        }
+        return false;
+    }
+    plane_bytes = rect.part_bytes[0];
+    if (total != plane_bytes * 2u) {
+        od_xfer_app_set_displayed_etag(0u);
+        if (err_out != NULL) {
+            *err_out = OD_ERR_PIPE_START_SIZE_MISMATCH;
+        }
+        return false;
+    }
+
+    s_xfer.mode = OD_XFER_PIPE_PARTIAL;
+    s_xfer.owner = ctx->rp;
+    s_xfer.started_ms = od_xfer_app_now_ms();
+    s_xfer.expected_bytes = total;
+    s_xfer.compressed = compressed;
+    s_xfer.geometry = panel.geometry;
+    s_xfer.partial.plane_bytes = plane_bytes;
+    s_xfer.partial.x = x;
+    s_xfer.partial.y = y;
+    s_xfer.partial.width = width;
+    s_xfer.partial.height = height;
+    if (compressed) {
+        od_xfer_stream_reset(total);
+    }
+    return true;
+}
+#endif
+
+bool od_xfer_pipe_activate(void)
+{
+    bool ok = false;
+
+    switch (s_xfer.mode) {
+    case OD_XFER_PIPE_FULL:
+        ok = od_xfer_app_begin_full(&s_xfer.geometry);
+        break;
+#if OD_CAP_PARTIAL
+    case OD_XFER_PIPE_PARTIAL:
+        ok = od_xfer_app_begin_partial(s_xfer.partial.x, s_xfer.partial.y,
+                                       s_xfer.partial.width, s_xfer.partial.height,
+                                       s_xfer.partial.plane_bytes);
+        break;
+#else
+    case OD_XFER_PIPE_PARTIAL:
+        break;
+#endif
+    case OD_XFER_IDLE:
+    case OD_XFER_DIRECT_FULL:
+    case OD_XFER_DIRECT_PARTIAL:
+    case OD_XFER_FATAL:
+        break;
+    }
+    if (!ok) {
+        od_xfer_pipe_enter_fatal();
+    }
+    return ok;
+}
+
+bool od_xfer_pipe_consume(od_span_t payload)
+{
+    uint32_t consumed;
+
+    if (!od_span_valid(payload) || payload.n == 0u || payload.n > UINT32_MAX
+        || (s_xfer.mode != OD_XFER_PIPE_FULL && s_xfer.mode != OD_XFER_PIPE_PARTIAL)
+        || payload.n > UINT32_MAX - s_xfer.received_bytes) {
+        return false;
+    }
+    s_xfer.received_bytes += (uint32_t)payload.n;
+    if (s_xfer.compressed) {
+        return od_xfer_stream_push(payload, false);
+    }
+    if (s_xfer.written_bytes > s_xfer.expected_bytes
+        || payload.n > (size_t)(s_xfer.expected_bytes - s_xfer.written_bytes)) {
+        return false;
+    }
+    consumed = od_xfer_app_write(s_xfer.written_bytes, payload);
+    if (consumed != (uint32_t)payload.n) {
+        return false;
+    }
+    s_xfer.written_bytes += consumed;
+    return true;
+}
+
+bool od_xfer_pipe_finalize(void)
+{
+    if (s_xfer.mode != OD_XFER_PIPE_FULL && s_xfer.mode != OD_XFER_PIPE_PARTIAL) {
+        return false;
+    }
+    if (!s_xfer.compressed) {
+        return true;
+    }
+    return s_xfer.received_bytes != 0u && od_xfer_stream_push(od_span_none(), true);
+}
+
+bool od_xfer_pipe_complete(void)
+{
+    return (s_xfer.mode == OD_XFER_PIPE_FULL || s_xfer.mode == OD_XFER_PIPE_PARTIAL)
+        && s_xfer.written_bytes == s_xfer.expected_bytes;
+}
+
+void od_xfer_pipe_enter_fatal(void)
+{
+    const bool partial = s_xfer.mode == OD_XFER_PIPE_PARTIAL;
+
+    if (od_xfer_owns_hardware()) {
+        od_xfer_app_abort(OD_XFER_ABORT_STREAM_FAILED);
+    }
+#if OD_CAP_PARTIAL
+    if (partial) {
+        od_xfer_app_set_displayed_etag(0u);
+    }
+#else
+    (void)partial;
+#endif
+    if (s_xfer.mode != OD_XFER_IDLE) {
+        s_xfer.mode = OD_XFER_FATAL;
+    }
+}
+
+od_xfer_barrier_t od_xfer_pipe_before_refresh(void)
+{
+    if (s_xfer.mode != OD_XFER_PIPE_FULL && s_xfer.mode != OD_XFER_PIPE_PARTIAL) {
+        return OD_XFER_BARRIER_ABORT;
+    }
+    return od_xfer_app_before_refresh(&s_xfer.owner);
+}
+
+void od_xfer_pipe_barrier_abort(void)
+{
+    const od_reply_t owner = s_xfer.owner;
+#if OD_CAP_PARTIAL
+    if (s_xfer.mode == OD_XFER_PIPE_PARTIAL) {
+        od_xfer_app_set_displayed_etag(0u);
+    }
+#endif
+    od_xfer_clear_state();
+    od_xfer_app_barrier_abort(&owner);
+}
+
+bool od_xfer_pipe_refresh(uint8_t mode, bool has_new_etag, uint32_t new_etag,
+                          bool *completed)
+{
+    const bool partial = s_xfer.mode == OD_XFER_PIPE_PARTIAL;
+    bool refreshed;
+
+    if (completed == NULL
+        || (s_xfer.mode != OD_XFER_PIPE_FULL && s_xfer.mode != OD_XFER_PIPE_PARTIAL)) {
+        return false;
+    }
+    refreshed = od_xfer_app_refresh(mode, completed);
+    if (!refreshed) {
+        od_xfer_abort_active(OD_XFER_ABORT_REFRESH_FAILED, partial || has_new_etag);
+        return false;
+    }
+#if OD_CAP_PARTIAL
+    if (partial) {
+        od_xfer_app_set_displayed_etag(*completed && has_new_etag && new_etag != 0u
+                                      ? new_etag : 0u);
+    } else if (*completed) {
+        od_xfer_app_set_displayed_etag(has_new_etag && new_etag != 0u ? new_etag : 0u);
+    } else if (has_new_etag) {
+        od_xfer_app_set_displayed_etag(0u);
+    }
+#else
+    (void)partial;
+    (void)has_new_etag;
+    (void)new_etag;
+#endif
+    od_xfer_clear_state();
+    return true;
 }
 
 od_cmd_result_t od_xfer_data(const od_cmd_ctx_t *ctx, od_span_t body)

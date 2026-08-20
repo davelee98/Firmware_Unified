@@ -15,7 +15,7 @@ void touchResumeAfterEpdRefresh(void);
  *
  * For session teardown (abortToKnownState), where the balanced suspend/resume
  * pairing cannot be relied on: a teardown routed through the partial path bypasses
- * cleanupDirectWriteState() -- the only place that clears directWriteTouchSuspended
+ * the transfer adapter -- the only owner of directWriteTouchSuspended
  * -- and leaves the counter stuck above zero, so touch never comes back for the
  * rest of the boot. Not for the refresh brackets, which stay balanced.
  */

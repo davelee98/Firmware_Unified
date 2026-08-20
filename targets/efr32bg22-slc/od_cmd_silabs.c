@@ -215,20 +215,6 @@ bool od_cmd_allow_unauthenticated(uint16_t cmd)
   return false;
 }
 
-od_cmd_result_t od_cmd_app_pipe_start(const od_cmd_ctx_t *ctx, od_span_t body)
-{
-  /* 0x04 is intentionally target-specific: no canonical PIPE-unsupported code exists. */
-  uint8_t err[] = { RESP_NACK, 0x80u, 0x04u, 0u };
-  (void)body;
-  (void)reply_plain(ctx, err, sizeof(err));
-  return OD_CMD_NACK;
-}
-
-od_cmd_result_t od_cmd_app_pipe_data(const od_cmd_ctx_t *ctx, od_span_t body)
-{ (void)ctx; (void)body; return OD_CMD_UNKNOWN; }
-od_cmd_result_t od_cmd_app_pipe_end(const od_cmd_ctx_t *ctx, od_span_t body)
-{ (void)ctx; (void)body; return OD_CMD_UNKNOWN; }
-
 od_cmd_result_t od_cmd_app_led_activate(const od_cmd_ctx_t *ctx, od_span_t body)
 {
   uint8_t ok[] = { RESP_ACK, RESP_LED_ACTIVATE_ACK, 0u, 0u };

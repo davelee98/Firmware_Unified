@@ -278,6 +278,44 @@ xfer_direct_dispatch() {
 }
 check "structure: direct transfer dispatch ownership" xfer_direct_dispatch
 
+pipe_dispatch_ownership() {
+    local rc=0 hits row count
+    local rows=shared/core/od_dispatch_ops.h
+
+    for row in \
+        'X(CMD_PIPE_WRITE_START,    od_pipe_start,              1u)' \
+        'X(CMD_PIPE_WRITE_DATA,     od_pipe_data,               (OD_CAP_PIPE ? 3u : 1u))' \
+        'X(CMD_PIPE_WRITE_END,      od_pipe_end,                (OD_CAP_PIPE ? 3u : 1u))'; do
+        if ! grep -Fq "$row" "$rows"; then
+            echo "shared PIPE dispatch row or reservation budget drifted: $row"
+            rc=1
+        fi
+    done
+
+    hits=$(grep -RInE '\bod_cmd_app_pipe_(start|data|end)\b' shared/core targets \
+        --include='*.c' --include='*.cpp' --include='*.h' --exclude-dir=build \
+        2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "target PIPE hook returned; dispatch must route straight to shared od_pipe"
+        rc=1
+    fi
+    hits=$(grep -nE '\b(od_xfer_app_|od_zlib_pump_)' shared/core/od_pipe.c || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "od_pipe must use reply-free od_xfer internal operations"
+        rc=1
+    fi
+    count=$(grep -Ec '^[[:space:]]*"\$\{CMAKE_CURRENT_LIST_DIR\}/core/od_pipe\.c"' \
+        shared/sources.cmake)
+    if [ "$count" -ne 1 ]; then
+        echo "od_pipe.c must be registered exactly once in shared/sources.cmake (found $count)"
+        rc=1
+    fi
+    return $rc
+}
+check "structure: PIPE dispatch ownership" pipe_dispatch_ownership
+
 esp32_xfer_cutover() {
     local rc=0 hits
 
@@ -289,104 +327,17 @@ esp32_xfer_cutover() {
         rc=1
     fi
 
-    if ! grep -q '\bod_xfer_reset[[:space:]]*(' targets/esp32-idf/src/session_guard.cpp; then
-        echo "ESP32 teardown must reset the shared legacy transfer before od_core_reset"
+    if ! grep -q '\bod_core_reset[[:space:]]*(' targets/esp32-idf/src/session_guard.cpp; then
+        echo "ESP32 teardown must use the shared core reset"
         rc=1
     fi
     return $rc
 }
 check "esp32: shared legacy transfer cutover" esp32_xfer_cutover
 
-# TRANSITIONAL THROUGH PHASE 3 STEP 6. Target PIPE and shared od_xfer both drive the singleton
-# pump during the staged migration, so each START must displace the other owner first. The target
-# PIPE cutover must remove these two arms and replace this check with the permanent production
-# invariant: no target calls od_zlib_pump_reset/push; shared/core/od_xfer.c is the only caller.
-esp32_xfer_interim_pipe_arbitration() {
-    local rc=0 pipe_start legacy_start
-
-    pipe_start=$(sed -n '/^od_cmd_result_t handlePipeWriteStart(/,/^}/p' \
-                 targets/esp32-idf/src/display_service.cpp)
-    if ! grep -q '\bod_xfer_active[[:space:]]*(' <<<"$pipe_start" ||
-       ! grep -q '\bod_xfer_reset[[:space:]]*(' <<<"$pipe_start"; then
-        echo "ESP32 PIPE START must displace a live shared legacy transfer before pump use"
-        rc=1
-    fi
-
-    legacy_start=$(sed -n '/^extern "C" void od_xfer_app_prepare_start(/,/^}/p' \
-                   targets/esp32-idf/src/display_service.cpp)
-    if ! grep -q '\bresetPipeWriteState[[:space:]]*(' <<<"$legacy_start"; then
-        echo "ESP32 legacy START must displace target PIPE through od_xfer_app_prepare_start"
-        rc=1
-    fi
-    return $rc
-}
-check "esp32: interim PIPE/od_xfer arbitration" esp32_xfer_interim_pipe_arbitration
-
-# Phase 2 step 10b's executable boundary. These names are not all permanent: the delete inventory
-# is intentionally required while target PIPE owns it, and Phase 3 step 6 must remove this check in
-# the same commit that removes the inventory. The retain list prevents a bulk PIPE deletion from
-# taking adapter hardware primitives with it.
-esp32_xfer_10b_inventory() {
-    local rc=0 symbol pump_hits pump_count
-    local files=(
-        targets/esp32-idf/src/display_service.cpp
-        targets/esp32-idf/src/display_service.h
-        targets/esp32-idf/src/main.h
-        targets/esp32-idf/src/structs.h
-    )
-    local delete_symbols=(
-        PipeWriteState PipeReorderSlot pipeState pipeReorder
-        handlePipeWriteStart handlePipeWriteData handlePipeWriteEnd
-        resetPipeWriteState pipeWriteActive pipeSlot pipeChunkReceived pipeBuildAckPayload
-        sendPipeAck pipeAbortNoReply sendPipeNack sendPipeStartNack pipeUpdateHighestSeen
-        pipeConsumePayload directWriteComputeGeometry directWriteActivatePanel
-        directWriteFinishAndRefresh directWriteSinkBytes streamControllerPlaneBytes
-        direct_zlib_sink partial_consume_bytes partial_prepare_panel_ram partial_write_to_panel
-        partial_write_stream_bytes partial_zlib_sink zlib_stream_to_direct_write
-        zlib_stream_to_partial_write mono_plane_bytes parse_be_u32 PartialStreamContext partialCtx
-        sessionOrigin directWriteActive directWriteCompressed directWriteBitplanes
-        directWriteBytesWritten directWriteDecompressedTotal directWriteWidth directWriteHeight
-        directWriteTotalBytes directWriteCompressedReceived directWriteStartTime
-        directWritePlaneBytes directWriteInitialPlane
-    )
-    local retain_symbols=(
-        directWriteResolveGeometry xferAppClear xferAppWriteFull xferAppWritePartial
-        od_xfer_app_prepare_start od_xfer_app_panel_info od_xfer_app_begin_full
-        od_xfer_app_begin_partial od_xfer_app_write od_xfer_app_inflate_scratch
-        od_xfer_app_abort od_xfer_app_before_refresh od_xfer_app_barrier_abort
-        od_xfer_app_refresh od_xfer_app_displayed_etag od_xfer_app_set_displayed_etag
-        od_xfer_app_now_ms partial_set_addr_window partial_prepare_panel_ram_for
-        partial_refresh_for directWriteTouchSuspended cleanupDirectWriteState
-        cleanup_partial_write_state
-    )
-
-    for symbol in "${delete_symbols[@]}"; do
-        if ! grep -wq "$symbol" "${files[@]}"; then
-            echo "ESP32 10b delete inventory drifted before Phase 3: $symbol"
-            rc=1
-        fi
-    done
-    for symbol in "${retain_symbols[@]}"; do
-        if ! grep -wq "$symbol" targets/esp32-idf/src/display_service.cpp; then
-            echo "ESP32 adapter primitive missing from the 10b retain inventory: $symbol"
-            rc=1
-        fi
-    done
-
-    pump_hits=$(grep -RInE '\bod_zlib_pump_(reset|push)[[:space:]]*\(' \
-        targets/esp32-idf/src --include='*.c' --include='*.cpp' --include='*.h' 2>/dev/null || true)
-    pump_count=$(grep -c . <<<"$pump_hits")
-    if [ "$pump_count" -ne 4 ] || grep -v '^targets/esp32-idf/src/display_service\.cpp:' <<<"$pump_hits" | grep -q .; then
-        echo "$pump_hits"
-        echo "ESP32 interim pump ownership drifted: expected four target-PIPE calls in display_service.cpp"
-        rc=1
-    fi
-    return $rc
-}
-check "esp32: Phase 2 step 10b inventory" esp32_xfer_10b_inventory
 
 nordic_xfer_cutover() {
-    local rc=0 teardown reset_line core_line
+    local rc=0
     if ! grep -q '\${OD_SHARED_SOURCES_APP_XFER}' \
             targets/nordic-zephyr/zephyr/CMakeLists.txt \
        || grep -q 'od_xfer_compile' targets/nordic-zephyr/zephyr/CMakeLists.txt; then
@@ -394,120 +345,17 @@ nordic_xfer_cutover() {
         rc=1
     fi
 
-    teardown=$(sed -n '/if (atomic_cas(&s_close_pending/,/\/\* BOUNDED/p' \
-               targets/nordic-zephyr/src/opendisplay_pipe.c)
-    reset_line=$(grep -n '\bod_xfer_reset[[:space:]]*(' <<<"$teardown" | head -n 1 | cut -d: -f1)
-    core_line=$(grep -n '\bod_core_reset[[:space:]]*(' <<<"$teardown" | head -n 1 | cut -d: -f1)
-    if [ -z "$reset_line" ] || [ -z "$core_line" ] || [ "$reset_line" -ge "$core_line" ]; then
-        echo "Nordic disconnect must reset od_xfer before od_core_reset"
+    if ! grep -q '\bod_core_reset[[:space:]]*(' targets/nordic-zephyr/src/opendisplay_pipe.c; then
+        echo "Nordic disconnect must use the shared core reset"
         rc=1
     fi
     return $rc
 }
 check "nordic: shared legacy transfer cutover" nordic_xfer_cutover
 
-# TRANSITIONAL THROUGH NORDIC PHASE 3 STEP 6. Retire this with the target PIPE machine and replace
-# it with the permanent production invariant that only shared/core/od_xfer.c resets or pushes the
-# zlib pump.
-nordic_xfer_interim_pipe_arbitration() {
-    local rc=0 pipe_start legacy_start
-
-    pipe_start=$(sed -n '/^extern "C" od_cmd_result_t opendisplay_pipe_write_start(/,/^}/p' \
-                 targets/nordic-zephyr/src/opendisplay_pipe_write.cpp)
-    if ! grep -q '\bod_xfer_active[[:space:]]*(' <<<"$pipe_start" ||
-       ! grep -q '\bod_xfer_reset[[:space:]]*(' <<<"$pipe_start"; then
-        echo "Nordic PIPE START must displace a live shared legacy transfer before pump use"
-        rc=1
-    fi
-
-    legacy_start=$(sed -n '/^extern "C" void od_xfer_app_prepare_start(/,/^}/p' \
-                   targets/nordic-zephyr/src/opendisplay_display.cpp)
-    if ! grep -q '\bopendisplay_pipe_write_reset[[:space:]]*(' <<<"$legacy_start"; then
-        echo "Nordic legacy START must displace target PIPE through od_xfer_app_prepare_start"
-        rc=1
-    fi
-    return $rc
-}
-check "nordic: interim PIPE/od_xfer arbitration" nordic_xfer_interim_pipe_arbitration
-
-# Phase 2 step 10b's Nordic executable boundary. Phase 3 step 6 removes this check with the delete
-# inventory, preserves the adapter primitives, and installs the single-pump-owner ratchet above.
-nordic_xfer_10b_inventory() {
-    local rc=0 symbol pump_hits pump_count
-    local files=(
-        targets/nordic-zephyr/src/opendisplay_display.cpp
-        targets/nordic-zephyr/src/opendisplay_display.h
-        targets/nordic-zephyr/src/opendisplay_pipe_write.cpp
-        targets/nordic-zephyr/src/opendisplay_pipe_write.h
-    )
-    local delete_symbols=(
-        PipeWriteState PipeReorderSlot s_pipe s_reorder pipe_slot pipe_chunk_received
-        pipe_build_ack_payload pipe_abort_no_reply send_pipe_ack sack_or_abort send_pipe_nack
-        send_pipe_start_nack pipe_update_highest_seen pipe_consume_payload finish_and_refresh
-        opendisplay_pipe_write_start opendisplay_pipe_write_data opendisplay_pipe_write_end
-        opendisplay_pipe_write_reset opendisplay_pipe_write_active od_cmd_app_pipe_start
-        od_cmd_app_pipe_data od_cmd_app_pipe_end s_active s_total_bytes s_written_bytes
-        s_dw_chunk_n s_dw_log_pct s_dw_trailing_ignores s_dw_init_t0 s_color_scheme s_plane_size
-        s_plane2_started s_dw_compressed s_dw_decompressed_total PartialStreamContext s_partial
-        s_partial_panel_up parse_be_u32 mono_plane_bytes partial_write_stream_bytes
-        partial_zlib_sink zlib_stream_to_partial_write partial_consume_bytes
-        partial_prepare_panel_ram partial_write_to_panel opendisplay_display_partial_active
-        opendisplay_display_dw_active opendisplay_display_bytes_written
-        opendisplay_display_total_bytes opendisplay_display_expected_dw_bytes
-        opendisplay_display_displayed_etag opendisplay_display_clear_etag
-        opendisplay_display_set_partial_new_etag opendisplay_display_partial_bytes_written
-        opendisplay_display_partial_expected opendisplay_display_partial_compressed
-        opendisplay_display_calc_plane_bytes opendisplay_display_partial_write_start
-        dw_init_mark dw_log_progress dw_stream_raw_bytes direct_zlib_sink
-        zlib_stream_to_direct_write opendisplay_display_direct_write_start
-        opendisplay_display_direct_write_data opendisplay_display_direct_write_end_prepare
-        opendisplay_display_direct_write_end_refresh opendisplay_display_pipe_full_start
-        opendisplay_display_pipe_partial_arm opendisplay_display_pipe_partial_prepare
-    )
-    local retain_symbols=(
-        XferAppMode XferAppHardwareState s_xfer_app xfer_app_clear xfer_app_write_full
-        xfer_app_write_partial od_xfer_app_prepare_start od_xfer_app_panel_info
-        od_xfer_app_begin_full od_xfer_app_begin_partial od_xfer_app_write
-        od_xfer_app_inflate_scratch od_xfer_app_abort od_xfer_app_before_refresh
-        od_xfer_app_barrier_abort od_xfer_app_refresh od_xfer_app_displayed_etag
-        od_xfer_app_set_displayed_etag od_xfer_app_now_ms s_epd s_decompression_chunk
-        s_displayed_etag display_cfg display_power_set wait_for_refresh
-        panel_skips_bbep_set_addr_window panel_uses_pixel_ram_x
-        panel_uses_ep397_y_decrement panel_uses_ep426_x_decrement
-        panel_skips_reinit_on_partial_refresh partial_set_ep397_ram_y partial_set_ep426_ram_y
-        partial_set_pixel_ram_x partial_set_addr_window partial_trigger_refresh
-        partial_prepare_panel_ram_hardware partial_cleanup opendisplay_display_abort
-    )
-
-    for symbol in "${delete_symbols[@]}"; do
-        if ! grep -wq "$symbol" "${files[@]}"; then
-            echo "Nordic 10b delete inventory drifted before Phase 3: $symbol"
-            rc=1
-        fi
-    done
-    for symbol in "${retain_symbols[@]}"; do
-        if ! grep -wq "$symbol" targets/nordic-zephyr/src/opendisplay_display.cpp; then
-            echo "Nordic adapter primitive missing from the 10b retain inventory: $symbol"
-            rc=1
-        fi
-    done
-
-    pump_hits=$(grep -RInE '\bod_zlib_pump_(reset|push)[[:space:]]*\(' \
-        targets/nordic-zephyr/src --include='*.c' --include='*.cpp' --include='*.h' \
-        2>/dev/null || true)
-    pump_count=$(grep -c . <<<"$pump_hits")
-    if [ "$pump_count" -ne 5 ] ||
-       grep -v '^targets/nordic-zephyr/src/opendisplay_display\.cpp:' <<<"$pump_hits" | grep -q .; then
-        echo "$pump_hits"
-        echo "Nordic interim pump ownership drifted: expected five target-PIPE calls in opendisplay_display.cpp"
-        rc=1
-    fi
-    return $rc
-}
-check "nordic: Phase 2 step 10b inventory" nordic_xfer_10b_inventory
 
 silabs_xfer_cutover() {
-    local rc=0 hits teardown reset_line core_line
+    local rc=0 hits
     local commands=targets/efr32bg22-slc/od_cmd_silabs.c
     local display=targets/efr32bg22-slc/opendisplay_display.cpp
     local cmake=targets/efr32bg22-slc/cmake_gcc/opendisplay-bg22.cmake
@@ -524,12 +372,9 @@ silabs_xfer_cutover() {
         rc=1
     fi
 
-    teardown=$(sed -n '/^void opendisplay_pipe_reset_transport(/,/^}/p' \
-               targets/efr32bg22-slc/opendisplay_pipe.c)
-    reset_line=$(grep -n '\bod_xfer_reset[[:space:]]*(' <<<"$teardown" | head -n 1 | cut -d: -f1)
-    core_line=$(grep -n '\breset_transport_state[[:space:]]*(' <<<"$teardown" | head -n 1 | cut -d: -f1)
-    if [ -z "$reset_line" ] || [ -z "$core_line" ] || [ "$reset_line" -ge "$core_line" ]; then
-        echo "Silabs teardown must reset od_xfer before common transport/session state"
+    if ! grep -q '\bod_core_reset[[:space:]]*(' "$commands" \
+       && ! grep -q '\bod_core_reset[[:space:]]*(' targets/efr32bg22-slc/opendisplay_pipe.c; then
+        echo "Silabs teardown must use the shared core reset"
         rc=1
     fi
 
@@ -544,6 +389,94 @@ silabs_xfer_cutover() {
     return $rc
 }
 check "silabs: shared legacy transfer cutover" silabs_xfer_cutover
+
+transfer_single_pump_owner() {
+    local hits
+    hits=$(grep -RInE '\bod_zlib_pump_(reset|push)[[:space:]]*\(' shared/core targets \
+        --include='*.c' --include='*.cpp' --include='*.h' --exclude='od_zlib_pump.c' \
+        --exclude='od_zlib_pump.h' --exclude-dir=build 2>/dev/null \
+        | grep -v '^shared/core/od_xfer\.c:' || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "production zlib pump caller returned outside shared/core/od_xfer.c"
+        return 1
+    fi
+}
+check "transfer: single pump owner" transfer_single_pump_owner
+
+pipe_target_machine_absent() {
+    local hits
+    hits=$(grep -RInE \
+        '\b(PipeWriteState|PipeReorderSlot|pipe_build_ack_payload|pipeBuildAckPayload|send_pipe_(ack|nack)|sendPipe(Ack|Nack)|handlePipeWrite(Start|Data|End)|pipe_refused_on_lan|sessionOrigin)\b' \
+        targets --include='*.c' --include='*.cpp' --include='*.h' --exclude-dir=build \
+        2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "target-local PIPE state machine returned"
+        return 1
+    fi
+}
+check "transfer: no target PIPE machine" pipe_target_machine_absent
+
+core_reset_owns_transfer() {
+    local rc=0 body xfer_line txq_line hits
+    body=$(sed -n '/^void od_core_reset(void)/,/^}/p' shared/core/od_core.c)
+    xfer_line=$(grep -n '\bod_xfer_reset[[:space:]]*(' <<<"$body" | head -n 1 | cut -d: -f1)
+    txq_line=$(grep -n '\bod_txq_reset[[:space:]]*(' <<<"$body" | head -n 1 | cut -d: -f1)
+    if [ -z "$xfer_line" ] || [ -z "$txq_line" ] || [ "$xfer_line" -ge "$txq_line" ]; then
+        echo "od_core_reset must reset transfer state before the egress queue"
+        rc=1
+    fi
+    hits=$(grep -RInE '\bod_xfer_reset[[:space:]]*\(' targets \
+        --include='*.c' --include='*.cpp' --include='*.h' --exclude-dir=build \
+        2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "target teardown bypassed od_core_reset transfer ownership"
+        rc=1
+    fi
+    return $rc
+}
+check "reset: od_core owns transfer teardown" core_reset_owns_transfer
+
+command_context_fixtures() {
+    local rc=0 hits statics constructors
+    hits=$(grep -RInE '\bod_cmd_ctx_t[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(;|=)' \
+        tests/host --include='*.c' --include='*.h' --exclude='od_cmd_test_ctx.h' \
+        2>/dev/null \
+        | grep -vE 'tests/host/nordic_cmd_device_test\.c:.*static od_cmd_ctx_t CTX;' \
+        | grep -v 'od_test_cmd_ctx[[:space:]]*(' || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "host command contexts must be initialized by od_test_cmd_ctx()"
+        rc=1
+    fi
+
+    statics=$(grep -RInE '\bstatic[[:space:]]+od_cmd_ctx_t\b' tests/host \
+        --include='*.c' --include='*.h' --exclude='od_cmd_test_ctx.h' 2>/dev/null \
+        | grep -vE '^tests/host/nordic_cmd_device_test\.c:.*static od_cmd_ctx_t CTX;' || true)
+    if [ -n "$statics" ]; then
+        echo "$statics"
+        echo "untracked static command-context fixture returned"
+        rc=1
+    fi
+    constructors=$(grep -RInE \
+        '^[[:space:]]*(static[[:space:]]+)?od_cmd_ctx_t[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(' \
+        tests/host --include='*.c' --include='*.h' --exclude='od_cmd_test_ctx.h' \
+        2>/dev/null || true)
+    if [ -n "$constructors" ]; then
+        echo "$constructors"
+        echo "file-local command-context constructor returned; use od_test_cmd_ctx()"
+        rc=1
+    fi
+    if ! sed -n '/^static void reset_all(void)/,/^}/p' tests/host/nordic_cmd_device_test.c \
+         | grep -q 'CTX = od_test_cmd_ctx[[:space:]]*('; then
+        echo "Nordic command fixture must initialize CTX through od_test_cmd_ctx() in reset_all()"
+        rc=1
+    fi
+    return $rc
+}
+check "command context: explicit host fixtures" command_context_fixtures
 
 od_color_structure() {
     local rc=0 hits count
@@ -858,6 +791,24 @@ log_off_link_proof() {
 }
 check "host: logging capability-off link proof" log_off_link_proof
 
+pipe_off_link_proof() {
+    local binary="$BUILD_ROOT/host-gcc/od_pipe_off_test" hits entry_count
+
+    [ -x "$binary" ] || { echo "capability-off PIPE fixture was not built"; return 1; }
+    hits=$(nm -a "$binary" | grep -E '\b(s_pipe|s_reorder|od_pipe_reorder_slot_t)\b' || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "OD_CAP_PIPE=0 retained PIPE sequencing or reorder storage"
+        return 1
+    fi
+    entry_count=$(nm -g "$binary" | grep -Ec '\bod_pipe_(start|data|end)$' || true)
+    if [ "$entry_count" -ne 3 ]; then
+        echo "OD_CAP_PIPE=0 must retain exactly the three dispatch entry points (found $entry_count)"
+        return 1
+    fi
+}
+check "host: PIPE capability-off link proof" pipe_off_link_proof
+
 # ASan + UBSan over every host test at once -- including the two PRE-AUTH parsers, od_config_tlv
 # and od_session, whose inputs an unauthenticated peer controls. halt_on_error is not decoration:
 # UBSan's default is to print a diagnostic and carry on with status 0.
@@ -867,7 +818,8 @@ host_sanitizers() {
           -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" >/dev/null \
         && cmake --build "$dir" -j"$(nproc)" \
-        && UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ASAN_OPTIONS=detect_leaks=1 \
+        && UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+           ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1}" \
            ctest --test-dir "$dir" --output-on-failure --no-tests=error
 }
 check "host suite (ASan + UBSan)" host_sanitizers
@@ -878,8 +830,8 @@ check "host suite (ASan + UBSan)" host_sanitizers
 # tests/fuzz/corpus/ are committed, so each run starts from the coverage the last one found.
 #
 # A crash writes its input to ./crash-<sha1>. Commit it to the corpus AND pin it as a numbered
-# case in tests/host/session_test.c, so the regression fails the ordinary run too.
-FUZZ_TARGETS=(session_open_raw session_open_sealed session_auth)
+# case in the corresponding ordinary host test, so the regression fails without fuzzing too.
+FUZZ_TARGETS=(session_open_raw session_open_sealed session_auth pipe_start pipe_data)
 
 fuzz_all() {
     local dir="$BUILD_ROOT/fuzz" t

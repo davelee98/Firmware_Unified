@@ -141,9 +141,7 @@ void opendisplay_pipe_abort_xfer_barrier(uint32_t tag)
 
 void opendisplay_pipe_reset_transport(void)
 {
-  if (od_xfer_active()) {
-    od_xfer_reset();
-  } else {
+  if (!od_xfer_frames_may_arrive()) {
     /* A transport reset is also the target's fail-safe panel power-off path. */
     opendisplay_display_abort();
   }

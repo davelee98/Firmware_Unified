@@ -71,6 +71,8 @@ typedef enum {
 typedef struct {
     od_reply_t           rp;
     od_tx_reservation_t *r;
+    uint16_t              wire_len;       /* complete request length before session open */
+    bool                  was_protected;  /* this request successfully crossed CCM open */
 } od_cmd_ctx_t;
 
 /* What one outcome MEANS, as data rather than as a switch in each target. The two targets got this

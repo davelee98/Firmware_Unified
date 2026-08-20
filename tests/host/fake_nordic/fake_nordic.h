@@ -1,8 +1,8 @@
 /* fake_nordic.h -- the target seams the Nordic command translation units reach through, faked so
  * they can be compiled and run on a workstation.
  *
- * THE POINT IS THAT THE COMMAND CODE IS REAL. od_cmd_{device,config,direct,nfc}.c and
- * opendisplay_pipe_write.cpp are linked as production sources; what is faked is everything BELOW
+ * THE POINT IS THAT THE COMMAND CODE IS REAL. Target command modules and the shared transfer
+ * machine are linked as production sources; what is faked is everything BELOW
  * them -- the panel, NVM, the BLE stack, the kernel. A transcription of a handler would prove only
  * that the copy agrees with itself, which is the rule tests/host has followed since C11.
  *
