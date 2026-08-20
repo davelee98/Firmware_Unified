@@ -10,6 +10,7 @@
 #include "od_hal_crypto.h"
 #include "od_hal_gpio.h"
 #include "od_hal_time.h"
+#include "od_hal_sleep.h"
 #include <stdio.h>
 #include <string.h>
 

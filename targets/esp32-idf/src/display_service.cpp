@@ -6,6 +6,7 @@
 #include "od_hal_i2c.h"
 #include "od_hal_gpio.h"
 #include "od_hal_time.h"
+#include "od_hal_sleep.h"
 #include "od_hal_adc.h"
 #include "structs.h"
 /* shared/core: the 16-byte MSD encoding. This target no longer assembles those bytes. */

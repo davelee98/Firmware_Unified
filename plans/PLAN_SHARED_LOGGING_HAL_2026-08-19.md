@@ -2,359 +2,523 @@
 
 **Date:** 2026-08-19
 
-**Source snapshot:** `main` at `5a169f2`, plus Phase 2 step 11 on `feat/transfer-phase2-step11`
+**Source snapshot:** reviewed against `main` at `e965dd9`.
 
-**Authority:** `../Firmware/src/od_log.{h,cpp}` (71 + 401 lines). Per the migration constraint,
-`Firmware` is the field-proven original; this plan promotes its shape rather than re-deriving one.
+**Authority and reconciliation:** `../Firmware/src/od_log.{h,cpp}` is the field-proven origin of
+the public API and record format. The current unified ESP32 and Nordic implementations are the
+authority for behavior already adapted after import. In particular, the legacy donor's TinyUSB
+room polling and stall backoff are not treated as live unified-firmware requirements when neither
+current target uses them.
 
-**Answers:** `PLAN_DEDUP_CONSOLIDATED_2026-08-17.md` Part 6 open question 5 ("Shared logging HAL:
-yes or no?") and Part 3 prerequisite 2. It also discharges the deferral written into
-`targets/esp32-idf/hal/od_hal_log.h` — "a decision to make when the logger is promoted and both
-targets are in front of you".
+**Verdict:** promote one shared logger for `esp32-idf` and `nordic-zephyr` over a small
+complete-emission HAL. `efr32bg22-slc` deliberately keeps its bare `printf()` output and links
+explicit capability-off logger stubs.
 
-**Verdict: yes, for `esp32-idf` and `nordic-zephyr`.** The API is already agreed between them;
-only the implementation is duplicated.
+**Implementation checkpoint — 2026-08-19:** the standalone time-HAL portion of Phase 1 is a
+software-complete candidate on `codex/hal-time-phase1`. `tools/check.sh --targets` passes 27/0/0,
+including all ESP32 configurations, all three Nordic boards and BG22; the host suite is 44/44.
+BG22 remains 250,196 B flash and 32,284 B static RAM, exactly matching an `e965dd9` baseline build.
+Both BG22 functions are currently removed by section GC because that target has no production
+caller; the unchanged size proves zero dormant footprint rather than device execution. No hardware
+timing or instrumented known-interval row has run, so Phase 1 is not hardware-qualified and the
+logging-specific steps have not started.
 
-**`efr32bg22-slc` does not adopt it** (project decision, 2026-08-19). It keeps its 102 bare
-`printf()` calls and gains no record format. That is not a gap to close later — §3.3 states how
-BG22 still links shared code that logs, and §5 has no BG22 cutover step.
+This answers `PLAN_DEDUP_CONSOLIDATED_2026-08-17.md` Part 6 question 5 and discharges the deferral
+in `targets/esp32-idf/hal/od_hal_log.h`.
 
 ---
 
-## 1. What is actually there today
+## 1. Current state
 
-This is not a design-from-scratch task. Two of three targets already ship the authority's public
-surface verbatim.
-
-| | public macro surface | implementation | port seam |
-|---|---|---|---|
-| `../Firmware` (authority) | 4 levels, compile-time filter, `_od_log`/`od_log_raw`/`od_log_flush`/`od_log_hex_line` | 401 lines: drop accounting, `[DROP: n]` splice, ready hook, loop-task budget, stall backoff | `Stream*` / `tud_cdc_write()` by `#ifdef` |
-| `esp32-idf` | **identical** (`src/od_log.h`, 83 lines) | 362 lines, near-verbatim port | `hal/od_hal_log.{h,c}` — `open`/`is_open`/`room`/`write`/`flush` |
-| `nordic-zephyr` | **identical** (`src/od_log.h`, 68 lines) | 126 lines; Zephyr owns queueing, `LOG_RAW` delivers | none — Zephyr backend |
-| `efr32bg22-slc` | **absent, and staying absent** | none | 102 bare `printf()` calls |
-
-The level ladder, the four macros, the `do { if (OD_LOG_LEVEL >= …) } while (0)` construction and
-its rationale, `_od_log`'s `__attribute__((format(printf, 2, 3)))`, and the
-`[SSSS.mmm|Cn] L: message` record format are already byte-identical between ESP32 and Nordic.
-Nordic's header even documents *why* the level test is inside the macro body rather than around it
-— the same reason the authority has it there.
-
-**So the promotion is: move the agreed policy into `shared/core/od_log.c`, and define the port
-seam beneath it.** The disagreement is entirely below the API.
-
-### 1.1 What is blocked on it
-
-`DEDUP_6_SWEEP_2026-08-17.md` §7, re-counted against the current tree:
-
-| Duplicate | Lines | What differs |
+| Target | Public surface | Current delivery |
 |---|---|---|
-| `od_watchdog_app.{c,h}` | 164+48 esp32, 196+64 nordic = **472** | the clock, a Zephyr spinlock, four log strings |
-| `od_session_app.*` | 136 + 136 + 63 = **335** | the clock, device-id source, log wording, rate-limit budget |
-| `od_rxq_app.*` | 69 + 43 = **112** | log wording, ESP32's hex line and encrypted/plaintext token |
-| `od_txq_app_dropped` | 3 sites, ~**20** | log wording only |
-| `od_log_hex_line` | 2 copies, ~**40** | nothing — identical algorithm, 32-byte cap, `" ..."` suffix |
+| `esp32-idf` | Four levels, `_od_log`, raw, flush, hex renderer and dropped count | Target logger formats records, takes a FreeRTOS mutex and writes through `od_hal_log`; its port-ready check is unconditionally true |
+| `nordic-zephyr` | The same four levels and functions | Target logger submits each complete record once through Zephyr `LOG_RAW`; Zephyr owns queueing, serialization and drops |
+| `efr32bg22-slc` | No `od_log` API | 102 bare `printf()` calls; unchanged by this plan |
 
-`targets/esp32-idf/src/od_watchdog_app.cpp` states the dependency in its own header: *"They are two
-copies because `shared/` has no logging HAL and `od_watchdog` therefore cannot emit the boot report
-itself; the day one lands, both collapse into it."*
+The level ladder and normal record shape are agreed:
 
-Collapsing those is **not** part of this plan. This plan lands the keystone; each collapse is its
-own promotion with its own hardware gate, sequenced afterwards.
+```text
+[SSSS.mmm|Cn] L: message\r\n
+```
 
-**With BG22 out, three of the five collapse fully and two collapse partially.**
-`od_watchdog_app` (472) and `od_rxq_app` (112) are ESP32+Nordic only already — BG22 declines
-`HAL_WDT` and `APP_RXQ` — and `od_log_hex_line` (~40) has only two copies. Those 624 lines are
-unaffected by the decision. `od_session_app` collapses its ESP32+Nordic pair (272 lines) while
-BG22's 63-line copy stays, and one of `od_txq_app_dropped`'s three sites stays. **~900 of the ~979
-lines still come back**; the residue is BG22's own and is not duplication, because after this there
-is nothing left for it to be duplicated *with*.
+The implementations are not otherwise identical. ESP32 caps normal and raw text at 232 bytes.
+Nordic permits 253 bytes before CRLF for a normal record and 255 bytes for raw output. Nordic
+clamps an invalid direct `_od_log()` level to INFO; ESP32's direct call indexes the level table
+without validation. Public macros only issue valid levels.
+
+### 1.1 What this unblocks
+
+The logging boundary is the prerequisite for later, independent promotions of:
+
+- the two `od_log_hex_line` copies;
+- `od_txq_app_dropped` logging;
+- the ESP32/Nordic `od_rxq_app` pair;
+- the ESP32/Nordic portions of `od_session_app`; and
+- the ESP32/Nordic `od_watchdog_app` pair.
+
+Those collapses are not part of this plan. BG22's session and TXQ logging adapters remain target
+code because BG22 declines the shared logger.
 
 ---
 
-## 2. The decision `od_hal_log.h` deferred
+## 2. Decisions
 
-That header refused to narrow to `docs/SHARED_API_DESIGN.md`'s one-line sink because
-`od_hal_log_room()` is load-bearing on nRF, and it recorded the question rather than guessing.
-Here is the answer, and it needs no new machinery.
+### 2.1 Submit one complete emission to the target
 
-**Keep a port seam wide enough to express backpressure. "Unbounded" is a legitimate answer to
-`room()`, and ESP32's own stdout backend already gives it.**
-
-From `hal/od_hal_log.h`:
-
-> The stdout backend reports `INT_MAX`. That is the honest answer for it and not a placeholder: the
-> IDF console driver exposes no inspectable queue … Reporting a made-up finite number would turn a
-> caller's backoff into either a permanent stall or a permanent no-op.
-
-That is exactly Nordic's situation: Zephyr owns its own queue and its own drop accounting, so
-`INT_MAX` is the honest answer there too. Shared policy's `room() >= need` test then passes
-immediately, no wait occurs, and no drop is ever counted — precisely today's Nordic behaviour. The
-backpressure machinery costs Nordic nothing and stays available on ESP32, where it is load-bearing.
-
-**Rejected alternatives, and why:**
-
-- *One-line sink (`void od_hal_log(const char *line)`).* Cannot express `room()`. ESP32's budget,
-  stall backoff and drop counting exist for a real defect — a USB host that holds the port open and
-  stops draining wedges `loop()` — and deleting them to fit a narrower contract trades a live
-  protection for symmetry.
-- *A capability flag / two-tier HAL.* Unnecessary. `INT_MAX` already encodes "no inspectable queue"
-  without a second concept, and a flag would need every policy branch to be written twice.
-
-### 2.1 The two FreeRTOS-typed hooks
-
-The authority's `od_log_set_loop_task(TaskHandle_t)` and `od_log_set_ready_hook(bool (*)(void))`
-cannot cross the boundary — the first names a vendor type, and CLAUDE.md's one rule forbids vendor
-headers in `shared/`. Both become port-seam predicates the target answers:
-
-- `bool od_hal_log_may_wait(void)` — replaces the loop-task capture. ESP32 answers "am I on the
-  task that owns the budget"; Nordic answers `true` unconditionally, which is inert because its
-  `room()` never forces a wait. The authority's load-bearing NULL default ("not captured yet ⇒ full
-  budget") becomes the target's problem, stated in its adapter.
-- `bool od_hal_log_is_ready(void)` — replaces the ready hook. Distinct from `is_open()`: a port can
-  be open with nobody listening, and the authority's comment explains why conflating them hands the
-  first terminal to attach a `[DROP: 4102931]` that says nothing. Nordic returns `is_open()`.
-
-Two implementers, not three. A seam with one honest implementation per target is the bar; a third
-that only exists to satisfy a linker is what §3.3 avoids.
-
----
-
-## 3. Resulting shape
-
-```
-shared/core/od_log.h        the four levels, the four macros, _od_log, od_log_raw,
-                            od_log_flush, od_log_hex_line, od_log_dropped_total
-shared/core/od_log.c        POLICY: record format, compile-time level filter, drop
-                            accounting and the [DROP: n] splice, the wait budget and
-                            stall backoff, hex-line rendering
-shared/hal/od_hal_log.h     PORT: open, is_open, is_ready, may_wait, room, write, flush,
-                            now_ms
-```
-
-`od_log.c` goes in a new **`OD_SHARED_SOURCES_HAL_LOG`** tier — named for the HAL it needs, like
-`HAL_CRYPTO` and `HAL_WDT`, not for a seam. Every target takes it; nothing declines it.
-
-`od_log_cycle_count()` stays a seam (Nordic already declares it `__weak`): the deep-sleep cycle
-count in the record header is a target fact.
-
-### 3.1 The clock, and the time HAL this plan deliberately does not create
-
-**There is no shared time HAL.** `shared/hal/` holds four headers — `od_hal_adv`, `od_hal_crypto`,
-`od_hal_radio`, `od_hal_wdt` — and `od_hal_uptime_ms()` is target-local to
-`targets/esp32-idf/hal/od_hal_time.h`.
-
-**That absence is a design choice, not an omission, and the reason is testability.**
-`shared/core/od_watchdog.h` states it outright: the clock "is passed in rather than taken from a
-time HAL so the uptime rule is directly testable and `shared/` needs no clock interface of its
-own." Eight shared entry points across three modules follow that rule today —
-`od_watchdog_boot_init`, `od_watchdog_feed`, `od_session_alive`, `od_session_touch`, three more
-`od_session_*`, and `od_txq_flush` — and every one of them is tested by passing an integer rather
-than by installing a fake clock. That is why the session, watchdog and txq suites are as direct as
-they are.
-
-A logger cannot follow the rule: threading `now_ms` through ~500 call sites would destroy the API
-the promotion exists to preserve. So **the port seam carries the clock**:
-`uint32_t od_hal_log_now_ms(void)`. That is consistent with what the seam already is — the DEDUP
-table lists "the clock" as the first of the things that differ between every duplicated seam file,
-so it is a target fact by the same argument as `room()` and `may_wait()`.
-
-**Do not create `shared/hal/od_hal_time.h` here.** Three reasons, in order of weight:
-
-1. **It would put the eight existing call sites at risk.** A shared clock is a standing invitation
-   for the next refactor to "simplify" `od_session_alive(s, now_ms, …)` into
-   `od_session_alive(s, …)`. Nothing about the timeout logic gets better; the host suite gets
-   materially worse. This is the only cost of a time HAL that makes something *worse* rather than
-   merely costing time.
-2. **It is not a one-function promotion.** `docs/SHARED_API_DESIGN.md` § `od_hal_time` carries an
-   unresolved naming dispute (`od_msleep` signed vs `od_hal_delay_ms`) flagged as "Decide this
-   before the Nordic import" — which did not happen — plus a contract point learned from two live
-   ESP32 defects: `delay_ms` must round up to whole ticks and never to zero, or a deliberate settle
-   becomes a busy-spin.
-3. **One subsystem per swap.** The DEDUP plan schedules it as a Phase 2 prerequisite alongside the
-   I2C seam, with its own gate. Landing it inside the logging plan couples two independently
-   revertable pieces of work.
-
-**When it does land, the reconciling rule is: shared modules that already take `now_ms` keep taking
-it. The HAL serves ambient consumers only** — the logger, and whatever later module genuinely
-cannot thread a parameter. Write that rule into `od_hal_time.h`'s header at creation, because the
-refactor in reason 1 will otherwise look like an obvious cleanup to someone who has not read this.
-
-With that rule, promotion costs the logger one line per target: `od_hal_log_now_ms()` is deleted
-and `od_log.c` calls the shared clock directly. Keeping the dependency inside the log seam now is
-what makes that a deletion rather than a rewrite, and note that
-`targets/esp32-idf/hal/od_hal_time.h` was already written to the shared contract verbatim on
-exactly that bet — "the same bet `od_hal_nvs` took". Promotion will not retire ESP32's `delay` and
-`millis`, though: both are pinned by name from `third_party/` (bb_epaper declares `void delay(long)`
-unmangled, FastEPD's `arduino_io.inl` has 19 `millis()` call sites), so a time HAL consolidates
-less on that target than it appears to.
-
-### 3.2 Record buffer sizing
-
-The authority uses a 256-byte stack buffer in `_od_log` plus a 24-byte tag. Size it behind a
-constant with a documented floor, per CLAUDE.md's memory rule:
+The target HAL is:
 
 ```c
-#ifndef OD_LOG_RECORD_MAX
-#define OD_LOG_RECORD_MAX 256u          /* ESP32, Nordic */
-#endif
-_Static_assert(OD_LOG_RECORD_MAX >= 96u, "a record must hold the header plus a useful message");
+void od_hal_log_open(void);
+bool od_hal_log_is_open(void);
+void od_hal_log_write(char *record, size_t len);
+void od_hal_log_flush(void);
+uint32_t od_hal_log_cycle_count(void);
 ```
 
-`OD_LOG_MAX_TEXT` (the authority's 232) derives from `OD_LOG_RECORD_MAX`, not a second constant.
+Uptime is deliberately absent: it comes from `shared/hal/od_hal_time.h`'s `od_hal_uptime_ms()`,
+which §2.3 promotes alongside `od_hal_delay_us()`. Only the cycle count stays logger-specific.
 
-**BG22's decision removes this plan's only memory risk.** A 256-byte record frame against 480 bytes
-of heap-inclusive headroom and a ~2.7 KB main stack was the one place the logger could cost more
-than it saved. With `OD_CAP_LOG=0` there is no frame, no tag and no static state on that target —
-see §3.3. Both remaining targets have room for the authority's numbers unchanged.
+`od_log.c` formats the final bytes, including CRLF for a normal record, in one mutable stack buffer,
+stores a terminating NUL at `record[len]`, and calls `od_hal_log_write()` exactly once per
+`_od_log()` or `od_log_raw()` invocation. The record contains formatted text rather than arbitrary
+binary data; embedded NUL is not supported. The HAL must consume or copy the `len` bytes before
+returning, must not mutate or retain the caller's buffer, and must make one call safe against
+concurrent task callers. The shared logger is not ISR-safe; no target may call it from an ISR.
 
-### 3.3 How BG22 links shared code that logs
+The return type is `void` deliberately. Zephyr's deferred logger can accept a `LOG_RAW` submission
+without exposing whether a backend later drops it, so a byte-count return would invite the Nordic
+adapter to fabricate delivery knowledge. Logging remains best-effort.
 
-BG22 takes `PURE + HAL_CRYPTO + HAL_RADIO + APP_SESSION + APP_INFLATE + APP_XFER`, so it compiles
-`od_session.c`, `od_xfer*.c` and every other shared module. Once those modules log, BG22 has to
-resolve the calls without implementing the seam.
+Target behavior:
 
-**`OD_CAP_LOG`, defaulting to 1; BG22 sets 0 in `target_compile_definitions`.** Two properties make
-this work:
+- ESP32 uses one `uart_write_bytes()` or `fwrite()` call. The selected driver owns serialization.
+- Nordic uses one `LOG_RAW("%s", record)` submission. `record` deliberately remains `char *`, which
+  tells Zephyr's deferred logger that it is transient and must be copied into the log package before
+  the call returns. Do not cast it to `const char *`: Zephyr treats that as read-only storage that
+  may be retained. Do not use `%.*s`: Zephyr's logging package does not support width or precision
+  on string conversions. Zephyr owns serialization, queueing, backend selection and its internal
+  drop reporting after that copy.
+- Flush and write must be mutually safe through the selected target transport. Shared code owns no
+  RTOS mutex and includes no RTOS header.
 
-- The existing macro body is `if (OD_LOG_LEVEL >= OD_LOG_ERROR)` with `OD_LOG_ERROR == 0`, so
-  `OD_LOG_LEVEL` can never disable ERROR on its own. `OD_CAP_LOG=0` forces the level negative, and
-  `-1 >= 0` is false for every level. **No macro body changes.** Arguments still compile, so a typo
-  in a log call is still a build error on BG22 — the property Nordic's header calls out as the
-  reason the test is inside the macro rather than around it.
-- **`od_log.c` is still compiled on BG22, not omitted.** With `OD_CAP_LOG=0` its bodies reduce to
-  empty and its static state to nothing, but the translation unit exists and `_od_log` resolves.
-  Relying on the optimizer to delete a call in a folded-away branch would make linkage depend on
-  `-O` level; that is not a bet worth taking on the one target with no headroom to debug it.
+### 2.2 Do not promote obsolete donor backpressure machinery
 
-So BG22 implements **no** `od_hal_log_*` function, gains no buffer, no record format and no RAM,
-and its console output is byte-for-byte what it is today.
+The shared interface has no `room`, `may_wait`, `is_ready`, lock or sleep operation.
 
-**The rule this creates, and it is a trap:** a log call in shared code does nothing on BG22, so
-**log arguments must have no side effects**. `od_log_info("n=%u", consume_next())` would skip
-`consume_next()` on BG22 and nowhere else. This was already true for any level below the compiled
-threshold; BG22 makes it true for *every* level on a whole target, which is what turns a latent
-style rule into a ratchet (§6.1).
+This is a reconciliation, not a simplification by assumption:
+
+- Current ESP32's `od_port_wait_ready()` returns `true` without consulting
+  `od_hal_log_room()`. Its UART drains independently of a host and its stdout backend exposes no
+  inspectable queue.
+- No current ESP32 call installs `od_log_set_ready_hook()`.
+- Current Nordic submits complete records to Zephyr and exposes neither room nor application-level
+  drop accounting.
+- A shared implementation of the donor algorithm would require RTOS mutex, current-task, tick and
+  sleep primitives that the proposed portable boundary must not acquire.
+- Applying the donor room test to ESP32's finite UART-room report would introduce drops that do not
+  occur today.
+
+The one complete-write contract removes the multipart reservation that required the ESP32 logger
+mutex. `od_log_set_loop_task()` and `od_log_set_ready_hook()` retire. No production caller uses the
+ready hook; the loop-task setter exists only to govern the retired wait budget.
+
+`od_log_dropped_total()` remains for source compatibility and returns a real `0` on both adopting
+targets. The `[DROP: n]` splice and the ESP32 mutex-contention counter retire. No production caller
+reads the count. This is a deliberate behavioral convergence: the current Nordic target already
+returns zero, and the current ESP32 target cannot generate a host-stall drop because its readiness
+path is unconditional. Record it in the implementation checkpoint rather than describing the
+legacy donor path as current behavior.
+
+### 2.3 Create `od_hal_time` with the two functions that already agree; keep ambient time out of policy APIs
+
+**Two rules, and they are separate.**
+
+**Rule one: shared policy keeps its explicit `now_ms` parameters.** Session, watchdog and TXQ
+functions are tested by passing an integer rather than installing a fake clock —
+`shared/core/od_watchdog.h` says the clock "is passed in rather than taken from a time HAL so the
+uptime rule is directly testable". Eight entry points follow it: `od_watchdog_boot_init`,
+`od_watchdog_feed`, `od_session_alive`, `od_session_touch`, three more `od_session_*`, and
+`od_txq_flush`. **None of them changes**, now or when `od_hal_time` later gains a bounded sleep.
+This is the only
+cost of a shared clock that makes something *worse* rather than merely costing effort, and the rule
+belongs in `od_hal_time.h`'s header at creation (§2.3.1) — otherwise the first refactor to "simplify"
+`od_session_alive(s, now_ms, …)` looks like an obvious cleanup.
+
+**Rule two: create `od_hal_time` — `shared/hal/od_hal_time.h` — with the two functions the targets
+already agree on.** The three time functions do not share a fate:
+
+| | ESP32 | Nordic | agreement |
+|---|---|---|---|
+| uptime ms | `uint32_t od_hal_uptime_ms(void)` | `uint32_t od_uptime_get_32(void)` → `k_uptime_get_32()` | signature identical; name differs |
+| busy wait µs | `void od_hal_delay_us(uint32_t)` → `esp_rom_delay_us` | `void od_busy_wait(uint32_t)` → `k_busy_wait` | signature **and** semantics identical — neither yields; name differs |
+| sleep ms | `void od_hal_delay_ms(uint32_t)` | `void od_msleep(int32_t)` → `k_msleep` | **name and signedness differ** |
+
+```c
+/* shared/hal/od_hal_time.h */
+uint32_t od_hal_uptime_ms(void);       /* monotonic ms since boot, free-running 32-bit */
+void     od_hal_delay_us(uint32_t us); /* busy-wait; does NOT yield; keep the argument small */
+```
+
+The `od_hal_*` names win per `docs/SHARED_API_DESIGN.md`, matching `od_hal_nvs`/`od_hal_gpio`/
+`od_hal_crypto`. Nordic renames `od_uptime_get_32` → `od_hal_uptime_ms` and `od_busy_wait` →
+`od_hal_delay_us`, leaving `od_zephyr_compat.h` holding only `od_msleep`.
+
+ESP32 is not a header-only repoint. Its current target header also declares the intentionally
+unpromoted `od_hal_delay_ms(uint32_t)`, and production callers depend on that declaration. Phase 1
+therefore moves the millisecond-sleep declaration and its contract into target-private
+`targets/esp32-idf/hal/od_hal_sleep.h`; `od_hal_time.c` includes both the shared time header and the
+private sleep header, and every ESP32 millisecond-sleep caller includes the private header. Update
+the host shim at the same boundary: delete its shadow `od_hal_time.h`, include the canonical shared
+header, provide the test clock as a fake `od_hal_uptime_ms()` definition, and expose any test-only
+millisecond-sleep declaration through a private sleep shim. There must not be a target-local or
+host-shim `od_hal_time.h` shadowing the canonical shared header through include-path order.
+
+#### 2.3.1 Two comments `od_hal_time.h` must carry at creation
+
+Both are one-time costs that prevent a predictable mistake, and neither is inferable from the code:
+
+1. **The bounded wait is deferred, not forgotten.** State that `od_hal_time` deliberately declares
+   no `od_hal_delay_ms()`/sleep, name the unresolved points (ESP32 `uint32_t` vs Nordic `int32_t`
+   `od_msleep`, zero-delay behaviour, and the round-up-never-to-zero rule learned from two live
+   ESP32 defects), and say that adding one is its own decision. Without this, the header reads like
+   an incomplete port and the obvious "finish it" commit silently picks a signedness.
+2. **Shared policy keeps its `now_ms` parameters.** State that `od_hal_uptime_ms()` is for ambient
+   consumers only and that the eight existing policy entry points must not be "simplified" to call
+   it. That refactor looks like a cleanup to anyone who has not read this plan.
+
+**Sleep is excluded deliberately.** `od_msleep`'s `int32_t` mirrors `k_msleep`, where a non-positive
+value means "already expired, return immediately"; `od_hal_delay_ms`'s `uint32_t` mirrors FreeRTOS
+ticks, which have no such convention. ESP32's contract also carries a rule learned from two live
+defects — round UP to whole ticks, never to zero, or a deliberate settle becomes a busy-spin.
+`SHARED_API_DESIGN` said "**Decide this before the Nordic import**"; the import happened without
+it, so the disagreement is locked in and needs its own decision. **Nothing in this plan needs a
+shared bounded sleep.**
+
+**Consequence for the log seam: there is no `od_hal_log_uptime_ms()`.** `od_log.c` calls
+`od_hal_uptime_ms()` directly. The seam keeps only the fact that is genuinely logger-specific:
+
+- `od_hal_log_cycle_count()` returns the target's persistent wake/deep-sleep cycle number. ESP32
+  replaces its logger-only `getDeepSleepCount()` accessor with an `extern "C"` implementation in
+  `main.cpp`; Nordic returns zero.
+
+Uptime is monotonic milliseconds since the current boot, truncated modulo `2^32`. It is not wall
+time and must not jump due to clock synchronization. The wrap is in the millisecond result domain,
+not in a target's underlying tick domain.
+
+**BG22 implements both, but they are not load-bearing there today.** With `OD_CAP_LOG=0` the logger
+is the only shared ambient consumer and it is compiled out, so **nothing shared calls
+`od_hal_uptime_ms()` on BG22**. The target implements the complete interface so a later shared
+ambient consumer does not arrive to find one target missing it; this phase does not rewrite BG22's
+existing direct `sl_udelay_wait()` or open-coded sleeptimer call sites. Removing those target calls
+is a separate time-HAL migration with its own timing qualification, especially for the 1–2 us
+hardware paths.
+
+That leaves the new BG22 `od_hal_uptime_ms()` definition intentionally unused at the end of Phase 1.
+This is deliberate staging, not evidence that the existing target clocks are correct. Ten current
+call sites still use the 32-bit tick conversion: session, PIPE, transfer timing, six BLE/NFC/timeout
+sites and the `bb_epaper` `millis()` adapter. Their pre-existing long-uptime defect is recorded in
+`docs/FOLLOWUPS.md` § 7 and must be fixed as an independently reviewable target change rather than
+folded silently into logging promotion.
+
+The BG22 uptime wrapper must not use
+`sl_sleeptimer_tick_to_ms(sl_sleeptimer_get_tick_count())`. That converts a 32-bit hardware tick
+count, so it wraps in the low-frequency tick domain (roughly 36 hours at 32.768 kHz) and violates the
+`uint32_t` millisecond contract. It must read `sl_sleeptimer_get_tick_count64()`, convert with
+`sl_sleeptimer_tick64_to_ms()`, check the status, and only then cast the 64-bit millisecond value to
+`uint32_t`. A read before `sl_sleeptimer_init()` reports `SL_STATUS_INVALID_PARAMETER`; return `0`,
+the boot-domain origin, on that path and on another conversion failure. Do not assert or log from
+the clock: early boot logging is a planned caller, an assertion can HardFault without a debugger,
+and logging the failure would recurse through timestamp acquisition.
+
+Host tests inject uptime and cycle count and cover uptime `0`, `999`, `1000` and `UINT32_MAX`, plus
+cycle zero and a non-zero value. Timestamp formatting may widen beyond four seconds digits; that is
+existing behavior.
+
+### 2.4 Flush owns its target-specific settlement
+
+`od_hal_log_flush()` means: push the selected transport toward the host, apply its bounded drain
+policy, and then perform the existing 5 ms settlement before returning.
+
+- ESP32 UART keeps its bounded `uart_wait_tx_done()` and then calls target-local
+  `od_hal_delay_ms(5)`; stdout performs `fflush()` and the same delay.
+- Nordic calls `log_flush()` and then `k_msleep(5)`.
+
+The delay lives inside the log HAL because it is part of the log transport's flush guarantee.
+Shared `od_log.c` therefore needs no sleep of its own, and this is exactly why §2.3 promotes uptime
+and busy-wait but not the bounded sleep. The minimum-5-ms property stays the target's
+responsibility, including tick rounding.
+
+When a bounded sleep is later added to `od_hal_time`, its contract must reconcile the current
+unsigned ESP32 `od_hal_delay_ms()` with Nordic's signed `od_msleep()`, define the zero-delay
+behavior and guarantee that a positive millisecond delay rounds up rather than to zero. That later
+addition may replace these flush delays, but it must not remove explicit `now_ms` parameters from
+shared policy modules.
+
+### 2.5 Preserve each target's existing truncation boundary
+
+Use one `OD_LOG_RECORD_MAX == 256` stack buffer. Target compile definitions preserve the existing
+text caps:
+
+| Profile | Normal text before CRLF | Raw text |
+|---|---:|---:|
+| ESP32 | 232 | 232 |
+| Nordic | 253 | 255 |
+
+`OD_LOG_TEXT_MAX` and `OD_LOG_RAW_TEXT_MAX` are compile-time constants with static assertions:
+
+```c
+_Static_assert(OD_LOG_TEXT_MAX + 2u + 1u <= OD_LOG_RECORD_MAX,
+               "normal record plus CRLF and NUL must fit");
+_Static_assert(OD_LOG_RAW_TEXT_MAX + 1u <= OD_LOG_RECORD_MAX,
+               "raw record plus NUL must fit");
+```
+
+The target profiles are tested separately. A later decision may converge the caps, but this
+promotion does not silently truncate Nordic lines earlier or lengthen ESP32 output.
+
+Invalid direct levels are clamped to INFO in shared code, adopting Nordic's safe behavior. This is
+a defensive change only for callers that bypass the four public macros; no such production caller
+exists.
+
+### 2.6 BG22 capability-off is explicit code, not optimizer behavior
+
+`OD_CAP_LOG` defaults to 1. BG22 sets it to 0. `od_log.h` defines an effective level of `-1` when
+the capability is off while keeping the existing `do { if (constant) ... } while (0)` macro shape.
+Arguments therefore still compile but are not evaluated.
+
+`od_log.c` has explicit capability branches:
+
+- With `OD_CAP_LOG=1`, compile the real implementation and HAL references.
+- With `OD_CAP_LOG=0`, compile no static logger state and no HAL references. `od_log_init()`,
+  `_od_log()`, `od_log_raw()` and `od_log_flush()` are explicit no-ops;
+  `od_log_dropped_total()` returns zero. The pure `od_log_hex_line()` renderer may remain available
+  because it requires no logger state or HAL.
+
+A host executable compiles this profile at `-O0`, supplies no `od_hal_log_*` fake, links
+successfully and verifies with `nm` that it has no unresolved or defined log-HAL symbol. This is
+the proof that BG22 does not depend on dead-code optimization for linkage. The target map separately
+proves zero logger state and measures the final flash/RAM/stack delta.
+
+Log arguments must have no side effects. That rule already applies to every compile-time-disabled
+level; capability-off makes it apply to every log call on BG22. Add a ratchet for obvious nested
+function calls in shared log arguments and review false positives manually.
 
 ---
 
-## 4. Behaviour that must not change
+## 3. Resulting ownership
 
-The record format is observable — Nordic's header calls it "the stable
-`[SSSS.mmm|Cn] L: message` record format", and log scrapers and the hardware checklist's
-"confirmed directly in device log" evidence both depend on it.
+```text
+shared/core/od_log.h       levels, macros and public functions
+shared/core/od_log.c       formatting, target-specific caps, capability-off stubs and hex renderer
+shared/hal/od_hal_log.h    complete-emission transport, flush and the cycle fact
+shared/hal/od_hal_time.h   od_hal_uptime_ms() and od_hal_delay_us() (§2.3)
+```
 
-- **ESP32 output stays byte-identical.** The authority is explicit that ESP32 never counts a drop
-  and never takes the tagged path, because doing so would break that guarantee. Preserve it.
-- **Nordic keeps Zephyr as the transport.** `LOG_RAW` delivery, Zephyr's queue, its backend
-  selection, and system logs staying visibly distinct. Shared policy formats the record; Zephyr
-  still carries it.
-- **Nordic's `od_log_dropped_total()` keeps returning a real `0`,** not a fabricated count — its
-  own comment argues this and it is right.
-- **BG22's output does not change at all.** Its 102 `printf()` calls stay exactly as they are.
-  This is the strongest form of the guarantee: the target with the least headroom and the least
-  hardware evidence is not touched by the promotion.
+`od_log.c` enters a new `OD_SHARED_SOURCES_HAL_LOG` tier. The tier explicitly depends on both the
+`od_hal_log` and `od_hal_time` seams; an enabled consumer must implement both. ESP32 and Nordic take
+the enabled tier. BG22 compiles the same source with `OD_CAP_LOG=0` and implements no log-seam
+function; its independently compiled time implementation remains available to target code and
+future shared ambient consumers.
+
+The HAL contract is target-private behavior beneath shared policy:
+
+- no vendor/framework types in either shared header;
+- no target registry or function table;
+- no dynamic allocation;
+- no retention of the caller's stack buffer;
+- no ISR use; and
+- one target transport submission per shared emission.
+
+---
+
+## 4. Observable behavior
+
+- ESP32 normal and raw bytes retain their existing caps and record formatting. Its unused
+  mutex-contention drop report retires as recorded in §2.2.
+- Nordic retains `LOG_RAW`, its queue/backends, its long-record limits and a real dropped total of
+  zero. System logs remain visibly distinct. Its adapter also fixes the current latent deferred-log
+  lifetime hazard by identifying the stack record as transient so Zephyr copies it before return.
+- BG22's 102 `printf()` calls and console bytes are unchanged.
+- Normal records retain CRLF. Raw records retain neither prefix nor automatic newline.
+- `od_log_flush()` retains at least the existing target-specific 5 ms settlement.
+
+Hardware boot timestamps and ESP32 cycle counts are inherently variable. “Byte-identical” gates
+therefore have two layers:
+
+1. Exact host fixtures use injected uptime/cycle values and compare every byte.
+2. Hardware captures normalize only `[uptime|cycle]`; message bytes, level, ordering and CRLF must
+   match the pre-cutover capture.
 
 ---
 
 ## 5. Sequence
 
-Each phase is independently revertable and separately reviewable. Phases 1–3 change no target's
-observable output.
+Each phase is independently revertible.
 
-**Phase 0 — freeze the current output.** Capture a boot-to-idle log from ESP32 and Nordic at
-`OD_LOG_LEVEL=DEBUG` as fixtures. Without these, "byte-identical" in §4 is an assertion rather than
-a test.
+### Phase 0 — freeze behavior
 
-**Phase 1 — `shared/hal/od_hal_log.h` and the host fake.** Header only, plus a capture fake for
-`tests/host/`, plus the first host test: record format, level filtering, `[DROP: n]` splice
-position, hex-line rendering against the authority's exact output. No production file moves. This
-is also the moment the logger becomes testable at all, which it has never been on any target.
+1. Capture ESP32 and Nordic boot-to-idle logs at `OD_LOG_LEVEL=DEBUG`.
+2. Store a normalized fixture that replaces only uptime and cycle fields.
+3. Record both targets' normal/raw truncation outputs at their exact boundaries.
+4. Record the deliberate retirement of ESP32's unconsumed dropped counter and donor `[DROP]` path.
 
-**Phase 2 — `shared/core/od_log.c`.** Port the authority's policy. Dormant: no target links it yet,
-so it is proven only against the host fake. Add the `HAL_LOG` tier to `shared/sources.cmake`
-without adding it to any target's list.
+### Phase 1 — headers, fake and profiles
 
-**Phase 3 — cut over, one target per commit, in repository order.**
-- *ESP32 first.* Its `hal/od_hal_log.c` is already the right shape — it gains `is_ready` and
-  `may_wait` and loses nothing. `src/od_log.{h,cpp}` (445 lines) is deleted. Diff the Phase 0
-  fixture; it must match byte-for-byte.
-- *Nordic second.* New `src/od_hal_log.c` wrapping `LOG_RAW`, reporting `INT_MAX` room and
-  `true` for `may_wait`/`is_ready`. `src/od_log.{h,c}` (194 lines) is deleted. Fixture must match.
-- *BG22 third — capability-off, not a cutover.* Set `OD_CAP_LOG=0`, link `od_log.c`, implement no
-  seam. The gate is a **zero** delta: same flash, same static RAM, same stack high-water, same
-  console bytes. This step exists only to prove the shared logger costs the declining target
-  nothing.
+1. Add `od_hal_time` — `shared/hal/od_hal_time.h` with `od_hal_uptime_ms()` and
+   `od_hal_delay_us()` (§2.3), carrying both §2.3.1 header comments: the bounded wait is deferred
+   with its open points named, and shared policy keeps its `now_ms` parameters. On ESP32, move
+   `od_hal_delay_ms()` into target-private `od_hal_sleep.h`, update its production callers and host
+   shim, and delete the target-local `od_hal_time.h`. Rename Nordic's
+   `od_uptime_get_32`/`od_busy_wait`. Add BG22's two wrappers without migrating its existing direct
+   timing calls; implement uptime through the SDK's 64-bit tick and millisecond conversion APIs.
+   This time-HAL change lands, builds and passes its adapter tests on its own before anything
+   logging-specific exists. Record its flash/RAM deltas separately and make the resulting artifacts
+   the baseline for the later logging-only size comparisons.
+2. Add `shared/hal/od_hal_log.h` with the five-function contract in §2.1.
+3. Add `shared/core/od_log.h`, including `OD_CAP_LOG` and effective-level handling.
+4. Add a capture fake with configurable open state, uptime and cycle values.
+5. Add ESP32-cap, Nordic-cap and capability-off host profiles.
+6. Do not link production targets yet.
 
-**Phase 4 — collapse the blocked duplicates.** `od_log_hex_line` first (identical, ~40 lines, zero
-risk), then `od_txq_app_dropped`, `od_rxq_app`, `od_session_app`, `od_watchdog_app` — smallest to
-largest, each its own promotion with its own gate. This is where the ~900 lines come back.
-`od_session_app` and `od_txq_app_dropped` collapse their ESP32+Nordic copies only; BG22's stay.
+### Phase 2 — dormant shared implementation
+
+1. Implement one-buffer/one-write formatting, raw output, safe level clamping and hex rendering.
+2. Add explicit `OD_CAP_LOG=0` stubs.
+3. Add `OD_SHARED_SOURCES_HAL_LOG` without adding it to production target lists.
+4. Prove the complete host matrix, including the `-O0` no-HAL capability-off executable.
+
+### Phase 3 — target cutovers
+
+One target per commit:
+
+1. **ESP32:** extend `hal/od_hal_log.c` with complete-write and settled-flush semantics;
+   replace `getDeepSleepCount()` in `main.cpp` with the C-linkage cycle seam. Delete
+   `src/od_log.{h,cpp}`, remove the loop-task setter from `main.cpp`, and remove its FreeRTOS host
+   shims if orphaned. Preserve the existing port-open ordering.
+2. **Nordic:** add `src/od_hal_log.c` over `LOG_RAW`, `log_flush`, `k_msleep` and cycle zero.
+   Call `od_hal_log_open()` before `od_log_init()` in `main.c`, then delete
+   `src/od_log.{h,c}`.
+3. **BG22:** set `OD_CAP_LOG=0`, link the stub profile, implement no log-HAL function and prove the
+   target-size/output gate against the post-time-HAL Phase 1 baseline.
+
+### Phase 4 — later deduplication
+
+Promote the blocked duplicate seams separately, smallest to largest: hex rendering, TXQ drop
+wording, RXQ app, session app, watchdog app. Each retains its own target and hardware gate. This
+logging plan is complete before Phase 4 starts.
 
 ---
 
-## 6. Gates
+## 6. Required tests and gates
 
-Every phase runs `tools/check.sh --targets` and reads the summary. Additionally:
+### 6.1 Host tests
 
-- **Phase 1–2:** host tests pass under gcc, clang and ASan/UBSan. The shared-boundary greps must
-  pass — `od_log.c` may include `<stdarg.h>`, `<stdio.h>` and `<string.h>` and nothing else.
-- **Phase 3, ESP32 and Nordic:** the Phase 0 fixture matches byte-for-byte at the same level, and
-  the target builds.
-- **Phase 3, BG22:** flash, static RAM, stack high-water and console output are all **unchanged**.
-  A nonzero delta on any of the four means `OD_CAP_LOG=0` is not compiling out what it claims to.
-- **Hardware, per target:** one boot-to-idle capture compared against the fixture, plus — on ESP32
-  only, because it is the only target with the machinery — a deliberate host-stall test confirming
-  the budget, the stall backoff and a `[DROP: n]` splice on recovery. That path has never had a
-  regression test on any target and is the single most defect-prone thing being moved.
+- exact level characters and prefixes;
+- uptime `0`, `999`, `1000`, `UINT32_MAX` and cycle zero/non-zero;
+- the BG22 time adapter converts across the underlying 32-bit tick rollover without an uptime jump,
+  narrows modulo `2^32` only after 64-bit millisecond conversion, and returns `0` when conversion is
+  unavailable before sleeptimer initialization;
+- valid levels plus invalid direct-level clamping;
+- normal and raw caps for both target profiles, including cap−1, cap and cap+1;
+- CRLF on normal records and no automatic suffix on raw records;
+- one and only one HAL write call per emission;
+- zero-length raw output behavior pinned to the current targets' result;
+- hex rendering at lengths 0, 1, 32 and 33;
+- closed/uninitialized logger behavior;
+- flush calls the HAL exactly once; target tests own the 5 ms implementation proof;
+- interleaved host threads cannot split one shared record into multiple HAL calls;
+- `OD_CAP_LOG=0` at `-O0` links without a HAL and has no logger state or HAL symbols.
 
-### 6.1 Ratchets
+Run under gcc, clang and ASan/UBSan.
 
-- **One logger.** No `od_log.{c,cpp,h}` under `targets/` after phase 3; the only `_od_log`
-  definition is `shared/core/od_log.c`.
-- **One hex renderer.** `od_log_hex_line` defined once. Its two current copies each carry a comment
-  saying the RX and TX sides must render identically — that requirement becomes structural.
-- **No vendor types in the seam.** `shared/hal/od_hal_log.h` names no `TaskHandle_t`, no `Stream`,
-  no `k_*`.
-- **Level ladder pinned.** `ERROR=0 WARN=1 INFO=2 DEBUG=3` and the `"EWID"` character table
-  `_Static_assert`ed, so a reordering that silently relabels every historical log line is a build
-  error.
-- **BG22 implements no `od_hal_log_*`,** and `OD_CAP_LOG=0` stays set for it. A seam implementation
-  appearing there is the decision being reversed by accident.
-- **No side effects in log arguments.** Grep shared `od_log_*` call sites for `(` inside an
-  argument other than a cast or a member access. Imperfect, but it catches the shape that silently
-  changes behaviour on the one target where every log call is dead.
+### 6.2 Target gates
+
+- The standalone Phase 1 time-HAL commit runs `tools/check.sh --targets` with no failure or skip;
+  all ESP32 configurations, all three Nordic boards and BG22 must compile before logging work begins.
+- Phase 1 records source-body equivalence for the existing ESP32 and Nordic microsecond-delay
+  implementations. On available hardware, exercise ESP32's D-FF 50 µs pulse path and Nordic's
+  `bb_epaper` delay path after the header/name migration; an open row is hardware debt, not a pass.
+- BG22 verifies `od_hal_uptime_ms()` against a known hardware interval, in addition to the fake-
+  sleeptimer rollover test. Because production currently has no caller and section GC removes the
+  adapter, this row requires a temporary instrumented build or waits for the first linked consumer;
+  a normal image cannot exercise it. This qualifies the new wrapper only; it does not qualify the
+  ten direct call sites tracked separately in `docs/FOLLOWUPS.md` § 7.
+- `tools/check.sh --targets` reports no failure and no skip after every cutover.
+- ESP32 and Nordic normalized hardware fixtures match message bytes, levels, ordering and CRLF.
+- ESP32 UART and stdout builds both compile; Nordic builds all three boards.
+- A Nordic deferred-mode test queues one application record, clobbers its source stack before the
+  backend drains, and compares the exact output, proving the transient record was copied during the
+  `LOG_RAW` submission.
+- Target-specific tests or instrumentation confirm one transport submission per emission under
+  concurrent task logging.
+- ESP32 flush retains bounded UART drain plus at least 5 ms settlement; Nordic flush retains
+  `log_flush()` plus at least 5 ms settlement.
+- BG22 console output is unchanged, no `od_hal_log_*` symbol exists, no logger static state appears
+  in the map, and logging-only flash/RAM/stack deltas are recorded against the post-time-HAL Phase 1
+  baseline. A nonzero logging-only delta stops the cutover for review.
+
+### 6.3 Ratchets
+
+- one `_od_log` and one `od_log_hex_line` definition, both in `shared/core/od_log.c`;
+- no target-local `od_log.{c,cpp,h}` after all three cutovers;
+- no vendor type or header in either shared logging file;
+- no target-local or host-shim `od_hal_time.h`; ESP32's unpromoted millisecond sleep is declared only
+  by its target-private `od_hal_sleep.h` and, where required, its corresponding test shim;
+- `ERROR=0`, `WARN=1`, `INFO=2`, `DEBUG=3`; host output tests pin `"EWID"` mapping;
+- BG22 sets `OD_CAP_LOG=0` and defines no `od_hal_log_*` function;
+- shared session/watchdog/TXQ function signatures retain their explicit `now_ms` parameters, and
+  no shared policy source calls `od_hal_uptime_ms()` — the logger is its only shared caller;
+- `shared/hal/od_hal_time.h` declares exactly two functions; a bounded sleep appearing there is
+  the §2.3 exclusion being reversed without its own decision;
+- no target defines `od_uptime_get_32` or `od_busy_wait` after Phase 1;
+- the Nordic adapter contains neither a `%.*s` log submission nor a `const char *` cast of the
+  transient shared record;
+- BG22's time adapter uses `sl_sleeptimer_get_tick_count64()` and converts before narrowing, while
+  direct BG22 timing call sites remain explicitly outside this phase;
+- no `room`, `may_wait`, ready-hook, loop-task setter, `[DROP:` or shared logging lock returns;
+- no obvious side-effecting function call in a shared log argument.
 
 ---
 
 ## 7. Stop conditions
 
-Stop the current phase when:
+Stop and revise the current phase if:
 
-- a target's Phase 0 fixture does not match after its cutover, and the difference is not a
-  deliberate recorded change;
-- BG22's flash, static RAM, stack or console output changes at all;
-- BG22 acquires an `od_hal_log_*` implementation, or shared code starts assuming a logger exists;
-- the seam acquires a vendor type, or a fifth port function that only one target can implement;
-- Nordic's logger stops being carried by Zephyr's transport, or its system logs stop being visibly
-  distinct;
-- `od_log_dropped_total()` returns a fabricated number on any target;
-- shared code starts logging inside an ISR or a lock held across a write; or
-- a phase-5 collapse changes a log string that a plan, a doc or a hardware-checklist row quotes.
+- the standalone Phase 1 target build or BG22 known-interval clock gate does not pass;
+- a target needs more than one HAL write to carry one shared emission;
+- Nordic stops using Zephyr's logging transport or system logs become indistinguishable;
+- a HAL write retains the shared stack pointer after returning;
+- Nordic cannot prove that deferred logging copied the transient record synchronously;
+- target serialization requires a shared RTOS lock or vendor header;
+- flush loses the bounded 5 ms settlement or rounds a positive delay to zero;
+- a bounded sleep is added to `od_hal_time` without separately resolving delay naming, signedness,
+  zero and tick-rounding semantics;
+- an existing explicit `now_ms` policy parameter is removed;
+- BG22 uptime wraps in the hardware tick domain, narrows before conversion, or asserts/logs when
+  conversion is unavailable before sleeptimer initialization;
+- BG22 gains a log-HAL implementation, logger state, output change or unexplained logging-only size
+  delta relative to the post-time-HAL baseline;
+- a target's truncation boundary changes without a separate recorded decision; or
+- logging is introduced in an ISR or while holding a lock across the target write.
 
 ---
 
 ## 8. Definition of done
 
-1. `shared/core/od_log.c` is the only logger; `shared/hal/od_hal_log.h` is the only port seam.
-2. ESP32 and Nordic implement the seam; no target defines `_od_log` or `od_log_hex_line`; BG22
-   implements none of it and builds with `OD_CAP_LOG=0`.
-3. ESP32 and Nordic output is byte-identical to their Phase 0 fixtures; BG22's output is unchanged.
-4. The drop/budget/backoff path has a host test and one ESP32 hardware observation.
-5. `OD_LOG_RECORD_MAX` has its floor asserted, and BG22's flash/RAM/stack deltas are recorded as
-   zero.
-6. No `shared/hal/od_hal_time.h` was created as a side effect; the clock stays inside the log seam.
-7. The four ratchets in §6.1 are in `tools/check.sh`.
-8. `tools/check.sh --targets` reports no failure and no skip.
+1. `shared/core/od_log.c` and `shared/core/od_log.h` are the only logger implementation/API.
+2. ESP32 and Nordic implement the five-function log HAL; BG22 implements none of it.
+   All three implement `od_hal_time.h`'s two functions.
+3. Every shared emission reaches its target transport in one call.
+4. Uptime, cycle, truncation, CRLF and raw behavior are pinned by deterministic host fixtures.
+5. Hardware captures match after normalizing only uptime/cycle fields.
+6. Flush settlement remains target-owned and measured. `od_hal_time` declares exactly
+   `od_hal_uptime_ms()` and `od_hal_delay_us()`, and its header carries both §2.3.1 comments.
+7. The standalone time-HAL target build, BG22 known-interval clock check and available-target timing
+   rows are recorded before logging promotion begins.
+8. Existing shared policy APIs retain explicit `now_ms` arguments.
+9. BG22 passes the `-O0` no-HAL host proof and target zero-state/size/output gate.
+10. `tools/check.sh --targets` reports no failure and no skip.
 
-Phase 4's ~900 lines are tracked separately; this plan is done when the keystone is in and the
-duplicates are *unblocked*, not when they are gone.
+The later ~900-line seam collapse remains separate. This plan lands the logging keystone and its
+falsifiable boundaries; it does not bundle the consumers that become promotable afterwards.

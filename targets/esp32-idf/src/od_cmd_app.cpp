@@ -17,7 +17,7 @@
 #include "od_dispatch.h"
 
 #include "od_cmd_reply.h"
-#include "od_hal_time.h"
+#include "od_hal_sleep.h"
 #include "od_log.h"
 
 /* C++ linkage, matching their definitions -- these are target functions, not a C ABI. */

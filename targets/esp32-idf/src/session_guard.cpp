@@ -7,6 +7,7 @@
 // names no vendor header at all. That matters beyond the ratchet: this file is a shared/core
 // candidate, and shared/ may call od_hal_* but not esp_* or freertos/*.
 #include "od_hal_time.h"
+#include "od_hal_sleep.h"
 
 #include "session_guard.h"
 

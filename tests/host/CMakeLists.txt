@@ -193,6 +193,17 @@ target_include_directories(od_silabs_storage_test PRIVATE
 target_link_libraries(od_silabs_storage_test od_shared_silabs)
 add_test(NAME silabs_storage COMMAND od_silabs_storage_test)
 
+# time_silabs: compile the production BG22 adapter over fake sleeptimer/udelay primitives. The
+# load-bearing case crosses the underlying 32-bit tick rollover and proves conversion happens in
+# 64 bits before the public millisecond result is narrowed.
+add_executable(od_time_silabs_test
+    time_silabs_test.c
+    ../../targets/efr32bg22-slc/od_hal_time.c)
+target_include_directories(od_time_silabs_test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/fake_silabs)
+target_link_libraries(od_time_silabs_test od_shared_silabs)
+add_test(NAME time_silabs COMMAND od_time_silabs_test)
+
 # config_tlv: the config-blob walk and its CRC. The walk is the PRE-AUTH attack surface -- this
 # blob is parsed at boot from storage a client can write -- so the cases that matter are the
 # hostile ones, and the CRC is checked DIFFERENTIALLY against an independent transcription of

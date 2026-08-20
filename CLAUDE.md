@@ -255,6 +255,19 @@ looks arbitrary and is not); delete the story.
   not a pass. A `xiao_nrf52840` flash of this HEAD on 2026-08-19 completed an encrypted PIPE
   upload plus config read and config write, so the promoted routing did not regress the PIPE and
   command paths — it exercises none of the `0x70`/`0x71`/`0x72`/`0x76` rows, which stay open.
+- **Shared time HAL software candidate (2026-08-19):** `shared/hal/od_hal_time.h` is the canonical
+  two-function ambient-clock/busy-wait seam. ESP32 keeps its unreconciled bounded millisecond sleep
+  in target-private `od_hal_sleep.h`; Nordic's `od_uptime_get_32`/`od_busy_wait` names are gone;
+  BG22 implements the seam with the SDK's 64-bit tick count and converts to milliseconds before
+  narrowing. Before sleeptimer initialization, or on another SDK conversion failure, that adapter
+  returns the boot-domain origin (`0`) rather than asserting or logging. Its production-source host
+  test crosses the underlying 32-bit tick rollover, pins the `uint32_t` millisecond wrap and checks
+  the pre-init result. BG22 has no production caller yet, so the linker discards both functions;
+  the image remaining at the `e965dd9` baseline of 250,196 B flash / 32,284 B static RAM proves
+  zero dormant footprint, not on-device execution. `tools/check.sh --targets` passes 27/0/0.
+  **Not hardware-qualified:** ESP32 D-FF timing, Nordic panel timing and an instrumented BG22
+  known-interval check remain open. Ten existing BG22 raw 32-bit tick conversions are deliberately
+  not swept into this promotion and are tracked in `docs/FOLLOWUPS.md` § 7.
 - `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel,crypto}`;
   `od_hal_crypto_random.c` is its own translation unit so a host test can compile the RNG arm
   without mbedTLS.

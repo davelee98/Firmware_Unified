@@ -5,6 +5,7 @@
 
 #include "od_hal_i2c.h"
 #include "od_hal_time.h"
+#include "od_hal_sleep.h"
 
 extern struct od_config globalConfig;
 extern uint8_t dynamicreturndata[11];

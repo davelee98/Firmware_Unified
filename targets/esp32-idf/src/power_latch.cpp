@@ -15,6 +15,7 @@
 
 #include "od_hal_gpio.h"
 #include "od_hal_time.h"
+#include "od_hal_sleep.h"
 #include "od_log.h"
 #include "structs.h"
 

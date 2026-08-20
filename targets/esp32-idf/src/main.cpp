@@ -27,6 +27,7 @@
 #include "od_hal_i2c.h"
 #include "od_hal_gpio.h"
 #include "od_hal_time.h"
+#include "od_hal_sleep.h"
 
 // Distinguishes a hidden mid-cycle reset (PANIC/WDT/BROWNOUT/SW) from a real
 // power-on or deep-sleep wake; any reset here clears the wake cause, so the

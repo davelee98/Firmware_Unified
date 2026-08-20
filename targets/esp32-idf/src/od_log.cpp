@@ -5,6 +5,7 @@
 
 #include "od_hal_log.h"
 #include "od_hal_time.h"
+#include "od_hal_sleep.h"
 
 // The clock comes from od_hal_time. This was a private esp_timer_get_time()/1000 helper when it
 // was written (phase C step 1, before the time HAL existed) -- same arithmetic, one place now.

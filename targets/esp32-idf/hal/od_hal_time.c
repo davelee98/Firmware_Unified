@@ -6,6 +6,7 @@
  */
 
 #include "od_hal_time.h"
+#include "od_hal_sleep.h"
 
 #include "esp_rom_sys.h"
 #include "esp_timer.h"

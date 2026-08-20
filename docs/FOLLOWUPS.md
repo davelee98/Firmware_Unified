@@ -671,3 +671,51 @@ wrong mask thus costs both the partial path and, for that retry, compression.
 
 ESP32 validates the same fields inline in `display_service.cpp` and is unaffected; BG22 has no
 PIPE.
+
+---
+
+## 7. `Firmware_Unified` / BG22 — uptime wraps in the hardware-tick domain
+
+**Status:** open, pre-existing target defect; not caused by the shared logging/time-HAL plan.
+**Evidence:** `verified` against all current BG22 call sites and Simplicity SDK 2025.12.2's
+sleeptimer implementation. **Severity:** latent correctness failure on long-running devices.
+
+### The defect
+
+Ten shipped BG22 call sites compute uptime as:
+
+```c
+sl_sleeptimer_tick_to_ms(sl_sleeptimer_get_tick_count())
+```
+
+`sl_sleeptimer_get_tick_count()` is a 32-bit hardware-tick count. Converting that value to
+milliseconds makes the public time value wrap when the tick counter wraps, rather than modulo
+`2^32` milliseconds. The exact interval depends on the configured timer frequency; at 32.768 kHz
+it is about 36 hours. More generally, the defect exists whenever the configured tick rollover does
+not map to an integral `2^32`-millisecond wrap; ordinary kHz-range low-frequency clocks above
+1 kHz have that property.
+
+Unsigned `now_ms - then_ms` timeout arithmetic is safe only when both values wrap in their declared
+`uint32_t` millisecond domain. Across the earlier tick-domain wrap it produces one huge elapsed
+interval, which can spuriously expire a session, trip a transfer deadline or age connection/NFC
+state.
+
+Affected consumers:
+
+- `targets/efr32bg22-slc/od_session_app.c` — session liveness and activity time;
+- `targets/efr32bg22-slc/opendisplay_pipe.c` — the two-second END barrier deadline;
+- `targets/efr32bg22-slc/opendisplay_display.cpp` — transfer `started_ms`;
+- `targets/efr32bg22-slc/opendisplay_ble.c` — six connection-age, NFC and timeout uses; and
+- `targets/efr32bg22-slc/panel/od_bbep_efr32_io.inl` — the `bb_epaper` `millis()` adapter.
+
+### Fix
+
+Create one target uptime function that reads `sl_sleeptimer_get_tick_count64()`, converts with
+`sl_sleeptimer_tick64_to_ms()`, requires `SL_STATUS_OK`, then narrows the millisecond result to
+`uint32_t`. Route all ten call sites through it. The narrowing must occur after conversion so the
+observable clock wraps modulo `2^32` milliseconds.
+
+Keep this as an independently reviewable defect fix. The shared logging plan creates the correct
+`od_hal_uptime_ms()` implementation but deliberately does not sweep these existing target callers.
+Required proof: a fake-sleeptimer adapter test across the underlying 32-bit tick rollover, a known-
+interval hardware check on BG22, and the complete BG22 target gate.

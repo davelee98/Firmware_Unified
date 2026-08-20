@@ -176,45 +176,24 @@ split into start + `busy()` poll (the panel model, §3).
 > parameter). That section has been rewritten to the shipped contract. **`od_hal_radio` remains
 > unverified** — it is the next one this warning applies to.
 
-### `od_hal_time` — already exists in embryo
+### `od_hal_time` — implemented
 
 ```c
 uint32_t od_hal_uptime_ms(void);          /* monotonic; wrap-safe by subtraction */
-void     od_hal_delay_ms(uint32_t ms);    /* bounded busy/sleep; NOT a scheduler yield */
-void     od_hal_delay_us(uint32_t us);
+void     od_hal_delay_us(uint32_t us);    /* busy-wait; does not yield */
 ```
 
-> **CORRECTED 2026-08-04 — "promote verbatim" is not available.** This section said to promote
-> `Firmware_NRF54/src/nrf54_zephyr_compat.h` *verbatim (already `od_`-prefixed)*. That file
-> actually declares:
->
-> ```c
-> void     od_msleep(int32_t ms);
-> uint32_t od_uptime_get_32(void);
-> void     od_busy_wait(uint32_t usec);
-> ```
->
-> Same three functions, **different names**, and `od_msleep` takes a *signed* count. The names
-> above are the ones `targets/esp32-idf/hal/od_hal_time.h` implements, and they win: `od_hal_*`
-> matches `od_hal_nvs`/`od_hal_gpio`/`od_hal_log`, and a prefix that means something is worth
-> a rename on one target. **Decide this before the Nordic import** — importing that repo
-> unchanged locks the disagreement in, and step 2 of MIGRATION.md is exactly that import.
->
-> **Two contract points the sketch omitted, both learned from a defect:**
->
-> * `od_hal_delay_ms` **must round up to whole ticks and never to zero.** A tick-quantised
->   `vTaskDelay(pdMS_TO_TICKS(n))` returns *immediately* for any `n` below one tick period,
->   turning a deliberate settle into a busy-spin. This cost the ESP32 target two live defects
->   at a 100 Hz tick — `od_log_flush()`'s 5 ms settle became no settle, and a BLE teardown poll
->   busy-spun at loop-task priority for its full bound. The requirement belongs in the contract
->   rather than in each target's implementation notes.
-> * `od_hal_delay_ms(0)` sleeps one tick rather than yielding, which is *not* what Arduino's
->   `delay(0)` did. Stated so a caller that means "yield" asks for a yield.
+The uptime result is milliseconds since boot, converted in the target's full native clock domain
+and only then narrowed modulo `2^32`. Shared session, watchdog and TXQ policy retains its explicit
+`now_ms` arguments; this ambient clock is not a reason to replace testable policy inputs with a
+global dependency.
 
-`od_hal_delay_ms` maps to `k_msleep` / `vTaskDelay` / `sl_sleeptimer_delay_millisecond`. The
-core uses it **only** for short, bounded waits (e.g. the 20 ms TX-drain gap before a refresh,
-`opendisplay_pipe.c:799`); it must never be used to wait out a panel refresh — that is the
-pump's job (§3).
+Bounded millisecond sleep is deliberately outside this interface. ESP32's private
+`od_hal_delay_ms(uint32_t)` rounds positive delays up to whole ticks and treats zero as one tick;
+Nordic's private `od_msleep(int32_t)` follows `k_msleep`, where non-positive values are already
+expired. Naming, signedness, zero behavior and positive-delay rounding need a separate decision
+before sleep can be promoted. Panel-refresh waits remain state-machine work regardless of that
+future decision.
 
 ### `od_hal_gpio` — already exists in embryo
 

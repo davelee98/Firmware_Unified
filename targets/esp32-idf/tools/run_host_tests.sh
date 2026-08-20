@@ -13,22 +13,19 @@
 # Two sanitizer builds, matching the reference firmware's: ASan+UBSan, then TSan+UBSan as a
 # SEPARATE binary, because TSan and ASan cannot be combined.
 #
-# -I tools/hostshim supplies a fake clock (od_hal_time.h) and the two FreeRTOS types od_log.h
-# names, so the REAL src/link_owner.cpp and src/od_log.h compile unmodified. The test
-# drives that clock directly, which is the only way to park on the ~49.7-day wrap boundary the
-# wrap cases need; waiting is not an option.
+# -I ../../shared/hal supplies the canonical clock declaration. The test binary implements that
+# seam over its own atomic clock, while -I tools/hostshim supplies the two FreeRTOS types od_log.h
+# names, so the REAL src/link_owner.cpp and src/od_log.h compile unmodified. Driving the seam is the
+# only way to park on the ~49.7-day wrap boundary; waiting is not an option.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 OUT="${TMPDIR:-/tmp}/od-host-tests"
 mkdir -p "$OUT"
 
-# The fake clock is now hostshim/od_hal_time.h, which is the interface src/link_owner.cpp
-# actually calls. It replaced hostshim/esp_timer.h, and that replaced hostshim/Arduino.h: three
-# fakes over the life of one test, each following the clock up a layer as the port moved it.
-# This is the last of them -- od_hal_* is the only clock interface shared/ may know about, so
-# promoting link_owner.cpp changes nothing here.
-CXXFLAGS=(-std=c++17 -Wall -Wextra -Werror -O1 -I tools/hostshim -I src)
+# The fake is a link-time implementation, not a shadow header. That keeps the test on the same
+# declaration every production target uses and prevents include-path order from changing the seam.
+CXXFLAGS=(-std=c++17 -Wall -Wextra -Werror -O1 -I tools/hostshim -I ../../shared/hal -I src)
 SRCS=(tools/test_link_owner.cpp src/link_owner.cpp)
 
 # ThreadSanitizer aborts at startup with "unexpected memory mapping" under some kernels' ASLR
