@@ -34,6 +34,21 @@ right SHA to reach for; it just isn't a gate this checklist enforces.
 
 ---
 
+## Shared logging promotion
+
+- [ ] ESP32 UART profile: normalized boot-to-idle bytes, 232-byte normal/raw boundaries, concurrent
+      producers and settled flush match the pre-cutover behavior.
+- [ ] ESP32 stdout profile: the same normalized bytes and settled flush reach the configured IDF
+      console transport.
+- [ ] Nordic `xiao_nrf52840`: normalized boot-to-idle bytes, 253-byte normal / 255-byte raw
+      boundaries, concurrent producers and settled `log_flush()` reach USB CDC.
+- [ ] Nordic nRF54 class: repeat the native-log transport check on each available board class.
+- [ ] BG22: console bytes remain unchanged. The software image contains no shared logger/HAL symbol
+      or state and remains 250,196 B flash / 32,284 B static RAM; those build facts are not hardware
+      evidence.
+
+---
+
 ## Transfer Phase 1 — shared `od_zlib_pump`
 
 These rows apply to the Phase 1 candidate introduced after the dated transfer results below; an

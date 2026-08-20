@@ -13,10 +13,8 @@
 # Two sanitizer builds, matching the reference firmware's: ASan+UBSan, then TSan+UBSan as a
 # SEPARATE binary, because TSan and ASan cannot be combined.
 #
-# -I ../../shared/hal supplies the canonical clock declaration. The test binary implements that
-# seam over its own atomic clock, while -I tools/hostshim supplies the two FreeRTOS types od_log.h
-# names, so the REAL src/link_owner.cpp and src/od_log.h compile unmodified. Driving the seam is the
-# only way to park on the ~49.7-day wrap boundary; waiting is not an option.
+# The test binary implements the canonical clock seam over its own atomic clock. Both od_hal_time
+# and od_log come from shared/, so the real src/link_owner.cpp compiles without target shims.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -25,7 +23,7 @@ mkdir -p "$OUT"
 
 # The fake is a link-time implementation, not a shadow header. That keeps the test on the same
 # declaration every production target uses and prevents include-path order from changing the seam.
-CXXFLAGS=(-std=c++17 -Wall -Wextra -Werror -O1 -I tools/hostshim -I ../../shared/hal -I src)
+CXXFLAGS=(-std=c++17 -Wall -Wextra -Werror -O1 -I ../../shared/hal -I ../../shared/core -I src)
 SRCS=(tools/test_link_owner.cpp src/link_owner.cpp)
 
 # ThreadSanitizer aborts at startup with "unexpected memory mapping" under some kernels' ASLR

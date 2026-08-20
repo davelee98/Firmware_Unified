@@ -53,6 +53,7 @@ if(OD_SHARED_SOURCES)
         OD_CAP_PARTIAL=0
         OD_CAP_RXQ=0
         OD_CAP_DUAL_CS=0
+        OD_CAP_LOG=0
         OD_BOOT_LOGO_SIZES=2)
 
     # Dispatch-only fixtures define the four promoted od_xfer command entry points so they can
@@ -203,6 +204,38 @@ target_include_directories(od_time_silabs_test PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/fake_silabs)
 target_link_libraries(od_time_silabs_test od_shared_silabs)
 add_test(NAME time_silabs COMMAND od_time_silabs_test)
+
+# logging: the same shared implementation under the two deployed truncation profiles, plus a
+# capability-off build that deliberately supplies no log HAL. Compile the production source
+# directly so each executable gets exactly one profile rather than the aggregate archive's default.
+set(OD_LOG_SHARED_SOURCE ${CMAKE_CURRENT_LIST_DIR}/../../shared/core/od_log.c)
+add_executable(od_log_esp_test log_test.c ${OD_LOG_SHARED_SOURCE})
+target_include_directories(od_log_esp_test PRIVATE ${OD_SHARED_INCLUDE_DIRS})
+target_compile_definitions(od_log_esp_test PRIVATE
+    OD_LOG_TEXT_MAX=232u OD_LOG_RAW_TEXT_MAX=232u)
+target_link_libraries(od_log_esp_test Threads::Threads)
+add_test(NAME log_esp COMMAND od_log_esp_test)
+
+add_executable(od_log_nordic_test log_test.c ${OD_LOG_SHARED_SOURCE})
+target_include_directories(od_log_nordic_test PRIVATE ${OD_SHARED_INCLUDE_DIRS})
+target_compile_definitions(od_log_nordic_test PRIVATE
+    OD_LOG_TEXT_MAX=253u OD_LOG_RAW_TEXT_MAX=255u)
+target_link_libraries(od_log_nordic_test Threads::Threads)
+add_test(NAME log_nordic COMMAND od_log_nordic_test)
+
+add_executable(od_log_off_test log_off_test.c ${OD_LOG_SHARED_SOURCE})
+target_include_directories(od_log_off_test PRIVATE ${OD_SHARED_INCLUDE_DIRS})
+target_compile_definitions(od_log_off_test PRIVATE OD_CAP_LOG=0)
+target_compile_options(od_log_off_test PRIVATE -O0)
+add_test(NAME log_off COMMAND od_log_off_test)
+
+add_executable(od_nordic_log_hal_test
+    nordic_log_hal_test.c
+    ../../targets/nordic-zephyr/src/od_hal_log.c)
+target_include_directories(od_nordic_log_hal_test PRIVATE
+    ${OD_SHARED_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr)
+add_test(NAME nordic_log_hal COMMAND od_nordic_log_hal_test)
 
 # config_tlv: the config-blob walk and its CRC. The walk is the PRE-AUTH attack surface -- this
 # blob is parsed at boot from storage a client can write -- so the cases that matter are the

@@ -29,6 +29,8 @@
 #include "od_hal_time.h"
 #include "od_hal_sleep.h"
 
+#include "esp_heap_caps.h"
+
 // Distinguishes a hidden mid-cycle reset (PANIC/WDT/BROWNOUT/SW) from a real
 // power-on or deep-sleep wake; any reset here clears the wake cause, so the
 // next boot takes the NORMAL BOOT branch and redraws the boot screen.
@@ -110,11 +112,6 @@ void setup() {
     od_hal_log_open();
     od_log_init();
     #endif
-    // Immediately after od_log_init(), so the boot lines below are not emitted at a
-    // zero budget. setup() and loop() share a task on both targets (nRF's loop_task
-    // calls setup() then loops; the ESP32 loopTask does the same), so capturing here
-    // identifies the right one.
-    od_log_set_loop_task(xTaskGetCurrentTaskHandle());
     od_log_info("=== FIRMWARE INFO ===");
     uint8_t fwMajor = getFirmwareMajor();
     uint8_t fwMinor = getFirmwareMinor();
@@ -253,7 +250,7 @@ void setup() {
     logHeapUsage("(setup done)");
 }
 
-uint32_t getDeepSleepCount() {
+extern "C" uint32_t od_hal_log_cycle_count(void) {
     return deep_sleep_count;
 }
 

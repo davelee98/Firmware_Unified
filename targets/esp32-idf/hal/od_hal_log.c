@@ -1,16 +1,8 @@
-/* od_hal_log for ESP-IDF. See od_hal_log.h for why this exists and what it deliberately is
- * not.
- *
- * Both backends are lifted from compat/, unchanged in behaviour: the UART one from
- * compat/HardwareSerial.h (which existed for exactly one caller, main.cpp's OPENDISPLAY_LOG_UART
- * path, and is deleted with this commit), the stdout one from compat/arduino_compat.h's
- * SerialCompat. Nothing about the bytes on the wire changes -- this is the same IDF calls with
- * the Arduino class removed from between them and od_log.
- */
+/* Complete-record application log transport for ESP-IDF. */
 
 #include "od_hal_log.h"
+#include "od_hal_sleep.h"
 
-#include <limits.h>
 #include <stdio.h>
 
 #ifdef OPENDISPLAY_LOG_UART
@@ -77,28 +69,19 @@ bool od_hal_log_is_open(void)
     return s_open;
 }
 
-int od_hal_log_room(void)
+void od_hal_log_write(char *record, size_t len)
 {
-    size_t free_bytes = 0;
-    if (!s_open || uart_get_tx_buffer_free_size(OPENDISPLAY_LOG_UART_NUM, &free_bytes) != ESP_OK) {
-        return 0;
+    if (!s_open || record == NULL || len == 0u) {
+        return;
     }
-    return (int)free_bytes;
-}
-
-size_t od_hal_log_write(const uint8_t *b, size_t n)
-{
-    if (!s_open || b == NULL || n == 0) {
-        return 0;
-    }
-    int w = uart_write_bytes(OPENDISPLAY_LOG_UART_NUM, (const char *)b, n);
-    return (w > 0) ? (size_t)w : 0;
+    (void)uart_write_bytes(OPENDISPLAY_LOG_UART_NUM, record, len);
 }
 
 void od_hal_log_flush(void)
 {
     if (s_open) {
-        uart_wait_tx_done(OPENDISPLAY_LOG_UART_NUM, pdMS_TO_TICKS(100));
+        (void)uart_wait_tx_done(OPENDISPLAY_LOG_UART_NUM, pdMS_TO_TICKS(100));
+        od_hal_delay_ms(5u);
     }
 }
 
@@ -120,23 +103,19 @@ bool od_hal_log_is_open(void)
     return s_open;
 }
 
-int od_hal_log_room(void)
+void od_hal_log_write(char *record, size_t len)
 {
-    return s_open ? INT_MAX : 0;
-}
-
-size_t od_hal_log_write(const uint8_t *b, size_t n)
-{
-    if (!s_open || b == NULL || n == 0) {
-        return 0;
+    if (!s_open || record == NULL || len == 0u) {
+        return;
     }
-    return fwrite(b, 1, n, stdout);
+    (void)fwrite(record, 1, len, stdout);
 }
 
 void od_hal_log_flush(void)
 {
     if (s_open) {
-        fflush(stdout);
+        (void)fflush(stdout);
+        od_hal_delay_ms(5u);
     }
 }
 
