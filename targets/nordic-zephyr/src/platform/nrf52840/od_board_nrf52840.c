@@ -30,3 +30,18 @@ bool od_board_epd_requires_cold_cycle(void)
 	/* Matches prepareEpdRailForBoot() in the donor firmware. */
 	return true;
 }
+
+bool od_board_epd_pin_reserved(uint8_t port, uint8_t pin)
+{
+	/* P0.13 selects the EPD boost path. P0.20..25 belong to the
+	 * board's enabled QSPI flash. */
+	return port == 0u && (pin == 13u || (pin >= 20u && pin <= 25u));
+}
+
+bool od_board_spim_pin_ok(uint8_t sck_port, uint8_t sck_pin,
+			  uint8_t mosi_port, uint8_t mosi_pin)
+{
+	(void)sck_pin;
+	(void)mosi_pin;
+	return sck_port <= 1u && mosi_port <= 1u;
+}

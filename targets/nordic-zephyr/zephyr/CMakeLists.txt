@@ -61,6 +61,10 @@ list(APPEND BOARD_ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(opendisplay_nordic)
 
+# This is a project build option, not Kconfig. Pull it through the sysbuild cache so the
+# qualification image can prove that no fallback code was linked.
+zephyr_get(OD_EPD_SPI_REQUIRE_SPIM)
+
 set(FACTORY_GEN_SCRIPT ${PROJECT_ROOT}/scripts/factory_config_gen.py)
 set(FACTORY_GEN_STAMP ${GEN_DIR}/.factory_gen_stamp)
 
@@ -110,6 +114,10 @@ target_include_directories(app PRIVATE
 target_compile_definitions(app PRIVATE
   OD_APP_VERSION=0x0100
 )
+
+if(OD_EPD_SPI_REQUIRE_SPIM)
+  target_compile_definitions(app PRIVATE OD_EPD_SPI_REQUIRE_SPIM=1)
+endif()
 
 # BOARD *is* set here -- find_package(Zephyr) has run. Only the EXTRA_CONF_FILE block above it
 # sees an empty BOARD; do not move these down-stream checks up there.
@@ -225,6 +233,7 @@ target_sources(app PRIVATE
   ${SRC_DIR}/opendisplay_config_parser.c
   ${SRC_DIR}/opendisplay_config_storage.c
   ${SRC_DIR}/opendisplay_display.cpp
+  ${SRC_DIR}/od_epd_spi_nrfx.c
   ${SRC_DIR}/od_inflate_app.c
   ${SRC_DIR}/boot_screen.cpp
   ${SRC_DIR}/opendisplay_epd_map.c
@@ -249,6 +258,10 @@ target_sources(app PRIVATE
   ${PANEL_DIR}/od_bbep_zephyr.cpp
   ${THIRD_PARTY_DIR}/bb_epaper/src/Group5.cpp
 )
+
+if(NOT OD_EPD_SPI_REQUIRE_SPIM)
+  target_sources(app PRIVATE ${SRC_DIR}/od_epd_spi_bitbang.c)
+endif()
 
 # ------------------------------------------------------------------------------ shared/ ---
 # PURE needs the C standard library and shared/protocol, nothing else. HAL_WDT needs

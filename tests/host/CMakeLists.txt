@@ -237,6 +237,66 @@ target_include_directories(od_nordic_log_hal_test PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr)
 add_test(NAME nordic_log_hal COMMAND od_nordic_log_hal_test)
 
+# Nordic EPD GPIO fallback: compile the production direct-register writer over a fake nRF GPIO
+# register surface. This pins the one-time decode contract and the mode-0 edge/data ordering;
+# transfer-rate qualification still requires a board and oscilloscope.
+add_executable(od_nordic_epd_bitbang_test
+    nordic_epd_bitbang_test.c
+    ../../targets/nordic-zephyr/src/od_epd_spi_bitbang.c)
+target_include_directories(od_nordic_epd_bitbang_test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/fake_nrf_gpio
+    ../../targets/nordic-zephyr/src)
+add_test(NAME nordic_epd_bitbang COMMAND od_nordic_epd_bitbang_test)
+
+# Compile each production board policy independently. The exact nRF54 signal tuples are a
+# package-routing contract; a port-level approximation would incorrectly admit cross-pairs.
+foreach(OD_EPD_POLICY IN ITEMS NRF52840 NRF54L15 NRF54LM20A)
+    string(TOLOWER ${OD_EPD_POLICY} OD_EPD_POLICY_LOWER)
+    if(OD_EPD_POLICY STREQUAL "NRF52840")
+        set(OD_EPD_POLICY_SOURCE ../../targets/nordic-zephyr/src/platform/nrf52840/od_board_nrf52840.c)
+        set(OD_EPD_POLICY_DEFINE CONFIG_OD_PLATFORM_NRF52840=1)
+    elseif(OD_EPD_POLICY STREQUAL "NRF54L15")
+        set(OD_EPD_POLICY_SOURCE ../../targets/nordic-zephyr/src/platform/nrf54/od_board_nrf54l15.c)
+        set(OD_EPD_POLICY_DEFINE CONFIG_SOC_NRF54L15=1)
+    else()
+        set(OD_EPD_POLICY_SOURCE ../../targets/nordic-zephyr/src/platform/nrf54/od_board_nrf54lm20a.c)
+        set(OD_EPD_POLICY_DEFINE CONFIG_SOC_NRF54LM20A=1)
+    endif()
+    add_executable(od_nordic_epd_policy_${OD_EPD_POLICY_LOWER}_test
+        nordic_epd_policy_test.c ${OD_EPD_POLICY_SOURCE})
+    target_include_directories(od_nordic_epd_policy_${OD_EPD_POLICY_LOWER}_test PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr
+        ../../targets/nordic-zephyr/src)
+    target_compile_definitions(od_nordic_epd_policy_${OD_EPD_POLICY_LOWER}_test PRIVATE
+        ${OD_EPD_POLICY_DEFINE} OD_TEST_POLICY_${OD_EPD_POLICY}=1)
+    add_test(NAME nordic_epd_policy_${OD_EPD_POLICY_LOWER}
+        COMMAND od_nordic_epd_policy_${OD_EPD_POLICY_LOWER}_test)
+endforeach()
+
+# Production SPIM backend over deterministic nrfx/IRQ/semaphore fakes. Build all three compile-time
+# instance selections, plus the strict qualification variant that has no bit-bang references.
+function(add_nordic_epd_spim_test suffix platform_define)
+    set(target od_nordic_epd_spim_${suffix}_test)
+    add_executable(${target}
+        nordic_epd_spim_test.c
+        fake_nordic_spim/nrfx_fake.c
+        ../../targets/nordic-zephyr/src/od_epd_spi_nrfx.c)
+    target_include_directories(${target} PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/fake_nordic_spim
+        ../../targets/nordic-zephyr/src
+        ../../targets/nordic-zephyr/panel
+        ../../shared/core)
+    target_compile_definitions(${target} PRIVATE
+        OD_EPD_SPI_HOST_TEST=1 ${platform_define} ${ARGN})
+    add_test(NAME nordic_epd_spim_${suffix} COMMAND ${target})
+endfunction()
+
+add_nordic_epd_spim_test(nrf52840 CONFIG_OD_PLATFORM_NRF52840=1)
+add_nordic_epd_spim_test(nrf54l15 CONFIG_SOC_NRF54L15=1)
+add_nordic_epd_spim_test(nrf54lm20a CONFIG_SOC_NRF54LM20A=1)
+add_nordic_epd_spim_test(nrf52840_strict CONFIG_OD_PLATFORM_NRF52840=1
+    OD_EPD_SPI_REQUIRE_SPIM=1)
+
 # config_tlv: the config-blob walk and its CRC. The walk is the PRE-AUTH attack surface -- this
 # blob is parsed at boot from storage a client can write -- so the cases that matter are the
 # hostile ones, and the CRC is checked DIFFERENTIALLY against an independent transcription of

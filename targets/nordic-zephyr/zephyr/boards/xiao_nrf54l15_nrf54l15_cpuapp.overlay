@@ -18,11 +18,9 @@
 };
 
 /*
- * The display is driven by a GPIO bit-bang SPI on the OpenDisplay config pins
- * (P2.1 CLK, P2.2 DATA). The board enables the spi00 SPIM peripheral on those
- * same pads, so leaving it on lets the peripheral contend with the bit-bang
- * output and corrupts the panel data. No firmware path uses the Zephyr SPI API,
- * so keep the pins as plain GPIO.
+ * The application owns SPIM00 directly through nrfx so runtime configuration can select its
+ * qualified SCK/MOSI tuples. Keep the Zephyr SPI device disabled: status controls Zephyr device
+ * ownership, while CONFIG_NRFX_SPIM still compiles the generic nrfx driver used by the panel.
  */
 &spi00 {
 	status = "disabled";

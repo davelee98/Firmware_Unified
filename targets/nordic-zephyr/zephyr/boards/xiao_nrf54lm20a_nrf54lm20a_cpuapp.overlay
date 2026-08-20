@@ -23,13 +23,11 @@
  * seeed_xiao_connector.dtsi maps `xiao_spi: &spi23`, and spi23_default psels are
  * SPIM_SCK P1.04 (D8) and SPIM_MOSI P1.06 (D10) -- the two pads the panel's CLK and DATA
  * are wired to. The board DTS leaves spi23 status = "okay", so the SPIM peripheral and the
- * firmware's bit-bang both drive them: two owners, one pad. The panel then receives no
- * valid transaction, never asserts BUSY, and every refresh ends in the 60 s
- * "BUSY NEVER ASSERTED" while the BLE image upload itself succeeds.
+ * application panel backend owns directly through nrfx.
  *
  * spi00 is a different instance on P2.01/P2.02/P2.04 (the nRF54L15's panel bus, not this
- * board's). Nothing here uses the Zephyr SPI API, so both stay disabled and the pads stay
- * plain GPIO.
+ * board's). Keep both Zephyr SPI devices disabled: spi23 is application-owned through nrfx and
+ * spi00 must not claim the other board's panel pins.
  */
 &spi23 {
 	status = "disabled";

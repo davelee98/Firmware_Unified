@@ -36,3 +36,15 @@ bool od_board_epd_requires_cold_cycle(void)
 {
 	return false;
 }
+
+bool od_board_epd_pin_reserved(uint8_t port, uint8_t pin)
+{
+	return port == 1u && pin >= 10u && pin <= 14u;
+}
+
+bool od_board_spim_pin_ok(uint8_t sck_port, uint8_t sck_pin,
+			  uint8_t mosi_port, uint8_t mosi_pin)
+{
+	return (sck_port == 1u && sck_pin == 4u && mosi_port == 1u && mosi_pin == 6u)
+	    || (sck_port == 1u && sck_pin == 3u && mosi_port == 1u && mosi_pin == 5u);
+}

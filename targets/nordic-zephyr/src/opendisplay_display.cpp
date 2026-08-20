@@ -15,6 +15,8 @@
 #include "od_board.h"
 #include "boot_screen.h"
 #include "od_gpio.h"
+#include "od_epd_sizes.h"
+#include "od_epd_spi.h"
 #include "od_hal_time.h"
 #include "od_zephyr_compat.h"
 #include "od_watchdog_app.h"
@@ -28,8 +30,6 @@ extern "C" {
 }
 
 void bbepSendCMDSequence(BBEPDISP *pBBEP, const uint8_t *pSeq);
-
-#define OPENDISPLAY_DECOMPRESSION_CHUNK_SIZE 256u
 
 /* Raw BBEPDISP, not the vendored BBEPAPER C++ class -- see panel/od_bbep_zephyr.h. The class is
  * not compiled on this target, exactly as on esp32-idf. */
@@ -108,6 +108,15 @@ static const struct DisplayConfig *display_cfg(void)
   return &cfg->displays[0];
 }
 
+static bool display_bus_acquire(const struct DisplayConfig *d)
+{
+  if (d == nullptr || !od_epd_spi_init(d->data_pin, d->clk_pin)) {
+    od_log_error("panel: SPI acquire failed");
+    return false;
+  }
+  return true;
+}
+
 static void display_park_signal_pin(uint8_t pin_cfg)
 {
   od_gpio_park(pin_cfg);
@@ -167,6 +176,9 @@ static bool display_power_set(bool on)
     od_log_warn("panel: power-up refused - watchdog safe mode");
     return false;
   }
+  if (!on) {
+    od_epd_spi_deinit();
+  }
   if (cfg == nullptr) {
     od_log_error("panel: global config unavailable");
     return false;
@@ -191,6 +203,11 @@ static bool display_power_set(bool on)
     if (has_pwr_pin) {
       opendisplay_display_park_pins();
       od_gpio_configure_output(p, false);
+    } else if (d != nullptr) {
+      /* nrfx release disconnects SCK/MOSI. A permanently powered controller must
+       * instead see the same driven-low idle bus that this path historically left. */
+      od_gpio_configure_output(d->clk_pin, false);
+      od_gpio_configure_output(d->data_pin, false);
     }
     od_watchdog_app_phase(OD_WDT_PHASE_IDLE_OFF);
     return true;
@@ -474,6 +491,9 @@ static bool partial_write_stream_bytes(uint8_t *data, uint32_t len)
       chunk = len - offset;
     }
     bbepWriteData(&s_epd, data + offset, (int)chunk);
+    if (od_epd_spi_faulted()) {
+      return false;
+    }
     s_partial.bytes_written += chunk;
     offset += chunk;
   }
@@ -563,7 +583,12 @@ static bool partial_prepare_panel_ram_hardware(void)
     return false;
   }
   bbepSetRotation(&s_epd, (int)d->rotation * 90);
-  bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
+  if (!display_bus_acquire(d)) {
+    display_power_set(false);
+    return false;
+  }
+  bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin,
+             od_epd_spi_hz());
   od_bbep_wake(&s_epd);
   {
     const uint8_t *init_seq = s_epd.pInitPart ? s_epd.pInitPart : s_epd.pInitFull;
@@ -571,6 +596,10 @@ static bool partial_prepare_panel_ram_hardware(void)
   }
   bbepFill(&s_epd, BBEP_WHITE, PLANE_1);
   bbepFill(&s_epd, BBEP_WHITE, PLANE_0);
+  if (od_epd_spi_faulted()) {
+    display_power_set(false);
+    return false;
+  }
   return true;
 }
 
@@ -808,6 +837,7 @@ extern "C" void opendisplay_display_abort(void)
   s_plane2_started = false;
   s_dw_compressed = false;
   s_dw_decompressed_total = 0;
+  (void)od_epd_spi_fault_reset();
 }
 
 static void dw_log_progress(void)
@@ -851,6 +881,9 @@ static int dw_stream_raw_bytes(const uint8_t *payload, uint32_t payload_len)
       break;
     }
     bbepWriteData(&s_epd, (uint8_t *)(void *)p, (int)chunk);
+    if (od_epd_spi_faulted()) {
+      return -1;
+    }
     p += chunk;
     left -= chunk;
     s_written_bytes += chunk;
@@ -941,15 +974,29 @@ extern "C" bool opendisplay_display_boot_apply(void)
       return false;
     }
     bbepSetRotation(&s_epd, (int)d->rotation * 90);
+    if (!display_bus_acquire(d)) {
+      display_power_set(false);
+      continue;
+    }
     bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin,
-               d->clk_pin, 0);
+               d->clk_pin, od_epd_spi_hz());
     od_bbep_wake(&s_epd);
     od_watchdog_app_phase(OD_WDT_PHASE_INIT_SEQ);
     od_bbep_send_panel_init_full(&s_epd);
+    if (od_epd_spi_faulted()) {
+      od_log_error("boot display: panel SPI failed during initialization");
+      display_power_set(false);
+      continue;
+    }
     if (!writeBootScreenWithQr(s_epd)) {
       od_log_warn("boot display: renderer failed; transmitting white fallback");
       od_watchdog_app_phase(OD_WDT_PHASE_FILL);
       bbepFill(&s_epd, BBEP_WHITE, PLANE_DUPLICATE);
+    }
+    if (od_epd_spi_faulted()) {
+      od_log_error("boot display: panel SPI failed while transmitting framebuffer");
+      display_power_set(false);
+      continue;
     }
     od_log_info("boot framebuffer transmitted; starting physical refresh (attempt %u)", attempt);
     if (bbepRefresh(&s_epd, REFRESH_FULL) == BBEP_SUCCESS) {
@@ -979,6 +1026,8 @@ static void xfer_app_clear(void)
     bbepSleep(&s_epd, DEEP_SLEEP);
     display_power_set(false);
   }
+  od_epd_spi_deinit();
+  (void)od_epd_spi_fault_reset();
   memset(&s_xfer_app, 0, sizeof(s_xfer_app));
 }
 
@@ -992,7 +1041,7 @@ static bool xfer_app_write_full(uint32_t stream_offset, od_span_t data)
   }
   if (s_xfer_app.geometry.layout != OD_COLOR_LAYOUT_CONTROLLER_PLANES) {
     bbepWriteData(&s_epd, (uint8_t *)(uintptr_t)data.p, (int)data.n);
-    return true;
+    return !od_epd_spi_faulted();
   }
 
   while (consumed < data.n) {
@@ -1014,6 +1063,9 @@ static bool xfer_app_write_full(uint32_t stream_offset, od_span_t data)
       chunk = (uint32_t)data.n - consumed;
     }
     bbepWriteData(&s_epd, (uint8_t *)(uintptr_t)(data.p + consumed), (int)chunk);
+    if (od_epd_spi_faulted()) {
+      return false;
+    }
     consumed += chunk;
   }
   return true;
@@ -1047,6 +1099,9 @@ static bool xfer_app_write_partial(uint32_t stream_offset, od_span_t data)
       chunk = (uint32_t)data.n - consumed;
     }
     bbepWriteData(&s_epd, (uint8_t *)(uintptr_t)(data.p + consumed), (int)chunk);
+    if (od_epd_spi_faulted()) {
+      return false;
+    }
     consumed += chunk;
   }
   return true;
@@ -1110,7 +1165,12 @@ extern "C" bool od_xfer_app_begin_full(const od_color_geometry_t *geometry)
     return false;
   }
   bbepSetRotation(&s_epd, (int)d->rotation * 90);
-  bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
+  if (!display_bus_acquire(d)) {
+    display_power_set(false);
+    return false;
+  }
+  bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin,
+             od_epd_spi_hz());
   od_bbep_wake(&s_epd);
   od_watchdog_app_phase(OD_WDT_PHASE_INIT_SEQ);
   od_bbep_send_panel_init_full(&s_epd);
@@ -1126,6 +1186,10 @@ extern "C" bool od_xfer_app_begin_full(const od_color_geometry_t *geometry)
   s_xfer_app.current_plane = geometry->initial_plane == OD_COLOR_PLANE_0 ? PLANE_0 : PLANE_1;
   s_xfer_app.panel_up = true;
   bbepStartWrite(&s_epd, s_xfer_app.current_plane);
+  if (od_epd_spi_faulted()) {
+    xfer_app_clear();
+    return false;
+  }
   return true;
 }
 
@@ -1162,7 +1226,7 @@ extern "C" uint32_t od_xfer_app_write(uint32_t stream_offset, od_span_t data)
       ? xfer_app_write_full(stream_offset, data)
       : s_xfer_app.mode == XFER_APP_PARTIAL
           && xfer_app_write_partial(stream_offset, data);
-  return accepted ? (uint32_t)data.n : 0u;
+  return accepted && !od_epd_spi_faulted() ? (uint32_t)data.n : 0u;
 }
 
 extern "C" od_mut_span_t od_xfer_app_inflate_scratch(void)
@@ -1195,6 +1259,9 @@ extern "C" bool od_xfer_app_refresh(uint8_t mode, bool *completed)
   bool ok;
 
   if (completed == nullptr || s_xfer_app.mode == XFER_APP_IDLE || !s_xfer_app.panel_up) {
+    return false;
+  }
+  if (od_epd_spi_faulted()) {
     return false;
   }
   if (s_xfer_app.mode == XFER_APP_PARTIAL) {
@@ -1285,7 +1352,12 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
   dw_init_mark("after setPanelType");
 
   bbepSetRotation(&s_epd, (int)d->rotation * 90);
-  bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin, 0);
+  if (!display_bus_acquire(d)) {
+    display_power_set(false);
+    return -3;
+  }
+  bbepInitIO(&s_epd, d->dc_pin, d->reset_pin, d->busy_pin, d->cs_pin, d->data_pin, d->clk_pin,
+             od_epd_spi_hz());
   dw_init_mark("after initIO");
   od_bbep_wake(&s_epd);
   dw_init_mark("after wake (reset + busy)");
@@ -1301,6 +1373,10 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
   s_plane2_started = false;
   s_total_bytes = geometry.total_bytes;
   bbepStartWrite(&s_epd, geometry.initial_plane == OD_COLOR_PLANE_0 ? PLANE_0 : PLANE_1);
+  if (od_epd_spi_faulted()) {
+    opendisplay_display_abort();
+    return -3;
+  }
   dw_init_mark("after startWrite");
 
   s_written_bytes = 0;
@@ -1350,6 +1426,9 @@ extern "C" int opendisplay_display_direct_write_start(const uint8_t *payload, ui
 
 extern "C" int opendisplay_display_direct_write_data(const uint8_t *payload, uint16_t payload_len)
 {
+  if (od_epd_spi_faulted()) {
+    return -5;
+  }
   if (s_partial.active) {
     if (payload == nullptr || payload_len == 0u) {
       return 0;
@@ -1407,6 +1486,9 @@ extern "C" int opendisplay_display_direct_write_data(const uint8_t *payload, uin
  * the blocking refresh (matches the nRF52840 Firmware response ordering). */
 extern "C" int opendisplay_display_direct_write_end_prepare(const uint8_t *payload, uint16_t payload_len)
 {
+  if (od_epd_spi_faulted()) {
+    return -5;
+  }
   if (s_partial.active) {
     if (payload != nullptr && payload_len > 1u) {
       s_displayed_etag = 0;
@@ -1450,6 +1532,9 @@ extern "C" int opendisplay_display_direct_write_end_prepare(const uint8_t *paylo
 /* Stage 2: panel refresh; call only after a successful _prepare(). */
 extern "C" int opendisplay_display_direct_write_end_refresh(const uint8_t *payload, uint16_t payload_len, bool *refresh_ok)
 {
+  if (od_epd_spi_faulted()) {
+    return -5;
+  }
   if (s_partial.active) {
     int refresh_mode = REFRESH_PARTIAL;
     if (payload != nullptr && payload_len >= 1u) {
