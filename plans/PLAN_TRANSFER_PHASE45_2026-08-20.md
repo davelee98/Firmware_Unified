@@ -157,8 +157,11 @@ proof, and any corpus vector — `grep -c NFC tests/vectors/dispatch.json` retur
   documents `NFC_ERR_BAD_TOTAL_LEN` as "total_len == 0 or > 512"
   (`shared/protocol/opendisplay_protocol.h:867`) and the client enforces the same number. Unlike
   `OD_CONFIG_MAX_SIZE` it must **not** become per-target.
-- BG22 at Phase 3 HEAD: 250,292 B flash, 32,284 B static RAM, 480 B headroom. That is the
-  recaptured baseline for both phases.
+- BG22 at Phase 3 HEAD: 250,292 B flash and a 32,284 B `data + bss` total. **That total is not a
+  budget and the 480 bytes below it are not headroom** — `.memory_manager_heap` is sized to fill
+  whatever RAM is left, so the figure is constant whatever the static footprint does. The number
+  that moves, and the one X3 gates on, is `heap_size` (`heap_limit − __HeapBase`). Quote the total
+  as a record; measure the heap.
 - Nordic carries a 244-byte static `s_nfc_rsp_buf` for a response that can never exceed 224.
 - **The two controller adapters disagree above the cap, and neither is the shared machine's to
   decide.** BG22 stages tag reads in a 128-byte `s_od_nfc_read_data`
@@ -525,8 +528,8 @@ subsystems.
 
 Field order is `owner` first, then the 16-bit pair, then the two bytes, then the buffer: `owner` is
 4-aligned, so leading it avoids the 3 bytes of padding a leading `bool` forces. Do not claim the
-scalars are "packed" without checking — the resulting `sizeof` is what X3 measures, and X3's
-64-byte ceiling is small enough that padding is a material fraction of it.
+scalars are "packed" without checking — this `sizeof` is what X3's heap loss is mostly made of,
+and its 64-byte ceiling is small enough that padding is a material fraction of it.
 
 One instance, private to the translation unit, reached through `od_nfc_reset()` and the frame
 entry point — the `od_session` precedent. Under `OD_CAP_NFC=0` the struct is not defined and the
@@ -672,8 +675,11 @@ bespoke BLE READ tool is built here, since without it no READ row can be attempt
 ### Step 6 — BG22 cutover — **hardware gate before step 8**
 
 `od_cmd_silabs.c:253-348` is deleted down to the same temporary hook; `od_cmd_silabs_reset()`
-reduces to the config assembler. Record flash and static RAM against X3's 64-byte / 400-byte stop
-condition in the commit message, and open and update BG22's § 9 rows in this step as they run.
+reduces to the config assembler. Record flash and **`heap_size` loss against the pre-Phase-4
+baseline** in the commit message, against X3's 64-byte ceiling — not static RAM, which is constant
+by construction on this target. This is the step where the number should come back down: deleting
+the target's own 512-byte assembler recovers most of what step 3's shared one cost. Open and update
+BG22's § 9 rows in this step as they run.
 
 **`silabs_fault_test.c`'s NFC assertions stay green and unedited; its link plumbing does not, and
 the distinction is the whole of the rule.** That file calls `od_cmd_app_nfc()` at five sites
@@ -790,8 +796,11 @@ refuses an over-long cut too, so against a *valid* record type the widened compa
 one are observationally identical — both answer `0x01`, neither reaches the tag. The arm is
 distinguishable only through its position ahead of the record-type gate: **an invalid record type
 with a wrapping declared length answers `0x01` under the widened form and `0x05` under a 16-bit
-one.** That row is the oracle for N3 in the shared machine; without it, reverting the widening
-turns the suite red for the N4 ordering reason and the N3 claim goes unproven.
+one.** That row is the oracle for N3 in the shared machine, and it is load-bearing: **without it,
+reverting the widening leaves the suite GREEN.** Every other length row is masked — the wrapping
+rows carry a valid type and the split refuses them identically, and N4's over-declared rows use a
+length that does not wrap, so both forms answer `0x01` through the same arm. With the row, the
+mutation turns red for the right reason: the widened comparison must precede the type gate.
 
 **Record types and N4's order.** All five valid values, plus 5, 6, 0x80 and 0xFF rejected `0x05`.
 Both of N4's changed classes get their own case — valid type with an over-declared length, and
