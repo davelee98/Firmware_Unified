@@ -25,6 +25,15 @@ extern unsigned fake_silabs_aborts;
 extern unsigned fake_silabs_resets;
 extern bool fake_silabs_nfc_read_ok;
 extern uint16_t fake_silabs_nfc_read_len;
+/* What the handler forwarded to the tag, and whether the tag accepts it. Driver inputs and
+ * observations, never expected wire bytes. */
+extern bool     fake_silabs_nfc_write_ok;
+extern unsigned fake_silabs_nfc_write_calls;
+extern uint8_t  fake_silabs_nfc_write_rec_type;
+extern uint16_t fake_silabs_nfc_write_len;
+/* THE BYTES, not only their count -- see fake_nordic.h for why a length alone is not enough. */
+#define FAKE_SILABS_NFC_WRITE_MAX 512u
+extern uint8_t  fake_silabs_nfc_write_data[FAKE_SILABS_NFC_WRITE_MAX];
 
 /* BGAPI and clock script used only by the production transport fault suite. */
 #define FAKE_SILABS_SENT_MAX 32u

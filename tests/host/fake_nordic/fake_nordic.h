@@ -64,6 +64,15 @@ extern bool     fake_nfc_read_ok;
 extern bool     fake_nfc_write_ok;
 extern uint8_t  fake_nfc_rec_type;
 extern uint16_t fake_nfc_read_len;        /* how many tag bytes a read returns */
+/* What the handler actually forwarded to the tag. A driver sees these; recording them is what lets
+ * a test assert that a refused frame reached no sink at all, which a reply byte cannot show. */
+extern unsigned fake_nfc_write_calls;
+extern uint8_t  fake_nfc_write_rec_type;
+extern uint16_t fake_nfc_write_len;
+/* THE BYTES, not only their count. A length alone cannot tell a correctly assembled record from
+ * one whose chunks were concatenated in the wrong order, or written at the wrong offset. */
+#define FAKE_NFC_WRITE_MAX 512u
+extern uint8_t  fake_nfc_write_data[FAKE_NFC_WRITE_MAX];
 
 /* --- kernel ----------------------------------------------------------------------------------- */
 

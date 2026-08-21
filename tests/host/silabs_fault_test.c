@@ -233,6 +233,82 @@ static void test_nfc_exact_limit(void)
     CHECK(fake_silabs_sent[0].data[3] == NFC_ERR_READ_FAILED);
 }
 
+/* ------------------------------------------------------- frozen 0x0083 reference behaviour --- */
+
+#define REF_TARGET_MASK REF_BG22
+
+/* Declared where its only production caller declares it (opendisplay_pipe.c:45); BG22 exports no
+ * header for it. */
+void od_cmd_silabs_reset(void);
+
+static od_cmd_result_t ref_submit_as(const uint8_t *body, uint16_t n, od_origin_t origin,
+                                      uint32_t tag)
+{
+    od_tx_reservation_t r;
+
+    fake_silabs_sent_n = 0u;
+    if (od_txq_reserve(1u, &r) != OD_TXQ_OK) {
+        return OD_CMD_UNKNOWN;
+    }
+    {
+        od_cmd_ctx_t ctx = od_test_cmd_ctx((od_reply_t){ origin, tag }, &r,
+                                            (uint16_t)(2u + n), false);
+        const od_cmd_result_t rc = od_cmd_app_nfc(&ctx, od_span_make(body, n));
+
+        od_txq_release(&r);
+        (void)od_txq_process();
+        return rc;
+    }
+}
+
+static void ref_setup(void) { setup(); }
+static void ref_knob_read_ok(bool ok)      { fake_silabs_nfc_read_ok = ok; }
+static void ref_knob_read_len(uint16_t n)  { fake_silabs_nfc_read_len = n; }
+static void ref_knob_write_ok(bool ok)     { fake_silabs_nfc_write_ok = ok; }
+/* See the Nordic driver: od_core_reset() does not clear NFC today. */
+static void ref_reset_transport(void)      { od_cmd_silabs_reset(); }
+static unsigned ref_reply_count(void)      { return fake_silabs_sent_n; }
+static uint16_t ref_reply_len(unsigned i)  { return fake_silabs_sent[i].len; }
+static const uint8_t *ref_reply_data(unsigned i) { return fake_silabs_sent[i].data; }
+static unsigned ref_sink_calls(void)       { return fake_silabs_nfc_write_calls; }
+static uint16_t ref_sink_len(void)         { return fake_silabs_nfc_write_len; }
+static uint8_t  ref_sink_rec_type(void)    { return fake_silabs_nfc_write_rec_type; }
+static const uint8_t *ref_sink_data(void)  { return fake_silabs_nfc_write_data; }
+
+/* See the Nordic driver: a spent reservation is the reachable reply failure. */
+static od_cmd_result_t ref_submit_unqueueable(const uint8_t *body, uint16_t n,
+                                               od_origin_t origin, uint32_t tag)
+{
+    od_tx_reservation_t spent = { 0u, 0u };
+    od_cmd_ctx_t ctx = od_test_cmd_ctx((od_reply_t){ origin, tag }, &spent,
+                                        (uint16_t)(2u + n), false);
+    const od_cmd_result_t rc = od_cmd_app_nfc(&ctx, od_span_make(body, n));
+
+    (void)od_txq_process();
+    return rc;
+}
+
+/* A foreign owner is a different connection tag on the same link; a foreign origin is a different
+ * link. The production tag comes from the pipe, so neither foreign value is it. */
+static od_cmd_result_t ref_submit(const uint8_t *body, uint16_t n, bool foreign_tag,
+                                  bool foreign_origin, bool reply_fails)
+{
+    const uint32_t tag = opendisplay_pipe_connection_tag();
+    const od_origin_t origin = foreign_origin ? OD_ORIGIN_LAN_PLAIN : OD_ORIGIN_BLE;
+    const uint32_t use_tag = foreign_tag ? tag + 1u : tag;
+
+    fake_silabs_sent_n = 0u;
+    if (reply_fails) {
+        return ref_submit_unqueueable(body, n, origin, use_tag);
+    }
+    return ref_submit_as(body, n, origin, use_tag);
+}
+
+static void ref_authenticate(void) { authenticate(); fake_silabs_sent_n = 0u; }
+
+#include "nfc_reference_cases.inc"
+#include "nfc_reference_runner.inc"
+
 static void arm_direct_end(od_cmd_ctx_t *ctx, od_tx_reservation_t *r)
 {
     static const uint8_t image[4096];
@@ -575,6 +651,7 @@ int main(void)
 {
     test_config_persist_before_queue();
     test_nfc_exact_limit();
+    ref_run_table();
     test_direct_end_barrier();
     test_transport_deadlines();
     test_transport_pressure_policy();

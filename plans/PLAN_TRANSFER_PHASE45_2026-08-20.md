@@ -552,6 +552,15 @@ This is the step that makes N4's two changed classes demonstrable rather than as
 overflow input is the exception: N3 landed in step 0, so its fixture is historical and cites that
 fix commit because the unsafe pre-fix behaviour is no longer executable here.
 
+**ESP32's capability-off silence is the one § 7 input this step does not capture, and the
+exception is recorded here rather than left to be discovered in the fixture.** Its hook answers
+`OD_CMD_UNKNOWN` to every input and sends nothing, but `targets/esp32-idf/src/od_cmd_app.cpp`
+reaches `buzzer_control.h`, `communication.h`, `device_control.h` and `display_service.h`, none of
+which has a host fake — so freezing an eight-line stub would mean standing up that whole surface
+first. Step 7 proves the same observable against the machine that actually ships, through
+`nfc_off_test.c` and its map/symbol check, which is where this plan already assigns it. The fixture
+repeats the exception in its own header so the two cannot drift apart.
+
 **The fixtures record observable post-condition assembler state, not only reply bytes.** N5's table
 is half about state, and that half is precisely what a reply capture cannot see. Drive a follow-up
 DATA, END or replacement START as appropriate and prove whether the prior assembly is retained,

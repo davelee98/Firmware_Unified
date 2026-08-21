@@ -77,4 +77,15 @@ enum od_session_auth handshake_capture(struct od_session *s, uint32_t now_ms,
 bool handshake_step1(struct od_session *s, uint32_t now_ms, uint8_t server_nonce_out[16],
                      uint8_t *rsp, uint16_t *rsp_len);
 
+/* CLIENT-SIDE UNSEAL of a device->host frame, through the RFC 3610 reference rather than the
+ * production cipher, so a sealed reply can be compared for MEANING instead of for length. Returns
+ * false when the tag does not authenticate. `out` receives the plaintext application frame --
+ * [cmd_hi][cmd_lo][payload] -- exactly as the caller handed it to od_session_seal().
+ *
+ * Wire layout it undoes (od_session.c:674-690): [cmd:2][nonce:16][ct(payload+1)][tag:12], AAD is
+ * the two command bytes, the CCM nonce is the last 13 of the 16, and the first ciphertext byte is
+ * the inner one-byte payload length. */
+bool session_fake_unseal(const uint8_t *frame, uint16_t len, uint8_t *out, uint16_t out_cap,
+                         uint16_t *out_len);
+
 #endif /* OD_TEST_SESSION_FAKE_H */
