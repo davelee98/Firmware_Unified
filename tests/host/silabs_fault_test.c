@@ -4,6 +4,7 @@
 #include "od_cmd_app.h"
 #include "od_cmd_test_ctx.h"
 #include "od_config_read.h"
+#include "od_nfc.h"
 #include "od_reply.h"
 #include "od_session.h"
 #include "od_session_app.h"
@@ -265,8 +266,9 @@ static void ref_setup(void) { setup(); }
 static void ref_knob_read_ok(bool ok)      { fake_silabs_nfc_read_ok = ok; }
 static void ref_knob_read_len(uint16_t n)  { fake_silabs_nfc_read_len = n; }
 static void ref_knob_write_ok(bool ok)     { fake_silabs_nfc_write_ok = ok; }
-/* See the Nordic driver: od_core_reset() does not clear NFC today. */
-static void ref_reset_transport(void)      { od_cmd_silabs_reset(); }
+/* The assembler is the shared machine's now, so the teardown that clears it is od_nfc_reset() --
+ * which od_core_reset() calls. od_cmd_silabs_reset() is down to the config assembler. */
+static void ref_reset_transport(void)      { od_cmd_silabs_reset(); od_nfc_reset(); }
 static unsigned ref_reply_count(void)      { return fake_silabs_sent_n; }
 static uint16_t ref_reply_len(unsigned i)  { return fake_silabs_sent[i].len; }
 static const uint8_t *ref_reply_data(unsigned i) { return fake_silabs_sent[i].data; }

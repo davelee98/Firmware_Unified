@@ -26,8 +26,7 @@ uint8_t opendisplay_ble_get_app_version_patch(void);
 
 void opendisplay_ble_copy_msd_bytes(uint8_t out[16]);
 
-bool opendisplay_ble_nfc_read(uint8_t *type_out, uint8_t *data_out, uint16_t *data_len_io, uint16_t max_len);
-bool opendisplay_ble_nfc_write(uint8_t type, const uint8_t *data, uint16_t data_len);
+/* Tag I/O is shared/core/od_nfc_app.h's, implemented in opendisplay_ble.c. */
 
 #ifdef __cplusplus
 }
