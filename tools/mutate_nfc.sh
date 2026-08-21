@@ -21,16 +21,44 @@ BAK=$(mktemp)
 # Restore the source AND rebuild, so the tree is not left holding the last mutant's binaries.
 # Without the rebuild, build/mutate/od_nfc_test keeps reporting failures and the off fixture keeps
 # an assembler in it -- a mutant left lying around where a passing artifact is expected.
+# RESTORATION FAILURE IS A FAILURE, not a footnote. Swallowing it let the script exit 0 while the
+# source still held a mutation or the build tree still held mutant binaries -- the state someone
+# then reads and believes.
 cleanup () {
-    cp "$BAK" "$SRC"
+    local rc=$?
+
+    if ! cp "$BAK" "$SRC"; then
+        echo "RESTORE FAILED: $SRC may still hold a mutation. Backup kept at $BAK"
+        exit 1
+    fi
     rm -f "$BAK"
-    cmake --build "$BUILD" --target od_nfc_test od_nfc_off_test -j"$(nproc)" >/dev/null 2>&1 || true
+    if ! cmake --build "$BUILD" --target od_nfc_test od_nfc_off_test \
+         -j"$(nproc)" >/dev/null 2>&1; then
+        echo "RESTORE BUILD FAILED: $BUILD still holds mutant binaries"
+        exit 1
+    fi
+    exit "$rc"
 }
 trap cleanup EXIT
 cp "$SRC" "$BAK"
 
 # The nm half of the capability-off claim, run the same way check.sh runs it.
-off_proof_holds () { ! nm -a "$BUILD"/od_nfc_off_test 2>/dev/null | grep -qE "\bs_nfc\b"; }
+#
+# THREE OUTCOMES, NOT TWO. `! nm ... | grep -q` reports "proof holds" when nm itself fails, which
+# conflates "the symbol is absent" with "nothing was read" -- the fail-open shape this harness has
+# now had twice. nm's status is checked before its output is searched.
+#   0 = proof holds (no assembler)   1 = proof fails (assembler present)   2 = unreadable
+off_proof_status () {
+    local syms
+
+    if ! syms=$(nm -a "$BUILD"/od_nfc_off_test 2>/dev/null); then
+        return 2
+    fi
+    if printf '%s\n' "$syms" | grep -qE "\bs_nfc\b"; then
+        return 1
+    fi
+    return 0
+}
 
 cmake -S tests/host -B "$BUILD" >/dev/null || exit 1
 cmake --build "$BUILD" --target od_nfc_test od_nfc_off_test -j"$(nproc)" >/dev/null 2>&1 || {
@@ -41,7 +69,13 @@ cmake --build "$BUILD" --target od_nfc_test od_nfc_off_test -j"$(nproc)" >/dev/n
 # credited with a symbol that was there before it.
 "$BUILD"/od_nfc_test >/dev/null 2>&1 || { echo "baseline suite is not green"; exit 1; }
 "$BUILD"/od_nfc_off_test >/dev/null 2>&1 || { echo "baseline capability-off suite is not green"; exit 1; }
-off_proof_holds || { echo "baseline nm proof already fails: s_nfc present before any mutation"; exit 1; }
+off_proof_status
+case $? in
+    0) ;;
+    1) echo "baseline nm proof already fails: s_nfc present before any mutation"; exit 1 ;;
+    *) echo "baseline nm proof could not be evaluated: nm failed on the capability-off fixture"
+       exit 1 ;;
+esac
 
 fail=0
 mutate () {
@@ -124,12 +158,13 @@ PY
     fi
     # A FLIP, not a state: the baseline above established the proof holds, so finding the symbol
     # now is attributable to this mutation rather than to something that was already true.
-    if off_proof_holds; then
-        printf '%-34s SURVIVED -- the nm proof cannot see this\n' "$name"; fail=1
-    else
-        hits=$(nm -a "$BUILD"/od_nfc_off_test | grep -E "\bs_nfc\b" | head -1 | tr -s ' ')
-        printf '%-34s nm proof flips to fail (%s)\n' "$name" "$hits"
-    fi
+    off_proof_status
+    case $? in
+        1) hits=$(nm -a "$BUILD"/od_nfc_off_test | grep -E "\bs_nfc\b" | head -1 | tr -s ' ')
+           printf '%-34s nm proof flips to fail (%s)\n' "$name" "$hits" ;;
+        0) printf '%-34s SURVIVED -- the nm proof cannot see this\n' "$name"; fail=1 ;;
+        *) printf '%-34s NOT EXERCISED -- nm could not read the fixture\n' "$name"; fail=1 ;;
+    esac
 }
 mutate_off
 
