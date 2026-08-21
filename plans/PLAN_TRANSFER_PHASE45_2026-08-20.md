@@ -2,7 +2,9 @@
 
 **Date:** 2026-08-20
 
-**Source snapshot:** `codex/transfer-phase3` at `aba251b` (shared PIPE landed at `3ca5e57`).
+**Source snapshot:** Phase 3 closed at `b3ab8bb`, merged to `main` as `9e691a3` (shared PIPE
+landed at `3ca5e57`). The earlier `aba251b` cited here was `docs: add Claude Codex mailboxes`,
+not a Phase 3 implementation commit at all.
 
 **Owns:** Phases 4 (NFC) and 5 (cleanup and release evidence) of
 [`PLAN_TRANSFER_PROMOTION_2026-08-17.md`](PLAN_TRANSFER_PROMOTION_2026-08-17.md), which is
@@ -236,7 +238,8 @@ if ((uint32_t)declared_len + 4u > (uint32_t)body.n) { /* 0x01 */ }
 
 This adopts the Silabs donor form and fixes § 3.4's divergence 3 by construction. The change is
 demonstrated against a fake sink, which records the length the pre-fix handler forwarded; the real
-NDEF encoder is never run with a wrapped length (§ 2.1). `od_span_split()` is used wherever a cut is taken, per architectural decision 1.
+NDEF encoder is never run with a wrapped length (§ 2.1). `od_span_split()` is used wherever a cut
+is taken, per architectural decision 1.
 
 The sibling `Firmware_NRF54` carries the same defect and is **not** fixed from here; it is filed
 in `docs/FOLLOWUPS.md` as external work (§ 13).
@@ -363,7 +366,7 @@ it would be caught by something else.
 No regression against it without an explicitly approved trade-off recorded here. Phase 4 has one,
 and it is approved in advance rather than gated on an impossibility:
 
-**BG22 static RAM will grow.** Its current NFC statics are the 512-byte buffer plus four scalars;
+**BG22 static RAM will grow.** Its current NFC statics are the 512-byte buffer plus three scalars;
 the shared state adds N1's owner — one `od_reply_t`, itself an `od_origin_t` plus a `uint32_t` tag
 (`shared/core/od_txq.h:69-72`) — plus the active flag, and alignment. A dozen-odd bytes against
 480 B of headroom is an acceptable price for closing the foreign-owner defect, and the alternative
@@ -387,7 +390,7 @@ unavailable board leaves its row open and named.
 ### 5.1 New files
 
 ```
-shared/core/od_nfc.h          state, the frame entry point, reset
+shared/core/od_nfc.h          state, od_nfc_frame(), od_nfc_reset()
 shared/core/od_nfc.c          the whole 0x83 machine, both capability arms
 shared/core/od_nfc_app.h      the two-function target seam
 tests/host/nfc_test.c         shared-machine suite over a fake tag
@@ -398,6 +401,19 @@ The seam lives in `shared/core/` beside `od_cmd_app.h`, `od_session_app.h`, `od_
 `od_xfer_app.h` and `od_boot_app.h`. `shared/hal/` is reserved for `od_hal_*` driver interfaces,
 and this is not one: it names a target *function*, not a driver, which is the same distinction
 that makes the APP tiers APP tiers.
+
+**The shared command entry point is `od_nfc_frame()`**, and it is named here because three
+different places have to stub or route it:
+
+```c
+/* shared/core/od_nfc.h */
+od_cmd_result_t od_nfc_frame(const od_cmd_ctx_t *ctx, od_span_t body);
+void            od_nfc_reset(void);
+```
+
+Both symbols exist under either capability arm (N8). `od_dispatch_ops.h` names `od_nfc_frame` at
+step 8, `od_core_reset()` names `od_nfc_reset` at step 3, and the dispatch-only fixtures stub
+`od_nfc_frame` rather than the seam — see § 5.1's exception and step 8.
 
 `od_nfc.c` joins a new `OD_SHARED_SOURCES_APP_NFC` tier in `shared/sources.cmake`. Nordic and BG22
 take the tier explicitly; ESP32 receives it through the aggregate and compiles it capability-off,
@@ -452,25 +468,44 @@ sub-command, error code or length field — if an implementation starts to, the 
 
 ```c
 struct od_nfc {
-    bool        active;
     od_reply_t  owner;       /* the reply identity entire, per N1 -- od_txq.h:69-72 */
-    uint8_t     rec_type;
     uint16_t    total_len;
     uint16_t    received_len;
+    uint8_t     rec_type;
+    bool        active;
     uint8_t     data[OD_NFC_ASSEMBLY_MAX];   /* 512, wire-frozen per § 3.6 */
 };
 ```
 
-**The owner is `od_reply_t` itself, not a hand-copied `{origin, tag}` pair.** `od_cmd_ctx_t`
-already carries one (`od_cmd.h:72`), so the incumbent check compares the stored aggregate against
-`ctx->rp` and N1's "full immutable reply identity" holds by construction. Two loose fields are the
-same bytes today and stop being the full identity the day `od_reply_t` gains a third — silently,
-because nothing would fail to compile. X3's measurement is unaffected either way.
+**The owner is `od_reply_t` itself, not a hand-copied `{origin, tag}` pair** — matching
+`od_xfer`, whose `s_xfer.owner` is already one (`od_xfer.c:31-36`).
+
+**But C cannot compare structs, so storing the aggregate buys nothing on its own.** An earlier
+draft of this section claimed the identity check would hold "by construction"; it would not. There
+is no `==` for aggregates, and `memcmp` over a struct with padding is a bug waiting on a compiler.
+What actually makes it hold is a **canonical equality helper declared beside the type**:
+
+```c
+/* shared/core/od_txq.h, beside od_reply_t */
+static inline bool od_reply_same(const od_reply_t *a, const od_reply_t *b)
+{
+    return a->origin == b->origin && a->tag == b->tag;
+}
+```
+
+Step 2 converts `od_xfer_owner_matches()` (`od_xfer.c:49-51`) — today the only hand-written
+field-wise comparison in `shared/` — to this helper before NFC calls it in step 3. That is what
+makes a future third field a single-site edit instead of a silent divergence between two
+subsystems.
+
+Field order is `owner` first, then the 16-bit pair, then the two bytes, then the buffer: `owner` is
+4-aligned, so leading it avoids the 3 bytes of padding a leading `bool` forces. Do not claim the
+scalars are "packed" without checking — the resulting `sizeof` is what X3 measures, and X3's
+64-byte ceiling is small enough that padding is a material fraction of it.
 
 One instance, private to the translation unit, reached through `od_nfc_reset()` and the frame
 entry point — the `od_session` precedent. Under `OD_CAP_NFC=0` the struct is not defined and the
-instance does not exist, while both entry symbols remain (N8). Field order is chosen to keep the
-scalars packed ahead of the buffer; the resulting `sizeof` is what X3 measures.
+instance does not exist, while both entry symbols remain (N8).
 
 ### 5.4 Compile-time surface
 
@@ -528,7 +563,9 @@ inactive byte can affect a later public transition, not that stale storage remai
 ### Step 2 — Land `od_nfc_app.h` and the host fake
 
 Seam header, fake tag device (programmable read payload, programmable write failure, recorded
-calls), no production caller yet.
+calls), no production caller yet. In the same commit, add `od_reply_same()` beside `od_reply_t`
+and convert `od_xfer_owner_matches()` to use it. Run the existing transfer suites here so the live
+shared-subsystem edit is proven before step 3 introduces the helper's NFC caller.
 
 ### Step 3 — Land `od_nfc.c` dormant, both capability arms in one commit
 
@@ -540,6 +577,29 @@ In the same commit, add `APP_SESSION` → `APP_NFC` to the documented source-tie
 `od_nfc_app_test_stub.c` to `od_core_reset_test`, and extend that suite with a mid-assembly reset.
 This is required now because `od_core.c` names `od_nfc_reset()` now; it is not deferred to step 8's
 dispatch reroute.
+
+**`od_core_reset_test` is not the only executable that reference pulls `od_nfc.o` into, and the
+others break unless this commit carries them.** `tests/host/fake_silabs/fake_silabs.c` calls
+`od_core_reset()`, so every Silabs host executable — `silabs_fault_test`,
+`od_dispatch_corpus_silabs_test`, the storage and lifecycle suites — links `od_core.o` and, from
+step 3, `od_nfc.o` with it. Their fakes still define `opendisplay_ble_nfc_read`/`_write` under the
+old names until step 6, so the seam goes unresolved and the link fails. Two obligations follow, and
+neither is optional in this commit:
+
+- **Temporary seam forwarders in production and tests.** Both capability-on production adapters
+  and their associated host fakes gain `od_nfc_app_read`/`od_nfc_app_write`, forwarding to the
+  `opendisplay_ble_nfc_*` functions they already implement. This keeps every intermediate target
+  and host link independent of dead-section elimination. The forwarders are deleted at each
+  target's cutover, when the production adapter and its fake take the seam names for real.
+- **ESP32 sets `OD_CAP_NFC=0` here, not at step 7.** ESP32 consumes the aggregate and calls
+  `od_core_reset()` (`session_guard.cpp:141`), so at step 3 it would compile `od_nfc.c`
+  capability-**on** and link against adapters that do not exist on that target and never will.
+  Step 7 keeps the capability-off *proof* — `nfc_off_test.c`, the map and symbol evidence — but the
+  define itself has to land with the source that reads it.
+
+The general rule this instance of: a shared file entering the aggregate is live at the first
+**reference**, not at the first route. `od_core_reset()` is that reference, and it is three steps
+ahead of dispatch.
 
 ### Step 4 — The full shared suite, still dormant
 
@@ -555,10 +615,21 @@ one commit.
 
 ### Step 5 — Nordic cutover — **hardware gate before step 6**
 
-`od_cmd_nfc.c`'s state and parsing are deleted, leaving the temporary hook above;
-`od_cmd_nfc.h` goes and `opendisplay_pipe.c:117` calls `od_nfc_reset()`; the two
-`opendisplay_ble_nfc_*` functions become the `od_nfc_app` implementation; the 244-byte static
-response buffer goes. Record the static delta and the READ-path stack high-water (N7).
+`od_cmd_nfc.c`'s state and parsing are deleted, leaving the temporary hook above; `od_cmd_nfc.h`
+goes; the two `opendisplay_ble_nfc_*` functions become the `od_nfc_app` implementation and the
+step-3 forwarder for this target is dropped; the 244-byte static response buffer goes. Record the
+static delta and the READ-path stack high-water (N7).
+
+**Nordic's `opendisplay_pipe.c:117` call is deleted outright, not re-pointed at
+`od_nfc_reset()`.** Step 3 already put that call inside `od_core_reset()`, which line 115 invokes
+two lines earlier; re-pointing would reset the assembler twice per teardown and leave a target-side
+reset list of exactly the kind `od_core.h` exists to abolish.
+
+Three comments become false the moment step 3 lands and are corrected there, not here:
+`od_core.c:3` and `:10` say "four calls" and "all four happen"; `od_core.h` says "Target display,
+config and NFC state remains target-owned"; and `tests/host/core_reset_test.c:8` and its
+`test_reset_clears_all_four()` (`:152`) name the same count. CLAUDE.md's "producer, egress,
+session — in that order" sentence is the fourth (§ 5.5).
 
 Nordic's § 9 rows are **opened in this step and updated as they run**, before BG22 starts — the
 bespoke BLE READ tool is built here, since without it no READ row can be attempted at all.
@@ -581,9 +652,10 @@ failure this paragraph exists to catch.
 
 ### Step 7 — ESP32 capability-off proof
 
-`OD_CAP_NFC=0` in the ESP32 build, `nfc_off_test.c` green, map/symbol check added — absence of
-state and seam references, not of symbols (N8). The stub in `od_cmd_app.cpp:116-123` becomes the
-same temporary hook and stays until step 8. ESP32's § 9 row is opened and updated here.
+Retain the step-3 `OD_CAP_NFC=0` definition in the ESP32 build and prove it here:
+`nfc_off_test.c` green, map/symbol check added — absence of state and seam references, not of
+symbols (N8). The stub in `od_cmd_app.cpp:116-123` becomes the same temporary hook and stays until
+step 8. ESP32's § 9 row is opened and updated here.
 
 ### Step 8 — Reroute dispatch, delete the hook, install the ratchet
 
@@ -595,15 +667,21 @@ commit.
 
 - `tests/host/dispatch_route_test.c:148` and `tests/host/dispatch_test.c:165` — replace the target
   hook with the shared entry point's stub/route assertion.
-- `tests/host/corpus_profile_portable.c:298-305` — delete `od_cmd_app_nfc` and supply the shared
-  machine's `od_nfc_app_read`/`od_nfc_app_write` fake semantics, including the capability-off
-  composition. Left alone, its NFC vectors keep describing a hook dispatch no longer calls, and the
-  § 8 ratchet cannot catch it because that ratchet scopes to `targets/**`.
+- `tests/host/corpus_profile_portable.c:298-305` — delete `od_cmd_app_nfc` and define a route stub
+  for **`od_nfc_frame`**. It must *not* gain `od_nfc_app_*` fakes: this executable links
+  `od_session_fake_dispatch` → `od_shared_dispatch_fixture`, whose source list is PURE +
+  HAL_CRYPTO + HAL_RADIO + APP_SESSION with `od_core.c` filtered out (`CMakeLists.txt:72-77`), so
+  it contains no `od_nfc.o` for a seam fake to serve. Stubbing the seam there would leave the
+  entry point unresolved while looking like the fix. Left alone entirely, its NFC vectors keep
+  describing a hook dispatch no longer calls, and the § 8 ratchet cannot catch it because that
+  ratchet scopes to `targets/**`.
 - `tests/host/CMakeLists.txt` — `:622` compiles `targets/nordic-zephyr/src/od_cmd_nfc.c` into
-  `corpus_profile_nordic`, and `:647` and `:666` compile `targets/efr32bg22-slc/od_cmd_silabs.c`
-  into two Silabs executables. Those source lists move at steps 5, 6 and 8 as the files they name
-  shrink and go. A stale entry is a build failure rather than a silent wrong answer, which is why
-  it is listed last — but the inventory is only exhaustive with it in.
+  `corpus_profile_nordic`; `:647` and `:666` compile `targets/efr32bg22-slc/od_cmd_silabs.c` into
+  two Silabs executables. **Only the Nordic entry is removed.** `od_cmd_nfc.c` is an NFC-only
+  translation unit and goes with the cutover; `od_cmd_silabs.c` also owns the buzzer, config and
+  device hooks (`:245` onward) and stays in both source lists, merely shorter. A stale entry is a
+  build failure rather than a silent wrong answer, which is why this is listed last — but the
+  inventory is only exhaustive with it in.
 
 After this step no target-side NFC **handler, parser or assembler** symbol survives. The
 `od_nfc_app_*` adapter symbols deliberately do — they are the seam.
@@ -775,12 +853,23 @@ unaffected and was checked**: it commits through `nfc_t2t_payload_set()`
 in the path. BG22's *read* path shares the expression but caps `ln` at 128, so its block index
 never reaches 8 and the 128/129 row below stays a clean boundary test.
 
-An END ACK alone cannot pass any row above 240 bytes. Capture the
-I2C block sequence and independently read back and compare all 512 bytes. If the device's paging
-rules do not make the wrapped sub-addresses distinct and readback differs, leave the row open and
-record the controller defect in `docs/FOLLOWUPS.md`; controller addressing changes remain outside
-this promotion. If readback is whole, attach the trace that explains why the apparent wrap is
-valid.
+An END ACK alone cannot pass any row above 240 bytes.
+
+**Three cases, so the boundary is located rather than merely straddled.** A single 512-byte capture
+proves only that something is wrong somewhere; it cannot separate a wrap from any other failure in
+a 32-block write, and it cannot show the promotion left the working range working.
+
+| Record | Expectation | What it settles |
+|---|---|---|
+| RAW_NDEF, **240 bytes** (`i` reaches 14) | passes: readback byte-identical | the shared machine drives the adapter correctly below the wrap — a clean pass here is what makes 241 a controller finding rather than a promotion regression |
+| RAW_NDEF, **241 bytes** (`i` reaches 15, first wrapped offset) | **investigation** | the minimal reproducer, and one block of trace instead of seventeen |
+| RAW_NDEF, **512 bytes** (`i` reaches 31) | investigation | the deployed-scale case, only meaningful once 241 is understood |
+
+Capture the I2C block sequence for each and independently read back and compare every byte. If the
+device's paging rules do not make the wrapped sub-addresses distinct and readback differs at 241,
+leave the 241 and 512 rows open and record the controller defect in `docs/FOLLOWUPS.md` with the
+240-byte pass beside it as the bound; controller addressing changes remain outside this
+promotion. If readback is whole, attach the trace that explains why the apparent wrap is valid.
 
 **This row is severable from step 6's gate, and it is the only one that is.** X4 governs how a row
 is *reported* — never as a pass — and confers no permission to proceed past a gate; citing it for
