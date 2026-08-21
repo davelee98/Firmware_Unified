@@ -679,6 +679,26 @@ session — in that order" sentence is the fourth (§ 5.5).
 Nordic's § 9 rows are **opened in this step and updated as they run**, before BG22 starts — the
 bespoke BLE READ tool is built here, since without it no READ row can be attempted at all.
 
+### Gate waiver — steps 5 and 6, by project direction, 2026-08-21
+
+**Steps 5 and 6 were implemented with their hardware gates unrun.** This plan makes Nordic's gate
+block step 6 and BG22's block step 8; that sequencing was set aside on explicit project direction,
+after the blocker was raised and then restated.
+
+**Why it was necessary rather than convenient:** no board in this fleet has an NFC antenna or a
+TNB132M fitted. These gates are not waiting for a free bench — they wait on hardware that would
+have to be built or bought, so honouring the sequence would have held the promotion indefinitely
+rather than briefly.
+
+**What the waiver does not do.** It qualifies nothing. Every § 9 row stays open release debt, no
+amount of host coverage substitutes for one, and merged code is not evidence. It covers the
+*sequencing* of steps 5, 6 and 7 only: step 8's own requirements are unchanged, and any later step
+naming a hardware gate is gated as written unless waived the same way, in writing, here.
+
+**The row that was never severable stays that way.** BG22's >240-byte addressing investigation is a
+controller defect this promotion neither caused nor can fix; it is recorded as open on its own
+terms and is not covered by this waiver.
+
 ### Step 6 — BG22 cutover — **hardware gate before step 8**
 
 `od_cmd_silabs.c:253-348` is deleted down to the same temporary hook; `od_cmd_silabs_reset()`

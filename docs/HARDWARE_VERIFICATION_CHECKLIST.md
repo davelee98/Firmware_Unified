@@ -225,9 +225,14 @@ shared suite is 336 checks at `OD_CAP_NFC=1` and 32 at `OD_CAP_NFC=0`; `tools/mu
 reports all seven mandatory mutations detected; the Nordic and BG22 reference fixtures frozen at
 step 1 pass against the shared machine on every input except the deliberate N1/N4/N6 changes, each
 recorded in `docs/DIVERGENCE_MATRIX.md`. Nordic recovered 762 B of RAM at its cutover; BG22
-recovered 512 B of heap (`heap_size` 0x2ad0 -> 0x2cd0) for a net 16 B loss against the pre-Phase-4
-baseline, inside X3's 64 B ceiling. ESP32's image contains both `od_nfc_*` entry points and neither
-the assembler nor a seam reference.
+recovered 512 B of heap (`heap_size` 0x2ad0 -> 0x2cd0).
+
+X3's baseline is **measured, not inferred**: a clean BG22 build at `def82a1` — main before
+`od_nfc.c` existed — gives `heap_size` **0x2cf0 (11,504 B)**, against 0x2cd0 (11,472 B) now. That
+is **32 B of heap lost**, inside the 64 B ceiling. An earlier arithmetic estimate said 16 B and was
+wrong by half the figure, which is the reason the plan asks for a build rather than a subtraction.
+ESP32's image contains both `od_nfc_*` entry points and neither the assembler nor a seam
+reference.
 
 ### Nordic — needs a board with an NFC antenna fitted
 
@@ -238,15 +243,22 @@ antenna, so none of this has run.
 - [ ] Chunked 512-byte write **as `OD_NFC_REC_RAW_NDEF`**, read back the same way. Every other
       record type is an NDEF short record capped at 255 payload bytes and is refused at END with
       `0x03` — that refusal is correct behaviour, not a defect
-- [ ] A 218-byte read, and a 219-byte tag truncated to 218 — **Nordic's adapter behaviour,
-      asserted here and nowhere else** (N2b), in plaintext and encrypted sessions
+- [ ] A 218-byte read, in plaintext and encrypted sessions
+- [ ] A 219-byte **verbatim or well-known** record truncated to 218 — Nordic's adapter behaviour,
+      asserted here and nowhere else (N2b)
+- [ ] A 219-byte **MIME** record **refused** with `0x02`. Nordic does not truncate uniformly: its
+      MIME arm refuses anything that would not fit whole (`opendisplay_nfc.c`, the
+      `out_pack > out_max` test), so a row exercising only truncation would report the adapter as
+      uniform when it is not
 - [ ] BLE disconnect mid-assembly, then a fresh START from a new connection
 - [ ] Tag hardware absent or failing, answering `0x02` / `0x03`
 - [ ] The § 3.4 divergence-3 frame (`00 83 01 00 FF FD`) answered `0x01`, device still alive
 - [ ] **READ-path stack high-water** (N7): the response buffer is now a 224-byte stack local
       nesting with `od_reply()`'s sealed buffer
-- [ ] A config that assigns P0.09 or P0.10 while an NFC block is enabled is refused, and the same
-      config with NFC absent is accepted — the runtime pin-ownership rule
+- [ ] A config that assigns P0.09 or P0.10 is refused on an image built with NFCT, and accepted on
+      one built without it. **The reservation is static, not config-driven.** An earlier draft of
+      this row asked for the config-driven form and it is unachievable: UICR NFCPINS latches the
+      pads at reset, so no runtime state can hand them back. Two images, not two configs
 
 ### EFR32BG22 — needs a board with a TNB132M fitted
 

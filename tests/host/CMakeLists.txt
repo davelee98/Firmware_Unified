@@ -732,6 +732,13 @@ add_test(NAME bench_dispatch_gate
          COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_LIST_DIR}/bench_dispatch_gate_test.py)
 
+# nfc_read_tool: the nfc-read reply decoder. It is the ORACLE for every NFC read hardware row --
+# py-opendisplay implements no NFC_SUB_READ -- so a decoder that trusted the declared length would
+# pass a device that framed 218 and sent 200, the exact defect those rows exist to catch.
+add_test(NAME nfc_read_tool
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_LIST_DIR}/nfc_read_tool_test.py)
+
 # vectors_schema: positive AND negative fixtures. A validator is worth its REJECTIONS, and a suite
 # that only feeds it the real corpus proves it accepts what already exists -- which it must, or the
 # tree would be red. The C12 review found five malformed shapes it accepted; each has a case.

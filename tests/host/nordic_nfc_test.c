@@ -208,8 +208,9 @@ static void ref_setup(void) { setup(); }
 static void ref_knob_read_ok(bool ok)      { fake_nfc_read_ok = ok; }
 static void ref_knob_read_len(uint16_t n)  { fake_nfc_read_len = n; }
 static void ref_knob_write_ok(bool ok)     { fake_nfc_write_ok = ok; }
-/* The reset disconnect cleanup calls. od_core_reset() does NOT clear NFC today -- it gains that
- * responsibility when the machine is promoted -- so freezing it here would record a fiction. */
+/* The assembler is the shared machine's, so the reset that clears it is od_nfc_reset() -- which
+ * od_core_reset() calls as part of a teardown. Called directly here to keep this suite about the
+ * machine; core_reset_test.c proves the composition. */
 static void ref_reset_transport(void)      { od_nfc_reset(); }
 static unsigned ref_reply_count(void)      { return g_sent_n; }
 static uint16_t ref_reply_len(unsigned i)  { return g_sent[i].len; }
