@@ -461,6 +461,11 @@ void opendisplay_nfc_apply_config(const struct od_config *cfg)
 	       (unsigned)s_adv_byte_index);
 }
 
+bool opendisplay_nfc_owns_antenna(void)
+{
+	return s_nfc_enabled;
+}
+
 bool opendisplay_ble_nfc_read(uint8_t *type_out, uint8_t *data_out, uint16_t *data_len_io,
 			      uint16_t max_len)
 {
@@ -490,6 +495,11 @@ void opendisplay_nfc_apply_config(const struct od_config *cfg)
 
 void opendisplay_nfc_process(void)
 {
+}
+
+bool opendisplay_nfc_owns_antenna(void)
+{
+	return false;
 }
 
 bool opendisplay_ble_nfc_read(uint8_t *type_out, uint8_t *data_out, uint16_t *data_len_io,
