@@ -722,3 +722,47 @@ Keep this as an independently reviewable defect fix. The shared logging plan cre
 `od_hal_uptime_ms()` implementation but deliberately does not sweep these existing target callers.
 Required proof: a fake-sleeptimer adapter test across the underlying 32-bit tick rollover, a known-
 interval hardware check on BG22, and the complete BG22 target gate.
+
+## 8. `Firmware_Unified` / nordic-zephyr — board identity is derived from SoC
+
+### The defect
+
+There is no board axis. `zephyr/CMakeLists.txt` derives `OD_BOARD_NRF54L15` from
+`CONFIG_SOC_NRF54L15` and `OD_BOARD_NRF54LM20A` from `CONFIG_SOC_NRF54LM20A`, and the platform
+sources follow: `src/platform/nrf54/od_board_nrf54l15.c` guards itself with
+`BUILD_ASSERT(IS_ENABLED(CONFIG_SOC_NRF54L15))`, returns the literal `"XIAO nRF54L15"` from
+`od_board_name()`, and drives `P2.03` / `P2.05` / `P2.10` from `od_board_early_init()` — the XIAO's
+antenna-switch power, antenna-switch select and boost-select pins.
+
+Those are board facts wearing a SoC label. A second nRF54L15 board that is not the XIAO inherits
+all three GPIO writes and the wrong board name, with nothing in the build to object.
+
+### Why it is latent rather than theoretical
+
+The comment above the CMake block records the same failure already happening once: an nRF52840
+build compiled as L15 and drove P2.03/P2.05/P2.10, which do not exist on that part. It was silent
+because `od_pin_decode()` rejects a port whose GPIO node is not `okay` and `od_gpio_write()` then
+returns without faulting, so every write was a no-op.
+
+On a second real nRF54L15 board those pins **do** exist. The same bug stops being a no-op and
+starts driving three arbitrary pads during early init, before anything else is up.
+
+### Fix
+
+Introduce `CONFIG_OD_BOARD_*`, set by the board fragment rather than defaulted from `SOC_*`, and
+gate the XIAO-specific `od_board_*.c` on the board rather than the SoC. `od_board_name()` becomes a
+board property. The SoC-keyed `OD_PLATFORM_NRF52840` / `OD_PLATFORM_NRF54` split stays as it is —
+it genuinely is a SoC contract (pin encoding, bootloader) — so this adds an axis rather than
+replacing one.
+
+### Blocks
+
+The Nordic panel SPIM promotion (`plans/PLAN_NORDIC_SPIM_8MHZ_2026-08-19.md`) selects its SPIM
+instance at compile time. With no board axis, that selection is keyed on SoC too, and two nRF54L15
+boards whose panels sit on different ports cannot both be right. The plan's § 4.6 records the
+runtime pin-reachability half; this is the compile-time half, and it is the one that must land
+first. `docs/PRESET_PIN_MATRIX.md` § "Adding a Nordic board" has the per-SoC instance rules a second
+board would need.
+
+Required proof: two boards on the same SoC building and selecting different panel instances, with
+an unstated board failing the build rather than inheriting a default.
