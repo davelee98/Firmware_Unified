@@ -170,6 +170,7 @@ bool od_xfer_pipe_arm_full(const od_cmd_ctx_t *ctx, uint32_t total, bool compres
     if (ctx == NULL || total == 0u || s_xfer.mode != OD_XFER_IDLE) {
         return false;
     }
+    od_xfer_app_prepare_start();
     memset(&panel, 0, sizeof panel);
     if (!od_xfer_app_panel_info(&panel)
         || panel.geometry.total_bytes == 0u
@@ -205,6 +206,7 @@ bool od_xfer_pipe_arm_partial(const od_cmd_ctx_t *ctx, uint32_t total, bool comp
     if (ctx == NULL || total == 0u || s_xfer.mode != OD_XFER_IDLE) {
         return false;
     }
+    od_xfer_app_prepare_start();
     memset(&panel, 0, sizeof panel);
     if (!od_xfer_app_panel_info(&panel) || !panel.partial_enabled
         || !panel.geometry.partial_supported) {
@@ -298,6 +300,7 @@ bool od_xfer_pipe_activate(void)
 
 bool od_xfer_pipe_consume(od_span_t payload)
 {
+    uint32_t remaining;
     uint32_t consumed;
 
     if (!od_span_valid(payload) || payload.n == 0u || payload.n > UINT32_MAX
@@ -309,9 +312,13 @@ bool od_xfer_pipe_consume(od_span_t payload)
     if (s_xfer.compressed) {
         return od_xfer_stream_push(payload, false);
     }
-    if (s_xfer.written_bytes > s_xfer.expected_bytes
-        || payload.n > (size_t)(s_xfer.expected_bytes - s_xfer.written_bytes)) {
+    if (s_xfer.written_bytes > s_xfer.expected_bytes) {
         return false;
+    }
+    remaining = s_xfer.expected_bytes - s_xfer.written_bytes;
+    payload = od_span_take(payload, payload.n < remaining ? payload.n : remaining);
+    if (payload.n == 0u) {
+        return true;
     }
     consumed = od_xfer_app_write(s_xfer.written_bytes, payload);
     if (consumed != (uint32_t)payload.n) {

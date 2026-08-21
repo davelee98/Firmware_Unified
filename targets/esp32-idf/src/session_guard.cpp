@@ -106,44 +106,41 @@ void abortToKnownState(const char* reason, bool dropLink, LinkId ownerId) {
     //    open-coded inline assignments, so no teardown or watchdog touched it.
     resetChunkedWriteState();
 
-    // 7. Touch: assert the suspend counter reaches 0 even when teardown bypassed
-    //    cleanupDirectWriteState (which is the only place that used to clear
-    //    directWriteTouchSuspended), so a partial-path teardown cannot leave touch
-    //    suspended forever.
+    // 4. Touch: assert the suspend counter reaches 0 even when teardown bypasses the ordinary
+    //    completion path, so a partial-path teardown cannot leave touch suspended forever.
     touchForceResume();
 
-    // 7b. The auth-abuse run. Every session end clears it, so a new client can
-    //     never inherit its predecessor's rejections -- a defect the off-branch
-    //     prototype shipped with, because it only reset on a successful command.
+    // 5. The auth-abuse run. Every session end clears it, so a new client can never inherit its
+    //    predecessor's rejections.
     resetAuthAbuseCounter();
 
-    // 8. Both rings. R6 requires RX and TX drained of the departed session's traffic;
+    // 6. Both rings. R6 requires RX and TX drained of the departed session's traffic;
     //    an earlier draft flushed TX only, which left the teardown window open.
     //    Draining RX is sound because callback filtering means every frame in it
-    //    passed the owner check when written. A frame the owner writes AFTER this,
-    //    during step 10's wait, is deliberately not re-flushed: it carries the
-    //    departing instance's tag and fails the dispatch check once step 11 releases.
+    //    passed the owner check when written. A frame the owner writes after this, during step 8's
+    //    wait, is deliberately not re-flushed: it carries the departing instance's tag and fails
+    //    the dispatch check once step 9 releases.
     const uint8_t droppedRx = od_rxq_reset();
     if (droppedRx > 0) {
         od_log_warn("[abort] dropped %u queued command(s) from the departed session",
                     (unsigned)droppedRx);
     }
 
-    // 9. Every shared object that outlives a dispatch, in one call: transfer state, the
+    // 7. Every shared object that outlives a dispatch, in one call: transfer state, the
     //    config-read producer, egress, and the session. Cancelling the read is not tidiness -- it holds the config
     //    scratch, and od_dispatch DEFERS every config-mutating opcode while it is active, so a
     //    client that vanishes mid-read would otherwise defer every later config write forever.
-    //    The session clear was step 8 and moves here with it; nothing between the two reads it,
+    //    The session clear belongs here; nothing between the RX reset and this call reads it,
     //    and it is NEW on the disconnect path either way -- crypto state used to survive a BLE
     //    link drop entirely, cleared on session-timeout-at-command, a new auth, config reload and
     //    LAN teardown, but never on disconnect.
     //
     //    RX is NOT in it, deliberately: od_core_reset() cannot own a ring whose producer differs
     //    per target, and this target's connection policy has stricter ordering around its own --
-    //    hence step 8 above, where the drop count is also worth reporting.
+    //    hence step 6 above, where the drop count is also worth reporting.
     od_core_reset();
 
-    // 10. The drop, dispatched on the OWNER'S TRANSPORT. This routine is not
+    // 8. The drop, dispatched on the OWNER'S TRANSPORT. This routine is not
     //     BLE-only: the transfer watchdog that calls it is origin-agnostic, so
     //     dropping a BLE handle for a timed-out LAN owner would leave the owning
     //     socket alive while its token was released -- an R1 violation.
@@ -159,10 +156,9 @@ void abortToKnownState(const char* reason, bool dropLink, LinkId ownerId) {
         }
     }
 
-    // 11. Release, STRICTLY after step 10. Releasing at request time (an earlier
-    //     draft) would let a new connection be admitted while the old link was still
-    //     physically up. If the wait expired the release still happens -- the stale
-    //     link is inert by construction.
+    // 9. Release, STRICTLY after step 8. Releasing at request time would let a new connection be
+    //    admitted while the old link was still physically up. If the wait expired the release
+    //    still happens -- the stale link is inert by construction.
     //
     //     For the terminal caller this is naturally inert: the word was exchanged to
     //     OWNER_TERMINAL before the abort, so this full-identity CAS does not match

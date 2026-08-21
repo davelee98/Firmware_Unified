@@ -586,8 +586,8 @@ void processTouchInput(void) {
         return;
     }
     // Skip the I2C poll while a transfer is streaming or an EPD refresh is in flight:
-    // GT911 reads contend with the transfer for the bus and the loop task. This used to
-    // The shared lifecycle query covers direct, PIPE and partial streams.
+    // GT911 reads contend with the transfer for the bus and the loop task. The shared lifecycle
+    // query covers direct, PIPE and partial streams.
     //
     // No target guard. The contention is a property of sharing one bus and one loop
     // task, not of the SoC, and since Phase 3 nRF dispatches commands from loop() too

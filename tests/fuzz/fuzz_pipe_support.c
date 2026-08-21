@@ -95,9 +95,27 @@ od_cmd_ctx_t fz_pipe_ctx(uint16_t wire_len, bool was_protected)
     return ctx;
 }
 
-void fz_pipe_open(void)
+void fz_pipe_open(uint8_t flags, uint8_t window, uint8_t ack_every,
+                  uint16_t client_max_frame)
 {
-    uint8_t start[] = { PIPE_VERSION, 0u, 4u, 4u, 244u, 0u, 16u, 0u, 0u, 0u };
-    od_cmd_ctx_t ctx = fz_pipe_ctx(12u, false);
-    (void)od_pipe_start(&ctx, od_span_make(start, sizeof start));
+    uint8_t start[sizeof(struct PipeStartRequest) + sizeof(struct PipePartialExt)] = { 0u };
+    size_t start_n = sizeof(struct PipeStartRequest);
+    od_cmd_ctx_t ctx;
+
+    flags &= PIPE_FLAG_COMPRESSED | PIPE_FLAG_PARTIAL;
+    start[0] = PIPE_VERSION;
+    start[1] = flags;
+    start[2] = window;
+    start[3] = ack_every;
+    start[4] = (uint8_t)client_max_frame;
+    start[5] = (uint8_t)(client_max_frame >> 8);
+    start[6] = 16u;
+    if ((flags & PIPE_FLAG_PARTIAL) != 0u) {
+        start[10] = 1u;  /* old_etag, little-endian */
+        start[18] = 8u;  /* width, little-endian */
+        start[20] = 8u;  /* height, little-endian */
+        start_n = sizeof start;
+    }
+    ctx = fz_pipe_ctx((uint16_t)(2u + start_n), false);
+    (void)od_pipe_start(&ctx, od_span_make(start, start_n));
 }

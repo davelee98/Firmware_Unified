@@ -153,8 +153,8 @@ qualifies it.
 Software evidence captured 2026-08-20: the host suite passes 58/58 under GCC, Clang and
 ASan/UBSan; W=32, W=16 and capability-off PIPE builds pass; the five pre-auth fuzz targets and
 the pinned py-opendisplay 7.14.0 corpus pass; and all 11 ESP32 configurations, all three Nordic
-boards and the BG22 headless image build. Handwritten production source is +907/−2,934 lines
-(net −2,027); test/tool source is +1,187/−1,060 (net +127). Reorder storage is 7,953 B at W=32
+boards and the BG22 headless image build. Handwritten production source is +933/−2,960 lines
+(net −2,027); test/tool source is +1,489/−1,060 (net +429). Reorder storage is 7,953 B at W=32
 and 4,097 B at W=16. The BG22 link contains only the three small `od_pipe_*` entry points, no
 PIPE state/reorder symbol, and remains 250,292 B flash / 32,284 B static RAM (480 B headroom).
 Board-only throughput, retransmission, refresh-time and stack-high-water measurements remain
@@ -264,11 +264,12 @@ unavailable and do not qualify any row below.
 - [x] Interrupted-transfer recovery — 2026-08-19, PIPE abandoned mid-transfer by BLE disconnect;
       a fresh upload then completed through refresh
 
-**Unresolved pre-promotion observation:** a 2026-08-17 run reported small/sub-window PIPE uploads
-stalling, but the target machines and sender probe policy disagreed with that diagnosis. Hardware
-was unavailable on 2026-08-20, so the claim could be neither reproduced nor retired before the
-project-directed cutover. No flush timer was added. The post-promotion tail-below-cadence rows
-above must close before PIPE is hardware-qualified.
+**Unretired pre-promotion hardware observation:** the 2026-08-17 report records small/sub-window
+PIPE uploads stalling indefinitely and states that ESP32 behaved identically. Later source and
+sender-probe analysis conflicts with that diagnosis, but no hardware transcript retired it.
+Hardware was unavailable on 2026-08-20, and shared D11 deliberately preserved the target cadence
+policy without adding a timer. Treat the stall as live until the post-promotion tail-below-cadence
+rows above close with on-air evidence.
 
 ## `xiao_nrf54l15` / `xiao_nrf54lm20a`
 

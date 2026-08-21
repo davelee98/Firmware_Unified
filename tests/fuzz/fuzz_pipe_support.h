@@ -5,6 +5,7 @@
 
 void fz_pipe_reset(void);
 od_cmd_ctx_t fz_pipe_ctx(uint16_t wire_len, bool was_protected);
-void fz_pipe_open(void);
+void fz_pipe_open(uint8_t flags, uint8_t window, uint8_t ack_every,
+                  uint16_t client_max_frame);
 
 #endif

@@ -7,7 +7,9 @@ implementation). The SPIM hardware rows remain an entry gate; merge is not quali
 
 **Status:** software candidate implemented on `codex/transfer-phase3` on 2026-08-20 under the
 § 6 sequencing exception. All hardware evidence rows remain open; this status is not Phase 3
-hardware qualification.
+hardware qualification. Post-implementation review on 2026-08-20 restored donor-compatible raw
+overrun truncation and per-transfer target preparation, and expanded the shared-machine and fuzz
+coverage described in § 7.
 
 **Authority:** this document owns every Phase 3 decision, staging step, test obligation, cutover
 inventory transition and gate. `plans/PLAN_TRANSFER_PROMOTION_2026-08-17.md` remains the record of
@@ -470,10 +472,13 @@ the reservation budget of 3.
 - a duplicate below `expected_seq` but within `W` is discarded and SACKed under the same
   rate limit;
 - outside the window in both directions is fatal (`0x04`);
-- reorder-queue occupancy reaching the slot count is fatal (`0x03`);
+- the `W + 1` slot geometry makes slot-count occupancy unreachable from `fwd < W`; the assertion
+  and copy-width guard, rather than a dead runtime arm, protect that bound;
 - `payload.n > OD_PIPE_REORDER_PAYLOAD` is fatal (`0x03`) before slot selection or `memcpy`,
   independent of D4's negotiated-frame checks;
 - a consume failure is fatal with `0x02` when compressed and `0x03` when not.
+- uncompressed DATA writes only the remaining image prefix and ignores any trailing suffix,
+  matching both donor machines and shared legacy direct write; compressed input remains exact.
 
 If § 2.4 reproduces the small-tail stall, the fix lands as a **separate commit after** the
 promotion completes, in shared code, with its own tests and its own hardware row. It does not ride
@@ -845,9 +850,13 @@ with the displaced owner's frames inert and no second abort of fatal hardware.
 duplication, reorder and wrap, compared against the shared machine. Step 1's frozen Nordic oracle
 compared case-for-case before it is retired. Python sender tests stay the independent peer.
 
-**Corpus.** PIPE vectors move from the Nordic profile's target machine to the shared machine; the
-Silabs profile gains `target-production` vectors for D9's three capability-off answers. A
-`target-production` vector excluded by a capability predicate is a **failure**, per C12.
+**Corpus.** PIPE vectors move from the Nordic profile's target machine to the shared machine. The
+Silabs profile executes three D9 capability-off vectors classified `shared`, because the promoted
+answers now come from `shared/core/od_pipe.c`; the Nordic production profile excludes them through
+`forbids: cap_pipe`. Classifying those vectors `target-production` would make C12 correctly fail
+the PIPE-capable Nordic profile for excluding the claim, so that pre-cutover wording is retired.
+Capable-arm cases remain in `pipe_test.c`, which links and calls the production shared machine;
+the portable corpus PIPE entries are routing fixtures and cannot prove those bytes.
 
 **Mutation checks.** The suite must fail when a mutant: drops the owner check, mis-sizes the byte
 total, skips a reset, drops a reply status, corrupts one SACK mask bit, removes D4 while offering a
