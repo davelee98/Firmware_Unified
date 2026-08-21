@@ -87,7 +87,9 @@ od_cmd_result_t od_cmd_app_nfc(const od_cmd_ctx_t *ctx, od_span_t body)
     }
     rec_type = payload[1];
     text_len = (uint16_t)(((uint16_t)payload[2] << 8) | payload[3]);
-    if ((uint16_t)(4u + text_len) > payload_len) {
+    /* 32-bit, because text_len is a peer-supplied 16-bit field: a uint16_t sum wraps past the
+     * bound and admits a length the body cannot hold, which nfc_encode_ndef() then memcpy's. */
+    if ((uint32_t)text_len + 4u > (uint32_t)payload_len) {
       uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x01u };
       (void)od_cmd_reply_plain(ctx, err, sizeof(err));
       return OD_CMD_NACK;
@@ -152,7 +154,8 @@ od_cmd_result_t od_cmd_app_nfc(const od_cmd_ctx_t *ctx, od_span_t body)
       return OD_CMD_NACK;
     }
     chunk_len = (uint16_t)(payload_len - 1u);
-    if ((uint16_t)(s_nfc_write_chunk.received_len + chunk_len) > s_nfc_write_chunk.total_len) {
+    if ((uint32_t)s_nfc_write_chunk.received_len + (uint32_t)chunk_len
+        > (uint32_t)s_nfc_write_chunk.total_len) {
       od_cmd_nfc_reset();
       {
         uint8_t err[] = { 0xFFu, RESP_NFC_ENDPOINT, 0xFFu, 0x08u };

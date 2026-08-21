@@ -13,6 +13,8 @@
 
 #include "session_fake.h"
 
+#include "od_session.h"
+
 #include "aes128.h"
 
 #include <string.h>
@@ -234,6 +236,52 @@ enum od_hal_crypto_status od_hal_crypto_ccm_decrypt(od_hal_crypto_slot_t slot,
     }
     *plain_len = body;
     return OD_HAL_CRYPTO_OK;
+}
+
+bool session_fake_unseal(const uint8_t *frame, uint16_t len, uint8_t *out, uint16_t out_cap,
+                         uint16_t *out_len)
+{
+    uint8_t inner[1u + OD_SESSION_PAYLOAD_MAX];
+    const uint16_t head = 2u + OD_SESSION_NONCE_LEN;
+    uint16_t ct_len;
+    uint8_t payload_len;
+    unsigned slot;
+
+    if (frame == NULL || out == NULL || out_len == NULL
+        || len <= head + OD_HAL_CRYPTO_TAG_LEN) {
+        return false;
+    }
+    ct_len = (uint16_t)(len - head - OD_HAL_CRYPTO_TAG_LEN);
+    if (ct_len == 0u || ct_len > sizeof inner) {
+        return false;
+    }
+    /* The device keeps its slot private, so try each LOADED one: exactly one authenticates, and a
+     * wrong key fails the tag rather than producing plausible plaintext. Skipping the unloaded
+     * slots keeps that claim true -- an all-zero slot is still a key, and authenticating against
+     * one would mean the helper had decoded a frame the device never sealed. */
+    for (slot = 0u; slot < OD_HAL_CRYPTO_KEY_SLOTS; ++slot) {
+        if (!g_slot_loaded[slot]) {
+            continue;
+        }
+        memcpy(g_ref_key, g_slot_key[slot], 16u);
+        if (od_ccm_decrypt(frame + 2 + 3, frame, frame + head, ct_len,
+                           frame + head + ct_len, inner)) {
+            break;
+        }
+    }
+    if (slot == OD_HAL_CRYPTO_KEY_SLOTS) {
+        return false;
+    }
+    payload_len = inner[0];
+    if ((uint16_t)payload_len != (uint16_t)(ct_len - 1u)
+        || (uint16_t)(2u + payload_len) > out_cap) {
+        return false;
+    }
+    out[0] = frame[0];
+    out[1] = frame[1];
+    memcpy(out + 2, inner + 1, payload_len);
+    *out_len = (uint16_t)(2u + payload_len);
+    return true;
 }
 
 /* --------------------------------------------------------------------------------- cases --- */

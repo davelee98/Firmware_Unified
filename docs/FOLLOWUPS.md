@@ -766,3 +766,40 @@ board would need.
 
 Required proof: two boards on the same SoC building and selecting different panel instances, with
 an unstated board failing the build rather than inheriting a default.
+
+## 9. `Firmware_NRF54` — the NFC inline-write length bound wraps in 16 bits
+
+**Sibling repository; read-only from `Firmware_Unified`. Filed, not fixed from here.**
+
+### The defect
+
+`src/opendisplay_pipe.c`'s `handle_nfc_endpoint()` bounds the single-shot write (`0x0083`
+sub-command `0x01`) with a 16-bit sum of the declared length and its 4-byte header. Both operands
+are 16-bit, so the sum wraps and admits a declared length the body cannot possibly hold. The NDEF
+record builder below it then copies the unwrapped value.
+
+The reproducing frame is six bytes:
+
+```
+00 83 01 00 FF FD          /* cmd 0x0083, sub 0x01, rec_type 0x00, declared length 0xFFFD */
+```
+
+`rec_type` `0x00` is `OD_NFC_REC_TEXT`, a **valid** type, so the record-type gate does not stop it.
+`(uint16_t)(4 + 0xFFFD)` is `1`, which passes the bound against a 4-byte body. The TEXT arm's own
+guard passes too, because its `payload_len` (`1 + 2 + data_len`) wraps to `0`. The `memcpy` that
+follows uses `data_len` unwrapped: a ~65 KB read from a body held in a 256-byte receive slot, into
+a 512-byte static staging buffer.
+
+Reachable without authentication whenever security is disabled, since the session gate runs only
+when it is enabled.
+
+### Fix
+
+Widen the comparison to 32 bits (`(uint32_t)declared + 4u > (uint32_t)body_len`) and bound
+`data_len` against the staging buffer inside the record builder, so it is memory-safe independently
+of its callers. `Firmware_Silabs` already carries both, which is why it is unaffected.
+
+`Firmware_Unified` fixed its imported copy in `targets/nordic-zephyr/src/od_cmd_nfc.c` and
+`opendisplay_nfc.c`, with the regression pinned in `tests/host/nordic_nfc_test.c` — that suite
+drives the production handler over a fake tag sink and asserts a refused frame reaches no sink at
+all. It fails against the pre-fix bound.

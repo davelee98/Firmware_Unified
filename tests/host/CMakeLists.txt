@@ -638,6 +638,21 @@ if(Python3_FOUND)
     add_dependencies(od_dispatch_corpus_nordic_test od_vectors_generated)
     add_test(NAME dispatch_corpus_nordic COMMAND od_dispatch_corpus_nordic_test)
 
+    # nordic_nfc: the 0x0083 length bounds, against Nordic's production handler over fake drivers.
+    # Focused rather than a corpus vector because what it asserts is that a refused frame reached
+    # NO TAG SINK -- an absence the wire bytes cannot show.
+    add_executable(od_nordic_nfc_test
+        nordic_nfc_test.c
+        fake_nordic/fake_nordic.c
+        ../../targets/nordic-zephyr/src/od_cmd_nfc.c
+        ../../targets/nordic-zephyr/src/od_cmd_reply.c)
+    target_include_directories(od_nordic_nfc_test PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/fake_nordic
+        ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr
+        ../../targets/nordic-zephyr/src)
+    target_link_libraries(od_nordic_nfc_test od_session_fake)
+    add_test(NAME nordic_nfc COMMAND od_nordic_nfc_test)
+
     # The BG22 production hooks, compiled with the same 2 KiB/three-slot/no-PIPE ABI as the target.
     # Only the vendor drivers beneath them are faked; reply bytes still come from od_cmd_silabs.c.
     add_executable(od_dispatch_corpus_silabs_test

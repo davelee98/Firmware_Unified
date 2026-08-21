@@ -57,6 +57,10 @@ bool     fake_nfc_read_ok;
 bool     fake_nfc_write_ok;
 uint8_t  fake_nfc_rec_type;
 uint16_t fake_nfc_read_len;
+unsigned fake_nfc_write_calls;
+uint8_t  fake_nfc_write_rec_type;
+uint16_t fake_nfc_write_len;
+uint8_t  fake_nfc_write_data[FAKE_NFC_WRITE_MAX];
 
 uint32_t fake_k_uptime_ms;
 uint32_t fake_k_slept_ms;
@@ -102,6 +106,10 @@ void fake_nordic_reset(void)
     fake_nfc_write_ok = true;
     fake_nfc_rec_type = 0x01u;
     fake_nfc_read_len = 4u;
+    fake_nfc_write_calls = 0u;
+    fake_nfc_write_rec_type = 0u;
+    fake_nfc_write_len = 0u;
+    memset(fake_nfc_write_data, 0, sizeof fake_nfc_write_data);
 
     fake_k_uptime_ms = 1000u;
     fake_k_slept_ms = 0u;
@@ -282,7 +290,12 @@ bool opendisplay_ble_nfc_read(uint8_t *rec_type, uint8_t *out, uint16_t *out_len
 
 bool opendisplay_ble_nfc_write(uint8_t rec_type, const uint8_t *data, uint16_t len)
 {
-    (void)rec_type; (void)data; (void)len;
+    ++fake_nfc_write_calls;
+    fake_nfc_write_rec_type = rec_type;
+    fake_nfc_write_len = len;
+    if (data != NULL && len <= FAKE_NFC_WRITE_MAX) {
+        memcpy(fake_nfc_write_data, data, len);
+    }
     return fake_nfc_write_ok;
 }
 

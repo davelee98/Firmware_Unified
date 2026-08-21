@@ -36,6 +36,11 @@ unsigned fake_silabs_aborts;
 unsigned fake_silabs_resets;
 bool fake_silabs_nfc_read_ok;
 uint16_t fake_silabs_nfc_read_len;
+bool     fake_silabs_nfc_write_ok;
+unsigned fake_silabs_nfc_write_calls;
+uint8_t  fake_silabs_nfc_write_rec_type;
+uint16_t fake_silabs_nfc_write_len;
+uint8_t  fake_silabs_nfc_write_data[FAKE_SILABS_NFC_WRITE_MAX];
 
 static struct od_config_asm s_assembler;
 static uint32_t s_xfer_written;
@@ -59,6 +64,11 @@ void fake_silabs_reset(void)
     fake_silabs_resets = 0u;
     fake_silabs_nfc_read_ok = true;
     fake_silabs_nfc_read_len = 4u;
+    fake_silabs_nfc_write_ok = true;
+    fake_silabs_nfc_write_calls = 0u;
+    fake_silabs_nfc_write_rec_type = 0u;
+    fake_silabs_nfc_write_len = 0u;
+    memset(fake_silabs_nfc_write_data, 0, sizeof fake_silabs_nfc_write_data);
     fake_silabs_store_len = 0u;
     memset(fake_silabs_store_blob, 0, sizeof fake_silabs_store_blob);
     od_config_asm_reset(&s_assembler);
@@ -125,7 +135,15 @@ bool opendisplay_ble_nfc_read(uint8_t *type, uint8_t *data, uint16_t *len, uint1
 }
 
 bool opendisplay_ble_nfc_write(uint8_t type, const uint8_t *data, uint16_t len)
-{ (void)type; (void)data; (void)len; return true; }
+{
+    ++fake_silabs_nfc_write_calls;
+    fake_silabs_nfc_write_rec_type = type;
+    fake_silabs_nfc_write_len = len;
+    if (data != NULL && len <= FAKE_SILABS_NFC_WRITE_MAX) {
+        memcpy(fake_silabs_nfc_write_data, data, len);
+    }
+    return fake_silabs_nfc_write_ok;
+}
 
 void od_xfer_app_prepare_start(void)
 {
