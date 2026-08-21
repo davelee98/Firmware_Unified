@@ -208,6 +208,72 @@ unavailable and do not qualify any row below.
 
 ---
 
+## Transfer Phase 4 — NFC (0x0083)
+
+The shared-machine software candidate was implemented by project direction on 2026-08-21, steps 5,
+6 and 7 in sequence, while every hardware row below remained open. **NO NFC-ENABLED HARDWARE
+EXISTS IN THIS FLEET**: no board carries an antenna, so none of these rows is merely awaiting a
+free bench — they await hardware that has to be built or bought. That is a stronger form of open
+than the Phase 2 and Phase 3 exceptions above, and it is why every row here is release debt rather
+than a queued task.
+
+The sequencing exception is not qualification. No Phase 1-3 run, and no amount of host coverage,
+qualifies any row below.
+
+Software evidence captured 2026-08-21: `tools/check.sh --targets` passes 33/0/0 with no skip; the
+shared suite is 336 checks at `OD_CAP_NFC=1` and 32 at `OD_CAP_NFC=0`; `tools/mutate_nfc.sh`
+reports all seven mandatory mutations detected; the Nordic and BG22 reference fixtures frozen at
+step 1 pass against the shared machine on every input except the deliberate N1/N4/N6 changes, each
+recorded in `docs/DIVERGENCE_MATRIX.md`. Nordic recovered 762 B of RAM at its cutover; BG22
+recovered 512 B of heap (`heap_size` 0x2ad0 -> 0x2cd0) for a net 16 B loss against the pre-Phase-4
+baseline, inside X3's 64 B ceiling. ESP32's image contains both `od_nfc_*` entry points and neither
+the assembler nor a seam reference.
+
+### Nordic — needs a board with an NFC antenna fitted
+
+Enabling `CONFIG_NFC_T2T_NRFXLIB` (2026-08-21) makes the tag real on all three boards; none has an
+antenna, so none of this has run.
+
+- [ ] Inline write ≤ 120 bytes, read back by an independent NFC reader
+- [ ] Chunked 512-byte write **as `OD_NFC_REC_RAW_NDEF`**, read back the same way. Every other
+      record type is an NDEF short record capped at 255 payload bytes and is refused at END with
+      `0x03` — that refusal is correct behaviour, not a defect
+- [ ] A 218-byte read, and a 219-byte tag truncated to 218 — **Nordic's adapter behaviour,
+      asserted here and nowhere else** (N2b), in plaintext and encrypted sessions
+- [ ] BLE disconnect mid-assembly, then a fresh START from a new connection
+- [ ] Tag hardware absent or failing, answering `0x02` / `0x03`
+- [ ] The § 3.4 divergence-3 frame (`00 83 01 00 FF FD`) answered `0x01`, device still alive
+- [ ] **READ-path stack high-water** (N7): the response buffer is now a 224-byte stack local
+      nesting with `od_reply()`'s sealed buffer
+- [ ] A config that assigns P0.09 or P0.10 while an NFC block is enabled is refused, and the same
+      config with NFC absent is accepted — the runtime pin-ownership rule
+
+### EFR32BG22 — needs a board with a TNB132M fitted
+
+- [ ] Inline write ≤ 120 bytes, read back by an independent NFC reader
+- [ ] Chunked write **above 240 bytes** as `RAW_NDEF`: capture the I2C block sequence and read back
+      every byte. The write loop's block offset truncates at `i == 15`
+      (`opendisplay_ble.c:1526-1530`), so this is an **addressing investigation**, not a presumed
+      pass. 240 must pass, 241 is the minimal reproducer, 512 is the deployed-scale case
+- [ ] The controller limit: RAW_NDEF records of 128 and 129 raw bytes read back through the
+      bespoke BLE tool — 128 whole, 129 refused `0x02`. Confirm the boundary against the adapter
+      first; `sizeof(s_od_nfc_read_data)` is the constant, but which length is compared to it is
+      what the row proves
+- [ ] Both of N4's changed input classes confirmed on the wire (now `0x01`, was `0x03` / `0x05`)
+- [ ] `heap_size` measured on the flashed image against X3's ceiling
+
+### ESP32-S3 — capability-off
+
+- [ ] `0x0083` probed in plaintext and encrypted sessions draws nothing, the link is not held
+      open, and the client raises `NfcNotSupportedError`
+
+### The bespoke BLE READ tool — blocks every READ row above
+
+`py-opendisplay` implements no `NFC_SUB_READ` (`commands.py:103`, "not built here"), so **no READ
+row on any target can be attempted until a sender/decoder is written.** An independent NFC reader
+is stimulus and oracle only: it talks to the tag directly, bypassing `CMD_NFC_ENDPOINT`, dispatch,
+the seam and response framing. **A read row backed by a reader alone is not a pass.**
+
 ## ESP32-S3 (`s3-n16r8-extuart-debug`, FastEPD)
 
 - [x] Two fresh authentications — 2026-08-17

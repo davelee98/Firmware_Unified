@@ -492,3 +492,22 @@ rediscovering.
 core API (§1.6, SHARED_API_DESIGN.md) — good. But 9.4 shows origin also gates *which opcodes are
 legal*, which the current design treats purely as a CCM-policy input. Extend it: origin selects
 the reply transport, the encryption policy, **and** the permitted opcode set.
+
+---
+
+## 10. NFC endpoint 0x0083 — resolved by the Phase 4 promotion (2026-08-21)
+
+Six divergences the shared machine settles. Rows 10.1-10.4 are wire-visible changes against what
+shipped; 10.5-10.6 record differences the promotion deliberately did **not** normalise.
+
+None is hardware-verified. No board in this fleet has an NFC antenna fitted, so every row below is
+software-qualified only — see `docs/HARDWARE_VERIFICATION_CHECKLIST.md` § Transfer Phase 4.
+
+| # | Behaviour | Before | After | Why |
+|---|---|---|---|---|
+| 10.1 | Chunk assembler ownership | **Neither port bound an owner.** Any connection could extend or commit another's assembly; both donors bind `connection` and reject foreign DATA/END with `0x07` | Bound to the full `od_reply_t` — origin *and* tag. Foreign DATA/END answers `FF 83 FF 07` and mutates nothing | A **restoration**, not an invention: both imports dropped a check both donors had, with no rationale in the tree. `{origin, tag}` is strictly stronger than the donors' connection byte because it also separates transports. A replacement START from any owner still displaces the incumbent, as the donors do |
+| 10.2 | Inline-write length bound | Nordic evaluated `(uint16_t)(4 + declared) > body_len`, which **wraps**; BG22 widened it | 32-bit in every arm, and `od_span_split()` takes every cut | The wrap admitted a ~65 KB `memcpy` from a 256-byte RX slot into a 512-byte static, reachable unauthenticated with security disabled. Fixed on Nordic ahead of the promotion; the sibling `Firmware_NRF54` still carries it (`FOLLOWUPS.md` § 9) |
+| 10.3 | Inline-write check order | **BG22 tested the record type first** and folded the length test into the tag call, so an over-declared length answered `0x03` and an invalid type with one answered `0x05` | Length first, as its own arm: both classes now answer `0x01` | Both donors test length first. `0x03` told a client its tag was broken when its frame was |
+| 10.4 | Reply failure on START / DATA | Both ports discarded the queue result: the verdict stayed OK and the staged bytes survived a frame the client never saw answered | A failed ACK clears the assembler and the verdict is NACK | The client cannot know its frame landed and its only recovery is a fresh START; leaving bytes staged guarantees a later `0x08` or `0x09` on a transfer it believes never began. A deliberate divergence from the donors, which ignore the send result. READ / inline WRITE / END keep the opposite rule — the tag has already been touched, so a failed reply is reported and never reverted |
+| 10.5 | Read cap requested from the tag | Both donors pass `OD_PIPE_MAX_PAYLOAD - 6` = **238** | Both ports request `OD_SESSION_PAYLOAD_MAX - 4` = **218**, unchanged by the promotion | A sealed 238-byte record exceeds one BLE frame. Applied in both plaintext and encrypted sessions so the answer's size never depends on whether the session happens to be encrypted. **A host cannot interrogate this**; restoring 238 is a protocol decision, not a firmware one |
+| 10.6 | Behaviour above that cap | Nordic truncates for verbatim and well-known records and **refuses** an over-cap MIME record; BG22 refuses everything past its 128-byte staging buffer | Unchanged, and deliberately not normalised | Refusal versus truncation is a property of the record **and** the adapter together, not of the target. The shared machine passes the cap down and reports what came back — `false` becomes `0x02`, a short answer is sent at its true length. Normalising them is controller-code work on two targets with a hardware gate of its own |
