@@ -71,6 +71,16 @@ typedef struct {
     uint32_t    tag;
 } od_reply_t;
 
+/* Are two reply identities the same link? C cannot compare aggregates, so every owner check would
+ * otherwise be hand-written field by field -- and the day this struct gains a third member, each
+ * of those sites silently keeps comparing two. One helper beside the type makes that a single
+ * edit. Not memcmp: the struct has padding, and comparing it would depend on the compiler having
+ * zeroed bytes nobody assigned. */
+static inline bool od_reply_same(const od_reply_t *a, const od_reply_t *b)
+{
+    return a->origin == b->origin && a->tag == b->tag;
+}
+
 /* Drop every entry and zero the reserved count. For od_core_reset() and for test setup. Does NOT
  * touch the session: teardown goes through the target's session owner, never a memset here. */
 void od_txq_reset(void);

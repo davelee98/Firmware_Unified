@@ -48,7 +48,7 @@ bool od_xfer_started_ms(uint32_t *out)
 
 bool od_xfer_owner_matches(const od_cmd_ctx_t *ctx)
 {
-    return ctx != NULL && ctx->rp.origin == s_xfer.owner.origin && ctx->rp.tag == s_xfer.owner.tag;
+    return ctx != NULL && od_reply_same(&ctx->rp, &s_xfer.owner);
 }
 
 void od_xfer_clear_state(void)

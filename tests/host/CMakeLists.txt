@@ -638,6 +638,17 @@ if(Python3_FOUND)
     add_dependencies(od_dispatch_corpus_nordic_test od_vectors_generated)
     add_test(NAME dispatch_corpus_nordic COMMAND od_dispatch_corpus_nordic_test)
 
+    # The tag fake behind od_nfc_app.h, and its own contract. Compiled now, before step 3's shared
+    # machine exists, so a broken seam or knob surfaces here rather than inside the first suite
+    # built on it.
+    add_library(od_fake_nfc_tag STATIC fake_nfc_tag.c)
+    target_include_directories(od_fake_nfc_tag PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+    target_link_libraries(od_fake_nfc_tag PUBLIC od_shared)
+
+    add_executable(od_nfc_fake_test nfc_fake_test.c)
+    target_link_libraries(od_nfc_fake_test od_fake_nfc_tag)
+    add_test(NAME nfc_fake COMMAND od_nfc_fake_test)
+
     # nordic_nfc: the 0x0083 length bounds, against Nordic's production handler over fake drivers.
     # Focused rather than a corpus vector because what it asserts is that a refused frame reached
     # NO TAG SINK -- an absence the wire bytes cannot show.
