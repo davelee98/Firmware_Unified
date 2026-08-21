@@ -7,6 +7,10 @@
 # exercised because the mutated build failed and a stale binary ran, and a wrapping-length oracle
 # that od_span_split() had silently made redundant.
 #
+# The capability-off mutation is checked against the STRUCTURAL proof rather than the suite, because
+# what OD_CAP_NFC=0 claims is an absence: nfc_off_test would stay green with an assembler sitting
+# unused beside it. That row runs the same nm assertions as check.sh's ratchet.
+#
 # A FAILED BUILD IS A FAILED MUTATION, not a skip. That is why every row reports its build.
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -71,6 +75,44 @@ mutate "reply-failure unwind removed" \
   '    if (od_reply(ctx->r, &ctx->rp, frame, sizeof frame) != OD_TXQ_OK) {
         return OD_CMD_NACK;
     }'
+
+# The capability-off arm, judged by nm rather than by the suite.
+mutate_off () {
+    local name="capability-off allocates" obj hits
+    cp "$BAK" "$SRC"
+    python3 - <<'PY' || { printf '%-34s ANCHOR FAIL\n' "$name"; fail=1; return; }
+p = "shared/core/od_nfc.c"
+s = open(p).read()
+old = '''od_cmd_result_t od_nfc_frame(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+    (void)ctx;
+    (void)body;
+    return OD_CMD_UNKNOWN;
+}'''
+new = '''static struct { uint8_t data[OD_NFC_ASSEMBLY_MAX]; } s_nfc;
+
+od_cmd_result_t od_nfc_frame(const od_cmd_ctx_t *ctx, od_span_t body)
+{
+    (void)ctx;
+    (void)body;
+    s_nfc.data[0] = 0u;
+    return OD_CMD_UNKNOWN;
+}'''
+if s.count(old) != 1:
+    raise SystemExit(1)
+open(p, "w").write(s.replace(old, new))
+PY
+    if ! cmake --build "$BUILD" --target od_nfc_off_test -j"$(nproc)" >/dev/null 2>&1; then
+        printf '%-34s BUILD FAILED -- not exercised\n' "$name"; fail=1; return
+    fi
+    hits=$(nm -a "$BUILD"/od_nfc_off_test | grep -E "\bs_nfc\b" || true)
+    if [ -n "$hits" ]; then
+        printf '%-34s nm proof fails (%s)\n' "$name" "$(echo "$hits" | head -1 | tr -s ' ')"
+    else
+        printf '%-34s SURVIVED -- the nm proof cannot see this\n' "$name"; fail=1
+    fi
+}
+mutate_off
 
 cp "$BAK" "$SRC"
 [ "$fail" -eq 0 ] && echo "all mutations detected" || echo "SOME MUTATIONS WERE NOT DETECTED"

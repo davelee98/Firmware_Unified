@@ -644,10 +644,13 @@ ahead of dispatch.
 this step and is assigned to step 8**, because a `target-production` vector reaches the machine
 through dispatch and dispatch still routes `0x0083` to each target's `od_cmd_app_nfc` until then.
 Writing those vectors now would either exercise the target handlers this phase is replacing, or
-require the reroute this plan deliberately defers past the per-target hardware gates. The suite must fail against a machine with the
-owner check removed, with the 32-bit widening reverted (see § 7 for the input that makes that
-observable), with the retryable short END converted to
-a reset, and with the reply-failure unwind removed.
+require the reroute this plan deliberately defers past the per-target hardware gates.
+
+The suite must fail against a machine with the owner check removed, with the 32-bit widening
+reverted (see § 7 for the input that makes that observable), with the retryable short END
+converted to a reset, with the reply-failure unwind removed, and with the capability-off arm
+allocating the assembler. `tools/mutate_nfc.sh` runs all of them and treats a build failure as a
+failed mutation, because a mutation that does not compile has not been exercised.
 
 **Dispatch still names `od_cmd_app_nfc` until step 8, so a target that deletes its definition
 cannot link.** Each cutover therefore leaves a temporary hook — a wrapper whose whole body calls
@@ -854,8 +857,10 @@ nfc_rec_type_valid | nfc_type_valid | od_cmd_nfc_reset | od_cmd_app_nfc
 over `targets/**` — with `opendisplay_nfc.c`'s NDEF encoder explicitly out of scope, because it is
 controller adaptation and stays.
 
-**Added at step 8** — `host: NFC capability-off link proof`, beside `pipe_off_link_proof` and
-`log_off_link_proof`.
+**Added at step 4**, not step 8 — `host: NFC capability-off link proof`, beside
+`pipe_off_link_proof` and `log_off_link_proof`. § 7 makes the `nm` evidence part of the
+capability-off suite, so the guard lands with the claim rather than four steps after it. Nothing
+remains to add here at step 8.
 
 **Reviewed at step 11** — every existing transitional check, against X2. `transfer: single pump
 owner` and `transfer: no target PIPE machine` are expected to become permanent structural
