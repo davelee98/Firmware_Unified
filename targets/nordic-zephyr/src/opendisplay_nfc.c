@@ -304,6 +304,12 @@ static bool nfc_encode_ndef(uint8_t rec_type, const uint8_t *data, uint16_t data
 	if (data == NULL || data_len == 0u) {
 		return false;
 	}
+	/* Bound data_len before the per-record payload_len arithmetic below: that math is uint16_t
+	 * and wraps on a large length, while the memcpy that follows uses data_len unwrapped. Keeps
+	 * the record builder memory-safe independently of what its callers validated. */
+	if (data_len > sizeof(s_ndef)) {
+		return false;
+	}
 	memset(s_ndef, 0, sizeof(s_ndef));
 
 	if (rec_type == OD_NFC_REC_TEXT) {
