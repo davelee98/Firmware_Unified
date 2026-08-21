@@ -9,7 +9,6 @@
 #include "opendisplay_pipe.h"
 
 #include "od_cmd_config.h"
-#include "od_cmd_nfc.h"
 #include "od_config_read.h"
 #include "od_core.h"
 #include "od_dispatch.h"
@@ -114,7 +113,6 @@ void opendisplay_pipe_process(void)
   if (atomic_cas(&s_close_pending, 1, 0)) {
     od_core_reset();
     od_cmd_config_reset();
-    od_cmd_nfc_reset();
   }
 
   /* BOUNDED, and the bound is not defensive tidiness. A central issuing write-without-response can

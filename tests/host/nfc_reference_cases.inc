@@ -327,7 +327,21 @@ static const ref_case_t REF_CASES[] = {
  * connection can extend and commit somebody else's assembly. Both donors reject it with
  * CHUNK_NO_START. N1 restores the binding, so this row is expected to change at the promotion --
  * which is exactly why it is captured now rather than argued about later. */
-{ "a foreign owner can extend and commit another connection's assembly", REF_BOTH, {
+/* PROMOTED (N1). Nordic refuses a foreign owner from the cutover on; BG22 still accepts until its
+ * own. The pair below is the transition made visible -- it collapses at step 6. */
+{ "a foreign owner is refused and mutates nothing", REF_NORDIC, {
+    { .sub = NFC_SUB_WRITE_START, .has_header = true, .rec_type = OD_NFC_REC_RAW_NDEF,
+      .declared = 2u, ACKF(NFC_STATUS_CHUNK_ACCEPTED) },
+    { .sub = NFC_SUB_WRITE_DATA, .fill_len = 2u, .fill_seed = 0xA0u, .foreign_owner = true,
+      .skip_reply = true },
+    { .sub = NFC_SUB_WRITE_END, .foreign_owner = true, .skip_reply = true, .sink_calls = 0u } }, 3u },
+{ "a foreign ORIGIN is refused and mutates nothing", REF_NORDIC, {
+    { .sub = NFC_SUB_WRITE_START, .has_header = true, .rec_type = OD_NFC_REC_RAW_NDEF,
+      .declared = 2u, ACKF(NFC_STATUS_CHUNK_ACCEPTED) },
+    { .sub = NFC_SUB_WRITE_DATA, .fill_len = 2u, .fill_seed = 0xA8u, .foreign_origin = true,
+      .skip_reply = true },
+    { .sub = NFC_SUB_WRITE_END, .foreign_origin = true, .skip_reply = true, .sink_calls = 0u } }, 3u },
+{ "a foreign owner can extend and commit another connection's assembly", REF_BG22, {
     { .sub = NFC_SUB_WRITE_START, .has_header = true, .rec_type = OD_NFC_REC_RAW_NDEF,
       .declared = 2u, ACKF(NFC_STATUS_CHUNK_ACCEPTED) },
     /* The reply is not asserted on the foreign frames: whether a frame addressed to a dead tag
@@ -339,7 +353,7 @@ static const ref_case_t REF_CASES[] = {
     { .sub = NFC_SUB_WRITE_END, .foreign_owner = true, .expect_ok = true, .skip_reply = true,
       .sink_calls = 1u, .sink_len = 2u, .sink_seed = 0xA0u, .sink_check_data = true } }, 3u },
 
-{ "a foreign ORIGIN can extend and commit another link's assembly", REF_BOTH, {
+{ "a foreign ORIGIN can extend and commit another link's assembly", REF_BG22, {
     { .sub = NFC_SUB_WRITE_START, .has_header = true, .rec_type = OD_NFC_REC_RAW_NDEF,
       .declared = 2u, ACKF(NFC_STATUS_CHUNK_ACCEPTED) },
     /* Not merely a different tag on the same link -- a different transport entirely. Neither port
@@ -354,14 +368,14 @@ static const ref_case_t REF_CASES[] = {
  * IGNORES THAT: the reply return value is discarded, the verdict is still OK, and on START and
  * DATA the assembler keeps the bytes it staged for a frame the client never saw answered. N6
  * changes all of this, so it is frozen here first. */
-{ "a reply that cannot be queued is invisible on READ", REF_BOTH, {
+{ "a reply that cannot be queued is invisible on READ", REF_BG22, {
     { .sub = NFC_SUB_READ, .read_len = 4, .reply_fails = true,
       .reply_len = 0u, .expect_ok = true } }, 1u },
-{ "a reply that cannot be queued is invisible on inline WRITE, which still hit the tag", REF_BOTH, {
+{ "a reply that cannot be queued is invisible on inline WRITE, which still hit the tag", REF_BG22, {
     { .sub = NFC_SUB_WRITE, .has_header = true, .rec_type = OD_NFC_REC_TEXT,
       .declared = 4u, .fill_len = 4u, .reply_fails = true,
       .reply_len = 0u, .expect_ok = true, .sink_calls = 1u, .sink_len = 4u } }, 1u },
-{ "a START whose ACK could not be queued still arms the assembler", REF_BOTH, {
+{ "a START whose ACK could not be queued still arms the assembler", REF_BG22, {
     { .sub = NFC_SUB_WRITE_START, .has_header = true, .rec_type = OD_NFC_REC_RAW_NDEF,
       .declared = 2u, .reply_fails = true, .reply_len = 0u, .expect_ok = true },
     /* Armed: a DATA that follows is accepted rather than drawing CHUNK_NO_START. */
@@ -369,7 +383,7 @@ static const ref_case_t REF_CASES[] = {
       ACKF(NFC_STATUS_CHUNK_ACCEPTED) },
     { .sub = NFC_SUB_WRITE_END, ACKF(NFC_STATUS_WRITE_COMMITTED), .sink_calls = 1u,
       .sink_len = 2u, .sink_seed = 0xD0u, .sink_check_data = true } }, 3u },
-{ "a DATA whose ACK could not be queued still keeps its bytes", REF_BOTH, {
+{ "a DATA whose ACK could not be queued still keeps its bytes", REF_BG22, {
     { .sub = NFC_SUB_WRITE_START, .has_header = true, .rec_type = OD_NFC_REC_RAW_NDEF,
       .declared = 4u, ACKF(NFC_STATUS_CHUNK_ACCEPTED) },
     { .sub = NFC_SUB_WRITE_DATA, .fill_len = 2u, .fill_seed = 0xD4u, .reply_fails = true,
@@ -379,7 +393,7 @@ static const ref_case_t REF_CASES[] = {
       ACKF(NFC_STATUS_CHUNK_ACCEPTED) },
     { .sub = NFC_SUB_WRITE_END, ACKF(NFC_STATUS_WRITE_COMMITTED), .sink_calls = 1u,
       .sink_len = 4u, .sink_seed = 0xD4u, .sink_check_data = true } }, 4u },
-{ "an END whose ACK could not be queued has still committed to the tag", REF_BOTH, {
+{ "an END whose ACK could not be queued has still committed to the tag", REF_BG22, {
     { .sub = NFC_SUB_WRITE_START, .has_header = true, .rec_type = OD_NFC_REC_RAW_NDEF,
       .declared = 2u, ACKF(NFC_STATUS_CHUNK_ACCEPTED) },
     { .sub = NFC_SUB_WRITE_DATA, .fill_len = 2u, .fill_seed = 0xD8u,

@@ -12,7 +12,7 @@
 
 #include "fake_nordic.h"
 #include "od_cmd_app.h"
-#include "od_cmd_nfc.h"
+#include "od_nfc.h"
 #include "od_cmd_test_ctx.h"
 #include "od_hal_radio.h"
 #include "od_reply.h"
@@ -85,7 +85,7 @@ static void setup(void)
     g_security_on = false;
     od_txq_reset();
     od_session_clear(&g_session);
-    od_cmd_nfc_reset();
+    od_nfc_reset();
     memset(g_sent, 0, sizeof g_sent);
     g_sent_n = 0u;
 }
@@ -210,7 +210,7 @@ static void ref_knob_read_len(uint16_t n)  { fake_nfc_read_len = n; }
 static void ref_knob_write_ok(bool ok)     { fake_nfc_write_ok = ok; }
 /* The reset disconnect cleanup calls. od_core_reset() does NOT clear NFC today -- it gains that
  * responsibility when the machine is promoted -- so freezing it here would record a fiction. */
-static void ref_reset_transport(void)      { od_cmd_nfc_reset(); }
+static void ref_reset_transport(void)      { od_nfc_reset(); }
 static unsigned ref_reply_count(void)      { return g_sent_n; }
 static uint16_t ref_reply_len(unsigned i)  { return g_sent[i].len; }
 static const uint8_t *ref_reply_data(unsigned i) { return g_sent[i].data; }

@@ -272,7 +272,7 @@ void     opendisplay_ble_reload_config_from_nvm(void){ ++fake_store_reloads; }
 
 void opendisplay_ble_copy_msd_bytes(uint8_t out[16]) { memcpy(out, fake_ble_msd, 16); }
 
-bool opendisplay_ble_nfc_read(uint8_t *rec_type, uint8_t *out, uint16_t *out_len, uint16_t max)
+bool od_nfc_app_read(uint8_t *rec_type, uint8_t *out, uint16_t *out_len, uint16_t max)
 {
     uint16_t n = fake_nfc_read_len;
 
@@ -290,7 +290,7 @@ bool opendisplay_ble_nfc_read(uint8_t *rec_type, uint8_t *out, uint16_t *out_len
     return true;
 }
 
-bool opendisplay_ble_nfc_write(uint8_t rec_type, const uint8_t *data, uint16_t len)
+bool od_nfc_app_write(uint8_t rec_type, const uint8_t *data, uint16_t len)
 {
     ++fake_nfc_write_calls;
     fake_nfc_write_rec_type = rec_type;
@@ -348,16 +348,3 @@ void od_watchdog_app_arm(void)           { }
 void od_watchdog_app_service(void)       { }
 bool od_watchdog_app_safe_mode(void)     { return false; }
 void od_watchdog_app_phase(uint8_t p)    { (void)p; }
-
-/* od_nfc_app seam -- the alias the production adapter carries, for the same reason: the shared
- * machine is linked wherever od_core_reset() is, so every binary holding this fake has to resolve
- * the seam whether it exercises NFC or not. */
-bool od_nfc_app_read(uint8_t *type, uint8_t *data, uint16_t *len_io, uint16_t cap)
-{
-    return opendisplay_ble_nfc_read(type, data, len_io, cap);
-}
-
-bool od_nfc_app_write(uint8_t type, const uint8_t *data, uint16_t len)
-{
-    return opendisplay_ble_nfc_write(type, data, len);
-}
