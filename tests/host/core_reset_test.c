@@ -5,14 +5,16 @@
  * around its own ring -- so a reset here would race one target and reorder the other. The call
  * sites drain RX themselves, on their own terms.
  *
- * WHAT IS NOT ASSERTED HERE, stated so a green run is not over-read: the ORDER of the four calls.
+ * WHAT IS NOT ASSERTED HERE, stated so a green run is not over-read: the ORDER of the five calls.
  * They run straight-line on the consumer context with nothing interleaved, so no test driving the
  * public API can distinguish one order from another -- swapping the cancel and the reset leaves
  * every assertion below unchanged, verified by mutation. The order is not load-bearing (od_core.c
- * says why); what these cases pin is that all three happen, which is.
+ * says why); what these cases pin is that all five happen, which is.
  */
 
 #include "od_core.h"
+
+#include "od_nfc.h"
 
 #include "od_config_read.h"
 #include "od_cmd_test_ctx.h"
@@ -49,13 +51,21 @@ static const char *g_case = "(none)";
 static unsigned g_sent_n;
 static bool     g_radio_accepts = true;
 
+/* The last frame the radio accepted, for the NFC probe below. */
+static uint8_t  g_last[8];
+static uint16_t g_last_len;
+
 od_radio_result_t od_hal_radio_send(od_origin_t origin, uint32_t tag,
                                     const uint8_t *frame, uint16_t len)
 {
-    (void)origin; (void)tag; (void)frame; (void)len;
+    (void)origin; (void)tag;
     if (!g_radio_accepts) {
         return OD_RADIO_RETRY;          /* hold entries in the queue so a reset has work to do */
     }
+    /* The bytes are kept for the NFC probe below, which has to tell a refusal apart from an
+     * acceptance whose reply merely failed to queue -- both are OD_CMD_NACK. */
+    g_last_len = len > sizeof g_last ? (uint16_t)sizeof g_last : len;
+    memcpy(g_last, frame, g_last_len);
     ++g_sent_n;
     return OD_RADIO_SENT;
 }
@@ -147,14 +157,61 @@ static void start_a_stuck_read(void)
     CHECK(od_txq_depth() > 0u);
 }
 
+/* Arm a chunked NFC write and put one byte in it, so the reset has something to discard. */
+static void stage_a_partial_nfc_assembly(void)
+{
+    static const uint8_t start[] = { NFC_SUB_WRITE_START, OD_NFC_REC_RAW_NDEF, 0u, 4u };
+    static const uint8_t data[] = { NFC_SUB_WRITE_DATA, 0xA1u };
+    od_tx_reservation_t r;
+
+    CHECK(od_txq_reserve(2u, &r) == OD_TXQ_OK);
+    {
+        od_cmd_ctx_t ctx = od_test_cmd_ctx(BLE, &r, 6u, false);
+
+        CHECK(od_nfc_frame(&ctx, od_span_make(start, sizeof start)) == OD_CMD_OK);
+        CHECK(od_nfc_frame(&ctx, od_span_make(data, sizeof data)) == OD_CMD_OK);
+    }
+    od_txq_release(&r);
+}
+
+/* True when a DATA frame from the incumbent owner draws NFC_ERR_CHUNK_NO_START.
+ *
+ * ASSERTS THE ERROR BYTE, not the verdict. OD_CMD_NACK is ambiguous here -- an accepted chunk
+ * whose ACK could not be queued returns it too -- so a verdict-only probe passes whether or not
+ * the assembly survived, which is exactly the mistake this comment exists to stop being made
+ * again. The queue is cleared and the radio opened first so the reply is certain to be observable
+ * rather than lost to a full ring left over from the transfer above. */
+static bool nfc_data_is_refused(void)
+{
+    static const uint8_t data[] = { NFC_SUB_WRITE_DATA, 0xA2u };
+    od_tx_reservation_t r;
+
+    od_txq_reset();
+    g_radio_accepts = true;
+    g_last_len = 0u;
+    if (od_txq_reserve(1u, &r) != OD_TXQ_OK) {
+        return false;
+    }
+    {
+        od_cmd_ctx_t ctx = od_test_cmd_ctx(BLE, &r, 4u, false);
+
+        (void)od_nfc_frame(&ctx, od_span_make(data, sizeof data));
+    }
+    od_txq_release(&r);
+    (void)od_txq_process();
+    return g_last_len == 4u && g_last[0] == RESP_NACK && g_last[1] == RESP_NFC_ENDPOINT
+        && g_last[3] == NFC_ERR_CHUNK_NO_START;
+}
+
 /* ----------------------------------------------------------------------------------- cases --- */
 
-static void test_reset_clears_all_four(void)
+static void test_reset_clears_all_five(void)
 {
-    CASE("a reset clears transfer, producer, queue and session");
+    CASE("a reset clears the NFC assembly, transfer, producer, queue and session");
     setup();
     start_an_owned_transfer();
     start_a_stuck_read();
+    stage_a_partial_nfc_assembly();
     CHECK(od_session_authenticated(&g_app_session));
 
     od_core_reset();
@@ -165,6 +222,12 @@ static void test_reset_clears_all_four(void)
     CHECK(od_txq_depth() == 0u);
     CHECK(od_txq_reserved() == 0u);
     CHECK(!od_session_authenticated(&g_app_session));
+
+    /* LAST, because proving this costs a frame. The assembly is gone in the only way a client can
+     * observe it -- the DATA that would have completed it is answered as having no active START --
+     * and that probe queues a NACK of its own, which would perturb the queue assertions above.
+     * Asserting a zeroed struct instead would pin an implementation detail N5 leaves free. */
+    CHECK(nfc_data_is_refused());
 }
 
 static void test_reset_releases_the_key_slot(void)
@@ -244,7 +307,7 @@ static void test_no_chunk_survives_the_reset(void)
 
 int main(void)
 {
-    test_reset_clears_all_four();
+    test_reset_clears_all_five();
     test_reset_releases_the_key_slot();
     test_reset_does_not_touch_rx();
     test_reset_is_idempotent();

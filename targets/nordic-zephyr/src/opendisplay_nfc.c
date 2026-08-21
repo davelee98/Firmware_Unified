@@ -1,6 +1,7 @@
 #include "opendisplay_nfc.h"
 #include "od_log.h"
 #include "opendisplay_ble.h"
+#include "od_nfc_app.h"
 #include "opendisplay_constants.h"
 /* OD_NFC_IC_SOC_NFCT (2) is not in the canonical contract yet -- see the header. */
 #include "protocol_pending.h"
@@ -510,3 +511,19 @@ bool opendisplay_ble_nfc_write(uint8_t type, const uint8_t *data, uint16_t data_
 }
 
 #endif /* CONFIG_NFC_T2T_NRFXLIB */
+
+/* ------------------------------------------------------------------------- od_nfc_app seam ---
+ *
+ * An alias, because two callers reach this tag under different names: the target handler above,
+ * and the shared 0x83 machine, which is linked wherever od_core_reset() is. Aliasing rather than
+ * renaming keeps both resolvable without either build relying on the linker to discard the other
+ * caller. */
+bool od_nfc_app_read(uint8_t *type, uint8_t *data, uint16_t *len_io, uint16_t cap)
+{
+    return opendisplay_ble_nfc_read(type, data, len_io, cap);
+}
+
+bool od_nfc_app_write(uint8_t type, const uint8_t *data, uint16_t len)
+{
+    return opendisplay_ble_nfc_write(type, data, len);
+}

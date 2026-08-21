@@ -453,8 +453,33 @@ static void test_ring_wraps(void)
     }
 }
 
+/* od_reply_same() lives beside od_reply_t and is the one place a reply identity is compared, so
+ * BOTH fields are pinned here independently. Varying them together -- which is what a transfer
+ * suite naturally does -- cannot tell a correct comparison from one that reads a single field. */
+static void test_reply_identity(void)
+{
+    const od_reply_t a = { OD_ORIGIN_BLE, 7u };
+    const od_reply_t same = { OD_ORIGIN_BLE, 7u };
+    const od_reply_t other_tag = { OD_ORIGIN_BLE, 8u };
+    /* The same tag on another link. Tags are per-transport, so this collision is ordinary rather
+     * than contrived, and it is the case an origin-blind comparison gets wrong. */
+    const od_reply_t other_origin = { OD_ORIGIN_LAN_PLAIN, 7u };
+    const od_reply_t both = { OD_ORIGIN_LAN_PLAIN, 8u };
+
+    CASE("reply identity compares origin and tag independently");
+    CHECK(od_reply_same(&a, &same));
+    CHECK(od_reply_same(&a, &a));
+    CHECK(!od_reply_same(&a, &other_tag));
+    CHECK(!od_reply_same(&a, &other_origin));
+    CHECK(!od_reply_same(&a, &both));
+    /* Symmetric, so no call site depends on argument order. */
+    CHECK(od_reply_same(&same, &a));
+    CHECK(!od_reply_same(&other_origin, &a));
+}
+
 int main(void)
 {
+    test_reply_identity();
     test_reservation_accounting();
     test_ble_value_ceiling();
     test_drain_results();

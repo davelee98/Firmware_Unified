@@ -138,7 +138,8 @@ looks arbitrary and is not); delete the story.
     their state to `od_cmd_{device,config,direct,nfc}.c`, each exporting the one reset disconnect
     cleanup calls.
   - **Both session objects are private to their `od_session_app` translation unit**, and
-    `od_core_reset()` is the shared half of a teardown (producer, egress, session — in that order).
+    `od_core_reset()` is the shared half of a teardown (producers — NFC assembly, transfer,
+  config-read — then egress, then session, in that order).
     RX is deliberately not in it: its producer differs per target.
   - **Three defects fixed**: Nordic's prepared-key slot no longer latches on a failed
     `psa_destroy_key` (it dropped ownership only on success, so authentication was unavailable

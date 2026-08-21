@@ -157,8 +157,11 @@ proof, and any corpus vector — `grep -c NFC tests/vectors/dispatch.json` retur
   documents `NFC_ERR_BAD_TOTAL_LEN` as "total_len == 0 or > 512"
   (`shared/protocol/opendisplay_protocol.h:867`) and the client enforces the same number. Unlike
   `OD_CONFIG_MAX_SIZE` it must **not** become per-target.
-- BG22 at Phase 3 HEAD: 250,292 B flash, 32,284 B static RAM, 480 B headroom. That is the
-  recaptured baseline for both phases.
+- BG22 at Phase 3 HEAD: 250,292 B flash and a 32,284 B `data + bss` total. **That total is not a
+  budget and the 480 bytes below it are not headroom** — `.memory_manager_heap` is sized to fill
+  whatever RAM is left, so the figure is constant whatever the static footprint does. The number
+  that moves, and the one X3 gates on, is `heap_size` (`heap_limit − __HeapBase`). Quote the total
+  as a record; measure the heap.
 - Nordic carries a 244-byte static `s_nfc_rsp_buf` for a response that can never exceed 224.
 - **The two controller adapters disagree above the cap, and neither is the shared machine's to
   decide.** BG22 stages tag reads in a 128-byte `s_od_nfc_read_data`
@@ -361,22 +364,47 @@ A transitional ratchet is either converted to a permanent structural one or dele
 reason. "The code it guarded is gone" is not sufficient — the question is whether re-introducing
 it would be caught by something else.
 
-### X3 — BG22's 32,284 B / 480 B headroom is the floor
+### X3 — BG22's budget is measured in heap, because static RAM cannot move
 
-No regression against it without an explicitly approved trade-off recorded here. Phase 4 has one,
-and it is approved in advance rather than gated on an impossibility:
+**The earlier form of this rule could not fail, and step 3 proved it.** It was phrased as
+"32,284 B static RAM / 480 B headroom is the floor", and step 3 added a dormant 528-byte `s_nfc`
+to the BG22 image while `text`/`data`/`bss` stayed byte-identical at 249,800 / 492 / 31,792 —
+verified by building the same tree with and without the change. Nothing regressed because nothing
+*could*: `.memory_manager_heap` is sized by the linker script as `__HeapBase` plus whatever RAM is
+left, so every byte of new static is taken out of the heap and the totals never move. A stop
+condition on `data + bss`, or on `32,764 − (data + bss)`, is therefore not a loose gate — it is
+inert.
 
-**BG22 static RAM will grow.** Its current NFC statics are the 512-byte buffer plus three scalars;
-the shared state adds N1's owner — one `od_reply_t`, itself an `od_origin_t` plus a `uint32_t` tag
-(`shared/core/od_txq.h:69-72`) — plus the active flag, and alignment. A dozen-odd bytes against
-480 B of headroom is an acceptable price for closing the foreign-owner defect, and the alternative
-— a narrower owner representation than the rest of the repo uses — trades a repo-wide invariant
-for a rounding error.
+**The quantity to measure is `heap_size`, and only that.** It is `heap_limit − __HeapBase` —
+`0x20008000 − 0x20005530` in the current map. It is NOT the `.memory_manager_heap` section size,
+which is four bytes larger because the section begins before an `ALIGN(0x8)` that `__HeapBase`
+sits after; quoting the section size instead would import an alignment artefact that moves for
+reasons having nothing to do with this promotion. One symbol pair, one number.
 
-So the gate is: measure the delta on the flashed image at the BG22 cutover, record it, and stop if
-it exceeds **64 bytes** or leaves headroom below **400 bytes**. Either outcome means the state
-object is wrong, not that the budget needs raising. Nordic's saving is measured the same way and
-is not quoted in advance (N7).
+- **Baseline:** `heap_size` in the pre-Phase-4 image, captured before step 5 from a clean build of
+  the merge base, and recorded in the step-9 evidence. At step 3 it stood at `0x2ad0` (10,960 B)
+  *with* the dormant assembler already linked.
+- **Ceiling:** at the end of Phase 4, BG22's heap may be at most **64 bytes** smaller than that
+  baseline. That is the same 64-byte allowance as before, now expressed against something that
+  can actually shrink.
+- **Interim growth is expected and is not a failure.** Between step 3 and step 6 the target carries
+  *both* assemblers — the shared 528-byte `s_nfc` and BG22's own 512-byte `s_nfc_data` — so the
+  heap is transiently about 528 B down. Step 6 deletes the target's, and the ceiling applies to
+  the result, not to the intermediate states.
+
+**BG22 static RAM will still grow slightly, and that is the approved trade-off.** Its NFC statics
+are the 512-byte buffer plus three scalars; the shared state adds N1's owner — one `od_reply_t`,
+itself an `od_origin_t` plus a `uint32_t` tag (`shared/core/od_txq.h:69-72`) — plus the active
+flag, and alignment. A dozen-odd bytes is an acceptable price for closing the foreign-owner
+defect, and the alternative — a narrower owner representation than the rest of the repo uses —
+trades a repo-wide invariant for a rounding error.
+
+Exceeding the ceiling means the state object is wrong, not that the budget needs raising. Nordic's
+saving is measured the same way and is not quoted in advance (N7).
+
+**One consequence for the rest of the plan:** § 9 and § 10 are updated to name `heap_size`
+directly rather than "static RAM" or a "heap-inclusive figure", both of which described the inert
+`data + bss` total. Quoting `data + bss` alongside is fine as a record; it is not the gate.
 
 ### X4 — An open hardware row is release debt, never a pass
 
@@ -500,8 +528,8 @@ subsystems.
 
 Field order is `owner` first, then the 16-bit pair, then the two bytes, then the buffer: `owner` is
 4-aligned, so leading it avoids the 3 bytes of padding a leading `bool` forces. Do not claim the
-scalars are "packed" without checking — the resulting `sizeof` is what X3 measures, and X3's
-64-byte ceiling is small enough that padding is a material fraction of it.
+scalars are "packed" without checking — this `sizeof` is what X3's heap loss is mostly made of,
+and its 64-byte ceiling is small enough that padding is a material fraction of it.
 
 One instance, private to the translation unit, reached through `od_nfc_reset()` and the frame
 entry point — the `od_session` precedent. Under `OD_CAP_NFC=0` the struct is not defined and the
@@ -612,9 +640,17 @@ ahead of dispatch.
 
 ### Step 4 — The full shared suite, still dormant
 
-§ 7 in its entirety, including the mutation checks. The suite must fail against a machine with the
-owner check removed, with the 32-bit widening reverted, with the retryable short END converted to
-a reset, and with the reply-failure unwind removed.
+§ 7's unit coverage in full, including the mutation checks. **The corpus half of § 7 is NOT part of
+this step and is assigned to step 8**, because a `target-production` vector reaches the machine
+through dispatch and dispatch still routes `0x0083` to each target's `od_cmd_app_nfc` until then.
+Writing those vectors now would either exercise the target handlers this phase is replacing, or
+require the reroute this plan deliberately defers past the per-target hardware gates.
+
+The suite must fail against a machine with the owner check removed, with the 32-bit widening
+reverted (see § 7 for the input that makes that observable), with the retryable short END
+converted to a reset, with the reply-failure unwind removed, and with the capability-off arm
+allocating the assembler. `tools/mutate_nfc.sh` runs all of them and treats a build failure as a
+failed mutation, because a mutation that does not compile has not been exercised.
 
 **Dispatch still names `od_cmd_app_nfc` until step 8, so a target that deletes its definition
 cannot link.** Each cutover therefore leaves a temporary hook — a wrapper whose whole body calls
@@ -646,8 +682,11 @@ bespoke BLE READ tool is built here, since without it no READ row can be attempt
 ### Step 6 — BG22 cutover — **hardware gate before step 8**
 
 `od_cmd_silabs.c:253-348` is deleted down to the same temporary hook; `od_cmd_silabs_reset()`
-reduces to the config assembler. Record flash and static RAM against X3's 64-byte / 400-byte stop
-condition in the commit message, and open and update BG22's § 9 rows in this step as they run.
+reduces to the config assembler. Record flash and **`heap_size` loss against the pre-Phase-4
+baseline** in the commit message, against X3's 64-byte ceiling — not static RAM, which is constant
+by construction on this target. This is the step where the number should come back down: deleting
+the target's own 512-byte assembler recovers most of what step 3's shared one cost. Open and update
+BG22's § 9 rows in this step as they run.
 
 **`silabs_fault_test.c`'s NFC assertions stay green and unedited; its link plumbing does not, and
 the distinction is the whole of the rule.** That file calls `od_cmd_app_nfc()` at five sites
@@ -756,8 +795,19 @@ on the *shared machine's* handling of whatever the seam returns (N2b) — a refu
 target does one or the other.
 
 **The overflow class (N3).** Declared lengths `0xFFFC`, `0xFFFD`, `0xFFFE`, `0xFFFF` in a
-four-byte body, each answered `0x01` with no seam call — the direct regression test for § 3.4's
-divergence 3. Plus declared length exactly equal to and one greater than the body remainder.
+four-byte body, each answered `0x01` with no seam call. Plus declared length exactly equal to and
+one greater than the body remainder.
+
+**AND THE ONE INPUT THAT ISOLATES THE WIDENED ARM**, because the rest do not. `od_span_split()`
+refuses an over-long cut too, so against a *valid* record type the widened comparison and a 16-bit
+one are observationally identical — both answer `0x01`, neither reaches the tag. The arm is
+distinguishable only through its position ahead of the record-type gate: **an invalid record type
+with a wrapping declared length answers `0x01` under the widened form and `0x05` under a 16-bit
+one.** That row is the oracle for N3 in the shared machine, and it is load-bearing: **without it,
+reverting the widening leaves the suite GREEN.** Every other length row is masked — the wrapping
+rows carry a valid type and the split refuses them identically, and N4's over-declared rows use a
+length that does not wrap, so both forms answer `0x01` through the same arm. With the row, the
+mutation turns red for the right reason: the widened comparison must precede the type gate.
 
 **Record types and N4's order.** All five valid values, plus 5, 6, 0x80 and 0xFF rejected `0x05`.
 Both of N4's changed classes get their own case — valid type with an over-declared length, and
@@ -782,9 +832,11 @@ verdict and assembler outcome asserted for each.
 **Capability-off.** Every sub-command answers nothing, returns `OD_CMD_UNKNOWN`, stamps no
 activity, calls no seam; `nm` shows no assembler symbol and no seam reference.
 
-**Corpus.** `tests/vectors/dispatch.json` gains `target-production` NFC vectors driven through
-`corpus_profile_nordic.c` and `corpus_profile_silabs.c`, and the ESP32 silence as its own vector.
-This closes § 3.5's remaining gaps from the wire end as well as the unit end.
+**Corpus — at step 8, not step 4.** `tests/vectors/dispatch.json` gains `target-production` NFC
+vectors driven through `corpus_profile_nordic.c` and `corpus_profile_silabs.c`, and the ESP32
+silence as its own vector. This closes § 3.5's remaining gaps from the wire end as well as the unit
+end. It lands with the dispatch reroute because that is what makes a vector reach the shared
+machine at all; before it, the same vectors would pin the target handlers being deleted.
 
 **Mutation checks.** Per step 4, each of: owner check removed, 32-bit widening reverted, short-END
 retry converted to a reset, reply-failure unwind removed, capability-off arm allocating the
@@ -805,8 +857,10 @@ nfc_rec_type_valid | nfc_type_valid | od_cmd_nfc_reset | od_cmd_app_nfc
 over `targets/**` — with `opendisplay_nfc.c`'s NDEF encoder explicitly out of scope, because it is
 controller adaptation and stays.
 
-**Added at step 8** — `host: NFC capability-off link proof`, beside `pipe_off_link_proof` and
-`log_off_link_proof`.
+**Added at step 4**, not step 8 — `host: NFC capability-off link proof`, beside
+`pipe_off_link_proof` and `log_off_link_proof`. § 7 makes the `nm` evidence part of the
+capability-off suite, so the guard lands with the claim rather than four steps after it. Nothing
+remains to add here at step 8.
 
 **Reviewed at step 11** — every existing transitional check, against X2. `transfer: single pump
 owner` and `transfer: no target PIPE machine` are expected to become permanent structural
@@ -902,8 +956,9 @@ which length is compared to it is the thing the row proves.
 the 218 cap and never compiles the 128-byte buffer; it stays unchanged and keeps proving what it
 proves (N2b).
 
-Plus both of N4's changed input classes confirmed on the wire, and static RAM measured against
-X3's stop condition on the flashed image.
+Plus both of N4's changed input classes confirmed on the wire, and `heap_size` measured on the
+flashed image against X3's ceiling — `heap_limit − __HeapBase`, not static RAM, which cannot move
+on this target.
 
 **ESP32-S3:** `0x0083` probed in both sessions draws nothing, the link is not held open, and the
 client raises `NfcNotSupportedError`; map/symbol evidence attached.
@@ -921,13 +976,15 @@ Nordic hardware gate, not an assumed prerequisite.
 `tools/check.sh --targets` clean with no skip, at every step boundary. Per § 9 of the superseded
 plan, record after each unit: shared production LOC added and target LOC removed; remaining
 target-owned protocol state structs and wire-response literals; `.text`, `.rodata`, `.data`,
-`.bss`, and BG22's heap-inclusive figure; stack high-water where available; hardware rows
-passed/open.
+`.bss`, and — for BG22 — `heap_size` (`heap_limit − __HeapBase`), which is the figure X3 gates on;
+stack high-water where available; hardware rows passed/open. Record `data + bss` for BG22 too if
+useful, but as a note rather than a measurement: it is constant by construction there.
 
 Phase 4 minimums: one NFC machine; zero target NFC assemblers or response literals; zero disabled
-NFC state or seam references on ESP32; BG22 static RAM within X3's approved 64-byte growth and
-400-byte headroom floor; Nordic static delta and READ-path stack high-water both measured and
-recorded; net handwritten production deletion, with test growth reported separately.
+NFC state or seam references on ESP32; BG22 within X3's 64-byte heap-loss ceiling, measured as
+heap and not as data+bss, which cannot move on this target; Nordic static delta and READ-path
+stack high-water both measured and recorded; net handwritten production deletion, with test
+growth reported separately.
 
 Phase 5 minimums: § 11 of the superseded plan, in full, with every clause satisfied or its row
 explicitly open.

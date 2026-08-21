@@ -1,17 +1,17 @@
 /* od_core.h -- the shared half of a teardown.
  *
- * WHAT IT DOES NOT DO IS THE POINT. Three shared objects outlive a single dispatch -- the config
- * read producer, the response queue and the session -- and every target had its own hand-written
- * list of them, which is exactly the kind of list that loses an entry when a fourth is added. This
- * is that list, once.
+ * WHAT IT DOES NOT DO IS THE POINT. Four shared objects outlive a single dispatch -- the NFC
+ * assembler, the config read producer, the response queue and the session -- and every target had
+ * its own hand-written list of them, which is exactly the kind of list that loses an entry when
+ * another is added. This is that list, once.
  *
  * IT DOES NOT TOUCH RX, deliberately. Nordic's producer is the BT thread and can push into the
  * ring concurrently, and ESP32's connection policy has stricter ordering around its own; a reset
  * here would race the first and reorder the second. RX teardown stays with the target that knows
  * its producer.
  *
- * Target display, config and NFC state remains target-owned. Shared transfer state is reset here
- * before any queued reply or session key can be discarded.
+ * Target display and config state remains target-owned. Shared transfer and NFC state is reset
+ * here before any queued reply or session key can be discarded.
  *
  * CONSUMER CONTEXT ONLY. Never from a stack callback: it cancels a producer and drops queued
  * frames, both of which the consumer may be inside.
@@ -24,8 +24,8 @@
 extern "C" {
 #endif
 
-/* Reset transfer state, cancel the config-read producer, drop queued responses, and clear the
- * app session.
+/* Drop any partial NFC assembly, reset transfer state, cancel the config-read producer, drop
+ * queued responses, and clear the app session.
  *
  * The session goes through od_session_clear(), never a memset: clear also releases the HAL key
  * slot and preserves the slot index, and a memset would strand a prepared key in a finite pool. */

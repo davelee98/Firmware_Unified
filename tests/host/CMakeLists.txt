@@ -427,7 +427,8 @@ add_test(NAME dispatch_route COMMAND od_dispatch_route_test)
 # target, so a shared reset would race one and reorder the other), and the session must go through
 # od_session_clear() rather than a memset, or its prepared HAL key slot is stranded in a finite
 # pool with nothing left naming it.
-add_executable(od_core_reset_test core_reset_test.c od_xfer_app_test_stub.c od_log_test_stub.c)
+add_executable(od_core_reset_test core_reset_test.c od_xfer_app_test_stub.c od_log_test_stub.c
+    od_nfc_app_test_stub.c)
 target_link_libraries(od_core_reset_test od_session_fake)
 add_test(NAME core_reset COMMAND od_core_reset_test)
 
@@ -637,6 +638,31 @@ if(Python3_FOUND)
     target_link_libraries(od_dispatch_corpus_nordic_test od_session_fake)
     add_dependencies(od_dispatch_corpus_nordic_test od_vectors_generated)
     add_test(NAME dispatch_corpus_nordic COMMAND od_dispatch_corpus_nordic_test)
+
+    # The tag fake behind od_nfc_app.h, and its own contract. Compiled now, before step 3's shared
+    # machine exists, so a broken seam or knob surfaces here rather than inside the first suite
+    # built on it.
+    add_library(od_fake_nfc_tag STATIC fake_nfc_tag.c)
+    target_include_directories(od_fake_nfc_tag PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+    target_link_libraries(od_fake_nfc_tag PUBLIC od_shared)
+
+    add_executable(od_nfc_fake_test nfc_fake_test.c)
+    target_link_libraries(od_nfc_fake_test od_fake_nfc_tag)
+    add_test(NAME nfc_fake COMMAND od_nfc_fake_test)
+
+    # nfc: the shared 0x0083 machine at OD_CAP_NFC=1, over the programmable tag.
+    add_executable(od_nfc_test nfc_test.c)
+    target_link_libraries(od_nfc_test od_fake_nfc_tag od_session_fake)
+    add_test(NAME nfc COMMAND od_nfc_test)
+
+    # nfc_off: the same machine at OD_CAP_NFC=0. od_nfc.c is compiled INTO the executable rather
+    # than taken from od_shared, because neither shared archive carries this profile -- od_shared is
+    # capability-on and od_shared_silabs is BG22, which has NFC. Defining OD_CAP_NFC=0 on an
+    # executable that linked a capability-on archive would prove nothing and still pass.
+    add_executable(od_nfc_off_test nfc_off_test.c ../../shared/core/od_nfc.c)
+    target_compile_definitions(od_nfc_off_test PRIVATE OD_CAP_NFC=0)
+    target_link_libraries(od_nfc_off_test od_session_fake)
+    add_test(NAME nfc_off COMMAND od_nfc_off_test)
 
     # nordic_nfc: the 0x0083 length bounds, against Nordic's production handler over fake drivers.
     # Focused rather than a corpus vector because what it asserts is that a refused frame reached

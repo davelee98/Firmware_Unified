@@ -17,6 +17,8 @@
 #include "opendisplay_led.h"
 
 #include <stdarg.h>
+#include "od_nfc_app.h"
+
 #include <string.h>
 
 int      fake_disp_data_rc;
@@ -346,3 +348,16 @@ void od_watchdog_app_arm(void)           { }
 void od_watchdog_app_service(void)       { }
 bool od_watchdog_app_safe_mode(void)     { return false; }
 void od_watchdog_app_phase(uint8_t p)    { (void)p; }
+
+/* od_nfc_app seam -- the alias the production adapter carries, for the same reason: the shared
+ * machine is linked wherever od_core_reset() is, so every binary holding this fake has to resolve
+ * the seam whether it exercises NFC or not. */
+bool od_nfc_app_read(uint8_t *type, uint8_t *data, uint16_t *len_io, uint16_t cap)
+{
+    return opendisplay_ble_nfc_read(type, data, len_io, cap);
+}
+
+bool od_nfc_app_write(uint8_t type, const uint8_t *data, uint16_t len)
+{
+    return opendisplay_ble_nfc_write(type, data, len);
+}

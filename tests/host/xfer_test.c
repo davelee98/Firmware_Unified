@@ -281,6 +281,11 @@ static void test_raw_direct(void)
     od_cmd_ctx_t other = od_test_cmd_ctx(OTHER, &g_reservation, 2u, false);
     od_cmd_ctx_t stale = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE, 8u },
                                          &g_reservation, 2u, false);
+    /* THE OWNER'S TAG ON A DIFFERENT LINK. Without this the suite only ever varies the tag, or
+     * varies both fields at once, so an owner check that compared the tag alone would pass
+     * everything here -- tags are per-transport and collide across links by construction. */
+    od_cmd_ctx_t crosslink = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_LAN_PLAIN, OWNER.tag },
+                                             &g_reservation, 2u, false);
     od_reply_t recorded_owner;
     uint32_t started_ms = 0u;
     uint8_t tolerated[3] = { 1u, 2u, 3u };
@@ -300,6 +305,8 @@ static void test_raw_direct(void)
     CHECK(od_xfer_data(&other, od_span_make(data, 2u)) == OD_CMD_OK);
     CHECK(g_write_calls == 0u && g_reply_n == 1u);
     CHECK(od_xfer_data(&stale, od_span_make(data, 2u)) == OD_CMD_OK);
+    CHECK(g_write_calls == 0u && g_reply_n == 1u);
+    CHECK(od_xfer_data(&crosslink, od_span_make(data, 2u)) == OD_CMD_OK);
     CHECK(g_write_calls == 0u && g_reply_n == 1u);
     CHECK(od_xfer_data(&owner, od_span_none()) == OD_CMD_OK);
     CHECK(g_write_calls == 0u && g_reply_n == 1u);
