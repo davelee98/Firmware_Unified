@@ -4,10 +4,12 @@
  * real tag controller would have -- a record to hand back, a failure to inject, and a record of
  * what it was asked to write -- and the reply bytes are assembled by the shared machine above it.
  *
- * IT MODELS BOTH ADAPTERS, and that is the point rather than an accident. Asked for more than it
- * can supply, BG22 refuses and Nordic truncates (plan N2b), and the shared machine is required to
- * handle either without normalising them. A fake that could only do one of the two would make
- * half that requirement untestable.
+ * IT MODELS BOTH DEPLOYED OUTCOMES, and that is the point rather than an accident. Asked for more
+ * than it can supply, a real adapter either refuses or truncates, and which one is a property of
+ * the record and the adapter together rather than of the target: BG22 refuses everything past its
+ * staging buffer, while Nordic truncates a verbatim or well-known record and refuses a MIME one.
+ * The shared machine is required to handle either without normalising them (plan N2b), so a fake
+ * that could only do one would make half that requirement untestable.
  */
 #ifndef OD_TEST_FAKE_NFC_TAG_H
 #define OD_TEST_FAKE_NFC_TAG_H
@@ -19,8 +21,8 @@
 
 /* What a read hands back, when it succeeds at all. */
 typedef enum {
-    FAKE_NFC_OVER_CAP_TRUNCATE = 0,  /* Nordic: return `cap` bytes */
-    FAKE_NFC_OVER_CAP_REFUSE         /* BG22: return false, as its staging buffer forces */
+    FAKE_NFC_OVER_CAP_TRUNCATE = 0,  /* return `cap` bytes -- Nordic's verbatim/well-known arms */
+    FAKE_NFC_OVER_CAP_REFUSE         /* return false -- all of BG22, and Nordic's MIME arm */
 } fake_nfc_over_cap_t;
 
 extern bool                fake_nfc_read_ok;      /* false = the tag read fails outright */

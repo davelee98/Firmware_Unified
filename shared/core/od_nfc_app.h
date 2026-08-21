@@ -26,10 +26,13 @@ extern "C" {
  * signature this close to the one it replaces is an invitation for a later adapter to start
  * depending on whatever the caller left there.
  *
- * ABOVE `cap` THE TWO ADAPTERS DELIBERATELY DISAGREE and the shared machine does not normalise
- * them: BG22 refuses, because its staging buffer is smaller than the cap the caller requests, and
- * Nordic truncates to `cap`. Both are deployed behaviour. Report what the adapter did -- false, or
- * a short length -- and let the caller turn that into a wire answer.
+ * ABOVE `cap` BOTH OUTCOMES ARE DEPLOYED, and the shared machine normalises neither. Refusal and
+ * truncation are properties of the record and the adapter together, not of the adapter alone:
+ * BG22 refuses everything over its staging buffer, which is smaller than the cap a caller
+ * requests, while Nordic truncates a verbatim or well-known record and refuses a MIME one that
+ * would not fit whole (`opendisplay_nfc.c`, the `out_pack > out_max` arm). Report what came back
+ * -- false, or a short length -- and let the caller turn that into a wire answer. Do not assume
+ * either outcome from the target alone.
  *
  * On true, `*type` is one of OD_NFC_REC_* and `*len_io` is how many bytes were written to `data`,
  * never more than `cap`. On false nothing in `data`, `*type` or `*len_io` is meaningful. */
