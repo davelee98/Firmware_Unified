@@ -115,10 +115,13 @@ static od_cmd_result_t handle_inline_write(const od_cmd_ctx_t *ctx, od_span_t bo
     }
     type = header.p[1];
     declared = (uint16_t)(((uint16_t)header.p[2] << 8) | header.p[3]);
-    /* THE BOUND IS ITS OWN ARM, and evaluated in 32 bits, even though the split below would also
-     * refuse an over-long cut. The declared length is peer-supplied: a 16-bit sum with the header
-     * wraps and admits a length the body cannot hold, and stating that test explicitly is what a
-     * regression can be aimed at. */
+    /* THE BOUND IS ITS OWN ARM, evaluated in 32 bits, and it runs BEFORE the record-type gate.
+     * The split below would also refuse an over-long cut, so against a valid record type the two
+     * are indistinguishable -- both answer MALFORMED and neither touches the tag. What makes this
+     * arm observable, and therefore testable, is its POSITION: with an invalid record type and a
+     * wrapping declared length, the widened comparison answers MALFORMED while a 16-bit one falls
+     * through to the type gate and answers INVALID_REC_TYPE. That input is the oracle for this
+     * line; the split is defense in depth behind it, not a substitute. */
     if ((uint32_t)declared + 4u > (uint32_t)body.n) {
         return nack(ctx, NFC_ERR_MALFORMED);
     }

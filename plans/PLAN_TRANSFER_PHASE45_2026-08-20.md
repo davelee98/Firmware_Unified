@@ -372,12 +372,14 @@ left, so every byte of new static is taken out of the heap and the totals never 
 condition on `data + bss`, or on `32,764 − (data + bss)`, is therefore not a loose gate — it is
 inert.
 
-**The quantity to measure is the heap.** In the BG22 map it is the `.memory_manager_heap` section
-size, equivalently `0x20008000 − __HeapBase`. It is the only figure that moves when static RAM
-grows, and it moves one-for-one.
+**The quantity to measure is `heap_size`, and only that.** It is `heap_limit − __HeapBase` —
+`0x20008000 − 0x20005530` in the current map. It is NOT the `.memory_manager_heap` section size,
+which is four bytes larger because the section begins before an `ALIGN(0x8)` that `__HeapBase`
+sits after; quoting the section size instead would import an alignment artefact that moves for
+reasons having nothing to do with this promotion. One symbol pair, one number.
 
-- **Baseline:** the heap size in the pre-Phase-4 image, captured before step 5 from a clean build
-  of the merge base, and recorded in the step-9 evidence. At step 3 it stood at `0x2ad4` (10,964 B)
+- **Baseline:** `heap_size` in the pre-Phase-4 image, captured before step 5 from a clean build of
+  the merge base, and recorded in the step-9 evidence. At step 3 it stood at `0x2ad0` (10,960 B)
   *with* the dormant assembler already linked.
 - **Ceiling:** at the end of Phase 4, BG22's heap may be at most **64 bytes** smaller than that
   baseline. That is the same 64-byte allowance as before, now expressed against something that
@@ -397,10 +399,9 @@ trades a repo-wide invariant for a rounding error.
 Exceeding the ceiling means the state object is wrong, not that the budget needs raising. Nordic's
 saving is measured the same way and is not quoted in advance (N7).
 
-**One consequence for the rest of the plan:** § 10's "BG22 static RAM within X3's approved 64-byte
-growth and 400-byte headroom floor" is superseded by this section, and § 9's "static RAM measured
-against X3's stop condition on the flashed image" means the heap figure above. Quoting `data + bss`
-alongside it is fine as a record; it is not the gate.
+**One consequence for the rest of the plan:** § 9 and § 10 are updated to name `heap_size`
+directly rather than "static RAM" or a "heap-inclusive figure", both of which described the inert
+`data + bss` total. Quoting `data + bss` alongside is fine as a record; it is not the gate.
 
 ### X4 — An open hardware row is release debt, never a pass
 
@@ -637,7 +638,8 @@ ahead of dispatch.
 ### Step 4 — The full shared suite, still dormant
 
 § 7 in its entirety, including the mutation checks. The suite must fail against a machine with the
-owner check removed, with the 32-bit widening reverted, with the retryable short END converted to
+owner check removed, with the 32-bit widening reverted (see § 7 for the input that makes that
+observable), with the retryable short END converted to
 a reset, and with the reply-failure unwind removed.
 
 **Dispatch still names `od_cmd_app_nfc` until step 8, so a target that deletes its definition
@@ -780,8 +782,16 @@ on the *shared machine's* handling of whatever the seam returns (N2b) — a refu
 target does one or the other.
 
 **The overflow class (N3).** Declared lengths `0xFFFC`, `0xFFFD`, `0xFFFE`, `0xFFFF` in a
-four-byte body, each answered `0x01` with no seam call — the direct regression test for § 3.4's
-divergence 3. Plus declared length exactly equal to and one greater than the body remainder.
+four-byte body, each answered `0x01` with no seam call. Plus declared length exactly equal to and
+one greater than the body remainder.
+
+**AND THE ONE INPUT THAT ISOLATES THE WIDENED ARM**, because the rest do not. `od_span_split()`
+refuses an over-long cut too, so against a *valid* record type the widened comparison and a 16-bit
+one are observationally identical — both answer `0x01`, neither reaches the tag. The arm is
+distinguishable only through its position ahead of the record-type gate: **an invalid record type
+with a wrapping declared length answers `0x01` under the widened form and `0x05` under a 16-bit
+one.** That row is the oracle for N3 in the shared machine; without it, reverting the widening
+turns the suite red for the N4 ordering reason and the N3 claim goes unproven.
 
 **Record types and N4's order.** All five valid values, plus 5, 6, 0x80 and 0xFF rejected `0x05`.
 Both of N4's changed classes get their own case — valid type with an over-declared length, and
@@ -926,8 +936,9 @@ which length is compared to it is the thing the row proves.
 the 218 cap and never compiles the 128-byte buffer; it stays unchanged and keeps proving what it
 proves (N2b).
 
-Plus both of N4's changed input classes confirmed on the wire, and static RAM measured against
-X3's stop condition on the flashed image.
+Plus both of N4's changed input classes confirmed on the wire, and `heap_size` measured on the
+flashed image against X3's ceiling — `heap_limit − __HeapBase`, not static RAM, which cannot move
+on this target.
 
 **ESP32-S3:** `0x0083` probed in both sessions draws nothing, the link is not held open, and the
 client raises `NfcNotSupportedError`; map/symbol evidence attached.
@@ -945,8 +956,9 @@ Nordic hardware gate, not an assumed prerequisite.
 `tools/check.sh --targets` clean with no skip, at every step boundary. Per § 9 of the superseded
 plan, record after each unit: shared production LOC added and target LOC removed; remaining
 target-owned protocol state structs and wire-response literals; `.text`, `.rodata`, `.data`,
-`.bss`, and BG22's heap-inclusive figure; stack high-water where available; hardware rows
-passed/open.
+`.bss`, and — for BG22 — `heap_size` (`heap_limit − __HeapBase`), which is the figure X3 gates on;
+stack high-water where available; hardware rows passed/open. Record `data + bss` for BG22 too if
+useful, but as a note rather than a measurement: it is constant by construction there.
 
 Phase 4 minimums: one NFC machine; zero target NFC assemblers or response literals; zero disabled
 NFC state or seam references on ESP32; BG22 within X3's 64-byte heap-loss ceiling, measured as
