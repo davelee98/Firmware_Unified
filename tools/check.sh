@@ -816,7 +816,7 @@ check "host: PIPE capability-off link proof" pipe_off_link_proof
 # The seam symbols are DEFINED in that binary on purpose and must not be REFERENCED by od_nfc.o --
 # checking for their absence entirely would pass by link failure rather than by behaviour.
 nfc_off_link_proof() {
-    local binary="$BUILD_ROOT/host-gcc/od_nfc_off_test" hits entry_count refs
+    local binary="$BUILD_ROOT/host-gcc/od_nfc_off_test" hits entry_count refs obj obj_count
 
     [ -x "$binary" ] || { echo "capability-off NFC fixture was not built"; return 1; }
     hits=$(nm -a "$binary" | grep -E "\bs_nfc\b" || true)
@@ -825,9 +825,17 @@ nfc_off_link_proof() {
         echo "OD_CAP_NFC=0 retained the chunk assembler"
         return 1
     fi
-    refs=$(nm -u "$(find "$BUILD_ROOT/host-gcc" -name 'od_nfc.c.o' -path '*od_nfc_off*' | head -1)" \
-           2>/dev/null | grep -Ec "od_nfc_app_(read|write)" || true)
-    if [ "${refs:-0}" -ne 0 ]; then
+    # RESOLVE THE OBJECT FIRST, and insist on exactly one. Piping an unresolved path straight into
+    # nm made this check fail OPEN: no match meant an empty argument, nm's error went to /dev/null,
+    # and refs came back 0 -- reporting "no seam references" from a file that was never read.
+    obj=$(find "$BUILD_ROOT/host-gcc" -name 'od_nfc.c.o' -path '*od_nfc_off*' 2>/dev/null)
+    obj_count=$(printf '%s\n' "$obj" | grep -c . || true)
+    if [ "$obj_count" -ne 1 ] || [ ! -r "$obj" ]; then
+        echo "expected exactly one readable capability-off od_nfc.c.o, found $obj_count"
+        return 1
+    fi
+    refs=$(nm -u "$obj" | grep -Ec "od_nfc_app_(read|write)" || true)
+    if [ "$refs" -ne 0 ]; then
         echo "OD_CAP_NFC=0 still references the tag seam ($refs undefined seam symbols)"
         return 1
     fi

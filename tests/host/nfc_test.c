@@ -261,6 +261,27 @@ static void test_read_above_the_cap(void)
     CHECK(g_sent_n == 1u && g_sent[0].len == 224u);
     CHECK(g_sent[0].data[5] == 218u);
 
+    /* 512 and 513 are the client's assembly sizes arriving on the READ path, where the cap is
+     * 218: nothing about them is special to the machine, which is the point -- they must be
+     * handled by the same cap rather than by a size-specific arm. */
+    CASE("reads far above the cap follow the adapter, not the size");
+    for (unsigned i = 0; i < 2u; ++i) {
+        const uint16_t big = i == 0u ? 512u : 513u;
+
+        setup();
+        fake_nfc_read_len = big;
+        fake_nfc_over_cap = FAKE_NFC_OVER_CAP_REFUSE;
+        CHECK(submit(read, 1u) == OD_CMD_NACK);
+        CHECK(nacked(NFC_ERR_READ_FAILED));
+
+        setup();
+        fake_nfc_read_len = big;
+        fake_nfc_over_cap = FAKE_NFC_OVER_CAP_TRUNCATE;
+        CHECK(submit(read, 1u) == OD_CMD_OK);
+        CHECK(g_sent_n == 1u && g_sent[0].len == 224u);
+        CHECK(g_sent[0].data[5] == 218u);
+    }
+
     CASE("a failing tag read yields READ_FAILED");
     setup();
     fake_nfc_read_ok = false;
@@ -272,13 +293,26 @@ static void test_read_sealed(void)
 {
     static const uint8_t read[1] = { NFC_SUB_READ };
     uint8_t nonce[16];
+    uint8_t expected[OD_SESSION_PLAIN_FRAME_MAX];
+    uint16_t expected_len;
     uint8_t plain[OD_SESSION_PLAIN_FRAME_MAX];
     uint16_t plain_len = 0u;
 
+    /* THE PLAINTEXT ANSWER IS THE ORACLE, captured rather than described. Spot-checking a status
+     * byte and a length byte would pass on a frame carrying the wrong command, the wrong record
+     * type, the wrong high length byte or the wrong payload -- so the same read is run unsealed
+     * first and the sealed one is compared against it in full. */
+    CASE("an unsealed read of the cap gives the reference frame");
+    setup();
+    fake_nfc_read_len = 218u;
+    CHECK(submit(read, 1u) == OD_CMD_OK);
+    CHECK(g_sent_n == 1u && g_sent[0].len == 224u);
+    expected_len = g_sent[0].len;
+    memcpy(expected, g_sent[0].data, expected_len);
+
     /* The cap is applied in BOTH modes on purpose, so the answer's size does not depend on whether
-     * the session happens to be encrypted. Compared as the decoded application frame, because a
-     * length alone would pass on any correctly sized ciphertext. */
-    CASE("the 218-byte cap holds in a protected session, and decodes to the same frame");
+     * the session happens to be encrypted. */
+    CASE("the same read in a protected session decodes to the identical frame");
     setup();
     g_security_on = true;
     CHECK(handshake(&g_session, od_session_app_now_ms(), nonce, false)
@@ -288,8 +322,8 @@ static void test_read_sealed(void)
     CHECK(g_sent_n == 1u && g_sent[0].len == 253u);
     CHECK(session_fake_unseal(g_sent[0].data, g_sent[0].len, plain,
                               (uint16_t)sizeof plain, &plain_len));
-    CHECK(plain_len == 224u);
-    CHECK(plain[2] == NFC_STATUS_READ_DATA && plain[5] == 218u);
+    CHECK(plain_len == expected_len);
+    CHECK(plain_len == expected_len && memcmp(plain, expected, expected_len) == 0);
 }
 
 /* ---------------------------------------------------------------------------- inline write --- */
@@ -585,6 +619,33 @@ static void test_ownership(void)
     CHECK(fake_nfc_write_calls == 0u);
     CHECK(submit(end, 1u) == OD_CMD_OK);
     CHECK(fake_nfc_write_calls == 1u);
+
+    CASE("END from another link commits nothing");
+    setup();
+    arm(2u);
+    n = data_frame(2u, 0x36u);
+    CHECK(submit(g_body, n) == OD_CMD_OK);
+    CHECK(submit_from(OTHER_LINK, end, 1u) == OD_CMD_NACK);
+    CHECK(nacked(NFC_ERR_CHUNK_NO_START));
+    CHECK(fake_nfc_write_calls == 0u);
+    CHECK(submit(end, 1u) == OD_CMD_OK);
+    CHECK(sink_holds(2u, 0x36u));
+
+    /* A TAG IS A TRANSPORT HANDLE AND GETS REUSED. If the owner's connection drops and the next
+     * one is handed the same tag, its frames must not inherit the dead owner's assembly -- the
+     * teardown is what ends the transfer, not the tag value. */
+    CASE("a recycled tag does not inherit the dead owner's assembly");
+    setup();
+    arm(4u);
+    n = data_frame(2u, 0x38u);
+    CHECK(submit(g_body, n) == OD_CMD_OK);
+    od_nfc_reset();                      /* the owner's link went away */
+    n = data_frame(2u, 0x3Au);           /* a new peer, same tag */
+    CHECK(submit(g_body, n) == OD_CMD_NACK);
+    CHECK(nacked(NFC_ERR_CHUNK_NO_START));
+    CHECK(submit(end, 1u) == OD_CMD_NACK);
+    CHECK(nacked(NFC_ERR_CHUNK_NO_START));
+    CHECK(fake_nfc_write_calls == 0u);
 
     CASE("a replacement START from a foreign owner takes ownership");
     setup();

@@ -640,7 +640,11 @@ ahead of dispatch.
 
 ### Step 4 — The full shared suite, still dormant
 
-§ 7 in its entirety, including the mutation checks. The suite must fail against a machine with the
+§ 7's unit coverage in full, including the mutation checks. **The corpus half of § 7 is NOT part of
+this step and is assigned to step 8**, because a `target-production` vector reaches the machine
+through dispatch and dispatch still routes `0x0083` to each target's `od_cmd_app_nfc` until then.
+Writing those vectors now would either exercise the target handlers this phase is replacing, or
+require the reroute this plan deliberately defers past the per-target hardware gates. The suite must fail against a machine with the
 owner check removed, with the 32-bit widening reverted (see § 7 for the input that makes that
 observable), with the retryable short END converted to
 a reset, and with the reply-failure unwind removed.
@@ -825,9 +829,11 @@ verdict and assembler outcome asserted for each.
 **Capability-off.** Every sub-command answers nothing, returns `OD_CMD_UNKNOWN`, stamps no
 activity, calls no seam; `nm` shows no assembler symbol and no seam reference.
 
-**Corpus.** `tests/vectors/dispatch.json` gains `target-production` NFC vectors driven through
-`corpus_profile_nordic.c` and `corpus_profile_silabs.c`, and the ESP32 silence as its own vector.
-This closes § 3.5's remaining gaps from the wire end as well as the unit end.
+**Corpus — at step 8, not step 4.** `tests/vectors/dispatch.json` gains `target-production` NFC
+vectors driven through `corpus_profile_nordic.c` and `corpus_profile_silabs.c`, and the ESP32
+silence as its own vector. This closes § 3.5's remaining gaps from the wire end as well as the unit
+end. It lands with the dispatch reroute because that is what makes a vector reach the shared
+machine at all; before it, the same vectors would pin the target handlers being deleted.
 
 **Mutation checks.** Per step 4, each of: owner check removed, 32-bit widening reverted, short-END
 retry converted to a reset, reply-failure unwind removed, capability-off arm allocating the
