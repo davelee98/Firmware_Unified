@@ -427,7 +427,8 @@ add_test(NAME dispatch_route COMMAND od_dispatch_route_test)
 # target, so a shared reset would race one and reorder the other), and the session must go through
 # od_session_clear() rather than a memset, or its prepared HAL key slot is stranded in a finite
 # pool with nothing left naming it.
-add_executable(od_core_reset_test core_reset_test.c od_xfer_app_test_stub.c od_log_test_stub.c)
+add_executable(od_core_reset_test core_reset_test.c od_xfer_app_test_stub.c od_log_test_stub.c
+    od_nfc_app_test_stub.c)
 target_link_libraries(od_core_reset_test od_session_fake)
 add_test(NAME core_reset COMMAND od_core_reset_test)
 

@@ -1,4 +1,5 @@
 #include "opendisplay_ble.h"
+#include "od_nfc_app.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_display.h"
 #include "opendisplay_led.h"
@@ -2162,4 +2163,22 @@ bool opendisplay_ble_nfc_write(uint8_t type, const uint8_t *data, uint16_t data_
   GPIO_PinModeSet(s_od_nfc_scl_port, s_od_nfc_scl_pin, gpioModeInput, 1);
   GPIO_PinModeSet(s_od_nfc_sda_port, s_od_nfc_sda_pin, gpioModeInput, 1);
   return ok;
+}
+
+/* ---------------------------------------------------------------- od_nfc_app seam, temporary ---
+ *
+ * The shared 0x83 machine is linked from the commit that adds it, because od_core_reset() names
+ * its reset -- but this target's handler still owns the wire until its own cutover. Until then the
+ * seam forwards to the adapter above rather than replacing its name, so both callers work and
+ * neither build depends on the linker discarding an unreferenced machine.
+ *
+ * DELETED AT THIS TARGET'S CUTOVER, when the adapter takes the seam names for real. */
+bool od_nfc_app_read(uint8_t *type, uint8_t *data, uint16_t *len_io, uint16_t cap)
+{
+    return opendisplay_ble_nfc_read(type, data, len_io, cap);
+}
+
+bool od_nfc_app_write(uint8_t type, const uint8_t *data, uint16_t len)
+{
+    return opendisplay_ble_nfc_write(type, data, len);
 }

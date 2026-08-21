@@ -17,6 +17,8 @@
 #include "opendisplay_led.h"
 #include "opendisplay_pipe.h"
 
+#include "od_nfc_app.h"
+
 #include <string.h>
 
 bool fake_silabs_store_ok;
@@ -235,3 +237,16 @@ void opendisplay_pipe_reset_transport(void)
 void sl_bt_run(void) { }
 #endif
 void NVIC_SystemReset(void) { ++fake_silabs_resets; }
+
+/* od_nfc_app seam, temporary -- mirrors the forwarder the production adapter carries until this
+ * target's cutover. The shared machine is linked from the moment od_core_reset() names its reset,
+ * so every binary holding this fake has to resolve the seam whether it exercises NFC or not. */
+bool od_nfc_app_read(uint8_t *type, uint8_t *data, uint16_t *len_io, uint16_t cap)
+{
+    return opendisplay_ble_nfc_read(type, data, len_io, cap);
+}
+
+bool od_nfc_app_write(uint8_t type, const uint8_t *data, uint16_t len)
+{
+    return opendisplay_ble_nfc_write(type, data, len);
+}

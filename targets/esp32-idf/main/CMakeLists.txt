@@ -250,7 +250,11 @@ endif()
 # Arduino/PlatformIO plumbing (ARDUINO_USB_*, board_build.*) which became sdkconfig instead.
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
     ${OD_BOARD_DEFINES}
-    OD_XFER_DIRECT_AUTO_END=1)
+    OD_XFER_DIRECT_AUTO_END=1
+    # This target has no tag. It must be set HERE, with the commit that adds od_nfc.c to the
+    # aggregate: od_core_reset() names od_nfc_reset(), so the machine is linked from that moment
+    # and a capability-on build would demand an od_nfc_app implementation ESP32 has never had.
+    OD_CAP_NFC=0)
 
 # FastEPD selects its IO backend with `#ifdef ARDUINO / #elif defined(__LINUX__)`. Under IDF
 # NEITHER was defined, so every it8951 transport function in FastEPD.inl compiled to an EMPTY
