@@ -1,4 +1,15 @@
-# Transfer-plane promotion plan
+# Transfer-plane promotion plan — SUPERSEDED
+
+> **This plan is superseded in full and is retained as a reference, not as work to do.**
+> Its remaining phases are owned by two successor documents:
+> [`PLAN_TRANSFER_PHASE3_2026-08-20.md`](PLAN_TRANSFER_PHASE3_2026-08-20.md) (PIPE) and
+> [`PLAN_TRANSFER_PHASE45_2026-08-20.md`](PLAN_TRANSFER_PHASE45_2026-08-20.md) (NFC, plus cleanup
+> and release evidence). Where a successor and this file disagree, the successor wins.
+>
+> What survives here is the frozen reference both successors inherit rather than restate: § 4's
+> wire and lifecycle freeze, § 5's architecture rules, § 7's commit discipline, § 8's software and
+> hardware gates, § 9's measurements, § 10's stop conditions and § 11's definition of done. Read
+> those here; read everything else in the successor that owns it.
 
 **Original date:** 2026-08-17
 
@@ -10,6 +21,10 @@
 
 **Phase 3 delegation:** 2026-08-20 — Phase 3 is now owned by
 [`PLAN_TRANSFER_PHASE3_2026-08-20.md`](PLAN_TRANSFER_PHASE3_2026-08-20.md).
+
+**Phase 4/5 delegation:** 2026-08-20 — Phases 4 and 5 are now owned by
+[`PLAN_TRANSFER_PHASE45_2026-08-20.md`](PLAN_TRANSFER_PHASE45_2026-08-20.md). With that, every
+phase of this plan is either landed or delegated, and nothing here is live work.
 
 **Status:** Phase 1 landed on `main` at `a9a4ac5` and its hardware gate was marked cleared on
 2026-08-18 in `docs/HARDWARE_VERIFICATION_CHECKLIST.md`. Phase 2's dormant shared machine landed
@@ -36,15 +51,18 @@ qualified. And Phase 2's per-target hardware rows must be closed — or explicit
 unavailable against a named board — because Phase 3 deletes the only reference PIPE
 implementations that exist, including the two-machine arbitration Phase 2 introduced.
 
-This is the active plan for the remaining transfer-plane work. It supersedes the transfer sequence
-in `PLAN_MIGRATION_ENDGAME_2026-08-17.md` and the geometry/compression phases in the original
-version of this file. The detailed C14 and color plans remain the record of what already landed.
+This is no longer the active plan for any transfer-plane work; the two successor documents named
+at the top own all of it. It still supersedes the transfer sequence in
+`PLAN_MIGRATION_ENDGAME_2026-08-17.md` and the geometry/compression phases in the original version
+of this file. The detailed C14 and color plans remain the record of what already landed.
 **Phase 3 (PIPE) is delegated in full** to
 [`PLAN_TRANSFER_PHASE3_2026-08-20.md`](PLAN_TRANSFER_PHASE3_2026-08-20.md), which owns its
 decisions, staging, cutovers, tests and gates; the § 6 Phase 3 section below is superseded and
-retained only as a pointer. Phases 4 (NFC) and 5 (cleanup and release evidence) stay here until
-Phase 3 nears completion, as do § 4's wire freeze, § 5's architecture rules and § 7-§ 11's
-cross-phase gates, which all three remaining phases share.
+retained only as a pointer. **Phases 4 (NFC) and 5 (cleanup and release evidence) are likewise
+delegated in full** to
+[`PLAN_TRANSFER_PHASE45_2026-08-20.md`](PLAN_TRANSFER_PHASE45_2026-08-20.md), and their § 6
+sections below are pointers too. What remains here for both successors to read rather than restate
+is § 4's wire freeze, § 5's architecture rules and § 7-§ 11's cross-phase gates.
 
 ### Implementation checkpoint — 2026-08-18
 
@@ -1011,37 +1029,40 @@ qualified, Phase 2's per-target hardware rows closed or explicitly recorded as u
 pre-promotion `xiao_nrf52840` PIPE reference rows captured, the small-tail stall reproduced or
 retired with a transcript, and the compression-admission divergence decided.
 
-### Phase 4 — promote NFC independently
+### Phase 4 — promote NFC — SUPERSEDED
 
-1. Add `OD_CAP_NFC` with Nordic/BG22 enabled and ESP32 disabled.
-2. Add `od_nfc_app.h` adapters over existing controller operations.
-3. Implement parsing, response framing, record validation, 218-byte read cap, 512-byte assembly,
-   owner binding and reset in `od_nfc`.
-4. Reduce each `od_cmd_app_nfc` to a shared call or ESP32's explicit unknown behavior.
-5. Delete Nordic and BG22 command buffers/parsers in the same cutover.
+**Owned by [`PLAN_TRANSFER_PHASE45_2026-08-20.md`](PLAN_TRANSFER_PHASE45_2026-08-20.md).** That
+document is authoritative for every Phase 4 decision, staging step, cutover inventory, test
+obligation and gate. The five numbered steps and the test/hardware paragraphs that stood here have
+been superseded rather than copied — read them there, not here.
 
-Tests cover every subcommand and error; lengths 0, 1, 120, 121, 218, 219, 512 and 513; all record
-types; trailing single-write extensions; zero-length DATA; wrong owner; recycled tag; replacement
-START; short END retry; overflow; read/write failure; reply failure; reset; and encrypted/plain
-read-size equality.
+What it carries forward from this plan and must not be re-decided:
 
-Hardware verifies 218/219 read behavior, inline and 512-byte chunked write, disconnect during
-assembly, hardware failure and independent-reader contents on Nordic/BG22. ESP32 map/symbol tests
-prove no NFC buffers.
+- § 4.5's NFC wire freeze and § 4.1's common handler rules, which it freezes rather than restates;
+- § 5.1's shared-module architecture and § 5.4's two-function `od_nfc_app.h` seam — no NDEF or
+  controller detail crosses it, and no second vtable or registry appears;
+- § 5.5's capability-off requirement that a disabled target link no staging buffer at all;
+- § 5.6's plain-C decision; and
+- § 7's commit discipline, § 8's gates, § 9's measurements and § 10's stop conditions, which it
+  extends rather than replaces.
 
-Exit gate: only controller adaptation remains target-owned and BG22 static RAM is at or below its
-Phase 0 baseline after old buffers are removed.
+What it decides that this plan left open: `{origin, tag}` ownership as a **restoration** of donor
+behaviour both unified ports dropped, the 218-byte read cap as a recorded divergence from the
+donors' 238, 32-bit evaluation of every length bound and the live Nordic overflow that fixes,
+validation order on the inline write, exactly which failures clear the assembler, reply-failure
+unwind semantics and their deliberate inversion of Phase 3's ACK-before-hardware rule, the
+response buffer as a stack local rather than shared static, ESP32's byte-exact silence, and the
+unchanged reservation budget of `1`.
 
-### Phase 5 — cleanup and release evidence
+Its entry preconditions are stated there and are lighter than Phase 3's: NFC shares no state with
+the image-transfer plane, so it does not wait on the Nordic panel SPIM work.
 
-1. Delete obsolete transfer declarations, structs, pump buffers, target constants and build
-   entries after their last caller disappears.
-2. Update `shared/sources.cmake` arrival comments and structural ratchets to reject a second
-   transfer parser, pump, reorder state or NFC assembler.
-3. Re-run the complete software gate and inspect every link map.
-4. Record source and memory deltas by unit, not only for the final squash.
-5. Complete the per-silicon/backend/transport hardware matrix or leave each unavailable row
-   explicitly open; never convert a build into a hardware pass.
+### Phase 5 — cleanup and release evidence — SUPERSEDED
+
+**Owned by [`PLAN_TRANSFER_PHASE45_2026-08-20.md`](PLAN_TRANSFER_PHASE45_2026-08-20.md)**, steps
+10-13, which carry these five items forward as executable steps with a deletion inventory, a
+ratchet-by-ratchet review rule, and the BG22 static-RAM floor named as a frozen decision. § 9's
+measurements and § 11's definition of done remain the acceptance criteria and are read here.
 
 ## 7. Commit structure
 
