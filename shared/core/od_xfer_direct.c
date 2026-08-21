@@ -140,6 +140,7 @@ od_cmd_result_t od_xfer_direct_data_impl(const od_cmd_ctx_t *ctx, od_span_t body
 static od_cmd_result_t finish_refresh(const od_cmd_ctx_t *ctx, od_span_t body)
 {
     od_xfer_state_t *state = od_xfer_state();
+    const od_reply_t owner = state->owner;
     const uint8_t ack[] = { RESP_ACK, RESP_DIRECT_WRITE_END_ACK };
     const uint8_t success[] = { RESP_ACK, RESP_DIRECT_WRITE_REFRESH_SUCCESS };
     const uint8_t timeout[] = { RESP_ACK, RESP_DIRECT_WRITE_REFRESH_TIMEOUT };
@@ -150,13 +151,13 @@ static od_cmd_result_t finish_refresh(const od_cmd_ctx_t *ctx, od_span_t body)
     bool completed = false;
 
     if (od_xfer_reply_app(ctx, ack, (uint16_t)sizeof ack) != OD_TXQ_OK) {
-        od_xfer_app_barrier_abort(&state->owner);
         od_xfer_clear_state();
+        od_xfer_app_barrier_abort(&owner);
         return OD_CMD_NACK;
     }
-    if (od_xfer_app_before_refresh(&state->owner) != OD_XFER_BARRIER_PROCEED) {
-        od_xfer_app_barrier_abort(&state->owner);
+    if (od_xfer_app_before_refresh(&owner) != OD_XFER_BARRIER_PROCEED) {
         od_xfer_clear_state();
+        od_xfer_app_barrier_abort(&owner);
         return OD_CMD_NACK;
     }
     if (!od_xfer_app_refresh(refresh_mode, &completed)) {

@@ -4,6 +4,7 @@
 #include "od_xfer.h"
 #include "od_xfer_app.h"
 #include "od_zlib_inflate.h"
+#include "od_cmd_test_ctx.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -59,14 +60,6 @@ static size_t g_written_n;
 static od_tx_reservation_t g_reservation;
 static const od_reply_t OWNER = { OD_ORIGIN_BLE, 7u };
 static const od_reply_t OTHER = { OD_ORIGIN_LAN_PLAIN, 9u };
-
-static od_cmd_ctx_t make_ctx(od_reply_t owner)
-{
-    od_cmd_ctx_t ctx;
-    ctx.rp = owner;
-    ctx.r = &g_reservation;
-    return ctx;
-}
 
 static od_txq_status_t record_reply(bool plain, const uint8_t *frame, uint16_t len)
 {
@@ -284,9 +277,10 @@ static size_t make_stored(od_span_t plain, uint8_t *out)
 
 static void test_raw_direct(void)
 {
-    od_cmd_ctx_t owner = make_ctx(OWNER);
-    od_cmd_ctx_t other = make_ctx(OTHER);
-    od_cmd_ctx_t stale = make_ctx((od_reply_t){ OD_ORIGIN_BLE, 8u });
+    od_cmd_ctx_t owner = od_test_cmd_ctx(OWNER, &g_reservation, 2u, false);
+    od_cmd_ctx_t other = od_test_cmd_ctx(OTHER, &g_reservation, 2u, false);
+    od_cmd_ctx_t stale = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE, 8u },
+                                         &g_reservation, 2u, false);
     od_reply_t recorded_owner;
     uint32_t started_ms = 0u;
     uint8_t tolerated[3] = { 1u, 2u, 3u };
@@ -323,7 +317,7 @@ static void test_raw_direct(void)
 
 static void test_start_boundaries(void)
 {
-    od_cmd_ctx_t owner = make_ctx(OWNER);
+    od_cmd_ctx_t owner = od_test_cmd_ctx(OWNER, &g_reservation, 2u, false);
     uint8_t body[5] = { 4u, 0u, 0u, 0u, 0x18u };
     size_t n;
 
@@ -353,7 +347,7 @@ static void test_start_boundaries(void)
 
 static void test_short_write_and_barrier(void)
 {
-    od_cmd_ctx_t owner = make_ctx(OWNER);
+    od_cmd_ctx_t owner = od_test_cmd_ctx(OWNER, &g_reservation, 2u, false);
     uint8_t data[2] = { 1u, 2u };
 
     CASE("short write is plain refusal");
@@ -414,7 +408,7 @@ static void complete_raw_direct(const od_cmd_ctx_t *owner, od_span_t end)
 
 static void test_end_and_refresh_boundaries(void)
 {
-    od_cmd_ctx_t owner = make_ctx(OWNER);
+    od_cmd_ctx_t owner = od_test_cmd_ctx(OWNER, &g_reservation, 2u, false);
     uint8_t end[6] = { 0u, 0x11u, 0x22u, 0x33u, 0x44u, 0x55u };
     size_t n;
 
@@ -453,7 +447,7 @@ static void test_end_and_refresh_boundaries(void)
 
 static void test_compressed_direct(void)
 {
-    od_cmd_ctx_t owner = make_ctx(OWNER);
+    od_cmd_ctx_t owner = od_test_cmd_ctx(OWNER, &g_reservation, 2u, false);
     uint8_t plain[4] = { 0x21u, 0x22u, 0x23u, 0x24u };
     uint8_t start[32];
     size_t compressed_n;
@@ -475,7 +469,7 @@ static void test_compressed_direct(void)
 
 static void test_controller_planes_incomplete(void)
 {
-    od_cmd_ctx_t owner = make_ctx(OWNER);
+    od_cmd_ctx_t owner = od_test_cmd_ctx(OWNER, &g_reservation, 2u, false);
     uint8_t short_planes[7] = { 1u, 2u, 3u, 4u, 5u, 6u, 7u };
 
     CASE("controller-plane geometry and incomplete END");
@@ -510,7 +504,7 @@ static void make_partial_start(uint8_t out[17], uint8_t flags, uint32_t old_etag
 
 static void test_partial(void)
 {
-    od_cmd_ctx_t owner = make_ctx(OWNER);
+    od_cmd_ctx_t owner = od_test_cmd_ctx(OWNER, &g_reservation, 2u, false);
     uint8_t start[17];
     uint8_t a = 0xA5u;
     uint8_t b = 0x5Au;
@@ -546,7 +540,7 @@ static void test_partial(void)
 
 static void test_partial_end_boundaries(void)
 {
-    od_cmd_ctx_t owner = make_ctx(OWNER);
+    od_cmd_ctx_t owner = od_test_cmd_ctx(OWNER, &g_reservation, 2u, false);
     uint8_t start[17];
     uint8_t data[2] = { 0xA5u, 0x5Au };
     uint8_t end[2] = { 0u, 0u };
@@ -580,7 +574,7 @@ static void test_partial_end_boundaries(void)
 
 static void test_partial_compressed_and_boundaries(void)
 {
-    od_cmd_ctx_t owner = make_ctx(OWNER);
+    od_cmd_ctx_t owner = od_test_cmd_ctx(OWNER, &g_reservation, 2u, false);
     uint8_t start[17];
     uint8_t plain[8] = { 0xA5u, 0x5Au, 1u, 2u, 3u, 4u, 5u, 6u };
     uint8_t compressed[32];
@@ -611,7 +605,7 @@ static void test_partial_compressed_and_boundaries(void)
 
 static void test_short_consumption_range(void)
 {
-    od_cmd_ctx_t owner = make_ctx(OWNER);
+    od_cmd_ctx_t owner = od_test_cmd_ctx(OWNER, &g_reservation, 2u, false);
     uint8_t data[4] = { 1u, 2u, 3u, 4u };
     uint32_t consumed;
 
@@ -627,7 +621,7 @@ static void test_short_consumption_range(void)
 
 static void test_reset_and_geometry(void)
 {
-    od_cmd_ctx_t owner = make_ctx(OWNER);
+    od_cmd_ctx_t owner = od_test_cmd_ctx(OWNER, &g_reservation, 2u, false);
 
     CASE("geometry rejected before activation");
     setup();

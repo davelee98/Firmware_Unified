@@ -397,26 +397,29 @@ is the argument for owning the backend. bb_epaper is down to 3 `OD-PATCH` sites,
 files genuinely compiled: `bb_ep.inl` (the `epd42yr2_init_full` duplicate-symbol fix, and the
 BUSY-wait timeout warning from 3.6) and `bb_epaper.h` (`delay(int)` → `delay(long)`).
 
-### 3.10 Compressed legacy direct write is no longer gated on the streaming-decompression capability, but compressed PIPE still is — *Nordic; wire-visible inconsistency*
+### 3.10 ~~Compressed legacy direct write and PIPE disagree on the streaming-decompression capability~~ — resolved 2026-08-20
 
-**Status:** open. **Evidence:** `verified` by reading the two paths, 2026-08-19; not reproduced on
-hardware.
+The capability is advisory. Shared PIPE admits compression without consulting the target config,
+matching shared legacy direct write. The host may use the bit to choose compression, but firmware
+does not treat its absence as a refusal condition. Transfer Phase 3 pins that decision in the
+shared production-machine tests; the Nordic hardware row remains open until compressed PIPE is run
+on a config without the bit.
 
-Before Transfer Phase 2 step 11, a compressed `0x70` START on `nordic-zephyr` reached
-`opendisplay_display_direct_write_start()`, which refuses compression when the parsed display
-config does not set `TRANSMISSION_MODE_STREAMING_DECOMPRESSION`
-(`targets/nordic-zephyr/src/opendisplay_display.cpp:1314`). `0x70` now routes to shared
-`od_xfer`, and `shared/core/od_xfer_direct.c` applies no such gate — a 4-byte size prefix simply
-means compressed. PIPE keeps the old behaviour: `opendisplay_display_pipe_full_start()` still
-funnels into `direct_write_start()`, so the gate still bites there.
+### 3.11 Nordic POWER_OFF comment disagrees with the handler-NACK activity policy
 
-So on a device whose config lacks that bit, a compressed legacy direct write is now accepted while
-a compressed PIPE upload of the same image is refused. Decide which is correct and make both agree:
-either the capability is a real constraint (restore the gate inside shared `od_xfer`, keyed off
-`od_xfer_app_panel_info()` rather than a target global) or it is advisory and PIPE should stop
-enforcing it. Whichever way, the host reads that bit to decide whether to compress at all
-(`py-opendisplay` `device.py`, `supports_zip or supports_streaming_decompression`), so a device
-that answers inconsistently makes the host's choice look arbitrary.
+**Status:** open. **Evidence:** `verified` by reading the command and frame-policy paths,
+2026-08-20; no hardware run needed to establish the mismatch.
+
+`targets/nordic-zephyr/src/od_cmd_device.c` says the recognized-but-unsupported `0x0052`
+POWER_OFF NACK must not stamp activity and that `od_frame_policy()` gives
+`OD_FRAME_HANDLER_NACK` no stamp. The implementation says the opposite:
+`od_cmd_app_power_off()` returns `OD_CMD_NACK`, dispatch maps that result to
+`OD_FRAME_HANDLER_NACK`, and the policy stamps activity and resets the authentication-abuse run.
+
+The runtime path is internally consistent; the comment and its stated intent are not. Decide
+whether recognized unsupported commands should retain the current handler-NACK policy. If so,
+correct the comment. If not, make the broader frame-policy change with tests for every handler
+NACK consumer. Transfer Phase 3 preserves the current policy and does not resolve this item.
 
 ### 3.4 Already tracked elsewhere — pointers only
 

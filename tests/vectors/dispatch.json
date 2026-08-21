@@ -406,6 +406,84 @@
       }
     },
     {
+      "id": "dispatch/pipe-start-unsupported-nack",
+      "dir": "h2d",
+      "frame": "0080",
+      "state": {
+        "sec_enabled": false,
+        "session": null
+      },
+      "expect": {
+        "reply": "ff800400",
+        "note": "Transfer Phase 3 D9: a target compiled without PIPE preserves BG22's four-byte START capability refusal. DATA and END remain genuinely unknown and silent in the following vectors."
+      },
+      "min_protocol": "2.0",
+      "requires": [],
+      "forbids": [
+        "cap_pipe"
+      ],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/core/od_pipe.c"
+      }
+    },
+    {
+      "id": "dispatch/pipe-data-unsupported-silence",
+      "dir": "h2d",
+      "frame": "0081",
+      "state": {
+        "sec_enabled": false,
+        "session": null
+      },
+      "expect": {
+        "reply": null,
+        "note": "Transfer Phase 3 D9: PIPE DATA is an unknown opcode on a capability-off build and emits nothing."
+      },
+      "min_protocol": "2.0",
+      "requires": [],
+      "forbids": [
+        "cap_pipe"
+      ],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/core/od_pipe.c"
+      }
+    },
+    {
+      "id": "dispatch/pipe-end-unsupported-silence",
+      "dir": "h2d",
+      "frame": "0082",
+      "state": {
+        "sec_enabled": false,
+        "session": null
+      },
+      "expect": {
+        "reply": null,
+        "note": "Transfer Phase 3 D9: PIPE END is an unknown opcode on a capability-off build and emits nothing."
+      },
+      "min_protocol": "2.0",
+      "requires": [],
+      "forbids": [
+        "cap_pipe"
+      ],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/core/od_pipe.c"
+      }
+    },
+    {
       "id": "dispatch/power-off-unsupported-nack",
       "dir": "h2d",
       "frame": "0052",

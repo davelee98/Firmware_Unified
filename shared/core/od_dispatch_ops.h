@@ -30,9 +30,9 @@
     X(CMD_LED_STOP,            od_cmd_app_led_stop,        1u)                       \
     X(CMD_PARTIAL_WRITE_START, od_xfer_partial_start,      1u)                       \
     X(CMD_BUZZER,              od_cmd_app_buzzer,          1u)                       \
-    X(CMD_PIPE_WRITE_START,    od_cmd_app_pipe_start,      1u)                       \
-    X(CMD_PIPE_WRITE_DATA,     od_cmd_app_pipe_data,       (OD_CAP_PIPE ? 3u : 1u))  \
-    X(CMD_PIPE_WRITE_END,      od_cmd_app_pipe_end,        (OD_CAP_PIPE ? 3u : 1u))  \
+    X(CMD_PIPE_WRITE_START,    od_pipe_start,              1u)                       \
+    X(CMD_PIPE_WRITE_DATA,     od_pipe_data,               (OD_CAP_PIPE ? 3u : 1u))  \
+    X(CMD_PIPE_WRITE_END,      od_pipe_end,                (OD_CAP_PIPE ? 3u : 1u))  \
     X(CMD_NFC_ENDPOINT,        od_cmd_app_nfc,             1u)
 
 #endif /* OD_DISPATCH_OPS_H */

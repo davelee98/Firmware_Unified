@@ -1,6 +1,7 @@
 #include "od_color.h"
 #include "od_inflate_app.h"
 #include "od_session_app.h"
+#include "od_cmd_test_ctx.h"
 #include "od_xfer.h"
 #include "od_xfer_app.h"
 #include "od_zlib_inflate.h"
@@ -96,14 +97,12 @@ static int drain_all(void)
 static int run_start(bool valid_panel)
 {
     od_tx_reservation_t reservation;
-    od_cmd_ctx_t ctx;
+    od_cmd_ctx_t ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE, 7u },
+                                        &reservation, 2u, false);
 
     clear_sent();
     g_panel_ok = valid_panel;
     if (od_txq_reserve(1u, &reservation) != OD_TXQ_OK) return 0;
-    ctx.rp.origin = OD_ORIGIN_BLE;
-    ctx.rp.tag = 7u;
-    ctx.r = &reservation;
     if (od_xfer_direct_start(&ctx, od_span_none())
         != (valid_panel ? OD_CMD_OK : OD_CMD_NACK)) return 0;
     od_txq_release(&reservation);
@@ -113,17 +112,15 @@ static int run_start(bool valid_panel)
 static int run_complete(bool completed)
 {
     od_tx_reservation_t reservation;
-    od_cmd_ctx_t ctx;
+    od_cmd_ctx_t ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE, 7u },
+                                        &reservation, 2u, false);
     uint8_t data[4] = { 1u, 2u, 3u, 4u };
 
     clear_sent();
     g_panel_ok = true;
     g_refresh_completed = completed;
-    ctx.rp.origin = OD_ORIGIN_BLE;
-    ctx.rp.tag = 7u;
 
     if (od_txq_reserve(1u, &reservation) != OD_TXQ_OK) return 0;
-    ctx.r = &reservation;
     if (od_xfer_direct_start(&ctx, od_span_none()) != OD_CMD_OK) return 0;
     od_txq_release(&reservation);
     if (!drain_all()) return 0;

@@ -10,8 +10,8 @@
  * here would race the first and reorder the second. RX teardown stays with the target that knows
  * its producer.
  *
- * TARGET TRANSFER, DISPLAY, CONFIG AND NFC STATE IS ALSO THE TARGET'S. Those are not shared
- * objects and this cannot see them -- the call sites run their own resets alongside this one.
+ * Target display, config and NFC state remains target-owned. Shared transfer state is reset here
+ * before any queued reply or session key can be discarded.
  *
  * CONSUMER CONTEXT ONLY. Never from a stack callback: it cancels a producer and drops queued
  * frames, both of which the consumer may be inside.
@@ -24,7 +24,8 @@
 extern "C" {
 #endif
 
-/* Cancel the config-read producer, drop every queued response, and clear the app session.
+/* Reset transfer state, cancel the config-read producer, drop queued responses, and clear the
+ * app session.
  *
  * The session goes through od_session_clear(), never a memset: clear also releases the HAL key
  * slot and preserves the slot index, and a memset would strand a prepared key in a finite pool. */

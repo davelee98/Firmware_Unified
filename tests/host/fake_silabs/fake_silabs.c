@@ -211,8 +211,7 @@ void opendisplay_pipe_abort_xfer_barrier(uint32_t tag)
 void opendisplay_pipe_reset_transport(void)
 {
     ++fake_silabs_resets;
-    if (od_xfer_active()) od_xfer_reset();
-    else opendisplay_display_abort();
+    if (!od_xfer_frames_may_arrive()) opendisplay_display_abort();
     od_core_reset();
 }
 void sl_bt_run(void) { }

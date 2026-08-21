@@ -93,3 +93,10 @@ dependencies.lock
 # `git add -A` swept them back in.
 __pycache__/
 *.py[cod]
+
+# Agent mailboxes (CLAUDE.md § "Agent mailbox"). Working files for asynchronous Claude-Codex
+# handoffs, not repository content: they carry in-flight review traffic that the plans, FEEDBACK_*
+# notes and commit messages record properly once a message is acted on. Tracking them would put
+# every draft exchange in the history and make two agents editing their own file a merge conflict.
+plans/CLAUDE_TO_CODEX.md
+plans/CODEX_TO_CLAUDE.md

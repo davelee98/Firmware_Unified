@@ -248,7 +248,6 @@ target_sources(app PRIVATE
   ${SRC_DIR}/od_session_app.c
   ${SRC_DIR}/od_hal_radio.c
   ${SRC_DIR}/od_cmd_reply.c
-  ${SRC_DIR}/opendisplay_pipe_write.cpp
   ${SRC_DIR}/opendisplay_cs.c
   ${SRC_DIR}/opendisplay_nfc.c
   ${SRC_DIR}/factory_config.c

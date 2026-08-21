@@ -61,6 +61,25 @@ void od_xfer_reply_partial_error(const od_cmd_ctx_t *ctx, uint8_t opcode, uint8_
 void od_xfer_stream_reset(uint32_t expected_bytes);
 bool od_xfer_stream_push(od_span_t input, bool final);
 
+/* Reply-free PIPE operations. od_pipe owns every wire byte; this module owns the transfer,
+ * accounting, inflater, panel lifecycle and etag. */
+bool od_xfer_pipe_arm_full(const od_cmd_ctx_t *ctx, uint32_t total, bool compressed);
+#if OD_CAP_PARTIAL
+bool od_xfer_pipe_arm_partial(const od_cmd_ctx_t *ctx, uint32_t total, bool compressed,
+                              uint32_t old_etag, uint16_t x, uint16_t y,
+                              uint16_t width, uint16_t height, uint8_t *err_out);
+#endif
+bool od_xfer_pipe_activate(void);
+bool od_xfer_pipe_consume(od_span_t payload);
+bool od_xfer_pipe_finalize(void);
+bool od_xfer_pipe_complete(void);
+void od_xfer_pipe_enter_fatal(void);
+od_xfer_barrier_t od_xfer_pipe_before_refresh(void);
+void od_xfer_pipe_barrier_abort(void);
+bool od_xfer_pipe_refresh(uint8_t mode, bool has_new_etag, uint32_t new_etag,
+                          bool *completed);
+void od_pipe_reset_state(void);
+
 od_cmd_result_t od_xfer_direct_data_impl(const od_cmd_ctx_t *ctx, od_span_t body);
 od_cmd_result_t od_xfer_direct_end_impl(const od_cmd_ctx_t *ctx, od_span_t body);
 #if OD_CAP_PARTIAL

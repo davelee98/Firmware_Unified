@@ -173,6 +173,7 @@ set(OD_SHARED_SOURCES_APP_XFER
     "${CMAKE_CURRENT_LIST_DIR}/core/od_xfer.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_xfer_direct.c"
     "${CMAKE_CURRENT_LIST_DIR}/core/od_xfer_partial.c"
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_pipe.c"
 )
 
 # HAL_LOG owns portable record formatting. Enabled targets must implement od_hal_log and

@@ -1,7 +1,7 @@
 /* zephyr/kernel.h -- host stand-in, the sliver of it the PIPE-write module uses.
  *
  * Two primitives, between the two Nordic sources tests/host compiles. k_msleep() is the 20 ms
- * opendisplay_pipe_write.cpp waits for a queued END ack to reach the air before a refresh blocks
+ * the shared PIPE path waits for a queued END ack to reach the air before a refresh blocks
  * the thread -- on the host a counter, so a test can assert the barrier happened without spending
  * the time. k_uptime_get_32() is settable, so a timestamp can be pinned rather than raced.
  */

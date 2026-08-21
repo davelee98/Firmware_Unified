@@ -2,6 +2,7 @@
 
 #include "fake_silabs.h"
 #include "od_cmd_app.h"
+#include "od_cmd_test_ctx.h"
 #include "od_config_read.h"
 #include "od_reply.h"
 #include "od_session.h"
@@ -100,26 +101,20 @@ static void authenticate(void)
     CHECK(od_session_authenticated(&g_session));
 }
 
-static od_cmd_ctx_t reserve_ctx(uint8_t budget, od_tx_reservation_t *r)
-{
-    od_cmd_ctx_t ctx;
-    CHECK(od_txq_reserve(budget, r) == OD_TXQ_OK);
-    ctx.rp.origin = OD_ORIGIN_BLE;
-    ctx.rp.tag = opendisplay_pipe_connection_tag();
-    ctx.r = r;
-    return ctx;
-}
-
 static void test_config_persist_before_queue(void)
 {
     const uint8_t config[] = { 0x55u };
     od_tx_reservation_t r;
-    od_cmd_ctx_t ctx;
+    od_cmd_ctx_t ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE, 0u },
+                                        &r, 0u, false);
 
     CASE("config success persists before queue, then reloads before clearing the old session");
     setup();
     authenticate();
-    ctx = reserve_ctx(1u, &r);
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE,
+                                         opendisplay_pipe_connection_tag() },
+                          &r, 2u, false);
     CHECK(od_cmd_app_config_write(&ctx, od_span_make(config, sizeof config)) == OD_CMD_OK);
     od_txq_release(&r);
     CHECK(fake_silabs_store_attempts == 1u);
@@ -142,7 +137,10 @@ static void test_config_persist_before_queue(void)
     fake_silabs_store_blob[0] = 0xa5u;
     fake_silabs_store_len = 1u;
     fake_silabs_store_ok = false;
-    ctx = reserve_ctx(1u, &r);
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE,
+                                         opendisplay_pipe_connection_tag() },
+                          &r, 2u, false);
     CHECK(od_cmd_app_config_write(&ctx, od_span_make(config, sizeof config)) == OD_CMD_NACK);
     od_txq_release(&r);
     CHECK(fake_silabs_store_attempts == 1u);
@@ -162,7 +160,10 @@ static void test_config_persist_before_queue(void)
     authenticate();
     fake_silabs_store_blob[0] = 0x5au;
     fake_silabs_store_len = 1u;
-    ctx = reserve_ctx(1u, &r);
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE,
+                                         opendisplay_pipe_connection_tag() },
+                          &r, 2u, false);
     CHECK(od_cmd_app_config_clear(&ctx, od_span_make(NULL, 0u)) == OD_CMD_OK);
     od_txq_release(&r);
     CHECK(fake_silabs_store_clears == 1u);
@@ -177,7 +178,10 @@ static void test_config_persist_before_queue(void)
     fake_silabs_store_blob[0] = 0x5au;
     fake_silabs_store_len = 1u;
     fake_silabs_store_ok = false;
-    ctx = reserve_ctx(1u, &r);
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE,
+                                         opendisplay_pipe_connection_tag() },
+                          &r, 2u, false);
     CHECK(od_cmd_app_config_clear(&ctx, od_span_make(NULL, 0u)) == OD_CMD_NACK);
     od_txq_release(&r);
     CHECK(fake_silabs_store_clears == 0u);
@@ -195,12 +199,16 @@ static void test_nfc_exact_limit(void)
 {
     const uint8_t read[] = { NFC_SUB_READ };
     od_tx_reservation_t r;
-    od_cmd_ctx_t ctx;
+    od_cmd_ctx_t ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE, 0u },
+                                        &r, 0u, false);
 
     CASE("an NFC record of exactly 218 bytes produces the 224-byte maximum plaintext frame");
     setup();
     fake_silabs_nfc_read_len = 218u;
-    ctx = reserve_ctx(1u, &r);
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE,
+                                         opendisplay_pipe_connection_tag() },
+                          &r, 2u, false);
     CHECK(od_cmd_app_nfc(&ctx, od_span_make(read, sizeof read)) == OD_CMD_OK);
     od_txq_release(&r);
     CHECK(od_txq_process() == 1u);
@@ -212,7 +220,10 @@ static void test_nfc_exact_limit(void)
     CASE("219-byte NFC data is refused instead of truncated to a successful reply");
     setup();
     fake_silabs_nfc_read_len = 219u;
-    ctx = reserve_ctx(1u, &r);
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE,
+                                         opendisplay_pipe_connection_tag() },
+                          &r, 2u, false);
     CHECK(od_cmd_app_nfc(&ctx, od_span_make(read, sizeof read)) == OD_CMD_NACK);
     od_txq_release(&r);
     CHECK(od_txq_process() == 1u);
@@ -227,15 +238,24 @@ static void arm_direct_end(od_cmd_ctx_t *ctx, od_tx_reservation_t *r)
     static const uint8_t image[4096];
     od_tx_reservation_t setup_reservation;
 
-    *ctx = reserve_ctx(1u, &setup_reservation);
+    CHECK(od_txq_reserve(1u, &setup_reservation) == OD_TXQ_OK);
+    *ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE,
+                                          opendisplay_pipe_connection_tag() },
+                           &setup_reservation, 2u, false);
     CHECK(od_xfer_direct_start(ctx, od_span_none()) == OD_CMD_OK);
     od_txq_release(&setup_reservation);
     od_txq_reset();
-    *ctx = reserve_ctx(2u, &setup_reservation);
+    CHECK(od_txq_reserve(2u, &setup_reservation) == OD_TXQ_OK);
+    *ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE,
+                                          opendisplay_pipe_connection_tag() },
+                           &setup_reservation, 2u, false);
     CHECK(od_xfer_data(ctx, od_span_make(image, sizeof image)) == OD_CMD_OK);
     od_txq_release(&setup_reservation);
     od_txq_reset();
-    *ctx = reserve_ctx(2u, r);
+    CHECK(od_txq_reserve(2u, r) == OD_TXQ_OK);
+    *ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE,
+                                          opendisplay_pipe_connection_tag() },
+                           r, 2u, false);
 }
 
 static void run_direct_end(od_cmd_ctx_t *ctx, od_tx_reservation_t *r,
@@ -256,7 +276,8 @@ static void replace_connection_on_run(void)
 static void test_direct_end_barrier(void)
 {
     od_tx_reservation_t r;
-    od_cmd_ctx_t ctx;
+    od_cmd_ctx_t ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE, 0u },
+                                        &r, 0u, false);
 
     CASE("stack acceptance alone is insufficient; refresh waits for zero pending packets");
     setup();
@@ -452,7 +473,8 @@ static void exchange_mtu(uint8_t connection, uint16_t mtu)
 static void test_degraded_boot_contracts(void)
 {
     od_tx_reservation_t r;
-    od_cmd_ctx_t ctx;
+    od_cmd_ctx_t ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE, 0u },
+                                        &r, 0u, false);
 
     CASE("no MTU exchange ever happens, and the stack still carries a 224-byte reply");
     /* THE REGRESSION GUARD. The application keeps no MTU mirror, so it cannot refuse on a stale
@@ -461,7 +483,10 @@ static void test_degraded_boot_contracts(void)
      * least 31 bytes, would be dropped on a link that carries 253. */
     setup();
     fake_silabs_nfc_read_len = 218u;
-    ctx = reserve_ctx(1u, &r);
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE,
+                                         opendisplay_pipe_connection_tag() },
+                          &r, 2u, false);
     {
         const uint8_t read[] = { NFC_SUB_READ };
         CHECK(od_cmd_app_nfc(&ctx, od_span_make(read, sizeof read)) == OD_CMD_OK);
@@ -480,7 +505,10 @@ static void test_degraded_boot_contracts(void)
     setup();
     fake_silabs_att_mtu = 30u;          /* value max 27 */
     fake_silabs_nfc_read_len = 100u;
-    ctx = reserve_ctx(1u, &r);
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE,
+                                         opendisplay_pipe_connection_tag() },
+                          &r, 2u, false);
     {
         const uint8_t read[] = { NFC_SUB_READ };
         CHECK(od_cmd_app_nfc(&ctx, od_span_make(read, sizeof read)) == OD_CMD_OK);
@@ -500,7 +528,10 @@ static void test_degraded_boot_contracts(void)
     setup();
     exchange_mtu(7u, 30u);
     fake_silabs_nfc_read_len = 218u;
-    ctx = reserve_ctx(1u, &r);
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE,
+                                         opendisplay_pipe_connection_tag() },
+                          &r, 2u, false);
     {
         const uint8_t read[] = { NFC_SUB_READ };
         CHECK(od_cmd_app_nfc(&ctx, od_span_make(read, sizeof read)) == OD_CMD_OK);
@@ -530,7 +561,10 @@ static void test_degraded_boot_contracts(void)
     authenticate();
     {
         const uint8_t config[] = { 0x55u };
-        ctx = reserve_ctx(1u, &r);
+        CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE,
+                                         opendisplay_pipe_connection_tag() },
+                          &r, 2u, false);
         CHECK(od_cmd_app_config_write(&ctx, od_span_make(config, sizeof config)) == OD_CMD_OK);
         od_txq_release(&r);
         CHECK(fake_silabs_store_saves == 1u);

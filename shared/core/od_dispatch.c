@@ -6,6 +6,7 @@
 #include "od_dispatch_ops.h"
 #include "od_config_read.h"
 #include "od_gate.h"
+#include "od_pipe.h"
 #include "od_reply.h"
 #include "od_session.h"
 #include "od_session_app.h"
@@ -28,7 +29,7 @@ static uint8_t s_plain[OD_SESSION_PLAIN_MAX];
  * a handler that mutates state and then cannot answer looks to the host exactly like a command
  * that never ran.
  *
- * 0x81 is 3 because handlePipeWriteData can emit the data ACK, the END ack AND the refresh status
+ * 0x81 is 3 because od_pipe_data can emit the data ACK, the END ack AND the refresh status
  * in one call. 0x71 is 2 because it emits the data ack OR calls END, never both. The END opcodes
  * are 2: their own ack, then the post-refresh status -- and that reservation is HELD ACROSS THE
  * REFRESH, which is free here because capacity is a counter rather than a parked slot. */
@@ -153,6 +154,7 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
     od_tx_reservation_t r;
     od_frame_outcome_t outcome;
     od_span_t body;
+    bool was_protected = false;
     uint16_t cmd;
 
     if (rp == NULL || !od_span_has(frame, 2u)) {
@@ -206,7 +208,7 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
      * unidentifiable. DISCOVERY rather than ACCEPTED, so a version poll cannot stamp activity and
      * hold the exclusive link indefinitely. */
     if (cmd == CMD_FIRMWARE_VERSION) {
-        const od_cmd_ctx_t ctx = { *rp, &r };
+        const od_cmd_ctx_t ctx = { *rp, &r, (uint16_t)frame.n, false };
         const od_cmd_result_t rc = od_cmd_app_firmware_version(&ctx, body);
         od_txq_release(&r);
         return (rc == OD_CMD_OK) ? OD_FRAME_DISCOVERY : outcome_of(rc);
@@ -229,11 +231,12 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
             return g.outcome;
         }
         body = g.body;
+        was_protected = true;
     }
 
     /* ---- handler ---- */
     {
-        const od_cmd_ctx_t ctx = { *rp, &r };
+        const od_cmd_ctx_t ctx = { *rp, &r, (uint16_t)frame.n, was_protected };
         const od_cmd_result_t rc = dispatch_plain(&ctx, cmd, body);
         od_txq_release(&r);
         return outcome_of(rc);

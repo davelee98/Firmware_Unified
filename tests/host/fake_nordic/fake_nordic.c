@@ -15,7 +15,6 @@
 #include "opendisplay_config_storage.h"
 #include "opendisplay_display.h"
 #include "opendisplay_led.h"
-#include "opendisplay_pipe_write.h"
 
 #include <stdarg.h>
 #include <string.h>
@@ -67,7 +66,6 @@ void fake_nordic_reset(void)
 {
     /* A benign, working device. Every knob a vector cares about is then set from its state,
      * so a vector's declared preconditions are the only thing that differs between runs. */
-    opendisplay_pipe_write_reset();
     fake_disp_data_rc = 0;
     fake_disp_prepare_rc = 0;
     fake_disp_refresh_rc = 0;
@@ -112,78 +110,6 @@ void fake_nordic_reset(void)
 
 /* ------------------------------------------------------------------------------------ panel --- */
 
-int opendisplay_display_direct_write_start(const uint8_t *p, uint16_t n)
-{
-    (void)p; (void)n;
-    if (fake_disp_start_rc == 0) {
-        fake_disp_dw_active = true;
-        fake_disp_written = 0u;
-    }
-    return fake_disp_start_rc;
-}
-
-int opendisplay_display_direct_write_data(const uint8_t *p, uint16_t n)
-{
-    (void)p;
-    if (fake_disp_data_rc != 0) {
-        return fake_disp_data_rc;
-    }
-    fake_disp_written += n;
-    return 0;
-}
-
-int opendisplay_display_direct_write_end_prepare(const uint8_t *p, uint16_t n)
-{
-    (void)p; (void)n;
-    return fake_disp_prepare_rc;
-}
-
-int opendisplay_display_direct_write_end_refresh(const uint8_t *p, uint16_t n, bool *ok)
-{
-    (void)p; (void)n;
-    ++fake_disp_refreshes;
-    if (ok != NULL) {
-        *ok = fake_disp_refresh_ok;
-    }
-    if (fake_disp_refresh_rc == 0) {
-        fake_disp_dw_active = false;
-    }
-    return fake_disp_refresh_rc;
-}
-
-int opendisplay_display_partial_write_start(const uint8_t *p, uint16_t n, uint8_t *err)
-{
-    (void)p; (void)n;
-    if (fake_disp_partial_start_rc != 0 && err != NULL) {
-        *err = fake_disp_partial_err;
-    }
-    return fake_disp_partial_start_rc;
-}
-
-bool     opendisplay_display_partial_active(void)        { return false; }
-bool     opendisplay_display_dw_active(void)             { return fake_disp_dw_active; }
-uint32_t opendisplay_display_bytes_written(void)         { return fake_disp_written; }
-uint32_t opendisplay_display_total_bytes(void)           { return fake_disp_total_bytes; }
-uint32_t opendisplay_display_expected_dw_bytes(void)     { return fake_disp_total_bytes; }
-uint32_t opendisplay_display_displayed_etag(void)        { return 0u; }
-void     opendisplay_display_clear_etag(void)            { }
-void     opendisplay_display_set_partial_new_etag(uint32_t e) { (void)e; }
-uint32_t opendisplay_display_partial_bytes_written(void) { return fake_disp_written; }
-uint32_t opendisplay_display_partial_expected(void)      { return fake_disp_total_bytes; }
-bool     opendisplay_display_partial_compressed(void)    { return false; }
-uint32_t opendisplay_display_calc_plane_bytes(uint16_t w, uint16_t h) { return (uint32_t)w * h; }
-int      opendisplay_display_pipe_full_start(bool c, uint32_t n) { (void)c; (void)n; return 0; }
-
-int opendisplay_display_pipe_partial_arm(uint8_t flags, uint32_t old_etag, uint16_t x, uint16_t y,
-                                         uint16_t w, uint16_t h, uint32_t total, uint8_t *err)
-{
-    (void)flags; (void)old_etag; (void)x; (void)y; (void)w; (void)h; (void)total; (void)err;
-    return 0;
-}
-
-int  opendisplay_display_pipe_partial_prepare(void) { return 0; }
-void opendisplay_display_abort(void)   { ++fake_disp_aborts; fake_disp_dw_active = false;
-                                         fake_disp_written = 0u; }
 bool opendisplay_display_boot_apply(void) { return false; }
 void opendisplay_display_park_pins(void)  { }
 void opendisplay_display_power_off(void)  { }
@@ -192,10 +118,6 @@ void opendisplay_display_power_off(void)  { }
 
 void od_xfer_app_prepare_start(void)
 {
-    if (opendisplay_pipe_write_active()) {
-        opendisplay_display_abort();
-    }
-    opendisplay_pipe_write_reset();
 }
 
 bool od_xfer_app_panel_info(od_xfer_panel_info_t *out)
@@ -253,7 +175,9 @@ od_mut_span_t od_xfer_app_inflate_scratch(void)
 void od_xfer_app_abort(od_xfer_abort_reason_t reason)
 {
     (void)reason;
-    opendisplay_display_abort();
+    ++fake_disp_aborts;
+    fake_disp_dw_active = false;
+    fake_disp_written = 0u;
 }
 
 od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *owner)
@@ -265,7 +189,9 @@ od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *owner)
 void od_xfer_app_barrier_abort(const od_reply_t *owner)
 {
     (void)owner;
-    opendisplay_display_abort();
+    ++fake_disp_aborts;
+    fake_disp_dw_active = false;
+    fake_disp_written = 0u;
 }
 
 bool od_xfer_app_refresh(uint8_t mode, bool *completed)

@@ -47,12 +47,9 @@ extern "C" {
 OD_STATIC_ASSERT(OD_RXQ_VALUE_MAX_BLE <= OD_RXQ_FRAME_MAX,
                  "BLE value admission must fit the RX storage slot");
 
-/* Depth. The target sets this from its own PIPE window -- PIPE_MAX_W + 2, so usable capacity
- * (SLOTS - 1) covers a full window plus its END -- and asserts the relationship where both are
- * visible. shared/ cannot see PIPE_MAX_W, so the default here is the widest window any target
- * runs; a target with a narrower one narrows this with it rather than carrying slots it can never
- * fill. Setting it BELOW the derived value caps the effective window and costs throughput: a
- * deliberate trade, never a link-time discovery. */
+/* Depth. A PIPE-capable profile sets this with OD_PIPE_MAX_W so usable capacity (SLOTS - 1)
+ * covers a full window plus END. od_pipe.h asserts the relationship where both constants are
+ * visible. The default covers the widest supported window. */
 #ifndef OD_RXQ_SLOTS
 #define OD_RXQ_SLOTS 34u
 #endif

@@ -3,6 +3,7 @@
 #include "corpus_runner.h"
 
 #include "fake_silabs.h"
+#include "od_cmd_test_ctx.h"
 #include "od_caps.h"
 #include "od_config_asm.h"
 #include "od_txq.h"
@@ -31,11 +32,8 @@ void od_corpus_profile_reset(const od_vec_t *vec)
     if (vec->xfer_active) {
         static const uint8_t image[4096];
         od_tx_reservation_t reservation;
-        od_cmd_ctx_t ctx;
-
-        ctx.rp.origin = OD_ORIGIN_BLE;
-        ctx.rp.tag = 9u;
-        ctx.r = &reservation;
+        od_cmd_ctx_t ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE, 9u },
+                                            &reservation, 2u, false);
         if (od_txq_reserve(1u, &reservation) == OD_TXQ_OK) {
             (void)od_xfer_direct_start(&ctx, od_span_none());
             od_txq_release(&reservation);

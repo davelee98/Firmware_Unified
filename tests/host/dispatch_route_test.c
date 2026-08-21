@@ -18,6 +18,7 @@
 #include "od_cmd_app.h"
 #include "od_config_read.h"
 #include "od_reply.h"
+#include "od_pipe.h"
 #include "od_session.h"
 #include "od_session_app.h"
 #include "od_xfer.h"
@@ -138,9 +139,9 @@ HOOK(od_xfer_direct_start,        HOOK_DIRECT_START)
 HOOK(od_xfer_data,                HOOK_DIRECT_DATA)
 HOOK(od_xfer_end,                 HOOK_DIRECT_END)
 HOOK(od_xfer_partial_start,       HOOK_PARTIAL_START)
-HOOK(od_cmd_app_pipe_start,       HOOK_PIPE_START)
-HOOK(od_cmd_app_pipe_data,        HOOK_PIPE_DATA)
-HOOK(od_cmd_app_pipe_end,         HOOK_PIPE_END)
+HOOK(od_pipe_start,               HOOK_PIPE_START)
+HOOK(od_pipe_data,                HOOK_PIPE_DATA)
+HOOK(od_pipe_end,                 HOOK_PIPE_END)
 HOOK(od_cmd_app_led_activate,     HOOK_LED_ACTIVATE)
 HOOK(od_cmd_app_led_stop,         HOOK_LED_STOP)
 HOOK(od_cmd_app_buzzer,           HOOK_BUZZER)

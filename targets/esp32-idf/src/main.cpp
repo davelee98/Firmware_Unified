@@ -442,13 +442,10 @@ static void serviceBleDisconnectCleanup() {
     // teardown path here is exactly how the direct-write watchdog once tore down a
     // panel while leaving its pipe session live.
     //
-    // dropLink=false: the link is already gone, which is what the test above
-    // establishes. The abort's own release is its last step, so the slot frees here
-    // rather than at the event -- and the WARM-panel survival the old inline code
-    // relied on is preserved inside the abort (cleanupDirectWriteState no-ops on
-    // WARM). With the slot already unowned this is still worth running: it is
-    // idempotent, and it is what clears a transfer left behind by a session whose
-    // token was released on some other path.
+    // dropLink=false: the link is already gone, which is what the test above establishes. The
+    // abort's own release is its last step, so the slot frees here rather than at the event. With
+    // the slot already unowned this is still worth running: it is idempotent, and it clears a
+    // transfer left behind by a session whose token was released on some other path.
     abortToKnownState("owner disconnected", false, owner);
 }
 

@@ -138,18 +138,6 @@ uint8_t* tcpReceiveBuffer = nullptr;
 uint32_t tcpReceiveBufferPos = 0;
 #endif
 
-// Direct write mode state (bufferless display writing)
-bool directWriteActive = false;  // True when direct write mode is active
-bool directWriteCompressed = false;  // True if using compressed direct write
-bool directWriteBitplanes = false;  // True for controller-plane streams (BWR/BWY/GRAY4)
-uint32_t directWriteBytesWritten = 0;  // Total bytes written to current plane
-uint32_t directWriteDecompressedTotal = 0;  // Expected decompressed size
-uint16_t directWriteWidth = 0;  // Display width in pixels
-uint16_t directWriteHeight = 0;  // Display height in pixels
-uint32_t directWriteTotalBytes = 0;  // Total bytes expected per plane (for bitplanes) or total (for others)
-uint32_t directWriteCompressedReceived = 0;  // Total compressed bytes received for diagnostics/overflow guard
-
-uint32_t directWriteStartTime = 0;  // Timestamp when direct write started (for timeout detection)
 bool displayPowerState = false;  // Track display power state (true = powered on, false = powered off)
 // EPD panel power state machine — single source of truth for panel power. The
 // legacy displayPowerState bool is kept synced: displayPowerState == (pwrmgmState != PWR_OFF).
@@ -203,11 +191,6 @@ od_cmd_result_t handleWriteConfigChunk(const od_cmd_ctx_t *ctx, uint8_t* data, u
 od_cmd_result_t handleFirmwareVersion(const od_cmd_ctx_t *ctx);
 od_cmd_result_t handleReadMSD(const od_cmd_ctx_t *ctx);  // Read Manufacturer Specific Data (MSD) payload
 const char* getFirmwareShaString();
-void cleanupDirectWriteState(bool refreshDisplay);
-od_cmd_result_t handlePipeWriteStart(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
-od_cmd_result_t handlePipeWriteData(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
-od_cmd_result_t handlePipeWriteEnd(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len);
-void resetPipeWriteState(void);
 int mapEpd(int id);
 uint8_t getFirmwareMajor();
 uint8_t getFirmwareMinor();

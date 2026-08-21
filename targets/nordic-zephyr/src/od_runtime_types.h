@@ -6,7 +6,7 @@
  * WHY THIS FILE EXISTS. shared/protocol/opendisplay_structs.h is the single source of truth for
  * every config-packet struct, and it deliberately carries NO in-memory types -- its own header
  * says so: "NO repo-specific values (GPIO pin values, buffer sizes, GlobalConfig,
- * EncryptionSession, ImageData, PipeWriteState, ButtonState). Those move to a repo-local header
+ * EncryptionSession, image-transfer state, ButtonState). Those move to a repo-local header
  * on adoption." This is that header for targets/nordic-zephyr.
  *
  * It replaces src/opendisplay_structs.h, which was a hand-written 319-line SUBSET of the

@@ -5,7 +5,7 @@
  * around its own ring -- so a reset here would race one target and reorder the other. The call
  * sites drain RX themselves, on their own terms.
  *
- * WHAT IS NOT ASSERTED HERE, stated so a green run is not over-read: the ORDER of the three calls.
+ * WHAT IS NOT ASSERTED HERE, stated so a green run is not over-read: the ORDER of the four calls.
  * They run straight-line on the consumer context with nothing interleaved, so no test driving the
  * public API can distinguish one order from another -- swapping the cancel and the reset leaves
  * every assertion below unchanged, verified by mutation. The order is not load-bearing (od_core.c
@@ -15,11 +15,15 @@
 #include "od_core.h"
 
 #include "od_config_read.h"
+#include "od_cmd_test_ctx.h"
 #include "od_reply.h"
 #include "od_rxq.h"
 #include "od_session.h"
 #include "od_session_app.h"
 #include "od_txq.h"
+#include "od_xfer.h"
+#include "od_xfer_app_test_stub.h"
+#include "od_xfer_internal.h"
 #include "session_fake.h"
 
 #include <stdio.h>
@@ -108,6 +112,8 @@ static void setup(void)
     memset(&g_app_session, 0, sizeof g_app_session);
     od_session_init(&g_app_session, 0);
     od_config_read_cancel();
+    od_xfer_reset();
+    od_test_xfer_app_reset();
     od_txq_reset();
     g_sent_n = 0u;
     g_radio_accepts = true;
@@ -115,6 +121,17 @@ static void setup(void)
 
     CHECK(handshake(&g_app_session, g_now_ms, server_nonce, false)
           == OD_SESSION_AUTH_ESTABLISHED);
+}
+
+static void start_an_owned_transfer(void)
+{
+    od_tx_reservation_t reservation = { 0 };
+    od_cmd_ctx_t ctx = od_test_cmd_ctx(BLE, &reservation, 12u, false);
+
+    od_test_xfer_app_set_panel_ready(true);
+    CHECK(od_xfer_pipe_arm_full(&ctx, 32u, false));
+    CHECK(od_xfer_pipe_activate());
+    CHECK(od_xfer_owns_hardware());
 }
 
 /* Start a config read and leave it mid-flight with entries stuck in the queue. */
@@ -132,16 +149,19 @@ static void start_a_stuck_read(void)
 
 /* ----------------------------------------------------------------------------------- cases --- */
 
-static void test_reset_clears_all_three(void)
+static void test_reset_clears_all_four(void)
 {
-    CASE("a reset cancels the producer, empties the queue and clears the session");
+    CASE("a reset clears transfer, producer, queue and session");
     setup();
+    start_an_owned_transfer();
     start_a_stuck_read();
     CHECK(od_session_authenticated(&g_app_session));
 
     od_core_reset();
 
     CHECK(!od_config_read_active());
+    CHECK(!od_xfer_frames_may_arrive());
+    CHECK(od_test_xfer_app_abort_calls() == 1u);
     CHECK(od_txq_depth() == 0u);
     CHECK(od_txq_reserved() == 0u);
     CHECK(!od_session_authenticated(&g_app_session));
@@ -195,6 +215,8 @@ static void test_reset_is_idempotent(void)
     od_core_reset();
 
     CHECK(!od_config_read_active());
+    CHECK(!od_xfer_frames_may_arrive());
+    CHECK(od_test_xfer_app_abort_calls() == 0u);
     CHECK(od_txq_depth() == 0u);
     CHECK(od_txq_reserved() == 0u);
     CHECK(!od_session_authenticated(&g_app_session));
@@ -222,7 +244,7 @@ static void test_no_chunk_survives_the_reset(void)
 
 int main(void)
 {
-    test_reset_clears_all_three();
+    test_reset_clears_all_four();
     test_reset_releases_the_key_slot();
     test_reset_does_not_touch_rx();
     test_reset_is_idempotent();

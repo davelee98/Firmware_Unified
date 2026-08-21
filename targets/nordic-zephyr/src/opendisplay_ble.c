@@ -1035,7 +1035,7 @@ void opendisplay_ble_init(void)
 	 * esp32-idf/main.cpp's "SoftDevice must start before display/SPI; advertising starts
 	 * after boot screen" -- the BT stack is already up (bt_enable() above), but nothing may
 	 * be able to CONNECT yet, because a connected central can push a direct-write immediately,
-	 * and opendisplay_display_direct_write_start() touches the same BBEPDISP s_epd and the
+	 * and the shared transfer adapter touches the same BBEPDISP state and the
 	 * same panel GPIOs/SPI device the boot-display work queue thread is mid-sequence on, with
 	 * no lock between them. A wedge on either side used to surface as a frozen, unpainted
 	 * boot screen with no way to tell why. The timeout keeps a genuinely stuck render from
