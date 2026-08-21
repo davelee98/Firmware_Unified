@@ -225,6 +225,12 @@ in-flight transfer: a malformed, unsupported or size-mismatched BLE START still 
 owner. Capability-off BG22 and D8's LAN refusal are inert exceptions because they do not implement
 or admit PIPE.
 
+One target power-policy detail deliberately differs from the ESP32 donor. Replacing a live partial
+transfer calls `OD_XFER_ABORT_REPLACED`, which releases the panel warm; the donor's shared partial
+cleanup forced it off. The replacement START immediately re-acquires the panel, so preserving the
+warm state avoids a needless power cycle and leaves the donor-compatible displayed etag unchanged.
+Nordic's cleanup is unconditional and therefore unaffected by the reason split.
+
 **Why.** This is deliberately the opposite of the legacy `0x70` order, and it is load-bearing:
 Spectra/ACeP-class bring-up runs for seconds while the client gates its `0x0080` wait on an
 ordinary command timeout. Recorded as a permanent divergence from the master plan's § 5.3 END
@@ -477,8 +483,13 @@ the reservation budget of 3.
 - `payload.n > OD_PIPE_REORDER_PAYLOAD` is fatal (`0x03`) before slot selection or `memcpy`,
   independent of D4's negotiated-frame checks;
 - a consume failure is fatal with `0x02` when compressed and `0x03` when not.
-- uncompressed DATA writes only the remaining image prefix and ignores any trailing suffix,
-  matching both donor machines and shared legacy direct write; compressed input remains exact.
+- uncompressed full-frame DATA writes only the remaining image prefix and ignores any trailing
+  suffix, matching both full-frame donor machines and shared legacy direct write;
+- uncompressed partial DATA exceeding the remaining logical bytes is a consume failure and fatal
+  `0x03`, matching both partial donors and shared legacy `0x76`; compressed input remains exact;
+- incomplete PIPE END aborts with `OD_XFER_ABORT_PIPE_INCOMPLETE`: ESP32 forces the mid-write panel
+  off as its donor does, while Nordic retains its existing unconditional cleanup. The separate
+  reason preserves legacy direct/partial `OD_XFER_ABORT_INCOMPLETE` power policy.
 
 If § 2.4 reproduces the small-tail stall, the fix lands as a **separate commit after** the
 promotion completes, in shared code, with its own tests and its own hardware row. It does not ride
@@ -825,7 +836,8 @@ so the ESP32 verdict correction does not claim a liveness change.
 **Completion.** Uncompressed full auto-END under both values of `OD_XFER_DIRECT_AUTO_END` (D10);
 compressed and partial never auto-completing; explicit END order tail SACK → END ACK → barrier →
 refresh → `0x73`/`0x74`; auto-END capped at three replies; incomplete END refusing with
-`{FF,82}` and clearing a partial etag; compressed exactness — DONE early, output overrun,
+`{FF,82}`, using the PIPE-specific incomplete abort reason, and clearing a partial etag; compressed
+exactness — DONE early, output overrun,
 truncated input, checksum failure; etag endianness both directions (D12); target refresh returning
 false after the END ACK emitting plaintext `{FF,82}`, aborting once and clearing the etag (D13).
 

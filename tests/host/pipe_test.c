@@ -25,6 +25,7 @@ static unsigned g_begin_full;
 static unsigned g_begin_partial;
 static unsigned g_prepare;
 static unsigned g_abort;
+static od_xfer_abort_reason_t g_abort_reason;
 static unsigned g_write;
 static unsigned g_refresh;
 static unsigned g_barrier;
@@ -126,7 +127,8 @@ uint32_t od_xfer_app_write(uint32_t offset, od_span_t data)
 }
 od_mut_span_t od_xfer_app_inflate_scratch(void)
 { return od_mut_span_make(g_scratch, sizeof g_scratch); }
-void od_xfer_app_abort(od_xfer_abort_reason_t reason) { (void)reason; ++g_abort; }
+void od_xfer_app_abort(od_xfer_abort_reason_t reason)
+{ g_abort_reason = reason; ++g_abort; }
 od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *owner)
 { (void)owner; ++g_barrier; return g_barrier_result; }
 void od_xfer_app_barrier_abort(const od_reply_t *owner) { (void)owner; ++g_abort; }
@@ -152,6 +154,7 @@ static void setup(void)
     g_begin_partial = 0u;
     g_prepare = 0u;
     g_abort = 0u;
+    g_abort_reason = OD_XFER_ABORT_REPLACED;
     g_write = 0u;
     g_refresh = 0u;
     g_barrier = 0u;
@@ -505,6 +508,18 @@ static void test_consume_and_reply_failures(void)
     CHECK(send_data(&owner, 0u, payload, sizeof payload) == OD_CMD_OK);
     CHECK(g_written == 32u && g_write == 1u && g_abort == 0u && g_refresh == 1u);
 
+    CASE("raw partial trailing bytes are fatal instead of truncated");
+    setup();
+    (void)start_body(sb, PIPE_FLAG_PARTIAL, 4u, 4u, 244u, 16u);
+    sb[10] = 0x44u; sb[11] = 0x33u; sb[12] = 0x22u; sb[13] = 0x11u;
+    sb[18] = 8u;
+    sb[20] = 8u;
+    CHECK(od_pipe_start(&start, od_span_make(sb, sizeof sb)) == OD_CMD_OK);
+    CHECK(send_data(&owner, 0u, payload, 20u) == OD_CMD_NACK);
+    CHECK(g_written == 0u && g_abort == 1u
+          && g_abort_reason == OD_XFER_ABORT_STREAM_FAILED);
+    CHECK(g_replies[1].plain && g_replies[1].bytes[2] == 0x03u && g_etag == 0u);
+
     CASE("raw sink refusal selects fatal 0x03");
     setup();
     g_write_limit = 7u;
@@ -631,6 +646,19 @@ static void test_completion_failures(void)
     od_cmd_ctx_t end = od_test_cmd_ctx(owner, &g_reservation, 7u, false);
     const uint8_t end_body[] = { 2u, 0xA1u, 0xB2u, 0xC3u, 0xD4u };
     uint8_t sb[22];
+
+    CASE("incomplete PIPE END uses the force-off-specific abort reason");
+    setup();
+    {
+        od_cmd_ctx_t full_start = od_test_cmd_ctx(owner, &g_reservation, 12u, false);
+        uint8_t short_data[8] = { 0u };
+        CHECK(od_pipe_start(&full_start,
+                            start_body(sb, 0u, 4u, 4u, 244u, 32u)) == OD_CMD_OK);
+        CHECK(send_data(&owner, 0u, short_data, sizeof short_data) == OD_CMD_OK);
+        CHECK(od_pipe_end(&end, od_span_make(end_body, sizeof end_body)) == OD_CMD_NACK);
+        CHECK(g_abort == 1u && g_abort_reason == OD_XFER_ABORT_PIPE_INCOMPLETE
+              && !od_xfer_frames_may_arrive());
+    }
 
     CASE("END ACK substitution aborts before barrier and refresh");
     setup();

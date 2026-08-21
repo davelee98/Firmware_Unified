@@ -316,6 +316,9 @@ bool od_xfer_pipe_consume(od_span_t payload)
         return false;
     }
     remaining = s_xfer.expected_bytes - s_xfer.written_bytes;
+    if (s_xfer.mode == OD_XFER_PIPE_PARTIAL && payload.n > remaining) {
+        return false;
+    }
     payload = od_span_take(payload, payload.n < remaining ? payload.n : remaining);
     if (payload.n == 0u) {
         return true;

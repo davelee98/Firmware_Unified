@@ -1876,6 +1876,7 @@ extern "C" od_mut_span_t od_xfer_app_inflate_scratch(void) {
 
 extern "C" void od_xfer_app_abort(od_xfer_abort_reason_t reason) {
     const bool forceOff = reason == OD_XFER_ABORT_STREAM_FAILED ||
+                          reason == OD_XFER_ABORT_PIPE_INCOMPLETE ||
                           reason == OD_XFER_ABORT_REPLY_FAILED ||
                           reason == OD_XFER_ABORT_REFRESH_FAILED ||
                           reason == OD_XFER_ABORT_RESET;

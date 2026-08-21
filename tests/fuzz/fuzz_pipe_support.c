@@ -109,7 +109,7 @@ void fz_pipe_open(uint8_t flags, uint8_t window, uint8_t ack_every,
     start[3] = ack_every;
     start[4] = (uint8_t)client_max_frame;
     start[5] = (uint8_t)(client_max_frame >> 8);
-    start[6] = 16u;
+    start[6] = (flags & PIPE_FLAG_PARTIAL) != 0u ? 16u : 8u;
     if ((flags & PIPE_FLAG_PARTIAL) != 0u) {
         start[10] = 1u;  /* old_etag, little-endian */
         start[18] = 8u;  /* width, little-endian */

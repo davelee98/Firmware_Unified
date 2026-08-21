@@ -284,10 +284,11 @@ looks arbitrary and is not); delete the story.
   are itemized and remain open in `docs/HARDWARE_VERIFICATION_CHECKLIST.md`; implementation by
   project direction is not a pass. The all-target software gate passes 32/0/0; BG22 remains
   250,292 B flash / 32,284 B static RAM with 480 B headroom and retains no PIPE state symbol.
-  Post-implementation review restored donor-compatible raw trailing-byte truncation and the
-  per-transfer target preparation hook; cadence/SACK masks, multi-slot drain, sequence wrap,
-  compressed full/partial admission and substitution paths are pinned in the production-machine
-  suite, and the DATA fuzzer drives sequences of frames through one live machine.
+  Post-implementation review restored donor-compatible raw full-frame trailing-byte truncation,
+  raw partial overflow refusal, per-transfer target preparation and ESP32 force-off on incomplete
+  PIPE END; cadence/SACK masks, multi-slot drain, sequence wrap, compressed full/partial admission
+  and substitution paths are pinned in the production-machine suite, and the DATA fuzzer drives
+  sequences of frames through both full and partial machines.
 - **Shared time HAL software candidate (2026-08-19):** `shared/hal/od_hal_time.h` is the canonical
   two-function ambient-clock/busy-wait seam. ESP32 keeps its unreconciled bounded millisecond sleep
   in target-private `od_hal_sleep.h`; Nordic's `od_uptime_get_32`/`od_busy_wait` names are gone;

@@ -153,9 +153,10 @@ qualifies it.
 Software evidence captured 2026-08-20: the host suite passes 58/58 under GCC, Clang and
 ASan/UBSan; W=32, W=16 and capability-off PIPE builds pass; the five pre-auth fuzz targets and
 the pinned py-opendisplay 7.14.0 corpus pass; and all 11 ESP32 configurations, all three Nordic
-boards and the BG22 headless image build. Handwritten production source is +933/−2,960 lines
-(net −2,027); test/tool source is +1,489/−1,060 (net +429). Reorder storage is 7,953 B at W=32
-and 4,097 B at W=16. The BG22 link contains only the three small `od_pipe_*` entry points, no
+boards and the BG22 headless image build. Handwritten production source is +938/−2,960 lines
+(net −2,022); test/tool source is +1,517/−1,060 (net +457). The reorder array is 8,118 B at
+W=32 and 4,182 B at W=16, plus 20 B of PIPE state in either profile. The BG22 link contains only
+the three small `od_pipe_*` entry points, no
 PIPE state/reorder symbol, and remains 250,292 B flash / 32,284 B static RAM (480 B headroom).
 Board-only throughput, retransmission, refresh-time and stack-high-water measurements remain
 unavailable and do not qualify any row below.

@@ -467,7 +467,7 @@ od_cmd_result_t od_pipe_end(const od_cmd_ctx_t *ctx, od_span_t body)
     }
     if (xfer->mode == OD_XFER_FATAL) {
         pipe_send_end_nack(ctx);
-        od_xfer_abort_active(OD_XFER_ABORT_INCOMPLETE, s_pipe.partial);
+        od_xfer_abort_active(OD_XFER_ABORT_PIPE_INCOMPLETE, s_pipe.partial);
         return OD_CMD_NACK;
     }
     if (!pipe_sack_or_fatal(ctx)) {
@@ -475,7 +475,7 @@ od_cmd_result_t od_pipe_end(const od_cmd_ctx_t *ctx, od_span_t body)
     }
     if (s_pipe.queued_count != 0u || !od_xfer_pipe_finalize() || !od_xfer_pipe_complete()) {
         pipe_send_end_nack(ctx);
-        od_xfer_abort_active(OD_XFER_ABORT_INCOMPLETE, s_pipe.partial);
+        od_xfer_abort_active(OD_XFER_ABORT_PIPE_INCOMPLETE, s_pipe.partial);
         return OD_CMD_NACK;
     }
     return pipe_finish(ctx, body);
