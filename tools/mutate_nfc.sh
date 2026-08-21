@@ -18,13 +18,30 @@ cd "$(dirname "$0")/.."
 SRC=shared/core/od_nfc.c
 BUILD=${OD_MUTATE_BUILD:-build/mutate}
 BAK=$(mktemp)
-trap 'cp "$BAK" "$SRC"; rm -f "$BAK"' EXIT
+# Restore the source AND rebuild, so the tree is not left holding the last mutant's binaries.
+# Without the rebuild, build/mutate/od_nfc_test keeps reporting failures and the off fixture keeps
+# an assembler in it -- a mutant left lying around where a passing artifact is expected.
+cleanup () {
+    cp "$BAK" "$SRC"
+    rm -f "$BAK"
+    cmake --build "$BUILD" --target od_nfc_test od_nfc_off_test -j"$(nproc)" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
 cp "$SRC" "$BAK"
+
+# The nm half of the capability-off claim, run the same way check.sh runs it.
+off_proof_holds () { ! nm -a "$BUILD"/od_nfc_off_test 2>/dev/null | grep -qE "\bs_nfc\b"; }
 
 cmake -S tests/host -B "$BUILD" >/dev/null || exit 1
 cmake --build "$BUILD" --target od_nfc_test od_nfc_off_test -j"$(nproc)" >/dev/null 2>&1 || {
     echo "baseline build failed"; exit 1; }
+
+# EVERY PROOF A MUTATION IS JUDGED BY MUST BE GREEN FIRST. A structural check that was already
+# failing would make "the mutation was detected" true for the wrong reason -- the mutation would be
+# credited with a symbol that was there before it.
 "$BUILD"/od_nfc_test >/dev/null 2>&1 || { echo "baseline suite is not green"; exit 1; }
+"$BUILD"/od_nfc_off_test >/dev/null 2>&1 || { echo "baseline capability-off suite is not green"; exit 1; }
+off_proof_holds || { echo "baseline nm proof already fails: s_nfc present before any mutation"; exit 1; }
 
 fail=0
 mutate () {
@@ -105,11 +122,13 @@ PY
     if ! cmake --build "$BUILD" --target od_nfc_off_test -j"$(nproc)" >/dev/null 2>&1; then
         printf '%-34s BUILD FAILED -- not exercised\n' "$name"; fail=1; return
     fi
-    hits=$(nm -a "$BUILD"/od_nfc_off_test | grep -E "\bs_nfc\b" || true)
-    if [ -n "$hits" ]; then
-        printf '%-34s nm proof fails (%s)\n' "$name" "$(echo "$hits" | head -1 | tr -s ' ')"
-    else
+    # A FLIP, not a state: the baseline above established the proof holds, so finding the symbol
+    # now is attributable to this mutation rather than to something that was already true.
+    if off_proof_holds; then
         printf '%-34s SURVIVED -- the nm proof cannot see this\n' "$name"; fail=1
+    else
+        hits=$(nm -a "$BUILD"/od_nfc_off_test | grep -E "\bs_nfc\b" | head -1 | tr -s ' ')
+        printf '%-34s nm proof flips to fail (%s)\n' "$name" "$hits"
     fi
 }
 mutate_off
