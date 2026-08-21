@@ -2165,14 +2165,12 @@ bool opendisplay_ble_nfc_write(uint8_t type, const uint8_t *data, uint16_t data_
   return ok;
 }
 
-/* ---------------------------------------------------------------- od_nfc_app seam, temporary ---
+/* ------------------------------------------------------------------------- od_nfc_app seam ---
  *
- * The shared 0x83 machine is linked from the commit that adds it, because od_core_reset() names
- * its reset -- but this target's handler still owns the wire until its own cutover. Until then the
- * seam forwards to the adapter above rather than replacing its name, so both callers work and
- * neither build depends on the linker discarding an unreferenced machine.
- *
- * DELETED AT THIS TARGET'S CUTOVER, when the adapter takes the seam names for real. */
+ * An alias, because two callers reach this tag under different names: the target handler above,
+ * and the shared 0x83 machine, which is linked wherever od_core_reset() is. Aliasing rather than
+ * renaming keeps both resolvable without either build relying on the linker to discard the other
+ * caller. */
 bool od_nfc_app_read(uint8_t *type, uint8_t *data, uint16_t *len_io, uint16_t cap)
 {
     return opendisplay_ble_nfc_read(type, data, len_io, cap);

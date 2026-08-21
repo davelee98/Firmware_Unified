@@ -176,15 +176,15 @@ set(OD_SHARED_SOURCES_APP_XFER
     "${CMAKE_CURRENT_LIST_DIR}/core/od_pipe.c"
 )
 
-# HAL_LOG owns portable record formatting. Enabled targets must implement od_hal_log and
-# od_hal_time; OD_CAP_LOG=0 compiles explicit no-op entry points with no HAL references or state.
 # APP_NFC is the portable 0x0083 machine. It calls the target's od_nfc_app seam for tag I/O and
 # keeps capability-off behaviour inside itself, so a target that declines NFC still links both
-# entry points. IT IS NOT OPTIONAL FOR AN APP_SESSION CONSUMER: od_core.c names od_nfc_reset(), so
-# any consumer taking od_core.c takes this tier too, whatever its capability setting.
+# entry points. NOT OPTIONAL FOR A CONSUMER THAT TAKES od_core.c: od_core_reset() names
+# od_nfc_reset(), whatever the capability setting.
 set(OD_SHARED_SOURCES_APP_NFC
     "${CMAKE_CURRENT_LIST_DIR}/core/od_nfc.c")
 
+# HAL_LOG owns portable record formatting. Enabled targets must implement od_hal_log and
+# od_hal_time; OD_CAP_LOG=0 compiles explicit no-op entry points with no HAL references or state.
 set(OD_SHARED_SOURCES_HAL_LOG
     "${CMAKE_CURRENT_LIST_DIR}/core/od_log.c"
 )

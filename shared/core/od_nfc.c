@@ -103,21 +103,34 @@ static od_cmd_result_t handle_read(const od_cmd_ctx_t *ctx)
 
 static od_cmd_result_t handle_inline_write(const od_cmd_ctx_t *ctx, od_span_t body)
 {
+    od_span_t header;
+    od_span_t rest;
+    od_span_t payload;
+    od_span_t trailing;
     uint16_t declared;
     uint8_t type;
 
-    if (body.n < 4u) {
+    if (!od_span_split(body, 4u, &header, &rest)) {
         return nack(ctx, NFC_ERR_MALFORMED);
     }
-    type = body.p[1];
-    declared = (uint16_t)(((uint16_t)body.p[2] << 8) | body.p[3]);
+    type = header.p[1];
+    declared = (uint16_t)(((uint16_t)header.p[2] << 8) | header.p[3]);
+    /* THE BOUND IS ITS OWN ARM, and evaluated in 32 bits, even though the split below would also
+     * refuse an over-long cut. The declared length is peer-supplied: a 16-bit sum with the header
+     * wraps and admits a length the body cannot hold, and stating that test explicitly is what a
+     * regression can be aimed at. */
     if ((uint32_t)declared + 4u > (uint32_t)body.n) {
         return nack(ctx, NFC_ERR_MALFORMED);
     }
     if (!rec_type_valid(type)) {
         return nack(ctx, NFC_ERR_INVALID_REC_TYPE);
     }
-    if (!od_nfc_app_write(type, body.p + 4, declared)) {
+    /* Trailing bytes past the declared length are accepted and ignored, which is what both donors
+     * do; the cut is checked rather than assumed. */
+    if (!od_span_split(rest, declared, &payload, &trailing)) {
+        return nack(ctx, NFC_ERR_MALFORMED);
+    }
+    if (!od_nfc_app_write(type, payload.p, (uint16_t)payload.n)) {
         return nack(ctx, NFC_ERR_TAG_WRITE_FAILED);
     }
     return ack_committed(ctx, NFC_STATUS_WRITE_COMMITTED);
@@ -125,14 +138,16 @@ static od_cmd_result_t handle_inline_write(const od_cmd_ctx_t *ctx, od_span_t bo
 
 static od_cmd_result_t handle_start(const od_cmd_ctx_t *ctx, od_span_t body)
 {
+    od_span_t header;
+    od_span_t rest;
     uint16_t total;
     uint8_t type;
 
-    if (body.n < 4u) {
+    if (!od_span_split(body, 4u, &header, &rest)) {
         return nack(ctx, NFC_ERR_MALFORMED);
     }
-    type = body.p[1];
-    total = (uint16_t)(((uint16_t)body.p[2] << 8) | body.p[3]);
+    type = header.p[1];
+    total = (uint16_t)(((uint16_t)header.p[2] << 8) | header.p[3]);
     if (!rec_type_valid(type)) {
         return nack(ctx, NFC_ERR_INVALID_REC_TYPE);
     }
@@ -151,23 +166,23 @@ static od_cmd_result_t handle_start(const od_cmd_ctx_t *ctx, od_span_t body)
 
 static od_cmd_result_t handle_data(const od_cmd_ctx_t *ctx, od_span_t body)
 {
-    uint16_t chunk;
+    od_span_t sub;
+    od_span_t chunk;
 
     /* Ownership before shape: a foreign frame must not learn whether its guess was well-formed,
      * and must mutate nothing either way (N1). */
     if (!owned_by(ctx)) {
         return nack(ctx, NFC_ERR_CHUNK_NO_START);
     }
-    if (body.n < 2u) {
+    if (!od_span_split(body, 1u, &sub, &chunk) || od_span_is_empty(chunk)) {
         return nack(ctx, NFC_ERR_MALFORMED);
     }
-    chunk = (uint16_t)(body.n - 1u);
-    if ((uint32_t)s_nfc.received_len + (uint32_t)chunk > (uint32_t)s_nfc.total_len) {
+    if ((uint32_t)s_nfc.received_len + (uint32_t)chunk.n > (uint32_t)s_nfc.total_len) {
         od_nfc_reset();
         return nack(ctx, NFC_ERR_CHUNK_OVERFLOW);
     }
-    memcpy(&s_nfc.data[s_nfc.received_len], body.p + 1, chunk);
-    s_nfc.received_len = (uint16_t)(s_nfc.received_len + chunk);
+    memcpy(&s_nfc.data[s_nfc.received_len], chunk.p, chunk.n);
+    s_nfc.received_len = (uint16_t)(s_nfc.received_len + chunk.n);
     return ack_armed(ctx);
 }
 

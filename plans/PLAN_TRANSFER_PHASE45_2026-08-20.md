@@ -361,22 +361,46 @@ A transitional ratchet is either converted to a permanent structural one or dele
 reason. "The code it guarded is gone" is not sufficient — the question is whether re-introducing
 it would be caught by something else.
 
-### X3 — BG22's 32,284 B / 480 B headroom is the floor
+### X3 — BG22's budget is measured in heap, because static RAM cannot move
 
-No regression against it without an explicitly approved trade-off recorded here. Phase 4 has one,
-and it is approved in advance rather than gated on an impossibility:
+**The earlier form of this rule could not fail, and step 3 proved it.** It was phrased as
+"32,284 B static RAM / 480 B headroom is the floor", and step 3 added a dormant 528-byte `s_nfc`
+to the BG22 image while `text`/`data`/`bss` stayed byte-identical at 249,800 / 492 / 31,792 —
+verified by building the same tree with and without the change. Nothing regressed because nothing
+*could*: `.memory_manager_heap` is sized by the linker script as `__HeapBase` plus whatever RAM is
+left, so every byte of new static is taken out of the heap and the totals never move. A stop
+condition on `data + bss`, or on `32,764 − (data + bss)`, is therefore not a loose gate — it is
+inert.
 
-**BG22 static RAM will grow.** Its current NFC statics are the 512-byte buffer plus three scalars;
-the shared state adds N1's owner — one `od_reply_t`, itself an `od_origin_t` plus a `uint32_t` tag
-(`shared/core/od_txq.h:69-72`) — plus the active flag, and alignment. A dozen-odd bytes against
-480 B of headroom is an acceptable price for closing the foreign-owner defect, and the alternative
-— a narrower owner representation than the rest of the repo uses — trades a repo-wide invariant
-for a rounding error.
+**The quantity to measure is the heap.** In the BG22 map it is the `.memory_manager_heap` section
+size, equivalently `0x20008000 − __HeapBase`. It is the only figure that moves when static RAM
+grows, and it moves one-for-one.
 
-So the gate is: measure the delta on the flashed image at the BG22 cutover, record it, and stop if
-it exceeds **64 bytes** or leaves headroom below **400 bytes**. Either outcome means the state
-object is wrong, not that the budget needs raising. Nordic's saving is measured the same way and
-is not quoted in advance (N7).
+- **Baseline:** the heap size in the pre-Phase-4 image, captured before step 5 from a clean build
+  of the merge base, and recorded in the step-9 evidence. At step 3 it stood at `0x2ad4` (10,964 B)
+  *with* the dormant assembler already linked.
+- **Ceiling:** at the end of Phase 4, BG22's heap may be at most **64 bytes** smaller than that
+  baseline. That is the same 64-byte allowance as before, now expressed against something that
+  can actually shrink.
+- **Interim growth is expected and is not a failure.** Between step 3 and step 6 the target carries
+  *both* assemblers — the shared 528-byte `s_nfc` and BG22's own 512-byte `s_nfc_data` — so the
+  heap is transiently about 528 B down. Step 6 deletes the target's, and the ceiling applies to
+  the result, not to the intermediate states.
+
+**BG22 static RAM will still grow slightly, and that is the approved trade-off.** Its NFC statics
+are the 512-byte buffer plus three scalars; the shared state adds N1's owner — one `od_reply_t`,
+itself an `od_origin_t` plus a `uint32_t` tag (`shared/core/od_txq.h:69-72`) — plus the active
+flag, and alignment. A dozen-odd bytes is an acceptable price for closing the foreign-owner
+defect, and the alternative — a narrower owner representation than the rest of the repo uses —
+trades a repo-wide invariant for a rounding error.
+
+Exceeding the ceiling means the state object is wrong, not that the budget needs raising. Nordic's
+saving is measured the same way and is not quoted in advance (N7).
+
+**One consequence for the rest of the plan:** § 10's "BG22 static RAM within X3's approved 64-byte
+growth and 400-byte headroom floor" is superseded by this section, and § 9's "static RAM measured
+against X3's stop condition on the flashed image" means the heap figure above. Quoting `data + bss`
+alongside it is fine as a record; it is not the gate.
 
 ### X4 — An open hardware row is release debt, never a pass
 
@@ -925,9 +949,10 @@ target-owned protocol state structs and wire-response literals; `.text`, `.rodat
 passed/open.
 
 Phase 4 minimums: one NFC machine; zero target NFC assemblers or response literals; zero disabled
-NFC state or seam references on ESP32; BG22 static RAM within X3's approved 64-byte growth and
-400-byte headroom floor; Nordic static delta and READ-path stack high-water both measured and
-recorded; net handwritten production deletion, with test growth reported separately.
+NFC state or seam references on ESP32; BG22 within X3's 64-byte heap-loss ceiling, measured as
+heap and not as data+bss, which cannot move on this target; Nordic static delta and READ-path
+stack high-water both measured and recorded; net handwritten production deletion, with test
+growth reported separately.
 
 Phase 5 minimums: § 11 of the superseded plan, in full, with every clause satisfied or its row
 explicitly open.
