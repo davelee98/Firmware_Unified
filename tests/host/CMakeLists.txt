@@ -752,6 +752,23 @@ add_test(NAME vectors_schema_fixtures
 add_executable(od_nordic_pin_codec_test
     nordic_pin_codec_test.c
     ../../targets/nordic-zephyr/src/od_pin_codec.c)
+
+    # nordic_nfc_pins: the NFC antenna reservation in the nRF52840 platform decoder. That file was
+    # not compiled by any host test, so the one `if` deciding whether a config may claim P0.09/P0.10
+    # had no coverage -- and the failure it prevents is a GPIO write that succeeds and drives
+    # nothing. Built at OD_CAP-equivalent NFC-on, which is how every shipping image is built.
+    add_executable(od_nordic_nfc_pins_test
+        nordic_nfc_pins_test.c
+        ../../targets/nordic-zephyr/src/od_pin_codec.c
+        ../../targets/nordic-zephyr/src/platform/nrf52840/od_pin_codec_nrf52840.c)
+    target_include_directories(od_nordic_nfc_pins_test PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr
+        ../../targets/nordic-zephyr/src)
+    target_compile_definitions(od_nordic_nfc_pins_test PRIVATE
+        CONFIG_OD_PLATFORM_NRF52840=1
+        CONFIG_OD_PLATFORM_NRF54=0
+        CONFIG_NFC_T2T_NRFXLIB=1)
+    add_test(NAME nordic_nfc_pins COMMAND od_nordic_nfc_pins_test)
 target_include_directories(od_nordic_pin_codec_test PRIVATE
     ../../targets/nordic-zephyr/src)
 add_test(NAME nordic_pin_codec COMMAND od_nordic_pin_codec_test)

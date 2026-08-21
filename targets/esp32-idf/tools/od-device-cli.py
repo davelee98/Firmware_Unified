@@ -1504,13 +1504,22 @@ NFC_REC_TYPES = {0: "TEXT", 1: "URI", 2: "WELL_KNOWN_RAW", 3: "MIME", 4: "RAW_ND
 
 
 def _decode_nfc_read(frame: bytes) -> dict[str, Any]:
-    """Decode one 0x0083 reply. Returns a dict; never raises on a short or malformed frame."""
+    """Decode one 0x0083 reply. Returns a dict; never raises on a short or malformed frame.
+
+    EXACT PREFIXES, NOT PERMISSIVE ONES. An oracle that accepts a near-miss reports a device as
+    conforming when it is not, and this decoder is the only thing standing behind every NFC read
+    row. A success is `00 83 80` and a refusal is `FF 83 FF`; anything else is malformed and is
+    reported as such rather than coerced into the nearest sensible reading."""
     if len(frame) < 3:
         return {"ok": False, "reason": f"short reply ({len(frame)} bytes)", "raw": frame.hex()}
-    status, cmd = frame[0], frame[1]
+    status, cmd, marker = frame[0], frame[1], frame[2]
     if cmd != 0x83:
         return {"ok": False, "reason": f"not a 0x83 reply (cmd=0x{cmd:02x})", "raw": frame.hex()}
     if status == 0xFF:
+        if marker != 0xFF:
+            return {"ok": False,
+                    "reason": f"NACK marker must be 0xFF, got 0x{marker:02x}",
+                    "raw": frame.hex()}
         err = frame[3] if len(frame) >= 4 else None
         return {
             "ok": False,
@@ -1519,12 +1528,19 @@ def _decode_nfc_read(frame: bytes) -> dict[str, Any]:
             "error": NFC_ERRORS.get(err, f"unknown(0x{err:02x})" if err is not None else "absent"),
             "raw": frame.hex(),
         }
-    if frame[2] != NFC_STATUS_READ_DATA:
-        return {"ok": False, "reason": f"unexpected status byte 0x{frame[2]:02x}", "raw": frame.hex()}
+    if status != 0x00:
+        return {"ok": False, "reason": f"status byte must be 0x00 or 0xFF, got 0x{status:02x}",
+                "raw": frame.hex()}
+    if marker != NFC_STATUS_READ_DATA:
+        return {"ok": False, "reason": f"unexpected status byte 0x{marker:02x}", "raw": frame.hex()}
     if len(frame) < 6:
         return {"ok": False, "reason": "read reply truncated before its length field",
                 "raw": frame.hex()}
     rec_type = frame[3]
+    if rec_type not in NFC_REC_TYPES:
+        return {"ok": False,
+                "reason": f"record type {rec_type} is not one of OD_NFC_REC_* (0-4)",
+                "raw": frame.hex()}
     declared = (frame[4] << 8) | frame[5]
     data = frame[6:]
     result = {
@@ -1543,28 +1559,74 @@ def _decode_nfc_read(frame: bytes) -> dict[str, Any]:
     return result
 
 
-async def _do_nfc_read(ctx: _BleCtx, timeout: float) -> dict[str, Any]:
+async def _await_reply(ctx: _BleCtx, cmd_lo: int, timeout: float) -> bytes | None:
+    """Send nothing; wait for the next reply carrying `cmd_lo`. None on timeout."""
     got: list[bytes] = []
     done = asyncio.Event()
 
     def on_frame(frame: bytes) -> None:
-        if len(frame) >= 2 and frame[1] == 0x83:
+        if len(frame) >= 2 and frame[1] == cmd_lo:
             got.append(frame)
             done.set()
 
     ctx.notify_handler = on_frame
-    await ctx.send_command(NFC_CMD_HI, NFC_CMD_LO, bytes([NFC_SUB_READ]))
     try:
         await asyncio.wait_for(done.wait(), timeout)
     except asyncio.TimeoutError:
-        # SILENCE IS A RESULT, and a meaningful one: it is what a capability-off target answers,
-        # and what py-opendisplay turns into NfcNotSupportedError. Reported rather than raised.
-        return {"ok": False, "silent": True,
-                "reason": f"no 0x83 reply within {timeout:.1f}s "
-                          "(expected on a target built with OD_CAP_NFC=0)"}
+        return None
     finally:
         ctx.notify_handler = None
-    return _decode_nfc_read(got[0])
+    return got[0]
+
+
+async def _notify_path_is_alive(ctx: _BleCtx, timeout: float) -> dict[str, Any]:
+    """A known-answer canary on the same connection, for the silence case.
+
+    SILENCE PROVES NOTHING ON ITS OWN -- a disconnected notify path, a dropped link or a wedged
+    device is also silent, and all three are indistinguishable from a capability-off target that
+    is behaving correctly. This is the same control `dispatch-gate` applies for the same reason.
+
+    FIRMWARE_VERSION is the canary because it is the one command a client must be able to issue
+    before it can authenticate, so it answers on every target in every session state -- including
+    the one that just said nothing about NFC."""
+    fw = _await_reply_after(ctx, 0x00, 0x43, RESP_FW_LO, timeout)
+    frame = await fw
+    if frame is None:
+        return {"alive": False,
+                "reason": f"canary CMD_FIRMWARE_VERSION drew no reply within {timeout:.1f}s, so "
+                          "the silence above is not evidence of anything"}
+    if frame[0] != 0x00:
+        return {"alive": False,
+                "reason": f"canary answered with status 0x{frame[0]:02x}, expected 0x00",
+                "raw": frame.hex()}
+    return {"alive": True, "raw": frame.hex()}
+
+
+async def _await_reply_after(ctx: _BleCtx, cmd_hi: int, cmd_lo: int,
+                             resp_lo: int, timeout: float) -> bytes | None:
+    task = asyncio.ensure_future(_await_reply(ctx, resp_lo, timeout))
+    await asyncio.sleep(0)
+    await ctx.send_command(cmd_hi, cmd_lo)
+    return await task
+
+
+RESP_FW_LO = 0x43
+
+
+async def _do_nfc_read(ctx: _BleCtx, timeout: float) -> dict[str, Any]:
+    frame = await _await_reply_after(ctx, NFC_CMD_HI, NFC_CMD_LO, 0x83, timeout)
+    if frame is None:
+        # SILENCE IS A RESULT, and a meaningful one -- it is what a capability-off target answers
+        # and what py-opendisplay turns into NfcNotSupportedError. But it is only evidence once
+        # the link is shown to be answering, so the canary runs before it is reported as such.
+        canary = await _notify_path_is_alive(ctx, timeout)
+        return {"ok": False,
+                "silent": bool(canary["alive"]),
+                "canary": canary,
+                "reason": f"no 0x83 reply within {timeout:.1f}s "
+                          + ("(link confirmed answering, so this is capability-off silence)"
+                             if canary["alive"] else "AND the link did not answer either")}
+    return _decode_nfc_read(frame)
 
 
 def cmd_nfc_read(args: argparse.Namespace) -> int:
@@ -1578,6 +1640,7 @@ def cmd_nfc_read(args: argparse.Namespace) -> int:
     result["encrypted"] = key is not None
     print(json.dumps(result, indent=2))
     if args.expect_silence:
+        # `silent` is set only when the canary answered, so this cannot pass on a dead link.
         return 0 if result.get("silent") else 1
     return 0 if result.get("ok") else 1
 

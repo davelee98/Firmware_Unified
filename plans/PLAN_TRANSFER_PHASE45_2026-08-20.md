@@ -695,9 +695,11 @@ amount of host coverage substitutes for one, and merged code is not evidence. It
 *sequencing* of steps 5, 6 and 7 only: step 8's own requirements are unchanged, and any later step
 naming a hardware gate is gated as written unless waived the same way, in writing, here.
 
-**The row that was never severable stays that way.** BG22's >240-byte addressing investigation is a
-controller defect this promotion neither caused nor can fix; it is recorded as open on its own
-terms and is not covered by this waiver.
+**BG22's >240-byte addressing row keeps its own, earlier exception and needs nothing from this
+waiver.** § 9 already makes it the one severable row, on the ground that the block-offset wrap is a
+controller defect this promotion neither caused nor can fix. That exception stands unchanged and is
+narrower than this one: it severs a single row from step 6's gate, where this waiver sets aside the
+sequencing of steps 5-7 entirely.
 
 ### Step 6 — BG22 cutover — **hardware gate before step 8**
 

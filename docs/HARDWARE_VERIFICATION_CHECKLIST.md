@@ -255,10 +255,15 @@ antenna, so none of this has run.
 - [ ] The § 3.4 divergence-3 frame (`00 83 01 00 FF FD`) answered `0x01`, device still alive
 - [ ] **READ-path stack high-water** (N7): the response buffer is now a 224-byte stack local
       nesting with `od_reply()`'s sealed buffer
-- [ ] A config that assigns P0.09 or P0.10 is refused on an image built with NFCT, and accepted on
-      one built without it. **The reservation is static, not config-driven.** An earlier draft of
-      this row asked for the config-driven form and it is unachievable: UICR NFCPINS latches the
-      pads at reset, so no runtime state can hand them back. Two images, not two configs
+- [ ] A config that assigns P0.09 or P0.10 is refused. **That is the whole row**, because the
+      complementary half has nothing to run against: every shipping nRF52840 image enables NFCT
+      unconditionally (`xiao_ble_nrf52840.conf:70`, `.overlay:235`), so no GPIO-owning image
+      exists. An earlier draft of this row claimed one and also asked for a config-driven form;
+      both were wrong. UICR NFCPINS latches the pads at reset, so handing them to GPIO needs an
+      image that disables NFCT *and* sets `CONFIG_NFCT_PINS_AS_GPIOS`, plus a UICR erase and
+      reboot to take effect. That variant is unbuilt and unspecified — see `docs/FOLLOWUPS.md`.
+      The refusal itself is host-tested (`tests/host/nordic_nfc_pins_test.c`), so this row is on-air
+      confirmation, not first coverage
 
 ### EFR32BG22 — needs a board with a TNB132M fitted
 
