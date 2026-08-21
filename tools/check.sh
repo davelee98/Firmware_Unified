@@ -809,6 +809,36 @@ pipe_off_link_proof() {
 }
 check "host: PIPE capability-off link proof" pipe_off_link_proof
 
+# The NFC capability-off claim is an ABSENCE, and nfc_off_test proves only the behavioural half.
+# This is the structural half: the assembler and both seam references must be gone, while the two
+# entry points remain, because od_core_reset() and (from step 8) dispatch name them.
+#
+# The seam symbols are DEFINED in that binary on purpose and must not be REFERENCED by od_nfc.o --
+# checking for their absence entirely would pass by link failure rather than by behaviour.
+nfc_off_link_proof() {
+    local binary="$BUILD_ROOT/host-gcc/od_nfc_off_test" hits entry_count refs
+
+    [ -x "$binary" ] || { echo "capability-off NFC fixture was not built"; return 1; }
+    hits=$(nm -a "$binary" | grep -E "\bs_nfc\b" || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "OD_CAP_NFC=0 retained the chunk assembler"
+        return 1
+    fi
+    refs=$(nm -u "$(find "$BUILD_ROOT/host-gcc" -name 'od_nfc.c.o' -path '*od_nfc_off*' | head -1)" \
+           2>/dev/null | grep -Ec "od_nfc_app_(read|write)" || true)
+    if [ "${refs:-0}" -ne 0 ]; then
+        echo "OD_CAP_NFC=0 still references the tag seam ($refs undefined seam symbols)"
+        return 1
+    fi
+    entry_count=$(nm -g "$binary" | grep -Ec "\bod_nfc_(frame|reset)$" || true)
+    if [ "$entry_count" -ne 2 ]; then
+        echo "OD_CAP_NFC=0 must retain both entry points (found $entry_count)"
+        return 1
+    fi
+}
+check "host: NFC capability-off link proof" nfc_off_link_proof
+
 # ASan + UBSan over every host test at once -- including the two PRE-AUTH parsers, od_config_tlv
 # and od_session, whose inputs an unauthenticated peer controls. halt_on_error is not decoration:
 # UBSan's default is to print a diagnostic and carry on with status 0.
