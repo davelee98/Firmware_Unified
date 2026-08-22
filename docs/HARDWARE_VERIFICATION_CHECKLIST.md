@@ -231,8 +231,57 @@ X3's baseline is **measured, not inferred**: a clean BG22 build at `def82a1` —
 `od_nfc.c` existed — gives `heap_size` **0x2cf0 (11,504 B)**, against 0x2cd0 (11,472 B) now. That
 is **32 B of heap lost**, inside the 64 B ceiling. An earlier arithmetic estimate said 16 B and was
 wrong by half the figure, which is the reason the plan asks for a build rather than a subtraction.
-ESP32's image contains both `od_nfc_*` entry points and neither the assembler nor a seam
-reference.
+
+### Step 9 consolidation, 2026-08-22
+
+Every figure below is a build at this branch's HEAD against a build at `def82a1`, not a running
+total carried forward from the per-step commits.
+
+| | flash | RAM | what it measures |
+|---|---|---|---|
+| **`xiao_nrf54lm20a`** | **+112** | **−234** | **the promotion alone** — NFC was already enabled here at `def82a1`, so nothing else moves |
+| `xiao_ble` (nRF52840) | +7,660 | +2,602 | promotion **plus** enabling `CONFIG_NFC_T2T_NRFXLIB` |
+| `xiao_nrf54l15` | +8,068 | +2,598 | same |
+| `efr32bg22-slc` | +92 | `heap_size` −32 | `data + bss` unchanged at 32,284 **by construction** |
+
+**lm20a is the number to quote for the promotion**, and it was nearly not measured: an earlier
+draft of this table claimed it had no Phase 4 baseline because NFC was already on there. That is
+exactly backwards — being already on is what makes it the only board where the library is not
+confounding the result. It costs 112 bytes of flash and **saves 234 bytes of RAM**, which is the
+244-byte response buffer and the 512-byte assembler leaving, less what the shared state costs.
+
+The other two Nordic figures are dominated by enabling the T2T library, which is a capability
+decision rather than a promotion cost. Netting them together would make the promotion look
+expensive on Nordic when the library is what costs.
+
+Its link map agrees: no `s_nfc_write_chunk` or `od_cmd_app_nfc`, both `od_nfc_*` entry points
+present, and the two `od_nfc_app_*` seam symbols present because Nordic implements the tag.
+
+**Source, whole phase, counted by CATEGORY rather than by path.** The distinction matters because
+`targets/esp32-idf/tools/od-device-cli.py` lives under `targets/` and is a tool, not firmware:
+
+| | added | removed |
+|---|---|---|
+| shared production (`od_nfc.{c,h}`, `od_nfc_app.h`) | 353 | 0 |
+| shared wiring (`od_dispatch{.c,_ops.h}`, `od_caps.h`, `od_core.{c,h}`, `od_cmd_app.h`, `od_txq.h`, `od_xfer.c`) | 34 | 14 |
+| build wiring (`shared/sources.cmake`) | 8 | 0 |
+| **target firmware** | **82** | **347** |
+| tests and tools | 2,196 | 102 |
+
+Target firmware is a net deletion of 265 lines, and even that understates it: what left was wire
+parsing, a chunk assembler and reply construction; what arrived is adapter and build wiring. Tests
+and tools are reported separately per § 10 and deliberately not netted against production.
+
+**Zero, and checked rather than assumed.** No target-side NFC assembler, parser, hook or
+wire-response literal survives: the § 8 ratchet greps eight symbols over `targets/**`, and
+`RESP_NFC_ENDPOINT` appears in no target `.c`/`.cpp`. All 11 ESP32 board images carry both
+`od_nfc_*` entry points, no `s_nfc`, and no `od_nfc_app_*` reference.
+
+**Software gate at step 9 close: `tools/check.sh --targets` 34 passed / 0 failed / 0 skipped.**
+The 33/0/0 recorded above was the step 5-7 figure; the extra check is the § 8 ratchet that landed
+with the dispatch reroute.
+
+**Hardware rows: 0 passed, 16 open.** Not one `0x0083` row has run, and none can here.
 
 ### Nordic — needs a board with an NFC antenna fitted
 
@@ -284,12 +333,18 @@ antenna, so none of this has run.
 - [ ] `0x0083` probed in plaintext and encrypted sessions draws nothing, the link is not held
       open, and the client raises `NfcNotSupportedError`
 
-### The bespoke BLE READ tool — blocks every READ row above
+### The bespoke BLE READ tool — built, and no longer the blocker
 
-`py-opendisplay` implements no `NFC_SUB_READ` (`commands.py:103`, "not built here"), so **no READ
-row on any target can be attempted until a sender/decoder is written.** An independent NFC reader
-is stimulus and oracle only: it talks to the tag directly, bypassing `CMD_NFC_ENDPOINT`, dispatch,
-the seam and response framing. **A read row backed by a reader alone is not a pass.**
+`py-opendisplay` implements no `NFC_SUB_READ` (`commands.py:103`, "not built here"), so every READ
+row needed a sender and decoder written first. **That exists**:
+`targets/esp32-idf/tools/od-device-cli.py nfc-read`, covered by `tests/host/nfc_read_tool_test.py`
+(41 checks, `bleak` stubbed). `--expect-silence` drives the capability-off row, and it requires a
+`FIRMWARE_VERSION` canary to answer before it will accept silence — a dead notify path is silent
+too, and without the control the flag would pass on a board that was not answering at all.
+
+**Hardware is still the blocker; the tool is not.** And an independent NFC reader remains stimulus
+and oracle only: it talks to the tag directly, bypassing `CMD_NFC_ENDPOINT`, dispatch, the seam and
+response framing. **A read row backed by a reader alone is not a pass.**
 
 ## ESP32-S3 (`s3-n16r8-extuart-debug`, FastEPD)
 

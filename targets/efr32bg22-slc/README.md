@@ -12,9 +12,9 @@ before the import and are corrected here.
 | | |
 |---|---|
 | Source repo builds on this box | **yes**, clean: `text 236316  data 492  bss 31792` |
-| This target builds | **yes**, clean: `text 240680  data 488  bss 31796` (`./build-and-flash.sh --no-flash`) |
+| This target builds | **yes**, clean: `text 249892  data 492  bss 31792`, `heap_size 0x2cd0` (`./build-and-flash.sh --no-flash`) |
 | Hardware-verified | **no** — nothing here has been flashed to a board |
-| Takes from `shared/` | the PURE tier, compiled but not yet called — see [below](#what-this-target-takes-from-shared-today) |
+| Takes from `shared/` | seven tiers it calls — PURE + HAL_CRYPTO + HAL_RADIO + APP_SESSION + APP_INFLATE + APP_XFER + APP_NFC — **plus HAL_LOG compiled capability-off** (`OD_CAP_LOG=0`), which links no logger symbol or state. Declines APP_RXQ, HAL_ADV and HAL_WDT. See [below](#what-this-target-takes-from-shared-today) |
 | Blocked by | *(resolved)* `bb_epaper` had no EFR32 IO backend and no `sendPanelInitFull()`; fixed by the target-owned `panel/od_bbep_efr32.cpp` adapter, `third_party/` unedited |
 | Also missing | *(resolved)* SEGGER RTT and `app_properties` come from the pinned SDK; neither is vendored |
 
@@ -131,22 +131,26 @@ memory rules in ../../docs/ARCHITECTURE.md exist because of this chip.
 | Radio | Silabs BLE stack (`sl_bt_*` BGAPI), peripheral role only |
 | Log | SEGGER RTT (`od_rtt.c`, J-Link required); no UART console |
 
-**Current occupancy** (`arm-none-eabi-size` on the checked-in build,
+**Occupancy at 2026-08-22** (`arm-none-eabi-size` and the link map on
 `cmake_gcc/build/base/opendisplay-bg22.out`):
 
 ```
-text 236316   data 492   bss 31792
+text 249892   data 492   bss 31792
 ```
 
-- Flash: 236.8 KB of 272 KB → **~87 % full, ~35 KB headroom.**
-- RAM: static (`.data` + `.bss` + 2752 B `.stack`) ends at `__HeapBase = 0x200056b0`
-  → **~22 KB static, 10.3 KB heap** (`heap_size = 0x2950`), and the two together are the
-  whole 32 KB. There is no slack.
+- Flash: 244.5 KB of 272 KB → **~90 % full, ~27.5 KB headroom.**
+- RAM: static ends at `__HeapBase = 0x20005330` → **20.8 KB static, 11.2 KB heap**
+  (`heap_size = 0x2cd0`), and the two together are the whole 32 KB. There is no slack.
 
-Largest single RAM consumers in the application's own code: `s_cfg_rec` (2064 B, config
-storage record), the `od_zlib_stream` state `s` (1676 B), `s_od_global_config` (844 B),
-`s_session` (640 B), `s_buttons` (640 B), `s_nfc_write_chunk` (520 B),
-`s_crypto_payload_buf` (513 B). Anything `shared/` adds competes directly with these.
+**`data + bss` IS NOT A BUDGET ON THIS PART.** `.memory_manager_heap` is sized by the linker to
+fill whatever RAM is left, so that total is 32,284 B whatever the static footprint does — it has
+not moved across several promotions that changed static RAM by hundreds of bytes. The figure that
+moves, and the one plans gate on, is `heap_size` (`heap_limit − __HeapBase`).
+
+Largest single RAM consumers in the application's own code, from the current map: `s_cfg` (2064 B,
+config storage record), the `od_zlib_stream` state `s` (1676 B), `s_od_global_config` (909 B),
+`s_ring` (804 B), `s_buttons` (640 B), `s_nfc` (528 B, the shared NFC chunk assembler). Anything
+`shared/` adds competes directly with these.
 
 ## Layout of the source repo
 
@@ -340,9 +344,9 @@ configuration step, not an install — do not record it as a missing prerequisit
 The **PURE tier only** — `core/od_config_asm.c` and `core/od_config_tlv.c` — taken as
 `${OD_SHARED_SOURCES_PURE}` from `shared/sources.cmake`, which
 [cmake_gcc/opendisplay-bg22.cmake](cmake_gcc/opendisplay-bg22.cmake) includes. Same shape as
-`targets/nordic-zephyr`: **compiled, not yet called**. `opendisplay_config_parser.c` still owns
-config parsing here; the point of wiring the sources in ahead of that swap is that `shared/` is
-now proved to compile under ARM GCC on the smallest target, a third toolchain and warning set.
+`targets/nordic-zephyr`: **compiled, not yet called** *at the time of that step*. Superseded — this
+target now calls the shared config, session, transfer, PIPE and NFC machines; see the summary table
+above for the tiers it takes today. The measurement below is that step's, not current occupancy.
 
 It cost nothing measurable: identical `text`/`data`/`bss` before and after (240680 / 488 /
 31796), because `-ffunction-sections -fdata-sections` + `--gc-sections` drop what nothing calls
