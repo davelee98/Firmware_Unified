@@ -162,7 +162,7 @@ HOOK(od_pipe_end,                 CMD_PIPE_WRITE_END)
 HOOK(od_cmd_app_led_activate,     CMD_LED_ACTIVATE)
 HOOK(od_cmd_app_led_stop,         CMD_LED_STOP)
 HOOK(od_cmd_app_buzzer,           CMD_BUZZER)
-HOOK(od_cmd_app_nfc,              CMD_NFC_ENDPOINT)
+HOOK(od_nfc_frame,                CMD_NFC_ENDPOINT)
 
 static bool g_mutates_config;
 bool od_cmd_mutates_config(uint16_t cmd)

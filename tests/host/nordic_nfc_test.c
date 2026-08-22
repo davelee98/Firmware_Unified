@@ -102,7 +102,7 @@ static od_cmd_result_t submit_as_origin(const uint8_t *body, uint16_t n, od_orig
     {
         od_cmd_ctx_t ctx = od_test_cmd_ctx((od_reply_t){ origin, tag }, &r,
                                            (uint16_t)(2u + n), false);
-        const od_cmd_result_t rc = od_cmd_app_nfc(&ctx, od_span_make(body, n));
+        const od_cmd_result_t rc = od_nfc_frame(&ctx, od_span_make(body, n));
 
         od_txq_release(&r);
         (void)od_txq_process();
@@ -228,7 +228,7 @@ static od_cmd_result_t submit_unqueueable(const uint8_t *body, uint16_t n, od_or
     od_tx_reservation_t spent = { 0u, 0u };
     od_cmd_ctx_t ctx = od_test_cmd_ctx((od_reply_t){ origin, tag }, &spent,
                                        (uint16_t)(2u + n), false);
-    const od_cmd_result_t rc = od_cmd_app_nfc(&ctx, od_span_make(body, n));
+    const od_cmd_result_t rc = od_nfc_frame(&ctx, od_span_make(body, n));
 
     (void)od_txq_process();
     return rc;

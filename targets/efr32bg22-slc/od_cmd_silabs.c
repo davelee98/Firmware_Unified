@@ -4,7 +4,6 @@
 
 #include "od_config_read.h"
 #include "od_dispatch.h"
-#include "od_nfc.h"
 #include "od_reply.h"
 #include "od_session.h"
 #include "od_session_app.h"
@@ -251,15 +250,7 @@ od_cmd_result_t od_cmd_app_buzzer(const od_cmd_ctx_t *ctx, od_span_t body)
   return OD_CMD_NACK;
 }
 
-/* CMD_NFC_ENDPOINT (0x0083) is shared/core/od_nfc.c's. This wrapper survives only because
- * dispatch still names od_cmd_app_nfc until step 8; the tag is reached through od_nfc_app.h,
- * implemented in opendisplay_ble.c. */
 void od_cmd_silabs_reset(void)
 {
   od_config_asm_reset(opendisplay_config_assembler());
-}
-
-od_cmd_result_t od_cmd_app_nfc(const od_cmd_ctx_t *ctx, od_span_t body)
-{
-  return od_nfc_frame(ctx, body);
 }

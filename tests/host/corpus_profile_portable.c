@@ -47,8 +47,15 @@ unsigned od_corpus_profile_caps(void)
 {
     /* A deliberately SPARSE device: no partial, no buzzer, no power latch. That is what makes the
      * compiled-out NACK vectors reachable at all -- they are the ones no promoted target can
-     * produce, because both promoted targets have those subsystems. */
-    return OD_VEC_CAP_PIPE | OD_VEC_CAP_NFC | OD_VEC_CAP_CONFIG_4K | OD_VEC_CAP_RXQ;
+     * produce, because both promoted targets have those subsystems.
+     *
+     * NO NFC EITHER, and for a different reason: 0x0083 is shared code this executable does not
+     * link -- the dispatch fixture filters out od_core.c and so carries no od_nfc.o -- so the
+     * entry point below is a routing stub. Claiming the capability would put vectors about the
+     * MACHINE'S bytes in front of a stub that can only answer for the route, and the only way to
+     * make them pass would be to transcribe the machine's replies into a fake. The silence vector
+     * still runs here, which is what the absent capability is for. */
+    return OD_VEC_CAP_PIPE | OD_VEC_CAP_CONFIG_4K | OD_VEC_CAP_RXQ;
 }
 
 /* Every hook here is a behaviour fixture, so the historical shapes are exactly
@@ -295,7 +302,12 @@ od_cmd_result_t od_cmd_app_buzzer(const od_cmd_ctx_t *ctx, od_span_t body)
     return ack4(ctx, RESP_BUZZER_ACK);
 }
 
-od_cmd_result_t od_cmd_app_nfc(const od_cmd_ctx_t *ctx, od_span_t body)
+/* The ROUTED ENTRY POINT, defined here rather than linked. This profile proves that shared
+ * dispatch routed and plumbed a vector and nothing below that, so it supplies od_nfc_frame itself
+ * -- and deliberately not od_nfc_app_read/write. A seam fake would have nothing to serve: this
+ * executable links od_session_fake_dispatch -> od_shared_dispatch_fixture, whose source list
+ * filters out od_core.c and therefore carries no od_nfc.o at all. */
+od_cmd_result_t od_nfc_frame(const od_cmd_ctx_t *ctx, od_span_t body)
 {
     (void)body;
     if (!(od_corpus_knobs.caps & OD_VEC_CAP_NFC)) {

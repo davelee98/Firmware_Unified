@@ -620,7 +620,6 @@ if(Python3_FOUND)
         fake_nordic/fake_nordic.c
         ../../targets/nordic-zephyr/src/od_cmd_device.c
         ../../targets/nordic-zephyr/src/od_cmd_config.c
-        ../../targets/nordic-zephyr/src/od_cmd_nfc.c
         ../../targets/nordic-zephyr/src/od_cmd_reply.c
         ../../targets/nordic-zephyr/src/od_inflate_app.c
         ${OD_VEC_INC})
@@ -670,7 +669,6 @@ if(Python3_FOUND)
     add_executable(od_nordic_nfc_test
         nordic_nfc_test.c
         fake_nordic/fake_nordic.c
-        ../../targets/nordic-zephyr/src/od_cmd_nfc.c
         ../../targets/nordic-zephyr/src/od_cmd_reply.c)
     target_include_directories(od_nordic_nfc_test PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/fake_nordic

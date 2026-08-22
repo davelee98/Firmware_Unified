@@ -418,6 +418,26 @@ pipe_target_machine_absent() {
 }
 check "transfer: no target PIPE machine" pipe_target_machine_absent
 
+# The 0x0083 machine is shared/core/od_nfc.c's. A target that grows its own assembler, its own
+# record-type table or its own hook is the divergence Phase 4 closed, so the symbols that carried
+# it on each port are named here rather than the behaviour, which no grep can see.
+#
+# opendisplay_nfc.c's NDEF encoder and the TNB132M I2C work are deliberately OUT OF SCOPE: they are
+# controller adaptation reached through od_nfc_app, and they stay.
+nfc_target_machine_absent() {
+    local hits
+    hits=$(grep -RInE \
+        '\b(od_nfc_write_chunk_t|s_nfc_write_chunk|s_nfc_data|s_nfc_rsp_buf|nfc_rec_type_valid|nfc_type_valid|od_cmd_nfc_reset|od_cmd_app_nfc)\b' \
+        targets --include='*.c' --include='*.cpp' --include='*.h' --exclude-dir=build \
+        2>/dev/null || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "target-local NFC assembler or hook returned"
+        return 1
+    fi
+}
+check "transfer: no target NFC assembler" nfc_target_machine_absent
+
 core_reset_owns_transfer() {
     local rc=0 body xfer_line txq_line hits
     body=$(sed -n '/^void od_core_reset(void)/,/^}/p' shared/core/od_core.c)

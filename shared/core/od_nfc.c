@@ -16,6 +16,11 @@
 
 #include <string.h>
 
+/* Both derived constants are asserted HERE rather than in the header -- see od_nfc.h for why.
+ * Every consumer of the header compiles this file, so nothing escapes the check. */
+OD_STATIC_ASSERT(OD_NFC_READ_MAX == 218u, "NFC read cap is wire-visible");
+OD_STATIC_ASSERT(OD_NFC_ASSEMBLY_MAX == 512u, "NFC assembly limit is the wire's, not a target's");
+
 #if OD_CAP_NFC
 
 struct od_nfc {

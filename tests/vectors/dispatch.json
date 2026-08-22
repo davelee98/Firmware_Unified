@@ -508,6 +508,157 @@
         "reply": "authored",
         "reply_source": "shared/protocol/opendisplay_protocol.h"
       }
+    },
+    {
+      "id": "dispatch/nfc-inline-write-committed",
+      "dir": "h2d",
+      "frame": "00830100000401020304",
+      "state": {
+        "sec_enabled": false,
+        "session": null
+      },
+      "expect": {
+        "reply": "008381",
+        "note": "Phase 4: the inline write (sub 0x01) commits a four-byte TEXT record and answers [00][83][0x81] NFC_STATUS_WRITE_COMMITTED. Driven through both production profiles, so a pass means each target's dispatch reaches the shared machine and the shared machine emits these bytes -- the target fakes supply a tag, not a policy."
+      },
+      "min_protocol": "2.0",
+      "requires": [
+        "cap_nfc"
+      ],
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/core/od_nfc.c"
+      }
+    },
+    {
+      "id": "dispatch/nfc-inline-write-length-past-body",
+      "dir": "h2d",
+      "frame": "00830100000501020304",
+      "state": {
+        "sec_enabled": false,
+        "session": null
+      },
+      "expect": {
+        "reply": "ff83ff01",
+        "note": "Phase 4 N4, RESOLVED AND PINNED. A declared length of 5 in a four-byte body answers [FF][83][FF][0x01] MALFORMED on both targets. BG22 previously answered 0x03 TAG_WRITE_FAILED here, because it tested the record type first and folded the length test into the tag call -- telling a client its tag was broken when its frame was. Both donors test length first; this vector is what stops the old order returning. See docs/DIVERGENCE_MATRIX.md row 10.3."
+      },
+      "min_protocol": "2.0",
+      "requires": [
+        "cap_nfc"
+      ],
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/core/od_nfc.c"
+      }
+    },
+    {
+      "id": "dispatch/nfc-inline-write-wrapping-length",
+      "dir": "h2d",
+      "frame": "008301fffffd",
+      "state": {
+        "sec_enabled": false,
+        "session": null
+      },
+      "expect": {
+        "reply": "ff83ff01",
+        "note": "Phase 4 N3, ON THE WIRE. Declared length 0xFFFD with an INVALID record type (0xFF). The record type is invalid deliberately: od_span_split() refuses an over-long cut on its own, so against a valid type a 16-bit bound and a 32-bit one are indistinguishable -- both answer 0x01. Only here does the widened comparison's POSITION ahead of the record-type gate become observable: 32-bit answers MALFORMED, a wrapping 16-bit one falls through and answers 0x05 INVALID_REC_TYPE. The 16-bit form admitted a ~65 KB memcpy; see docs/DIVERGENCE_MATRIX.md row 10.2 and docs/FOLLOWUPS.md section 9."
+      },
+      "min_protocol": "2.0",
+      "requires": [
+        "cap_nfc"
+      ],
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/core/od_nfc.c"
+      }
+    },
+    {
+      "id": "dispatch/nfc-invalid-record-type",
+      "dir": "h2d",
+      "frame": "00830105000401020304",
+      "state": {
+        "sec_enabled": false,
+        "session": null
+      },
+      "expect": {
+        "reply": "ff83ff05",
+        "note": "Phase 4: record type 5 is one past the last valid OD_NFC_REC_* value and answers [FF][83][FF][0x05] INVALID_REC_TYPE with a length that exactly fits, so the refusal is provably the type gate rather than the length arm."
+      },
+      "min_protocol": "2.0",
+      "requires": [
+        "cap_nfc"
+      ],
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/core/od_nfc.c"
+      }
+    },
+    {
+      "id": "dispatch/nfc-chunk-without-start",
+      "dir": "h2d",
+      "frame": "00831101",
+      "state": {
+        "sec_enabled": false,
+        "session": null
+      },
+      "expect": {
+        "reply": "ff83ff07",
+        "note": "Phase 4 N1: a DATA frame with no armed assembly answers [FF][83][FF][0x07] CHUNK_NO_START. The same code now also answers a frame from a foreign owner, which the corpus cannot express -- it drives one connection -- and which tests/host/nfc_test.c covers instead."
+      },
+      "min_protocol": "2.0",
+      "requires": [
+        "cap_nfc"
+      ],
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/core/od_nfc.c"
+      }
+    },
+    {
+      "id": "dispatch/nfc-unsupported-silence",
+      "dir": "h2d",
+      "frame": "008300",
+      "state": {
+        "sec_enabled": false,
+        "session": null
+      },
+      "expect": {
+        "reply": null,
+        "note": "Phase 4 N8: on a capability-off build 0x0083 is an unknown opcode and emits NOTHING. Silence is the wire contract rather than an omission -- py-opendisplay raises NfcNotSupportedError when the first frame draws no response, so an invented 'unsupported' error code would be indistinguishable from firmware older than the command."
+      },
+      "min_protocol": "2.0",
+      "requires": [],
+      "forbids": [
+        "cap_nfc"
+      ],
+      "proof": "shared",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored",
+        "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored",
+        "reply_source": "shared/core/od_nfc.c"
+      }
     }
   ]
 }
