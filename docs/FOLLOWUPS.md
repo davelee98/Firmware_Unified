@@ -803,3 +803,39 @@ of its callers. `Firmware_Silabs` already carries both, which is why it is unaff
 `opendisplay_nfc.c`, with the regression pinned in `tests/host/nordic_nfc_test.c` — that suite
 drives the production handler over a fake tag sink and asserts a refused frame reaches no sink at
 all. It fails against the pre-fix bound.
+
+## 10. `Firmware_Unified` / nRF52840 — there is no GPIO-owning image, and no way to become one at runtime
+
+### The constraint
+
+P0.09/P0.10 are the NFC antenna pair. Which function owns them is the UICR `NFCPINS` latch, read
+at reset: `CONFIG_NFCT_PINS_AS_GPIOS` is what reprograms it, and the change takes effect only after
+a UICR erase and a reboot. **No runtime state can hand those pads to GPIO**, so a config-driven
+rule — "NFC starts if configured, otherwise the pins are free" — is not implementable on this SoC.
+
+A config-gated version was written during Phase 4 and reverted. It was wrong twice: beyond the
+latch, LEDs, buttons, the buzzer and sensors claim their configured pins during their own init,
+before config load reaches `opendisplay_nfc_apply_config()`, so an NFC-enabled config could hand
+those pads to a peripheral and then start NFCT over it.
+
+`od_pin_decode()` therefore reserves the pair statically whenever NFCT is built
+(`targets/nordic-zephyr/src/platform/nrf52840/od_pin_codec_nrf52840.c`), covered by
+`tests/host/nordic_nfc_pins_test.c`.
+
+### What is missing
+
+Every shipping nRF52840 image enables NFCT unconditionally —
+`targets/nordic-zephyr/zephyr/boards/xiao_ble_nrf52840.conf:70` sets `CONFIG_NFC_T2T_NRFXLIB=y` and
+`.overlay:235` marks `&nfct` okay. **So the alternative does not exist**: there is no build in which
+P0.09/P0.10 are available to a config, and any documentation implying a user can choose is wrong.
+
+### What building one would take
+
+A named board variant that (1) leaves `&nfct` disabled, (2) sets `CONFIG_NFCT_PINS_AS_GPIOS=y`, and
+(3) documents the UICR erase plus reboot needed to move a device that has already run an NFC image.
+Step (3) is the part that needs care: a device flashed with the GPIO image still has NFC-latched
+pads until the UICR write lands and it restarts, so the two pins silently do nothing across that
+window — the same no-op failure this reservation exists to prevent.
+
+Unbuilt deliberately. No NFC hardware exists in this fleet to test either image against, and an
+untested second board variant carrying UICR semantics is a liability rather than an option.

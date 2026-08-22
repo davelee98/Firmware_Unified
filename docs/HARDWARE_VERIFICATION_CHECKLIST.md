@@ -208,6 +208,89 @@ unavailable and do not qualify any row below.
 
 ---
 
+## Transfer Phase 4 — NFC (0x0083)
+
+The shared-machine software candidate was implemented by project direction on 2026-08-21, steps 5,
+6 and 7 in sequence, while every hardware row below remained open. **NO NFC-ENABLED HARDWARE
+EXISTS IN THIS FLEET**: no board carries an antenna, so none of these rows is merely awaiting a
+free bench — they await hardware that has to be built or bought. That is a stronger form of open
+than the Phase 2 and Phase 3 exceptions above, and it is why every row here is release debt rather
+than a queued task.
+
+The sequencing exception is not qualification. No Phase 1-3 run, and no amount of host coverage,
+qualifies any row below.
+
+Software evidence captured 2026-08-21: `tools/check.sh --targets` passes 33/0/0 with no skip; the
+shared suite is 336 checks at `OD_CAP_NFC=1` and 32 at `OD_CAP_NFC=0`; `tools/mutate_nfc.sh`
+reports all seven mandatory mutations detected; the Nordic and BG22 reference fixtures frozen at
+step 1 pass against the shared machine on every input except the deliberate N1/N4/N6 changes, each
+recorded in `docs/DIVERGENCE_MATRIX.md`. Nordic recovered 762 B of RAM at its cutover; BG22
+recovered 512 B of heap (`heap_size` 0x2ad0 -> 0x2cd0).
+
+X3's baseline is **measured, not inferred**: a clean BG22 build at `def82a1` — main before
+`od_nfc.c` existed — gives `heap_size` **0x2cf0 (11,504 B)**, against 0x2cd0 (11,472 B) now. That
+is **32 B of heap lost**, inside the 64 B ceiling. An earlier arithmetic estimate said 16 B and was
+wrong by half the figure, which is the reason the plan asks for a build rather than a subtraction.
+ESP32's image contains both `od_nfc_*` entry points and neither the assembler nor a seam
+reference.
+
+### Nordic — needs a board with an NFC antenna fitted
+
+Enabling `CONFIG_NFC_T2T_NRFXLIB` (2026-08-21) makes the tag real on all three boards; none has an
+antenna, so none of this has run.
+
+- [ ] Inline write ≤ 120 bytes, read back by an independent NFC reader
+- [ ] Chunked 512-byte write **as `OD_NFC_REC_RAW_NDEF`**, read back the same way. Every other
+      record type is an NDEF short record capped at 255 payload bytes and is refused at END with
+      `0x03` — that refusal is correct behaviour, not a defect
+- [ ] A 218-byte read, in plaintext and encrypted sessions
+- [ ] A 219-byte **verbatim or well-known** record truncated to 218 — Nordic's adapter behaviour,
+      asserted here and nowhere else (N2b)
+- [ ] A 219-byte **MIME** record **refused** with `0x02`. Nordic does not truncate uniformly: its
+      MIME arm refuses anything that would not fit whole (`opendisplay_nfc.c`, the
+      `out_pack > out_max` test), so a row exercising only truncation would report the adapter as
+      uniform when it is not
+- [ ] BLE disconnect mid-assembly, then a fresh START from a new connection
+- [ ] Tag hardware absent or failing, answering `0x02` / `0x03`
+- [ ] The § 3.4 divergence-3 frame (`00 83 01 00 FF FD`) answered `0x01`, device still alive
+- [ ] **READ-path stack high-water** (N7): the response buffer is now a 224-byte stack local
+      nesting with `od_reply()`'s sealed buffer
+- [ ] A config that assigns P0.09 or P0.10 is refused. **That is the whole row**, because the
+      complementary half has nothing to run against: every shipping nRF52840 image enables NFCT
+      unconditionally (`xiao_ble_nrf52840.conf:70`, `.overlay:235`), so no GPIO-owning image
+      exists. An earlier draft of this row claimed one and also asked for a config-driven form;
+      both were wrong. UICR NFCPINS latches the pads at reset, so handing them to GPIO needs an
+      image that disables NFCT *and* sets `CONFIG_NFCT_PINS_AS_GPIOS`, plus a UICR erase and
+      reboot to take effect. That variant is unbuilt and unspecified — see `docs/FOLLOWUPS.md`.
+      The refusal itself is host-tested (`tests/host/nordic_nfc_pins_test.c`), so this row is on-air
+      confirmation, not first coverage
+
+### EFR32BG22 — needs a board with a TNB132M fitted
+
+- [ ] Inline write ≤ 120 bytes, read back by an independent NFC reader
+- [ ] Chunked write **above 240 bytes** as `RAW_NDEF`: capture the I2C block sequence and read back
+      every byte. The write loop's block offset truncates at `i == 15`
+      (`opendisplay_ble.c:1526-1530`), so this is an **addressing investigation**, not a presumed
+      pass. 240 must pass, 241 is the minimal reproducer, 512 is the deployed-scale case
+- [ ] The controller limit: RAW_NDEF records of 128 and 129 raw bytes read back through the
+      bespoke BLE tool — 128 whole, 129 refused `0x02`. Confirm the boundary against the adapter
+      first; `sizeof(s_od_nfc_read_data)` is the constant, but which length is compared to it is
+      what the row proves
+- [ ] Both of N4's changed input classes confirmed on the wire (now `0x01`, was `0x03` / `0x05`)
+- [ ] `heap_size` measured on the flashed image against X3's ceiling
+
+### ESP32-S3 — capability-off
+
+- [ ] `0x0083` probed in plaintext and encrypted sessions draws nothing, the link is not held
+      open, and the client raises `NfcNotSupportedError`
+
+### The bespoke BLE READ tool — blocks every READ row above
+
+`py-opendisplay` implements no `NFC_SUB_READ` (`commands.py:103`, "not built here"), so **no READ
+row on any target can be attempted until a sender/decoder is written.** An independent NFC reader
+is stimulus and oracle only: it talks to the tag directly, bypassing `CMD_NFC_ENDPOINT`, dispatch,
+the seam and response framing. **A read row backed by a reader alone is not a pass.**
+
 ## ESP32-S3 (`s3-n16r8-extuart-debug`, FastEPD)
 
 - [x] Two fresh authentications — 2026-08-17

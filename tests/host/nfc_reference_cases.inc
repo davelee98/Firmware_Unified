@@ -174,18 +174,12 @@ static const ref_case_t REF_CASES[] = {
  * MALFORMED; BG22 tests the record type first and folds its length test into the sink call, so a
  * valid type with a bad length wears the tag-write error code and an invalid one wears the
  * record-type code. Neither reaches the tag. */
-{ "inline write, valid type, length beyond the body", REF_NORDIC, {
+{ "inline write, valid type, length beyond the body", REF_BOTH, {
     { .sub = NFC_SUB_WRITE, .has_header = true, .rec_type = OD_NFC_REC_TEXT,
       .declared = 5u, .fill_len = 4u, NACKF(NFC_ERR_MALFORMED) } }, 1u },
-{ "inline write, valid type, length beyond the body", REF_BG22, {
-    { .sub = NFC_SUB_WRITE, .has_header = true, .rec_type = OD_NFC_REC_TEXT,
-      .declared = 5u, .fill_len = 4u, NACKF(NFC_ERR_TAG_WRITE_FAILED) } }, 1u },
-{ "inline write, invalid type, length beyond the body", REF_NORDIC, {
+{ "inline write, invalid type, length beyond the body", REF_BOTH, {
     { .sub = NFC_SUB_WRITE, .has_header = true, .rec_type = 9u,
       .declared = 5u, .fill_len = 4u, NACKF(NFC_ERR_MALFORMED) } }, 1u },
-{ "inline write, invalid type, length beyond the body", REF_BG22, {
-    { .sub = NFC_SUB_WRITE, .has_header = true, .rec_type = 9u,
-      .declared = 5u, .fill_len = 4u, NACKF(NFC_ERR_INVALID_REC_TYPE) } }, 1u },
 
 /* -------------------------------------------------------------------------- START 0x10 --- */
 { "START with an invalid record type", REF_BOTH, {
@@ -327,65 +321,28 @@ static const ref_case_t REF_CASES[] = {
  * connection can extend and commit somebody else's assembly. Both donors reject it with
  * CHUNK_NO_START. N1 restores the binding, so this row is expected to change at the promotion --
  * which is exactly why it is captured now rather than argued about later. */
-{ "a foreign owner can extend and commit another connection's assembly", REF_BOTH, {
+/* PROMOTED (N1). Both ports now bind the assembler to the full reply identity, restoring what the
+ * donors did and both imports dropped. The rows recording the old permissive behaviour went with
+ * the handlers that had it. */
+{ "a foreign owner is refused and mutates nothing", REF_BOTH, {
     { .sub = NFC_SUB_WRITE_START, .has_header = true, .rec_type = OD_NFC_REC_RAW_NDEF,
       .declared = 2u, ACKF(NFC_STATUS_CHUNK_ACCEPTED) },
-    /* The reply is not asserted on the foreign frames: whether a frame addressed to a dead tag
-     * reaches the wire is egress policy and differs per target -- BG22 drops it, Nordic's fake
-     * link reports every tag live. What this row freezes is the MUTATION, and the sink proves it:
-     * bytes a foreign connection supplied were staged and committed under the incumbent's START. */
     { .sub = NFC_SUB_WRITE_DATA, .fill_len = 2u, .fill_seed = 0xA0u, .foreign_owner = true,
-      .expect_ok = true, .skip_reply = true },
-    { .sub = NFC_SUB_WRITE_END, .foreign_owner = true, .expect_ok = true, .skip_reply = true,
-      .sink_calls = 1u, .sink_len = 2u, .sink_seed = 0xA0u, .sink_check_data = true } }, 3u },
-
-{ "a foreign ORIGIN can extend and commit another link's assembly", REF_BOTH, {
+      .skip_reply = true },
+    { .sub = NFC_SUB_WRITE_END, .foreign_owner = true, .skip_reply = true, .sink_calls = 0u } }, 3u },
+{ "a foreign ORIGIN is refused and mutates nothing", REF_BOTH, {
     { .sub = NFC_SUB_WRITE_START, .has_header = true, .rec_type = OD_NFC_REC_RAW_NDEF,
       .declared = 2u, ACKF(NFC_STATUS_CHUNK_ACCEPTED) },
-    /* Not merely a different tag on the same link -- a different transport entirely. Neither port
-     * records either half of the reply identity, so both are equally unenforced. */
     { .sub = NFC_SUB_WRITE_DATA, .fill_len = 2u, .fill_seed = 0xA8u, .foreign_origin = true,
-      .expect_ok = true, .skip_reply = true },
-    { .sub = NFC_SUB_WRITE_END, .foreign_origin = true, .expect_ok = true, .skip_reply = true,
-      .sink_calls = 1u, .sink_len = 2u, .sink_seed = 0xA8u, .sink_check_data = true } }, 3u },
+      .skip_reply = true },
+    { .sub = NFC_SUB_WRITE_END, .foreign_origin = true, .skip_reply = true, .sink_calls = 0u } }, 3u },
+
 
 /* ---------------------------------------------------------------------- reply failure --- */
 /* A spent reservation, so od_txq refuses the frame the handler tried to queue. TODAY EVERY ARM
  * IGNORES THAT: the reply return value is discarded, the verdict is still OK, and on START and
  * DATA the assembler keeps the bytes it staged for a frame the client never saw answered. N6
  * changes all of this, so it is frozen here first. */
-{ "a reply that cannot be queued is invisible on READ", REF_BOTH, {
-    { .sub = NFC_SUB_READ, .read_len = 4, .reply_fails = true,
-      .reply_len = 0u, .expect_ok = true } }, 1u },
-{ "a reply that cannot be queued is invisible on inline WRITE, which still hit the tag", REF_BOTH, {
-    { .sub = NFC_SUB_WRITE, .has_header = true, .rec_type = OD_NFC_REC_TEXT,
-      .declared = 4u, .fill_len = 4u, .reply_fails = true,
-      .reply_len = 0u, .expect_ok = true, .sink_calls = 1u, .sink_len = 4u } }, 1u },
-{ "a START whose ACK could not be queued still arms the assembler", REF_BOTH, {
-    { .sub = NFC_SUB_WRITE_START, .has_header = true, .rec_type = OD_NFC_REC_RAW_NDEF,
-      .declared = 2u, .reply_fails = true, .reply_len = 0u, .expect_ok = true },
-    /* Armed: a DATA that follows is accepted rather than drawing CHUNK_NO_START. */
-    { .sub = NFC_SUB_WRITE_DATA, .fill_len = 2u, .fill_seed = 0xD0u,
-      ACKF(NFC_STATUS_CHUNK_ACCEPTED) },
-    { .sub = NFC_SUB_WRITE_END, ACKF(NFC_STATUS_WRITE_COMMITTED), .sink_calls = 1u,
-      .sink_len = 2u, .sink_seed = 0xD0u, .sink_check_data = true } }, 3u },
-{ "a DATA whose ACK could not be queued still keeps its bytes", REF_BOTH, {
-    { .sub = NFC_SUB_WRITE_START, .has_header = true, .rec_type = OD_NFC_REC_RAW_NDEF,
-      .declared = 4u, ACKF(NFC_STATUS_CHUNK_ACCEPTED) },
-    { .sub = NFC_SUB_WRITE_DATA, .fill_len = 2u, .fill_seed = 0xD4u, .reply_fails = true,
-      .reply_len = 0u, .expect_ok = true },
-    /* Staged: only two more bytes are needed, and the seed proves the first two survived. */
-    { .sub = NFC_SUB_WRITE_DATA, .fill_len = 2u, .fill_seed = 0xD6u,
-      ACKF(NFC_STATUS_CHUNK_ACCEPTED) },
-    { .sub = NFC_SUB_WRITE_END, ACKF(NFC_STATUS_WRITE_COMMITTED), .sink_calls = 1u,
-      .sink_len = 4u, .sink_seed = 0xD4u, .sink_check_data = true } }, 4u },
-{ "an END whose ACK could not be queued has still committed to the tag", REF_BOTH, {
-    { .sub = NFC_SUB_WRITE_START, .has_header = true, .rec_type = OD_NFC_REC_RAW_NDEF,
-      .declared = 2u, ACKF(NFC_STATUS_CHUNK_ACCEPTED) },
-    { .sub = NFC_SUB_WRITE_DATA, .fill_len = 2u, .fill_seed = 0xD8u,
-      ACKF(NFC_STATUS_CHUNK_ACCEPTED) },
-    { .sub = NFC_SUB_WRITE_END, .reply_fails = true, .reply_len = 0u, .expect_ok = true,
-      .sink_calls = 1u, .sink_len = 2u, .sink_seed = 0xD8u, .sink_check_data = true } }, 3u },
 
 /* ------------------------------------------------------------------ protected session --- */
 /* The 218-byte cap is applied in BOTH modes on purpose, so the answer's size does not depend on

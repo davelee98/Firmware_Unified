@@ -4,6 +4,7 @@
 
 #include "od_config_read.h"
 #include "od_dispatch.h"
+#include "od_nfc.h"
 #include "od_reply.h"
 #include "od_session.h"
 #include "od_session_app.h"
@@ -250,100 +251,15 @@ od_cmd_result_t od_cmd_app_buzzer(const od_cmd_ctx_t *ctx, od_span_t body)
   return OD_CMD_NACK;
 }
 
-static uint8_t s_nfc_data[512];
-static uint16_t s_nfc_total;
-static uint16_t s_nfc_received;
-static uint8_t s_nfc_type;
-
-static bool nfc_type_valid(uint8_t type)
-{
-  return type == OD_NFC_REC_TEXT || type == OD_NFC_REC_URI ||
-         type == OD_NFC_REC_WELL_KNOWN_RAW || type == OD_NFC_REC_MIME ||
-         type == OD_NFC_REC_RAW_NDEF;
-}
-
+/* CMD_NFC_ENDPOINT (0x0083) is shared/core/od_nfc.c's. This wrapper survives only because
+ * dispatch still names od_cmd_app_nfc until step 8; the tag is reached through od_nfc_app.h,
+ * implemented in opendisplay_ble.c. */
 void od_cmd_silabs_reset(void)
 {
   od_config_asm_reset(opendisplay_config_assembler());
-  s_nfc_total = 0u;
-  s_nfc_received = 0u;
 }
 
 od_cmd_result_t od_cmd_app_nfc(const od_cmd_ctx_t *ctx, od_span_t body)
 {
-  uint8_t rsp[OD_SESSION_PAYLOAD_MAX + 2u];
-  uint8_t err[] = { RESP_NACK, RESP_NFC_ENDPOINT, 0xFFu, NFC_ERR_MALFORMED };
-  const uint8_t *p = body.p;
-  uint16_t n = (uint16_t)body.n;
-
-  if (n < 1u) goto fail;
-  if (p[0] == NFC_SUB_READ) {
-    uint16_t out_len = OD_SESSION_PAYLOAD_MAX - 4u;
-    uint8_t type;
-    if (!opendisplay_ble_nfc_read(&type, &rsp[6], &out_len, out_len)) {
-      err[3] = NFC_ERR_READ_FAILED; goto fail;
-    }
-    rsp[0] = RESP_ACK; rsp[1] = RESP_NFC_ENDPOINT; rsp[2] = NFC_STATUS_READ_DATA;
-    rsp[3] = type; rsp[4] = (uint8_t)(out_len >> 8); rsp[5] = (uint8_t)out_len;
-    (void)reply(ctx, rsp, (uint16_t)(6u + out_len)); return OD_CMD_OK;
-  }
-  if (p[0] == NFC_SUB_WRITE && n >= 4u) {
-    uint16_t len = (uint16_t)(((uint16_t)p[2] << 8) | p[3]);
-    if (!nfc_type_valid(p[1])) {
-      err[3] = NFC_ERR_INVALID_REC_TYPE; goto fail;
-    }
-    if ((uint32_t)len + 4u > n || !opendisplay_ble_nfc_write(p[1], &p[4], len)) {
-      err[3] = NFC_ERR_TAG_WRITE_FAILED; goto fail;
-    }
-    { uint8_t ok[] = { RESP_ACK, RESP_NFC_ENDPOINT, NFC_STATUS_WRITE_COMMITTED };
-      (void)reply(ctx, ok, sizeof(ok)); return OD_CMD_OK; }
-  }
-  if (p[0] == NFC_SUB_WRITE_START && n >= 4u) {
-    uint16_t total = (uint16_t)(((uint16_t)p[2] << 8) | p[3]);
-    if (!nfc_type_valid(p[1])) {
-      err[3] = NFC_ERR_INVALID_REC_TYPE; goto fail;
-    }
-    if (total == 0u || total > sizeof(s_nfc_data)) {
-      err[3] = NFC_ERR_BAD_TOTAL_LEN; goto fail;
-    }
-    s_nfc_type = p[1]; s_nfc_total = total; s_nfc_received = 0u;
-    { uint8_t ok[] = { RESP_ACK, RESP_NFC_ENDPOINT, NFC_STATUS_CHUNK_ACCEPTED };
-      (void)reply(ctx, ok, sizeof(ok)); return OD_CMD_OK; }
-  }
-  if (p[0] == NFC_SUB_WRITE_DATA && s_nfc_total == 0u) {
-    err[3] = NFC_ERR_CHUNK_NO_START; goto fail;
-  }
-  if (p[0] == NFC_SUB_WRITE_DATA && n >= 2u &&
-      (uint32_t)s_nfc_received + n - 1u > s_nfc_total) {
-    s_nfc_total = 0u; s_nfc_received = 0u;
-    err[3] = NFC_ERR_CHUNK_OVERFLOW; goto fail;
-  }
-  if (p[0] == NFC_SUB_WRITE_DATA && n >= 2u) {
-    memcpy(&s_nfc_data[s_nfc_received], &p[1], n - 1u);
-    s_nfc_received = (uint16_t)(s_nfc_received + n - 1u);
-    { uint8_t ok[] = { RESP_ACK, RESP_NFC_ENDPOINT, NFC_STATUS_CHUNK_ACCEPTED };
-      (void)reply(ctx, ok, sizeof(ok)); return OD_CMD_OK; }
-  }
-  if (p[0] == NFC_SUB_WRITE_END && s_nfc_total == 0u) {
-    err[3] = NFC_ERR_CHUNK_NO_START; goto fail;
-  }
-  if (p[0] == NFC_SUB_WRITE_END && s_nfc_received != s_nfc_total) {
-    err[3] = NFC_ERR_END_LEN_MISMATCH; goto fail;
-  }
-  if (p[0] == NFC_SUB_WRITE_END &&
-      opendisplay_ble_nfc_write(s_nfc_type, s_nfc_data, s_nfc_total)) {
-    s_nfc_total = 0u;
-    { uint8_t ok[] = { RESP_ACK, RESP_NFC_ENDPOINT, NFC_STATUS_WRITE_COMMITTED };
-      (void)reply(ctx, ok, sizeof(ok)); return OD_CMD_OK; }
-  }
-  if (p[0] == NFC_SUB_WRITE_END) {
-    s_nfc_total = 0u; s_nfc_received = 0u;
-    err[3] = NFC_ERR_TAG_WRITE_FAILED;
-  } else if (p[0] != NFC_SUB_READ && p[0] != NFC_SUB_WRITE &&
-             p[0] != NFC_SUB_WRITE_START && p[0] != NFC_SUB_WRITE_DATA) {
-    err[3] = NFC_ERR_UNKNOWN_SUBCMD;
-  }
-fail:
-  (void)reply_plain(ctx, err, sizeof(err));
-  return OD_CMD_NACK;
+  return od_nfc_frame(ctx, body);
 }

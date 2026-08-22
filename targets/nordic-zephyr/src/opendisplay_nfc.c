@@ -461,8 +461,8 @@ void opendisplay_nfc_apply_config(const struct od_config *cfg)
 	       (unsigned)s_adv_byte_index);
 }
 
-bool opendisplay_ble_nfc_read(uint8_t *type_out, uint8_t *data_out, uint16_t *data_len_io,
-			      uint16_t max_len)
+bool od_nfc_app_read(uint8_t *type_out, uint8_t *data_out, uint16_t *data_len_io,
+		     uint16_t max_len)
 {
 	if (!s_nfc_enabled) {
 		return false;
@@ -470,7 +470,7 @@ bool opendisplay_ble_nfc_read(uint8_t *type_out, uint8_t *data_out, uint16_t *da
 	return nfc_parse_ndef(type_out, data_out, data_len_io, max_len);
 }
 
-bool opendisplay_ble_nfc_write(uint8_t type, const uint8_t *data, uint16_t data_len)
+bool od_nfc_app_write(uint8_t type, const uint8_t *data, uint16_t data_len)
 {
 	if (!s_nfc_enabled) {
 		return false;
@@ -492,8 +492,8 @@ void opendisplay_nfc_process(void)
 {
 }
 
-bool opendisplay_ble_nfc_read(uint8_t *type_out, uint8_t *data_out, uint16_t *data_len_io,
-			      uint16_t max_len)
+bool od_nfc_app_read(uint8_t *type_out, uint8_t *data_out, uint16_t *data_len_io,
+		     uint16_t max_len)
 {
 	ARG_UNUSED(type_out);
 	ARG_UNUSED(data_out);
@@ -502,7 +502,7 @@ bool opendisplay_ble_nfc_read(uint8_t *type_out, uint8_t *data_out, uint16_t *da
 	return false;
 }
 
-bool opendisplay_ble_nfc_write(uint8_t type, const uint8_t *data, uint16_t data_len)
+bool od_nfc_app_write(uint8_t type, const uint8_t *data, uint16_t data_len)
 {
 	ARG_UNUSED(type);
 	ARG_UNUSED(data);
@@ -511,19 +511,3 @@ bool opendisplay_ble_nfc_write(uint8_t type, const uint8_t *data, uint16_t data_
 }
 
 #endif /* CONFIG_NFC_T2T_NRFXLIB */
-
-/* ------------------------------------------------------------------------- od_nfc_app seam ---
- *
- * An alias, because two callers reach this tag under different names: the target handler above,
- * and the shared 0x83 machine, which is linked wherever od_core_reset() is. Aliasing rather than
- * renaming keeps both resolvable without either build relying on the linker to discard the other
- * caller. */
-bool od_nfc_app_read(uint8_t *type, uint8_t *data, uint16_t *len_io, uint16_t cap)
-{
-    return opendisplay_ble_nfc_read(type, data, len_io, cap);
-}
-
-bool od_nfc_app_write(uint8_t type, const uint8_t *data, uint16_t len)
-{
-    return opendisplay_ble_nfc_write(type, data, len);
-}

@@ -229,3 +229,9 @@
 &uart0 {
 	status = "disabled";
 };
+
+/* NFCT ships disabled on nRF52840 (nrf52840.dtsi). It claims P0.09/P0.10, which no peripheral in
+ * this build uses, so enabling it takes nothing away. */
+&nfct {
+	status = "okay";
+};

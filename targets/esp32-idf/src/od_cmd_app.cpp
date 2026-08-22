@@ -15,6 +15,7 @@
 #include "device_control.h"
 #include "display_service.h"
 #include "od_dispatch.h"
+#include "od_nfc.h"
 
 #include "od_cmd_reply.h"
 #include "od_hal_sleep.h"
@@ -115,11 +116,15 @@ extern "C" od_cmd_result_t od_cmd_app_buzzer(const od_cmd_ctx_t *ctx, od_span_t 
 
 extern "C" od_cmd_result_t od_cmd_app_nfc(const od_cmd_ctx_t *ctx, od_span_t body)
 {
-    /* UNKNOWN, AND SILENT. This firmware implements no NFC on this target, and manufacturing an
-     * "unsupported NFC" error would be inventing a wire meaning. UNKNOWN also keeps the frame out
-     * of the activity stamp, so probing 0x0083 cannot hold the exclusive link open. */
-    (void)ctx; (void)body;
-    return OD_CMD_UNKNOWN;
+    /* The same wrapper the other two targets carry, over the same machine -- this target just
+     * builds it at OD_CAP_NFC=0, whose arm answers UNKNOWN and sends nothing.
+     *
+     * SILENCE IS THE WIRE BEHAVIOUR, not an omission: manufacturing an "unsupported NFC" error
+     * would invent a meaning a client cannot tell from firmware older than the command, and
+     * py-opendisplay's NfcNotSupportedError detection rests on the first frame drawing no reply.
+     * UNKNOWN also keeps the frame out of the activity stamp, so probing 0x0083 cannot hold the
+     * exclusive link open. Gone at step 8, when dispatch names od_nfc_frame directly. */
+    return od_nfc_frame(ctx, body);
 }
 
 /* ------------------------------------------------------------------ dispatcher predicates --- */
