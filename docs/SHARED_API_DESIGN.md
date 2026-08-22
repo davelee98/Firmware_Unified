@@ -714,7 +714,7 @@ true:
 | Sense of *optional* | NFC | Mechanism |
 |---|---|---|
 | Optional **in a config blob** — a config need not contain one | **yes** | schema: `@packet 0x2A @repeatable max=2`, unlike `system`/`manufacturer`/`power`, which are required singletons |
-| Optional **to support** — a target need not drive NFC hardware or answer `0x83` | **yes** | the target's `od_cmd_app_nfc()` hook. ESP32's returns `OD_CMD_UNKNOWN` and answers **nothing** |
+| Optional **to support** — a target need not drive NFC hardware or answer `0x83` | **yes** | `OD_CAP_NFC`. Since Phase 4 the opcode routes to `shared/core/od_nfc.c`; the capability-off arm returns `OD_CMD_UNKNOWN` and answers **nothing**, and a supporting target implements `od_nfc_app.h` |
 | Optional **to parse** — a target may fail to step over the packet | **NO** | the size-table parser walks every canonical packet unconditionally |
 
 So the placement is a three-way split, not a two-way one:

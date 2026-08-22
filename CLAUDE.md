@@ -79,15 +79,17 @@ looks arbitrary and is not); delete the story.
   --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF.
   `tools/sdkconfig_baseline.sh` is a gate a change must not break.
 - **`shared/` is no longer empty** —
-  `core/od_{adv_control,advert,cmd,color,config,config_asm,config_read,config_tlv,core,dispatch,gate,log,pipe,reply,rxq,session,txq,watchdog,xfer,xfer_direct,xfer_partial,zlib_inflate,zlib_pump}.c`
+  `core/od_{adv_control,advert,cmd,color,config,config_asm,config_read,config_tlv,core,dispatch,gate,log,nfc,pipe,reply,rxq,session,txq,watchdog,xfer,xfer_direct,xfer_partial,zlib_inflate,zlib_pump}.c`
   listed in `shared/sources.cmake` (never globbed) in per-HAL tiers, plus the two all-inline
   headers `od_span.h` and `od_nonce_window.h` and pure seam headers including `od_cmd_app.h`,
-  `od_session_app.h`, `od_inflate_app.h` and `od_xfer_app.h`, which correctly have no entry there. Consumers:
+  `od_session_app.h`, `od_inflate_app.h`, `od_xfer_app.h` and `od_nfc_app.h`, which correctly have no
+  entry there. Consumers:
   host tests and `esp32-idf` take the aggregate; `nordic-zephyr` takes PURE + HAL_CRYPTO +
-  HAL_RADIO + HAL_WDT + HAL_LOG + APP_SESSION + APP_RXQ + APP_INFLATE + APP_XFER;
+  HAL_RADIO + HAL_WDT + HAL_LOG + APP_SESSION + APP_RXQ + APP_INFLATE + APP_XFER + APP_NFC;
   `efr32bg22-slc` takes PURE + HAL_CRYPTO + HAL_RADIO + HAL_LOG + APP_SESSION + APP_INFLATE +
-  APP_XFER and deliberately compiles HAL_LOG capability-off while declining APP_RXQ, HAL_ADV and
-  HAL_WDT. APP tiers are named for a **seam** rather than a HAL because they need a target function
+  APP_XFER + APP_NFC and deliberately compiles HAL_LOG capability-off while declining APP_RXQ,
+  HAL_ADV and HAL_WDT. **APP_NFC is not optional for a consumer that takes `od_core.c`**:
+  `od_core_reset()` names `od_nfc_reset()`, whatever the capability setting. APP tiers are named for a **seam** rather than a HAL because they need a target function
   rather than a driver.
 - **THE WHOLE COMMAND PATH IS SHARED ON BOTH TARGETS.** (C8 2026-08-15, C10 2026-08-15,
   C11 2026-08-16). **NOW HARDWARE-VERIFIED on `esp32-idf`** (`s3-n16r8-extuart-debug`,
@@ -122,7 +124,8 @@ looks arbitrary and is not); delete the story.
     must be able to issue before it can authenticate. A **promoted** opcode leaves that surface:
     its row names the shared state machine directly and capability-off behaviour is compiled into
     it, so the link-error enforcement covers the target-owned rows only.
-    `0x70`/`0x71`/`0x72`/`0x76` went that way in Phase 2 step 11; PIPE and NFC have not.
+    `0x70`/`0x71`/`0x72`/`0x76` went that way in Phase 2 step 11, PIPE in Phase 3 and NFC in
+    Phase 4, so the link-error surface now covers the target-owned rows only.
   - **One deliberate wire change:** Nordic `0x0052` now answers
     `{FF,52,OD_ERR_POWER_OFF_UNSUPPORTED,00}` instead of falling silent. It has no power latch, and
     silence left a host unable to tell that from firmware older than the command.
@@ -135,7 +138,8 @@ looks arbitrary and is not); delete the story.
     `commandOrigin()` and `imageDataWritten()` are gone; both ingresses build an `od_reply_t` and
     call `od_dispatch_app_frame()`. `enum CommandOrigin` retired in favour of `od_origin_t`.
   - **`opendisplay_pipe.c` is transport and pump only**, 1194 → 200 lines. Commands moved with
-    their state to `od_cmd_{device,config,direct,nfc}.c`, each exporting the one reset disconnect
+    their state to `od_cmd_{device,config}.c` (direct and NFC have since been promoted to shared
+    machines and their files are gone), each exporting the one reset disconnect
     cleanup calls.
   - **Both session objects are private to their `od_session_app` translation unit**, and
     `od_core_reset()` is the shared half of a teardown (producers — NFC assembly, transfer,
@@ -240,7 +244,8 @@ looks arbitrary and is not); delete the story.
   fault suite covers persistence ordering/failure, event pressure/deadlines, DIRECT END completion,
   and NFC limits with 232 assertions. Phase 1 compressed direct is cleared, but the rest of C13's
   behavior is not hardware-qualified. The remaining
-  unpromoted protocol logic is **PIPE and NFC**. Direct and legacy partial now use shared
+  unpromoted protocol logic was **PIPE and NFC**, both since promoted (Phases 3 and 4). Direct and
+  legacy partial use shared
   `od_xfer`; the PIPE-capable targets retain only the explicitly inventoried machinery that target
   PIPE still calls until Phase 3.
 - **C14 canonical portable inflater (2026-08-18):** `shared/core/od_zlib_inflate.{c,h}` is the
@@ -379,7 +384,9 @@ looks arbitrary and is not); delete the story.
   not tell the two apart. Restored, and pinned.
   **THREE EXECUTABLES, and the difference is what a pass MEANS.** `od_cmd_app_*` is static
   link-time composition, so hook sets cannot share a binary — and the answer to that is not a
-  runtime registry. `dispatch_corpus_portable` defines every routed entry point itself, so it
+  runtime registry. `dispatch_corpus_portable` defines every routed entry point itself — except
+  `od_nfc_frame`, which it compiles from `shared/core/od_nfc.c` at `OD_CAP_NFC=0` so the
+  capability-off vector runs the shipped arm rather than a fixture agreeing with it — so it
   proves shared dispatch routed and plumbed a vector and nothing below that. The Nordic and Silabs
   binaries link their target's production command code for target-owned opcodes and the real shared
   `od_xfer` for `0x70`/`0x71`/`0x72`/`0x76`, over target-specific driver and `od_xfer_app` fakes.
