@@ -263,7 +263,7 @@ present, and the two `od_nfc_app_*` seam symbols present because Nordic implemen
 | | added | removed |
 |---|---|---|
 | shared production (`od_nfc.{c,h}`, `od_nfc_app.h`) | 353 | 0 |
-| shared wiring (dispatch, caps, core, `od_txq.h`) | 34 | 14 |
+| shared wiring (`od_dispatch{.c,_ops.h}`, `od_caps.h`, `od_core.{c,h}`, `od_cmd_app.h`, `od_txq.h`, `od_xfer.c`) | 34 | 14 |
 | build wiring (`shared/sources.cmake`) | 8 | 0 |
 | **target firmware** | **82** | **347** |
 | tests and tools | 2,196 | 102 |
@@ -276,6 +276,10 @@ and tools are reported separately per § 10 and deliberately not netted against 
 wire-response literal survives: the § 8 ratchet greps eight symbols over `targets/**`, and
 `RESP_NFC_ENDPOINT` appears in no target `.c`/`.cpp`. All 11 ESP32 board images carry both
 `od_nfc_*` entry points, no `s_nfc`, and no `od_nfc_app_*` reference.
+
+**Software gate at step 9 close: `tools/check.sh --targets` 34 passed / 0 failed / 0 skipped.**
+The 33/0/0 recorded above was the step 5-7 figure; the extra check is the § 8 ratchet that landed
+with the dispatch reroute.
 
 **Hardware rows: 0 passed, 16 open.** Not one `0x0083` row has run, and none can here.
 
