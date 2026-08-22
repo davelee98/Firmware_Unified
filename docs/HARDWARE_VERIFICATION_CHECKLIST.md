@@ -283,6 +283,43 @@ with the dispatch reroute.
 
 **Hardware rows: 0 passed, 16 open.** Not one `0x0083` row has run, and none can here.
 
+### Phase 5 close, 2026-08-22
+
+**Step 10 — deletion inventory: empty, and that is the result rather than an omission.** X1 forbids
+speculative deletion, so the inventory was built from evidence and came back with nothing to
+delete. Checked: orphaned declarations in target headers (none); target constants that lost their
+last user (none — `OD_PIPE_MAX_PAYLOAD`, `OD_NFC_ASSEMBLY_MAX` and `NFC_INLINE_MAX` are referenced
+only from `shared/`, which is correct); target-side response literals for promoted opcodes (none);
+target-local transfer, pump, PIPE or NFC state (none); build entries naming deleted files (none —
+and a real one would fail the build); and every scaffold the plan created, all still referenced.
+
+The reason is that each cutover deleted its own orphans in the same commit: `7c4fcb5` removed
+`od_cmd_nfc.h`, `5b6ecbf` removed `od_cmd_nfc.c`, and the BG22 and ESP32 wrappers went from files
+that keep their other hooks. Dead *code* cannot survive `-Wall -Wextra -Werror`, so what a sweep
+could still find is dead declarations and macros — and the ones present are pre-existing driver
+registers and config-packet constants that no promotion orphaned. Deleting those would be exactly
+the speculative deletion X1 rules out.
+
+**Step 12 — every image read, not merely produced.** All 15 (BG22, three Nordic boards, 11 ESP32
+configurations) inspected with `nm`:
+
+| | target-local transfer/PIPE/NFC state | shared entry points | seam symbols |
+|---|---|---|---|
+| `efr32bg22-slc` | 0 | 3 | 12 |
+| Nordic × 3 | 0 | 3 | 15 |
+| ESP32 × 11 | 0 | 3 | 13 |
+
+The read caught something a source grep cannot: `s_pipe` and `s_reorder` appear in every
+PIPE-capable image and are **`shared/core/od_pipe.c`'s own statics**, not target leftovers — and
+they are absent from BG22, which declines the capability. That is the capability-off arm being
+empty in the linker's account rather than in the source's, which is the distinction this step
+exists to make.
+
+**Step 13 — release evidence.** Per-unit measurements are recorded above under Step 9
+consolidation, per phase and per target rather than for a final squash. The § 9 matrix stands at
+**0 passed, 16 open**, every open row named with what it needs. No row is closed by this phase, and
+none is closed by any amount of the software evidence above it.
+
 ### Nordic — needs a board with an NFC antenna fitted
 
 Enabling `CONFIG_NFC_T2T_NRFXLIB` (2026-08-21) makes the tag real on all three boards; none has an
