@@ -302,20 +302,6 @@ od_cmd_result_t od_cmd_app_buzzer(const od_cmd_ctx_t *ctx, od_span_t body)
     return ack4(ctx, RESP_BUZZER_ACK);
 }
 
-/* The ROUTED ENTRY POINT, defined here rather than linked. This profile proves that shared
- * dispatch routed and plumbed a vector and nothing below that, so it supplies od_nfc_frame itself
- * -- and deliberately not od_nfc_app_read/write. A seam fake would have nothing to serve: this
- * executable links od_session_fake_dispatch -> od_shared_dispatch_fixture, whose source list
- * filters out od_core.c and therefore carries no od_nfc.o at all. */
-od_cmd_result_t od_nfc_frame(const od_cmd_ctx_t *ctx, od_span_t body)
-{
-    (void)body;
-    if (!(od_corpus_knobs.caps & OD_VEC_CAP_NFC)) {
-        return OD_CMD_UNKNOWN;     /* ESP32's answer: silence, never an invented error code */
-    }
-    return ack2(ctx, RESP_NFC_ENDPOINT);
-}
-
 /* --------------------------------------------------------- the dispatcher's own predicates --- */
 
 bool od_cmd_mutates_config(uint16_t cmd)

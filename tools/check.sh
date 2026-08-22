@@ -425,14 +425,23 @@ check "transfer: no target PIPE machine" pipe_target_machine_absent
 # opendisplay_nfc.c's NDEF encoder and the TNB132M I2C work are deliberately OUT OF SCOPE: they are
 # controller adaptation reached through od_nfc_app, and they stay.
 nfc_target_machine_absent() {
-    local hits
+    local hits rc
+
+    # GREP'S STATUS IS THE PROOF, not the emptiness of its output. `2>/dev/null || true` turns an
+    # unreadable tree or a mistyped path into "no hits" and therefore a PASS -- an absence check
+    # that passes because it read nothing.
+    #   0 = matched (the symbols came back)   1 = clean   >1 = could not be evaluated
     hits=$(grep -RInE \
         '\b(od_nfc_write_chunk_t|s_nfc_write_chunk|s_nfc_data|s_nfc_rsp_buf|nfc_rec_type_valid|nfc_type_valid|od_cmd_nfc_reset|od_cmd_app_nfc)\b' \
-        targets --include='*.c' --include='*.cpp' --include='*.h' --exclude-dir=build \
-        2>/dev/null || true)
-    if [ -n "$hits" ]; then
+        targets --include='*.c' --include='*.cpp' --include='*.h' --exclude-dir=build)
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
         echo "$hits"
         echo "target-local NFC assembler or hook returned"
+        return 1
+    fi
+    if [ "$rc" -gt 1 ]; then
+        echo "grep could not scan targets/ (status $rc); the absence is unproven"
         return 1
     fi
 }

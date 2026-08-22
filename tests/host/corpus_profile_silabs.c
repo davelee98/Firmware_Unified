@@ -7,6 +7,7 @@
 #include "od_caps.h"
 #include "od_config_asm.h"
 #include "od_txq.h"
+#include "od_nfc.h"
 #include "od_xfer.h"
 
 typedef char silabs_pipe_cap_must_be_zero[(OD_CAP_PIPE == 0) ? 1 : -1];
@@ -27,6 +28,7 @@ const char *od_corpus_profile_name(void) { return "silabs-production"; }
 void od_corpus_profile_reset(const od_vec_t *vec)
 {
     od_xfer_reset();
+    od_nfc_reset();   /* assembly outlives a dispatch; without this a START leaks into the next vector */
     fake_silabs_reset();
     fake_silabs_store_ok = vec->storage_ok != 0u;
     if (vec->xfer_active) {

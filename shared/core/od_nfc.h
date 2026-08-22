@@ -29,12 +29,10 @@
  * work around. */
 #define OD_NFC_ASSEMBLY_MAX 512u
 
-/* THE ASSERTS FOR BOTH CONSTANTS LIVE IN od_nfc.c, not here. Under -std=c99 -- which is how
- * shared/ is compiled for the host -- OD_STATIC_ASSERT falls back to a typedef named only by
- * __LINE__, so two headers carrying an assert on the same line collide in any translation unit
- * that includes both. This header hit that against an existing one the moment dispatch began
- * including it. The protocol header that defines the macro is a byte-for-byte copy of the
- * canonical one and is not ours to fix, so the asserts move instead of the macro. */
+/* Both constants are asserted in od_nfc.c, not here. Under -std=c99 OD_STATIC_ASSERT falls back to
+ * a typedef named only by __LINE__, so two headers carrying an assert on the same line collide in
+ * any translation unit including both -- and the macro lives in a byte-for-byte copy of the
+ * canonical protocol header, which is not ours to change. */
 
 #ifdef __cplusplus
 extern "C" {

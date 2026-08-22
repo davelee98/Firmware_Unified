@@ -2,7 +2,8 @@
  *
  * IT DEFINES NO HOOK. That is the whole difference from the portable profile: every
  * `od_cmd_app_*` in this executable comes from targets/nordic-zephyr/src/od_cmd_{device,config,
- * direct,nfc}.c and shared transfer modules, linked as production sources. What is here is the
+ * direct}.c, and the promoted opcodes -- transfer, PIPE, NFC -- from their shared machines, all
+ * linked as production sources. What is here is the
  * translation from a vector's declared state to the DRIVER knobs underneath them -- a stored blob,
  * a panel return code, a version number.
  *
@@ -15,6 +16,7 @@
 
 #include "fake_nordic.h"
 #include "od_cmd_test_ctx.h"
+#include "od_nfc.h"
 #include "od_xfer.h"
 
 #include <string.h>
@@ -37,6 +39,7 @@ const char *od_corpus_profile_name(void) { return "nordic-production"; }
 void od_corpus_profile_reset(const od_vec_t *vec)
 {
     od_xfer_reset();
+    od_nfc_reset();   /* assembly outlives a dispatch; without this a START leaks into the next vector */
     fake_nordic_reset();
 
     /* THE VERSION FIELDS ARE THE VECTOR'S, not a constant, because a device really does report

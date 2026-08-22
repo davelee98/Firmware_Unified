@@ -602,10 +602,19 @@ if(Python3_FOUND)
     set_source_files_properties(corpus_runner.c PROPERTIES
         INCLUDE_DIRECTORIES ${CMAKE_CURRENT_BINARY_DIR}/generated)
 
+    # od_nfc.c is compiled in HERE at OD_CAP_NFC=0 rather than stubbed. The capability-off vector
+    # claims shared/core/od_nfc.c emits nothing, and a handwritten stub agreeing with that claim
+    # would leave a regression in the real off arm green -- the fake would be its own oracle. The
+    # off arm needs no seam fake because it references no seam.
     add_executable(od_dispatch_corpus_portable_test
         corpus_runner.c
         corpus_profile_portable.c
+        ../../shared/core/od_nfc.c
         ${OD_VEC_INC})
+    # PER-TARGET, not per-source: set_source_files_properties is DIRECTORY-scoped, so setting the
+    # capability on this path would compile od_nfc.c capability-off for every target in this file
+    # that also builds it -- including od_nfc_test and the shared archive.
+    target_compile_definitions(od_dispatch_corpus_portable_test PRIVATE OD_CAP_NFC=0)
     target_link_libraries(od_dispatch_corpus_portable_test od_session_fake_dispatch)
     add_dependencies(od_dispatch_corpus_portable_test od_vectors_generated)
     add_test(NAME dispatch_corpus_portable COMMAND od_dispatch_corpus_portable_test)
