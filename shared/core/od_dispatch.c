@@ -6,6 +6,7 @@
 #include "od_dispatch_ops.h"
 #include "od_config_read.h"
 #include "od_gate.h"
+#include "od_nfc.h"
 #include "od_pipe.h"
 #include "od_reply.h"
 #include "od_session.h"

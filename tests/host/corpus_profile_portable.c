@@ -8,6 +8,14 @@
  * classified `target-production` the answer here comes from this file, not from firmware. The
  * runner totals the two separately so that distinction survives into the report.
  *
+ * ONE EXCEPTION, and it is deliberate: shared/core/od_nfc.c is compiled into this executable at
+ * OD_CAP_NFC=0 (see tests/host/CMakeLists.txt). The capability-off vector therefore runs the
+ * shipped off arm rather than a fixture, because what that vector claims is that the MACHINE
+ * emits nothing -- a hook here answering the same way would be the fake agreeing with the claim
+ * instead of testing it. The off arm needs no seam fake; it references no seam. Every other
+ * NFC vector requires the capability this profile does not declare, so none of them reaches a
+ * fixture here.
+ *
  * NO EXPECTATION EVER REACHES THIS FILE. It cannot include the generated table (CMake gives that
  * include directory to the runner only) and corpus_runner.h exposes knobs, not answers. Every reply
  * below is assembled from a protocol constant and a knob, the way the firmware assembles it. If a
@@ -47,8 +55,14 @@ unsigned od_corpus_profile_caps(void)
 {
     /* A deliberately SPARSE device: no partial, no buzzer, no power latch. That is what makes the
      * compiled-out NACK vectors reachable at all -- they are the ones no promoted target can
-     * produce, because both promoted targets have those subsystems. */
-    return OD_VEC_CAP_PIPE | OD_VEC_CAP_NFC | OD_VEC_CAP_CONFIG_4K | OD_VEC_CAP_RXQ;
+     * produce, because both promoted targets have those subsystems.
+     *
+     * NO NFC EITHER, and for a different reason: this executable compiles od_nfc.c at
+     * OD_CAP_NFC=0, so the machine it links genuinely has no NFC. Declaring the capability would
+     * be a lie about the binary, and it is what makes the capability-off vector reachable while
+     * every capability-on vector is excluded -- they belong in front of the two production
+     * profiles, which link the on arm. */
+    return OD_VEC_CAP_PIPE | OD_VEC_CAP_CONFIG_4K | OD_VEC_CAP_RXQ;
 }
 
 /* Every hook here is a behaviour fixture, so the historical shapes are exactly
@@ -293,15 +307,6 @@ od_cmd_result_t od_cmd_app_buzzer(const od_cmd_ctx_t *ctx, od_span_t body)
         return unsupported(ctx, RESP_BUZZER_ACK);
     }
     return ack4(ctx, RESP_BUZZER_ACK);
-}
-
-od_cmd_result_t od_cmd_app_nfc(const od_cmd_ctx_t *ctx, od_span_t body)
-{
-    (void)body;
-    if (!(od_corpus_knobs.caps & OD_VEC_CAP_NFC)) {
-        return OD_CMD_UNKNOWN;     /* ESP32's answer: silence, never an invented error code */
-    }
-    return ack2(ctx, RESP_NFC_ENDPOINT);
 }
 
 /* --------------------------------------------------------- the dispatcher's own predicates --- */

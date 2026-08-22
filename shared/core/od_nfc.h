@@ -22,14 +22,17 @@
  * sealed frame. Derived rather than written down: 218 is wire-visible, so it must move if the
  * envelope ever does, and must not move quietly otherwise. */
 #define OD_NFC_READ_MAX ((uint16_t)(OD_SESSION_PAYLOAD_MAX - 4u))
-OD_STATIC_ASSERT(OD_NFC_READ_MAX == 218u, "NFC read cap is wire-visible");
 
 /* A WIRE CONSTANT, not a target tunable. The canonical header documents NFC_ERR_BAD_TOTAL_LEN as
  * "total_len == 0 or > 512" and the client enforces the same number, so unlike OD_CONFIG_MAX_SIZE
  * this one may not become per-target: a cap a host cannot interrogate is a divergence it cannot
  * work around. */
 #define OD_NFC_ASSEMBLY_MAX 512u
-OD_STATIC_ASSERT(OD_NFC_ASSEMBLY_MAX == 512u, "NFC assembly limit is the wire's, not the target's");
+
+/* Both constants are asserted in od_nfc.c, not here. Under -std=c99 OD_STATIC_ASSERT falls back to
+ * a typedef named only by __LINE__, so two headers carrying an assert on the same line collide in
+ * any translation unit including both -- and the macro lives in a byte-for-byte copy of the
+ * canonical protocol header, which is not ours to change. */
 
 #ifdef __cplusplus
 extern "C" {

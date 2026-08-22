@@ -442,9 +442,11 @@ def main(argv: list[str]) -> int:
     dispatch = [v for v in every if v["id"].startswith("dispatch/")]
     h2d = [v for v in dispatch if any(s["dir"] == "h2d" for s in v["steps"])]
     d2h_only = [v for v in dispatch if all(s["dir"] == "d2h" for s in v["steps"])]
-    for got, want, what in ((len(every), 27, "total vectors"),
-                            (len(dispatch), 20, "dispatch vectors"),
-                            (len(h2d), 17, "h2d dispatch vectors"),
+    # +6 at Phase 4 step 8: the 0x0083 vectors, addable only once dispatch reached the shared
+    # machine. All six are h2d.
+    for got, want, what in ((len(every), 33, "total vectors"),
+                            (len(dispatch), 26, "dispatch vectors"),
+                            (len(h2d), 23, "h2d dispatch vectors"),
                             (len(d2h_only), 3, "d2h-only dispatch vectors")):
         if got != want:
             print(f"corpus accounting: {what} is {got}, expected {want}. If this change is "

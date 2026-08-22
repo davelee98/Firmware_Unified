@@ -145,7 +145,7 @@ HOOK(od_pipe_end,                 HOOK_PIPE_END)
 HOOK(od_cmd_app_led_activate,     HOOK_LED_ACTIVATE)
 HOOK(od_cmd_app_led_stop,         HOOK_LED_STOP)
 HOOK(od_cmd_app_buzzer,           HOOK_BUZZER)
-HOOK(od_cmd_app_nfc,              HOOK_NFC)
+HOOK(od_nfc_frame,                HOOK_NFC)
 
 /* --------------------------------------------------------------------------------- helpers --- */
 

@@ -210,7 +210,7 @@ static void test_nfc_exact_limit(void)
     ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE,
                                          opendisplay_pipe_connection_tag() },
                           &r, 2u, false);
-    CHECK(od_cmd_app_nfc(&ctx, od_span_make(read, sizeof read)) == OD_CMD_OK);
+    CHECK(od_nfc_frame(&ctx, od_span_make(read, sizeof read)) == OD_CMD_OK);
     od_txq_release(&r);
     CHECK(od_txq_process() == 1u);
     CHECK(fake_silabs_sent_n == 1u);
@@ -225,7 +225,7 @@ static void test_nfc_exact_limit(void)
     ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE,
                                          opendisplay_pipe_connection_tag() },
                           &r, 2u, false);
-    CHECK(od_cmd_app_nfc(&ctx, od_span_make(read, sizeof read)) == OD_CMD_NACK);
+    CHECK(od_nfc_frame(&ctx, od_span_make(read, sizeof read)) == OD_CMD_NACK);
     od_txq_release(&r);
     CHECK(od_txq_process() == 1u);
     CHECK(fake_silabs_sent_n == 1u);
@@ -254,7 +254,7 @@ static od_cmd_result_t ref_submit_as(const uint8_t *body, uint16_t n, od_origin_
     {
         od_cmd_ctx_t ctx = od_test_cmd_ctx((od_reply_t){ origin, tag }, &r,
                                             (uint16_t)(2u + n), false);
-        const od_cmd_result_t rc = od_cmd_app_nfc(&ctx, od_span_make(body, n));
+        const od_cmd_result_t rc = od_nfc_frame(&ctx, od_span_make(body, n));
 
         od_txq_release(&r);
         (void)od_txq_process();
@@ -284,7 +284,7 @@ static od_cmd_result_t ref_submit_unqueueable(const uint8_t *body, uint16_t n,
     od_tx_reservation_t spent = { 0u, 0u };
     od_cmd_ctx_t ctx = od_test_cmd_ctx((od_reply_t){ origin, tag }, &spent,
                                         (uint16_t)(2u + n), false);
-    const od_cmd_result_t rc = od_cmd_app_nfc(&ctx, od_span_make(body, n));
+    const od_cmd_result_t rc = od_nfc_frame(&ctx, od_span_make(body, n));
 
     (void)od_txq_process();
     return rc;
@@ -567,7 +567,7 @@ static void test_degraded_boot_contracts(void)
                           &r, 2u, false);
     {
         const uint8_t read[] = { NFC_SUB_READ };
-        CHECK(od_cmd_app_nfc(&ctx, od_span_make(read, sizeof read)) == OD_CMD_OK);
+        CHECK(od_nfc_frame(&ctx, od_span_make(read, sizeof read)) == OD_CMD_OK);
     }
     od_txq_release(&r);
     CHECK(od_txq_process() == 1u);
@@ -589,7 +589,7 @@ static void test_degraded_boot_contracts(void)
                           &r, 2u, false);
     {
         const uint8_t read[] = { NFC_SUB_READ };
-        CHECK(od_cmd_app_nfc(&ctx, od_span_make(read, sizeof read)) == OD_CMD_OK);
+        CHECK(od_nfc_frame(&ctx, od_span_make(read, sizeof read)) == OD_CMD_OK);
     }
     od_txq_release(&r);
     CHECK(od_txq_depth() == 1u);
@@ -612,7 +612,7 @@ static void test_degraded_boot_contracts(void)
                           &r, 2u, false);
     {
         const uint8_t read[] = { NFC_SUB_READ };
-        CHECK(od_cmd_app_nfc(&ctx, od_span_make(read, sizeof read)) == OD_CMD_OK);
+        CHECK(od_nfc_frame(&ctx, od_span_make(read, sizeof read)) == OD_CMD_OK);
     }
     od_txq_release(&r);
     CHECK(od_txq_process() == 1u);

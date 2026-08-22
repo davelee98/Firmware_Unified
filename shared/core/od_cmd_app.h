@@ -57,7 +57,6 @@ od_cmd_result_t od_cmd_app_config_clear(const od_cmd_ctx_t *ctx, od_span_t body)
 od_cmd_result_t od_cmd_app_led_activate(const od_cmd_ctx_t *ctx, od_span_t body);      /* 0x0073 */
 od_cmd_result_t od_cmd_app_led_stop(const od_cmd_ctx_t *ctx, od_span_t body);          /* 0x0075 */
 od_cmd_result_t od_cmd_app_buzzer(const od_cmd_ctx_t *ctx, od_span_t body);            /* 0x0077 */
-od_cmd_result_t od_cmd_app_nfc(const od_cmd_ctx_t *ctx, od_span_t body);               /* 0x0083 */
 
 #ifdef __cplusplus
 }
