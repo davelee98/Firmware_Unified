@@ -8,6 +8,14 @@
  * classified `target-production` the answer here comes from this file, not from firmware. The
  * runner totals the two separately so that distinction survives into the report.
  *
+ * ONE EXCEPTION, and it is deliberate: shared/core/od_nfc.c is compiled into this executable at
+ * OD_CAP_NFC=0 (see tests/host/CMakeLists.txt). The capability-off vector therefore runs the
+ * shipped off arm rather than a fixture, because what that vector claims is that the MACHINE
+ * emits nothing -- a hook here answering the same way would be the fake agreeing with the claim
+ * instead of testing it. The off arm needs no seam fake; it references no seam. Every other
+ * NFC vector requires the capability this profile does not declare, so none of them reaches a
+ * fixture here.
+ *
  * NO EXPECTATION EVER REACHES THIS FILE. It cannot include the generated table (CMake gives that
  * include directory to the runner only) and corpus_runner.h exposes knobs, not answers. Every reply
  * below is assembled from a protocol constant and a knob, the way the firmware assembles it. If a
@@ -49,12 +57,11 @@ unsigned od_corpus_profile_caps(void)
      * compiled-out NACK vectors reachable at all -- they are the ones no promoted target can
      * produce, because both promoted targets have those subsystems.
      *
-     * NO NFC EITHER, and for a different reason: 0x0083 is shared code this executable does not
-     * link -- the dispatch fixture filters out od_core.c and so carries no od_nfc.o -- so the
-     * entry point below is a routing stub. Claiming the capability would put vectors about the
-     * MACHINE'S bytes in front of a stub that can only answer for the route, and the only way to
-     * make them pass would be to transcribe the machine's replies into a fake. The silence vector
-     * still runs here, which is what the absent capability is for. */
+     * NO NFC EITHER, and for a different reason: this executable compiles od_nfc.c at
+     * OD_CAP_NFC=0, so the machine it links genuinely has no NFC. Declaring the capability would
+     * be a lie about the binary, and it is what makes the capability-off vector reachable while
+     * every capability-on vector is excluded -- they belong in front of the two production
+     * profiles, which link the on arm. */
     return OD_VEC_CAP_PIPE | OD_VEC_CAP_CONFIG_4K | OD_VEC_CAP_RXQ;
 }
 

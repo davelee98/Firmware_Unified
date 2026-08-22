@@ -28,7 +28,9 @@ const char *od_corpus_profile_name(void) { return "silabs-production"; }
 void od_corpus_profile_reset(const od_vec_t *vec)
 {
     od_xfer_reset();
-    od_nfc_reset();   /* assembly outlives a dispatch; without this a START leaks into the next vector */
+    /* Assembly outlives a dispatch: without this a START leaks into the next vector and results
+     * become order-dependent. */
+    od_nfc_reset();
     fake_silabs_reset();
     fake_silabs_store_ok = vec->storage_ok != 0u;
     if (vec->xfer_active) {

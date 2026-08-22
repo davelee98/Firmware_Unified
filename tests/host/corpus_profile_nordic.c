@@ -1,9 +1,9 @@
 /* corpus_profile_nordic.c -- the Nordic production proof profile.
  *
  * IT DEFINES NO HOOK. That is the whole difference from the portable profile: every
- * `od_cmd_app_*` in this executable comes from targets/nordic-zephyr/src/od_cmd_{device,config,
- * direct}.c, and the promoted opcodes -- transfer, PIPE, NFC -- from their shared machines, all
- * linked as production sources. What is here is the
+ * `od_cmd_app_*` in this executable comes from targets/nordic-zephyr/src/od_cmd_{device,config}.c
+ * over od_cmd_reply.c, and the promoted opcodes -- transfer, PIPE, NFC -- from their shared
+ * machines, all linked as production sources. What is here is the
  * translation from a vector's declared state to the DRIVER knobs underneath them -- a stored blob,
  * a panel return code, a version number.
  *
@@ -39,7 +39,9 @@ const char *od_corpus_profile_name(void) { return "nordic-production"; }
 void od_corpus_profile_reset(const od_vec_t *vec)
 {
     od_xfer_reset();
-    od_nfc_reset();   /* assembly outlives a dispatch; without this a START leaks into the next vector */
+    /* Assembly outlives a dispatch: without this a START leaks into the next vector and results
+     * become order-dependent. */
+    od_nfc_reset();
     fake_nordic_reset();
 
     /* THE VERSION FIELDS ARE THE VECTOR'S, not a constant, because a device really does report
