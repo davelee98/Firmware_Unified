@@ -71,10 +71,16 @@
 #                         because the dispatcher reserves capacity BEFORE it calls a handler and
 #                         cannot be written against a queue that does not exist yet. No wire
 #                         surface of its own: it moves finished frames, it does not build them.)
-#   core/od_dispatch.c    opcode dispatch, encryption gate
-#   core/od_xfer_direct.c 0x70/0x71/0x72
-#   core/od_xfer_partial.c 0x76
-#   core/od_pipe.c        0x80-0x82          (compile-gated OD_PIPE_ENABLE)
+#   core/od_dispatch.c    opcode dispatch, encryption gate      (LANDED — owns the opcode map and
+#                         the ordering: reservation, then gate, then decrypt. A promoted opcode's
+#                         row names its shared machine directly and leaves the od_cmd_app surface.)
+#   core/od_xfer_direct.c 0x70/0x71/0x72                        (LANDED — Phase 2.)
+#   core/od_xfer_partial.c 0x76                                 (LANDED — Phase 2.)
+#   core/od_pipe.c        0x80-0x82          (LANDED — Phase 3; capability-gated OD_CAP_PIPE, and
+#                         BG22 links the three entry points with no state behind them.)
+#   core/od_nfc.c         0x0083             (LANDED — Phase 4; capability-gated OD_CAP_NFC, tag
+#                         I/O behind od_nfc_app.h. NOT OPTIONAL for a consumer that takes
+#                         od_core.c: od_core_reset() names od_nfc_reset() whatever the capability.)
 #   core/od_zlib_inflate.c portable streaming zlib inflate     (LANDED — one bounded static
 #                         window, shared by all three target families; ESP32 may remap the API
 #                         to its ROM-backed tinfl adapter without changing the wire contract.)
