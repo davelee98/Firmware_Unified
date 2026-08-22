@@ -290,6 +290,32 @@ looks arbitrary and is not); delete the story.
   PIPE END; cadence/SACK masks, multi-slot drain, sequence wrap, compressed full/partial admission
   and substitution paths are pinned in the production-machine suite, and the DATA fuzzer drives
   sequences of frames through both full and partial machines.
+- **Transfer Phase 4 — NFC promoted, and NOTHING ABOUT IT IS HARDWARE-QUALIFIED (2026-08-22).**
+  `shared/core/od_nfc.{c,h}` is the only `0x0083` machine. Dispatch names `od_nfc_frame` at budget
+  `1`, `od_cmd_app_nfc` is gone from `od_cmd_app.h`, and no target-side NFC handler, parser or
+  assembler symbol survives — the `od_nfc_app_*` adapters do, because they are the seam. Nordic and
+  BG22 keep NDEF encode/decode and tag I/O behind it; ESP32 builds the capability-off arm and its
+  images carry both entry points, no assembler and no seam reference (checked on all 11 board
+  configurations).
+  **THE HARDWARE GATES FOR STEPS 5 AND 6 WERE WAIVED BY PROJECT DIRECTION, NOT PASSED**, and the
+  waiver is recorded in the plan. **No board in this fleet has an NFC antenna or a TNB132M fitted**,
+  so every `0x0083` row in docs/HARDWARE_VERIFICATION_CHECKLIST.md is open release debt awaiting
+  hardware that does not exist here — a stronger form of open than Phases 1–3. No host coverage
+  qualifies one, and merged code is not evidence.
+  Four wire-visible changes, all in `docs/DIVERGENCE_MATRIX.md` § 10: the chunk assembler binds the
+  full `od_reply_t` again (both ports had dropped a check both donors have, so any connection could
+  commit another's assembly); the inline-write length bound is 32-bit everywhere, closing a ~65 KB
+  overrun reachable **unauthenticated** with security disabled; BG22 tests length before record
+  type, so an over-declared length answers `0x01` where it answered `0x03`; and a failed START/DATA
+  ACK now clears the assembler. Two differences were deliberately **not** normalised: the 218-byte
+  read cap both ports narrowed from the donors' 238, and the refuse-versus-truncate split above it,
+  which is a property of the record and the adapter together rather than of the target.
+  `CONFIG_NFC_T2T_NRFXLIB` is now set on all three Nordic boards. On nRF52840 the antenna pair
+  P0.09/P0.10 is **statically reserved** whenever NFCT is built: UICR `NFCPINS` latches the pads at
+  reset, so ownership cannot follow config, and no GPIO-owning image exists (docs/FOLLOWUPS.md
+  § 10). Cost: `xiao_ble` +7,660 B flash / +2,602 B RAM, `xiao_nrf54l15` +8,068 / +2,598, mostly
+  the tag library rather than the machine. BG22 lost 32 B of `heap_size` (11,504 → 11,472), inside
+  X3's 64 B ceiling — measured as heap because `data + bss` is constant there by construction.
 - **Shared time HAL software candidate (2026-08-19):** `shared/hal/od_hal_time.h` is the canonical
   two-function ambient-clock/busy-wait seam. ESP32 keeps its unreconciled bounded millisecond sleep
   in target-private `od_hal_sleep.h`; Nordic's `od_uptime_get_32`/`od_busy_wait` names are gone;
@@ -365,8 +391,12 @@ looks arbitrary and is not); delete the story.
   No fake ever sees an expected reply: the generated table is included by the runner and nothing
   else, and profiles get semantic knobs instead. That is what stops the corpus becoming its own
   oracle.
-- Live plan: plans/PLAN_TRANSFER_PROMOTION_2026-08-17.md (the transfer sequence in
-  PLAN_MIGRATION_ENDGAME_2026-08-17.md is superseded; docs/NEXT_STEPS.md is historical). Dispatch
+- Live plan: plans/PLAN_TRANSFER_PHASE45_2026-08-20.md, which owns Phase 4 (NFC, steps 0–9 landed)
+  and Phase 5 (cleanup and release evidence, steps 10–13 outstanding).
+  PLAN_TRANSFER_PROMOTION_2026-08-17.md is **superseded in full** by it and by
+  PLAN_TRANSFER_PHASE3_2026-08-20.md — read it only for the cross-phase wire freeze, architecture
+  rules and gates the successors inherit rather than restate. The transfer sequence in
+  PLAN_MIGRATION_ENDGAME_2026-08-17.md is superseded; docs/NEXT_STEPS.md is historical. Dispatch
   C8–C12 landed. C13's Silabs implementation candidate is on `codex/silabs-c13`; hardware Gate 2
   remains. **docs/HARDWARE_VERIFICATION_CHECKLIST.md is the itemized per-target hardware
   checklist** — update it alongside this section whenever a hardware test runs.

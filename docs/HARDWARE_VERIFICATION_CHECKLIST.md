@@ -231,8 +231,35 @@ X3's baseline is **measured, not inferred**: a clean BG22 build at `def82a1` —
 `od_nfc.c` existed — gives `heap_size` **0x2cf0 (11,504 B)**, against 0x2cd0 (11,472 B) now. That
 is **32 B of heap lost**, inside the 64 B ceiling. An earlier arithmetic estimate said 16 B and was
 wrong by half the figure, which is the reason the plan asks for a build rather than a subtraction.
-ESP32's image contains both `od_nfc_*` entry points and neither the assembler nor a seam
-reference.
+
+### Step 9 consolidation, 2026-08-22
+
+Every figure below is a build at this branch's HEAD against a build at `def82a1`, not a running
+total carried forward from the per-step commits.
+
+| | flash | RAM | note |
+|---|---|---|---|
+| `xiao_ble` (nRF52840) | +7,660 | +2,602 | mostly the T2T library, not the machine |
+| `xiao_nrf54l15` | +8,068 | +2,598 | same |
+| `xiao_nrf54lm20a` | — | — | already had NFC; no Phase 4 baseline to differ from |
+| `efr32bg22-slc` | +92 | `heap_size` −32 | `data + bss` unchanged at 32,284 **by construction** |
+
+The Nordic numbers are dominated by enabling `CONFIG_NFC_T2T_NRFXLIB`, which is a capability
+decision rather than a promotion cost: the cutover itself recovered 762 B of RAM by deleting the
+244-byte response buffer and the 512-byte assembler. Reporting the two separately matters, because
+the promotion looks expensive on Nordic only if the library is charged to it.
+
+**Source, whole phase.** Shared production +353 lines (`od_nfc.{c,h}`, `od_nfc_app.h`). Target
+production +284 / −347, a net deletion of 63 lines that understates the change: what left was wire
+parsing and state, what arrived is adapter and build wiring. Test and tool source is +1,994 / −102,
+reported separately per § 10 and deliberately not netted against production.
+
+**Zero, and checked rather than assumed.** No target-side NFC assembler, parser, hook or
+wire-response literal survives: the § 8 ratchet greps eight symbols over `targets/**`, and
+`RESP_NFC_ENDPOINT` appears in no target `.c`/`.cpp`. All 11 ESP32 board images carry both
+`od_nfc_*` entry points, no `s_nfc`, and no `od_nfc_app_*` reference.
+
+**Hardware rows: 0 passed, 16 open.** Not one `0x0083` row has run, and none can here.
 
 ### Nordic — needs a board with an NFC antenna fitted
 
