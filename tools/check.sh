@@ -324,9 +324,9 @@ pipe_dispatch_ownership() {
 }
 check "structure: PIPE dispatch ownership" pipe_dispatch_ownership
 
-# Absence checks share this: grep's STATUS is the proof, not the emptiness of its output.
-# `2>/dev/null || true` turns an unreadable tree or a mistyped path into "no hits" and therefore a
-# pass -- a check that passes because it read nothing.
+# Absence checks share this: grep's STATUS is the proof, not the emptiness of its output. An
+# unreadable tree or a mistyped path must not read as clean -- a check that passes because it read
+# nothing is worse than no check.
 #   0 = matched (the thing came back)   1 = clean   >1 = could not be evaluated
 absent_or_fail() {
     local what=$1 pattern=$2 hits rc
@@ -345,9 +345,8 @@ absent_or_fail() {
     fi
 }
 
-# PERMANENT. The three per-target "shared legacy transfer cutover" checks this replaces each named
-# one target's legacy direct/partial entry points; a fourth target would have needed a fourth check.
-# One rule, every target, mirroring the PIPE and NFC absence ratchets.
+# PERMANENT. One rule over every target, mirroring the PIPE and NFC absence ratchets: a per-target
+# check cannot see a target that arrives without one.
 xfer_target_parser_absent() {
     absent_or_fail "target-local direct/partial command policy returned; shared od_xfer owns it" \
         '\b(handleDirectWrite(Start|Data|End)|handlePartialWriteStart|opendisplay_display_direct_write_(start|data|end|end_prepare|end_refresh))[[:space:]]*\(' \
@@ -355,39 +354,38 @@ xfer_target_parser_absent() {
 }
 check "transfer: no target transfer parser" xfer_target_parser_absent
 
-# PERMANENT, and the one rule in the plan's closing set that had no check at all. A promoted opcode
-# answers from shared code; a target assembling its own reply bytes for one is the divergence every
-# promotion in this plan existed to remove, and it would otherwise be invisible until a wire
-# capture disagreed with the corpus.
+# PERMANENT. A promoted opcode answers from shared code; a target assembling its own reply bytes
+# for one is the divergence every promotion here existed to remove, and it would be invisible until
+# a wire capture disagreed with the corpus.
 #
 # TWO PATTERNS, BECAUSE THE OPCODES ARE NOT NAMED ALIKE. Direct and NFC have RESP_* constants;
-# PIPE (0x80-0x82) and partial (0x76) have none, and shared/core/od_pipe.c emits raw bytes. A
-# first version of this check named RESP_DIRECT_WRITE_ACK, RESP_PIPE_WRITE_ACK and
-# RESP_PARTIAL_WRITE_ACK -- none of which exists -- so it guarded NFC alone while reading as full
-# coverage. Every identifier below is grep-verified to exist.
+# PIPE (0x80-0x82) and partial (0x76) have none, so shared/core/od_pipe.c emits raw bytes and the
+# donors did too. Every identifier below is grep-verified to exist.
+#
+# THE RAW PATTERN IS SHAPED BY WHAT THE DONORS ACTUALLY WROTE. Firmware_NRF54's handlers build
+# `{ 0x00u, 0x70u }` and `{ 0xFFu, 0x71u }` -- a bare status byte, not RESP_ACK -- across opcodes
+# 0x70, 0x71, 0x72 and 0x76. A pattern demanding the named statuses, or covering only 0x76 and
+# 0x80-0x82, would let a verbatim re-import through. Both status spellings and every promoted
+# opcode are covered. Matching a bare 0x70 anywhere would drown in unrelated constants; the
+# status-then-opcode initializer shape is what a reply looks like and what a re-import would carry.
 promoted_response_literal_absent() {
     local rc=0
     absent_or_fail "target-side response constant for a promoted opcode returned" \
         '\bRESP_(NFC_ENDPOINT|DIRECT_WRITE_(START|DATA|END)_ACK|DIRECT_WRITE_REFRESH_(SUCCESS|TIMEOUT))\b' \
         targets || rc=1
-    # The raw form: a frame initializer whose first byte is a status and whose second is a promoted
-    # opcode. Matching bare 0x80 would drown in unrelated bit masks; the status-then-opcode shape
-    # is what a reply actually looks like.
     absent_or_fail "target-side raw response frame for a promoted opcode returned" \
-        '\{[[:space:]]*RESP_(ACK|NACK)[[:space:]]*,[[:space:]]*0x(76|8[012])u?' \
+        '\{[[:space:]]*(RESP_ACK|RESP_NACK|0x00u?|0xFFu?)[[:space:]]*,[[:space:]]*0x(7[0126]|8[012])u?' \
         targets || rc=1
     return $rc
 }
 check "transfer: no target response literal for a promoted opcode" promoted_response_literal_absent
 
-# PERMANENT. Was one fragment inside each of the three per-target checks, so a new target could
-# have arrived with none. od_core_reset() is the shared half of a teardown; a target hand-rolling
-# the list is exactly what od_core.h exists to prevent.
+# PERMANENT. od_core_reset() is the shared half of a teardown; a target hand-rolling the list is
+# what od_core.h exists to prevent.
 #
-# WHAT IT PROVES IS THAT THE CALL IS PRESENT IN THE FILE, not that it executes: this is a grep, so
-# a commented-out call still satisfies it -- verified. It catches deletion and a target arriving
-# without one, which is what the three checks it replaces caught. Anything stronger needs the
-# teardown driven, and core_reset_test.c is where that lives.
+# WHAT IT PROVES IS THAT A CALL IS PRESENT, not that it executes: this is a grep, so a commented-out
+# call still satisfies it. It catches deletion and a target arriving without one. Anything stronger
+# needs the teardown driven, and core_reset_test.c is where that lives.
 core_reset_is_the_teardown() {
     local rc=0 d n found=0
 
