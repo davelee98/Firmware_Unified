@@ -91,8 +91,16 @@ boundary_includes() {
     # every backend includes vendor headers, so it can never satisfy this rule -- but it is one
     # vendored copy shared by all targets, not a per-target fork. Do not "fix" it by moving it
     # under shared/.
-    local hits
-    hits=$(grep -rInE "$pattern" shared/ | grep -vE "$exempt" || true)
+    local hits rc
+    # STATUS, NOT EMPTINESS. `|| true` here made an unreadable shared/ read as clean -- and this is
+    # one of the six permanent rules, so it is the last check that should answer without looking.
+    hits=$(grep -rInE "$pattern" shared/)
+    rc=$?
+    if [ "$rc" -gt 1 ]; then
+        echo "grep could not scan shared/ (status $rc); the vendor-include absence is unproven"
+        return 1
+    fi
+    hits=$(printf '%s\n' "$hits" | grep -vE "$exempt" || true)
     if [ -n "$hits" ]; then
         echo "$hits"
         echo
@@ -351,10 +359,24 @@ check "transfer: no target transfer parser" xfer_target_parser_absent
 # answers from shared code; a target assembling its own reply bytes for one is the divergence every
 # promotion in this plan existed to remove, and it would otherwise be invisible until a wire
 # capture disagreed with the corpus.
+#
+# TWO PATTERNS, BECAUSE THE OPCODES ARE NOT NAMED ALIKE. Direct and NFC have RESP_* constants;
+# PIPE (0x80-0x82) and partial (0x76) have none, and shared/core/od_pipe.c emits raw bytes. A
+# first version of this check named RESP_DIRECT_WRITE_ACK, RESP_PIPE_WRITE_ACK and
+# RESP_PARTIAL_WRITE_ACK -- none of which exists -- so it guarded NFC alone while reading as full
+# coverage. Every identifier below is grep-verified to exist.
 promoted_response_literal_absent() {
-    absent_or_fail "target-side response literal for a promoted opcode returned" \
-        '\bRESP_(NFC_ENDPOINT|DIRECT_WRITE_ACK|PIPE_WRITE_ACK|PARTIAL_WRITE_ACK)\b' \
-        targets
+    local rc=0
+    absent_or_fail "target-side response constant for a promoted opcode returned" \
+        '\bRESP_(NFC_ENDPOINT|DIRECT_WRITE_(START|DATA|END)_ACK|DIRECT_WRITE_REFRESH_(SUCCESS|TIMEOUT))\b' \
+        targets || rc=1
+    # The raw form: a frame initializer whose first byte is a status and whose second is a promoted
+    # opcode. Matching bare 0x80 would drown in unrelated bit masks; the status-then-opcode shape
+    # is what a reply actually looks like.
+    absent_or_fail "target-side raw response frame for a promoted opcode returned" \
+        '\{[[:space:]]*RESP_(ACK|NACK)[[:space:]]*,[[:space:]]*0x(76|8[012])u?' \
+        targets || rc=1
+    return $rc
 }
 check "transfer: no target response literal for a promoted opcode" promoted_response_literal_absent
 
@@ -367,28 +389,40 @@ check "transfer: no target response literal for a promoted opcode" promoted_resp
 # without one, which is what the three checks it replaces caught. Anything stronger needs the
 # teardown driven, and core_reset_test.c is where that lives.
 core_reset_is_the_teardown() {
-    local rc=0 f
-    for f in targets/esp32-idf/src/session_guard.cpp \
-             targets/nordic-zephyr/src/opendisplay_pipe.c \
-             targets/efr32bg22-slc/opendisplay_pipe.c; do
-        if [ ! -r "$f" ]; then
-            echo "$f is unreadable; its teardown is unproven"
-            rc=1
-        elif ! grep -q '\bod_core_reset[[:space:]]*(' "$f"; then
-            echo "$f must reach the shared core reset"
+    local rc=0 d n found=0
+
+    # DERIVED FROM targets/, not a hardcoded list: a fourth target arriving with no teardown is
+    # exactly what a fixed list of three files cannot see. Each target directory must contain at
+    # least one od_core_reset() call somewhere in its sources; which file is the target's business.
+    for d in targets/*/; do
+        [ -d "$d" ] || continue
+        found=1
+        n=$(grep -RIlE '\bod_core_reset[[:space:]]*\(' "$d" \
+            --include='*.c' --include='*.cpp' --exclude-dir=build | wc -l)
+        if [ "$n" -eq 0 ]; then
+            echo "${d} has no od_core_reset() caller; its teardown does not reach the shared half"
             rc=1
         fi
     done
+    if [ "$found" -eq 0 ]; then
+        echo "no target directories found; the teardown rule is unproven"
+        rc=1
+    fi
     return $rc
 }
 check "reset: every target teardown uses od_core_reset" core_reset_is_the_teardown
 
 transfer_single_pump_owner() {
-    local hits
+    local hits rc
     hits=$(grep -RInE '\bod_zlib_pump_(reset|push)[[:space:]]*\(' shared/core targets \
         --include='*.c' --include='*.cpp' --include='*.h' --exclude='od_zlib_pump.c' \
-        --exclude='od_zlib_pump.h' --exclude-dir=build 2>/dev/null \
-        | grep -v '^shared/core/od_xfer\.c:' || true)
+        --exclude='od_zlib_pump.h' --exclude-dir=build)
+    rc=$?
+    if [ "$rc" -gt 1 ]; then
+        echo "grep could not scan for pump callers (status $rc); the ownership is unproven"
+        return 1
+    fi
+    hits=$(printf '%s\n' "$hits" | grep -v '^shared/core/od_xfer\.c:' || true)
     if [ -n "$hits" ]; then
         echo "$hits"
         echo "production zlib pump caller returned outside shared/core/od_xfer.c"
@@ -426,14 +460,8 @@ core_reset_owns_transfer() {
         echo "od_core_reset must reset transfer state before the egress queue"
         rc=1
     fi
-    hits=$(grep -RInE '\bod_xfer_reset[[:space:]]*\(' targets \
-        --include='*.c' --include='*.cpp' --include='*.h' --exclude-dir=build \
-        2>/dev/null || true)
-    if [ -n "$hits" ]; then
-        echo "$hits"
-        echo "target teardown bypassed od_core_reset transfer ownership"
-        rc=1
-    fi
+    absent_or_fail "target teardown bypassed od_core_reset transfer ownership" \
+        '\bod_xfer_reset[[:space:]]*\(' targets || rc=1
     return $rc
 }
 check "reset: od_core owns transfer teardown" core_reset_owns_transfer

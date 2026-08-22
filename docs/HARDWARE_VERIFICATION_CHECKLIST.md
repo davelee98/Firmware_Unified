@@ -287,9 +287,13 @@ with the dispatch reroute.
 
 **Step 10 — deletion inventory: empty, and that is the result rather than an omission.** X1 forbids
 speculative deletion, so the inventory was built from evidence and came back with nothing to
-delete. Checked: orphaned declarations in target headers (none); target constants that lost their
-last user (none — `OD_PIPE_MAX_PAYLOAD`, `OD_NFC_ASSEMBLY_MAX` and `NFC_INLINE_MAX` are referenced
-only from `shared/`, which is correct); target-side response literals for promoted opcodes (none);
+delete. Checked: orphaned declarations in target headers (none); target constants that lost
+their last user (`OD_NFC_ASSEMBLY_MAX` and `OD_NFC_READ_MAX` are live in
+`shared/core/od_nfc.{c,h}`;
+**`OD_PIPE_MAX_PAYLOAD` has no user left anywhere** — the Nordic NFC cutover removed
+its last one, and it stays because `opendisplay_protocol.h` is a byte-for-byte copy of the
+canonical header and is not ours to edit, which is a different reason from being referenced);
+target-side response literals for promoted opcodes (none);
 target-local transfer, pump, PIPE or NFC state (none); build entries naming deleted files (none —
 and a real one would fail the build); and every scaffold the plan created, all still referenced.
 
@@ -300,20 +304,29 @@ could still find is dead declarations and macros — and the ones present are pr
 registers and config-packet constants that no promotion orphaned. Deleting those would be exactly
 the speculative deletion X1 rules out.
 
-**Step 12 — every image read, not merely produced.** All 15 (BG22, three Nordic boards, 11 ESP32
-configurations) inspected with `nm`:
+**Step 12 — every LINK MAP read, not merely produced.** The plan asks for maps, and a symbol
+table is not one: `nm` says a symbol exists, the map says which object contributed it. That
+difference is the whole value here, because the question is whether PIPE and NFC state comes from
+`shared/` or from a target.
 
-| | target-local transfer/PIPE/NFC state | shared entry points | seam symbols |
+Criterion: for each `.bss.<symbol>` entry, the contributing object named on that line — or on its
+continuation line, which is how the format wraps a long section name. All 15 maps, every image:
+
+| image | `s_pipe` | `s_reorder` | `s_nfc` |
 |---|---|---|---|
-| `efr32bg22-slc` | 0 | 3 | 12 |
-| Nordic × 3 | 0 | 3 | 15 |
-| ESP32 × 11 | 0 | 3 | 13 |
+| `efr32bg22-slc` | — | — | `od_nfc.c.obj` |
+| Nordic × 3 | `od_pipe.c.obj` | `od_pipe.c.obj` | `od_nfc.c.obj` |
+| ESP32 × 11 | `od_pipe.c.obj` | `od_pipe.c.obj` | — |
 
-The read caught something a source grep cannot: `s_pipe` and `s_reorder` appear in every
-PIPE-capable image and are **`shared/core/od_pipe.c`'s own statics**, not target leftovers — and
-they are absent from BG22, which declines the capability. That is the capability-off arm being
-empty in the linker's account rather than in the source's, which is the distinction this step
-exists to make.
+Every occurrence is attributed to a `shared/core/` object; no target object contributes any of
+them. The two dashes are the capability-off arms carrying no state at all — BG22 declines PIPE,
+ESP32 declines NFC — which is the claim `nm` alone cannot make, since a symbol's absence looks the
+same whatever removed it.
+
+A first pass at this table read a one-line context window and attributed Nordic's `s_pipe` to
+`od_nfc.c.obj`, because the next map entry happened to be `s_nfc`. The criterion above is what
+fixed it, and it is stated so the next reader can reproduce it rather than trust the
+result.
 
 **Step 13 — release evidence.** Per-unit measurements are recorded above under Step 9
 consolidation, per phase and per target rather than for a final squash. The § 9 matrix stands at

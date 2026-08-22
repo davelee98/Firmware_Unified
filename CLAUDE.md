@@ -328,10 +328,15 @@ looks arbitrary and is not); delete the story.
   commit, and X1 forbids inventing more.
   `tools/check.sh`'s transitional ratchets are consolidated into a permanent set of six absence
   rules — no second transfer parser, pump, reorder state or NFC assembler; no target-side response
-  literal for a promoted opcode; every target teardown through `od_core_reset()` — replacing three
-  per-target checks that duplicated two rules between them and would have needed a fourth for a
-  fourth target. **All six now fail closed**: they shared a `2>/dev/null || true` that made an
-  unreadable tree indistinguishable from a clean one, so grep's status is the proof now.
+  literal for a promoted opcode; and no vendor header under `shared/` — replacing three per-target
+  checks that duplicated two rules between them and would have needed a fourth for a fourth target.
+  A seventh, every target teardown reaching `od_core_reset()`, is derived from `targets/*/` rather
+  than a fixed file list, so a new target cannot arrive without one.
+  **They fail closed**: several shared a `2>/dev/null || true` that made an unreadable tree
+  indistinguishable from a clean one, so grep's status is the proof now — 0 matched, 1 clean,
+  >1 unproven. The response-literal rule is grep-verified against identifiers that exist:
+  its first form named `RESP_DIRECT_WRITE_ACK` and two others that do not, and so guarded NFC alone
+  while reading as full coverage.
   All 15 images were read rather than merely produced. That read is what shows `s_pipe` and
   `s_reorder` are `od_pipe.c`'s own statics present wherever PIPE is enabled and absent on BG22,
   which a source grep cannot distinguish from a target leftover.
