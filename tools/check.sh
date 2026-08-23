@@ -355,19 +355,12 @@ xfer_target_parser_absent() {
 check "transfer: no target transfer parser" xfer_target_parser_absent
 
 # PERMANENT. A promoted opcode answers from shared code; a target assembling its own reply bytes
-# for one is the divergence every promotion here existed to remove, and it would be invisible until
-# a wire capture disagreed with the corpus.
+# for one is invisible until a wire capture disagrees with the corpus.
 #
-# TWO PATTERNS, BECAUSE THE OPCODES ARE NOT NAMED ALIKE. Direct and NFC have RESP_* constants;
-# PIPE (0x80-0x82) and partial (0x76) have none, so shared/core/od_pipe.c emits raw bytes and the
-# donors did too. Every identifier below is grep-verified to exist.
-#
-# THE RAW PATTERN IS SHAPED BY WHAT THE DONORS ACTUALLY WROTE. Firmware_NRF54's handlers build
-# `{ 0x00u, 0x70u }` and `{ 0xFFu, 0x71u }` -- a bare status byte, not RESP_ACK -- across opcodes
-# 0x70, 0x71, 0x72 and 0x76. A pattern demanding the named statuses, or covering only 0x76 and
-# 0x80-0x82, would let a verbatim re-import through. Both status spellings and every promoted
-# opcode are covered. Matching a bare 0x70 anywhere would drown in unrelated constants; the
-# status-then-opcode initializer shape is what a reply looks like and what a re-import would carry.
+# Two patterns, because the opcodes are not named alike: direct and NFC have RESP_* constants,
+# PIPE (0x80-0x82) and partial (0x76) have none. Raw replies may use RESP_* or bare status bytes.
+# Cover every promoted opcode while matching initializer shape, so unrelated opcode constants do
+# not trigger the rule.
 promoted_response_literal_absent() {
     local rc=0
     absent_or_fail "target-side response constant for a promoted opcode returned" \
