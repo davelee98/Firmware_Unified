@@ -127,6 +127,21 @@ add_executable(od_zlib_inflate_test zlib_inflate_test.c)
 target_link_libraries(od_zlib_inflate_test od_shared)
 add_test(NAME zlib_inflate COMMAND od_zlib_inflate_test)
 
+# The shared header rule both inflate engines apply. Its own suite because the ESP32 adapter
+# cannot be linked here, so the rule is what carries the cross-engine claim.
+add_executable(od_zlib_header_test zlib_header_test.c)
+target_link_libraries(od_zlib_header_test od_shared)
+add_test(NAME zlib_header COMMAND od_zlib_header_test)
+
+# The vendored QR encoder. boot_screen_test compiles it too, but only through a rendered page --
+# this pins the module bitmap itself so a re-vendor is a failing test, not a QR that scans
+# differently on a shipped device.
+add_executable(od_qrcode_test qrcode_test.c
+    ${CMAKE_CURRENT_LIST_DIR}/../../third_party/qrcode/qrcode.c)
+target_include_directories(od_qrcode_test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/../../third_party/qrcode)
+add_test(NAME qrcode COMMAND od_qrcode_test)
+
 add_executable(od_zlib_pump_test zlib_pump_test.c)
 target_link_libraries(od_zlib_pump_test od_shared)
 add_test(NAME zlib_pump COMMAND od_zlib_pump_test)

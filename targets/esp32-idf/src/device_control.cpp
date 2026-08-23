@@ -22,8 +22,6 @@ void enterDeepSleep(bool force = false, uint16_t overrideSleepSeconds = 0);
 extern uint8_t rebootFlag;
 extern struct od_config globalConfig;
 extern uint8_t activeLedInstance;
-extern bool ledFlashActive;
-extern uint8_t ledFlashPosition;
 extern uint8_t dynamicreturndata[11];
 extern uint8_t buttonStateCount;
 extern volatile bool buttonEventPending;
@@ -347,9 +345,7 @@ static void led_stop_internal(bool clear_mode) {
         }
     }
     memset(&s_led, 0, sizeof(s_led));
-    ledFlashActive = false;
     activeLedInstance = 0xFF;
-    ledFlashPosition = 0;
 }
 
 static void led_schedule_delay_ms(uint16_t ms) {
@@ -566,8 +562,6 @@ od_cmd_result_t handleLedActivate(const od_cmd_ctx_t *ctx, uint8_t* data, uint16
     s_led.active = true;
     s_led.instance = ledInstance;
     activeLedInstance = ledInstance;
-    ledFlashActive = true;
-    ledFlashPosition = 0;
     led_load_config(led);
     led_run_step();
 

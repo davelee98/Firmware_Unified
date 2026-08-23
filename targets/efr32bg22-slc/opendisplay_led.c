@@ -492,8 +492,3 @@ void opendisplay_led_process(void)
   }
   led_run_step();
 }
-
-bool opendisplay_led_is_active(void)
-{
-  return s_run.active;
-}

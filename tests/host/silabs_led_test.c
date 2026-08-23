@@ -21,22 +21,9 @@
 #include "sl_sleeptimer.h"
 #include "sl_udelay.h"
 
-#include <stdio.h>
 #include <string.h>
 
-static unsigned g_checks;
-static unsigned g_failures;
-static const char *g_case = "(none)";
-
-#define CHECK(cond)                                                            \
-    do {                                                                       \
-        ++g_checks;                                                            \
-        if (!(cond)) {                                                         \
-            ++g_failures;                                                      \
-            printf("FAIL %s:%d [%s] %s\n", __FILE__, __LINE__, g_case, #cond); \
-        }                                                                      \
-    } while (0)
-#define CASE(name) (g_case = (name))
+#include "od_check.h"
 
 /* ----------------------------------------------------------------- vendor driver fakes --- */
 
@@ -137,6 +124,14 @@ static void setup(void)
     opendisplay_led_stop(0, false);
 }
 
+/* The runner keeps its own state private; the mode nibble in reserved[0] is what it re-reads on
+ * every step and what a host sees, so that is the liveness signal asserted here. Completion
+ * clears it. */
+static bool pattern_running(void)
+{
+    return (g_cfg.leds[0].reserved[0] & 0x0Fu) == 0x01u;
+}
+
 /* One service call is bounded when it schedules exactly one wait: the runner cannot have looped
  * past a scheduled wait without returning, because scheduling is always followed by a return. */
 static unsigned service_and_count_waits(void)
@@ -162,7 +157,7 @@ static void test_all_zero_delays_yield(void)
         setup();
         set_pattern(endless[i], 0u, 0u, 0u);         /* no flashes, no waits configured */
         CHECK(opendisplay_led_activate(0, g_payload, 12u) == 0);
-        CHECK(opendisplay_led_is_active());
+        CHECK(pattern_running());
         CHECK(g_timer_starts == 1u);                 /* activate itself yielded */
         CHECK(g_last_timer_ms == 1u);                /* the minimum step delay */
 
@@ -170,7 +165,7 @@ static void test_all_zero_delays_yield(void)
             CHECK(service_and_count_waits() == 1u);
         }
         /* Still running: an endless pattern must not be terminated by the floor. */
-        CHECK(opendisplay_led_is_active());
+        CHECK(pattern_running());
     }
 }
 
@@ -214,17 +209,16 @@ static void test_group_repeat_sentinels(void)
         set_pattern(cases[i].raw, 1u, 0u, 0u);
         CHECK(opendisplay_led_activate(0, g_payload, 12u) == 0);
 
-        for (unsigned n = 0; n < 256u && opendisplay_led_is_active(); ++n) {
+        for (unsigned n = 0; n < 256u && pattern_running(); ++n) {
             (void)service_and_count_waits();
         }
-        CHECK(opendisplay_led_is_active() == cases[i].endless);
+        CHECK(pattern_running() == cases[i].endless);
 
         if (cases[i].endless) {
             continue;
         }
         CHECK(g_pwm_waits ==
               cases[i].groups * flashes_per_group * LED_PWM_WAITS_PER_FLASH * brightness);
-        /* Completion clears the mode nibble, so a later process() cannot resume the pattern. */
         CHECK(g_cfg.leds[0].reserved[0] == 0x00u);
     }
 }
@@ -255,6 +249,5 @@ int main(void)
     test_group_repeat_sentinels();
     test_configured_delay_is_honoured();
 
-    printf("silabs_led: %u checks, %u failures\n", g_checks, g_failures);
-    return g_failures == 0 ? 0 : 1;
+    return OD_CHECK_REPORT_NONEMPTY("silabs_led", 100);
 }

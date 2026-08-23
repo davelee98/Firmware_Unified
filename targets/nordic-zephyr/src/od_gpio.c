@@ -82,67 +82,6 @@ void od_gpio_configure_input(uint8_t cfg, bool pull_up, bool pull_down)
 	}
 }
 
-/* One slot per interrupt-enabled pin. Each slot owns its gpio_callback so the
- * Zephyr trampoline can recover the registered handler via CONTAINER_OF. */
-#define OD_GPIO_IRQ_MAX 8
-
-struct od_gpio_irq_slot {
-	struct gpio_callback cb;
-	od_gpio_irq_handler_t handler;
-	bool used;
-};
-
-static struct od_gpio_irq_slot s_irq_slots[OD_GPIO_IRQ_MAX];
-
-static void od_gpio_irq_trampoline(const struct device *dev, struct gpio_callback *cb,
-				   uint32_t pins)
-{
-	ARG_UNUSED(dev);
-	ARG_UNUSED(pins);
-	struct od_gpio_irq_slot *slot = CONTAINER_OF(cb, struct od_gpio_irq_slot, cb);
-
-	if (slot->handler != NULL) {
-		slot->handler();
-	}
-}
-
-int od_gpio_configure_interrupt(uint8_t cfg, od_gpio_irq_handler_t handler)
-{
-	uint8_t port;
-	uint8_t pin;
-	const struct device *dev;
-	struct od_gpio_irq_slot *slot = NULL;
-	int err;
-
-	if (handler == NULL || !od_pin_decode(cfg, &port, &pin)) {
-		return -1;
-	}
-	dev = gpio_dev(port);
-	for (unsigned i = 0; i < OD_GPIO_IRQ_MAX; i++) {
-		if (!s_irq_slots[i].used) {
-			slot = &s_irq_slots[i];
-			break;
-		}
-	}
-	if (slot == NULL) {
-		return -1;
-	}
-	slot->handler = handler;
-	slot->used = true;
-	gpio_init_callback(&slot->cb, od_gpio_irq_trampoline, BIT(pin));
-	err = gpio_add_callback(dev, &slot->cb);
-	if (err != 0) {
-		slot->used = false;
-		return err;
-	}
-	err = gpio_pin_interrupt_configure(dev, pin, GPIO_INT_EDGE_BOTH);
-	if (err != 0) {
-		(void)gpio_remove_callback(dev, &slot->cb);
-		slot->used = false;
-	}
-	return err;
-}
-
 void od_gpio_write(uint8_t cfg, bool level_high)
 {
 	uint8_t port;

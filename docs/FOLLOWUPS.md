@@ -839,3 +839,63 @@ window — the same no-op failure this reservation exists to prevent.
 
 Unbuilt deliberately. No NFC hardware exists in this fleet to test either image against, and an
 untested second board variant carrying UICR semantics is a liability rather than an option.
+
+---
+
+## 11. `../CLAUDE.md` — the zlib window claim names an env that does not exist
+
+**External to this repository.** The workspace root is not a git checkout, so this cannot be
+fixed by a commit here; it is recorded so the finding survives.
+
+`../CLAUDE.md` line 101 states: *"Only `esp32-s3-E1004` sets `=15` (32 KB); it is commented out in
+every other PlatformIO env."* Measured 2026-08-22:
+
+- `../Firmware/platformio.ini` contains **eight** occurrences of
+  `OPENDISPLAY_ZLIB_WINDOW_BITS=15` — at `:80`, `:203`, `:233`, `:284`, `:368`, `:389`, `:410`
+  and `:506` — and **every one is commented out**.
+- There is no `esp32-s3-E1004` env. `platformio.ini:343` says so directly: *"The Seeed reTerminal
+  E1004 has no env of its own: it is the same hardware as …"*.
+- No board fragment in `targets/esp32-idf/boards/` sets it either, and
+  `shared/core/od_zlib_inflate.h:19-20` defaults to 9.
+
+So the 9-bit window is not "the default with one exception" — it is **absolute across the fleet**,
+which is stronger than the doc claims and matters when sizing shared buffers or reasoning about
+what a device will accept. `shared/core/od_zlib_header.h` is where the bound is enforced.
+
+The same stale claim had been copied into this repo at `targets/esp32-idf/src/od_inflate_tinfl.cpp`
+and was deleted with the D9 fix.
+
+---
+
+## 12. `Firmware_Unified` / nordic-zephyr — a short button press can be missed while idle
+
+`targets/nordic-zephyr/src/opendisplay_button.c` detects presses by comparing the pin level to the
+last observed state on each `opendisplay_button_process()` call. A press whose rising and falling
+edge both fall between two calls leaves the level where it started and is never reported.
+
+The window is set by the caller, not the button code
+(`targets/nordic-zephyr/src/main.c`):
+
+| Link state | `opendisplay_ble_process()` interval |
+|---|---|
+| Connected | 10 ms |
+| Advertising, no `sleep_timeout_ms` | 500 ms |
+| Advertising, `sleep_timeout_ms` configured | 1 s (`idle_delay_ms` chunk) |
+
+So the exposure is roughly a second on an idle-advertising device — exactly when a user is most
+likely to press a button to wake it.
+
+**A both-edges GPIO interrupt used to be attached, and it did not help.** Its handler set a single
+`volatile bool` that nothing ever read; `opendisplay_button_process()` only cleared it. Reading it
+would not have closed the window either: one anonymous flag cannot say which pin moved and carries
+no count, so the poll still finds an unchanged level. The flag, the handler and the now-unused
+`od_gpio_configure_interrupt()` were deleted on 2026-08-22 rather than left looking like a solution
+(dedup plan D10, "delete" chosen by project direction).
+
+**Closing it needs the transition recorded in ISR context** — per-button edge state, or a press
+counter incremented in the handler — so the information survives until the main loop looks. That is
+a wire-visible change to what reaches the MSD dynamic block and needs its own hardware gate on a
+board with buttons fitted. `od_gpio_configure_interrupt()` is in git history if it is wanted back
+(`git show f4f0aa1:targets/nordic-zephyr/src/od_gpio.c`).
+
+**Planned:** `plans/PLAN_NORDIC_BUTTONS_2026-08-22.md` ports the ESP32 ISR that already does this.

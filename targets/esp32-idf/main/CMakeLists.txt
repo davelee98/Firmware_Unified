@@ -107,8 +107,11 @@ list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../panel/od_bbep.cpp)
 # the wrong branch in that pass. Including the board fragment here instead makes IDF's own
 # property serialisation emit a dev warning, which IDF then treats as a fatal error.
 #
-# OD_BOARD is a -D on the command line, so it is in the cache from the first pass onward and
-# both passes agree. FastEPD is ESP32-S3-only and PSRAM-mandatory (MEMORY_CONSTRAINTS.md
+# OD_BOARD is a -D on the command line, so component expansion sees it and the source list is
+# consistent there. It is NOT visible everywhere: component_get_requirements.cmake is a separate
+# script include with its own scope, and OD_BOARD is empty inside it -- which is why the assertion
+# below returns early rather than resolving a path from it.
+# FastEPD is ESP32-S3-only and PSRAM-mandatory (MEMORY_CONSTRAINTS.md
 # § "FastEPD is ESP32-only and PSRAM-mandatory"), so this list can only ever hold S3 boards.
 # Boards whose source env sets -DOPENDISPLAY_FASTEPD *and* lists the FastEPD lib_dep.
 # Read from platformio.ini, not guessed -- the two are not the same set:
@@ -125,6 +128,44 @@ set(OD_FASTEPD_BOARDS
     s3-n32r8
     s3-n16r8-extuart
     s3-n16r8-extuart-debug)
+
+# Cross-check the hand-maintained list against the fragment it mirrors. The list exists because
+# the fragment's VARIABLES are invisible in this pass (see above) -- its TEXT is not, and reading
+# it is the whole assertion. Comment lines are stripped first: three non-FastEPD fragments name
+# the macro in prose explaining why they do not set it, and matching those would invert the check.
+#
+# Inside a function so nothing it needs survives into directory scope. IDF serialises this
+# component's variables into build_properties.temp.cmake during the early requirements pass, and
+# raw file text there produces a dev warning that IDF escalates to a fatal error -- the same trap
+# the note above describes for OD_BOARD_DEFINES.
+function(od_assert_fastepd_list board fragment)
+    # OD_BOARD is empty in IDF's component_get_requirements pass -- that script include has its
+    # own scope and does not inherit the cache the way component expansion does. Nothing there
+    # depends on this mapping; the assertion runs in the pass that builds the source list.
+    if(board STREQUAL "")
+        return()
+    endif()
+    if(NOT EXISTS "${fragment}")
+        message(FATAL_ERROR "od: no board fragment at ${fragment}")
+    endif()
+    file(STRINGS "${fragment}" fastepd_lines REGEX "^[^#]*OPENDISPLAY_FASTEPD")
+    set(fragment_wants FALSE)
+    if(fastepd_lines)
+        set(fragment_wants TRUE)
+    endif()
+    set(list_wants FALSE)
+    if(board IN_LIST OD_FASTEPD_BOARDS)
+        set(list_wants TRUE)
+    endif()
+    if(NOT fragment_wants STREQUAL list_wants)
+        message(FATAL_ERROR
+            "od: OD_FASTEPD_BOARDS says ${list_wants} for '${board}' but its fragment says "
+            "${fragment_wants}. These decide which library's Group5.cpp wins the link, so they "
+            "must agree.")
+    endif()
+endfunction()
+
+od_assert_fastepd_list("${OD_BOARD}" "${CMAKE_CURRENT_LIST_DIR}/../boards/${OD_BOARD}.cmake")
 
 if(OD_BOARD IN_LIST OD_FASTEPD_BOARDS)
     list(APPEND OD_APP_SOURCES ${OD_TP_DIR}/FastEPD/src/FastEPD.cpp

@@ -527,3 +527,27 @@ changed all three.
 |---|---|---|---|---|
 | 11.1 | `group_repeats` sentinel | All three runners store `(uint8_t)(raw + 1)` and treat internal 255 as endless. Raw `0xFE` therefore ran **forever** while raw `0xFF` — the value `opendisplay_structs.h:1114` documents as "repeat forever" — wrapped to 0 and stopped **immediately** | Raw `0xFE` **and** `0xFF` are both endless, held in an explicit `repeat_forever` flag rather than inferred from the wrapped count | `py-opendisplay` is the deciding evidence: `led_flash.py:102` encodes indefinite as `0xFE`, `:133` decodes both `0xFE` and `0xFF` as indefinite, and `:52` caps finite counts at 254 so `0xFF` is never a count. Accepting both matches the host exactly and keeps every deployed pattern working. The canonical header's "255" describes neither the host nor any shipped firmware; it is frozen, so the divergence is recorded rather than fixed there |
 | 11.2 | Zero-delay step yield | BG22 alone re-entered its `for (;;)` phase loop on every zero-delay transition and at the group-closing edge, so a pattern with all delays zero and an endless group never returned. Superloop, no watchdog: recovery was removing power. Reachable from any `0x0073` frame | Every flash and the group-closing edge schedule at least `LED_MIN_STEP_DELAY_MS` and return | ESP32 and Nordic already do exactly this, and Nordic's own comment names the group-closing edge as "the only yield when every loop count is zero and no flash ever runs". A port of the authority's shape, not a new design. Pinned by `tests/host/silabs_led_test.c`, which drives the production machine and bounds emissions per service call |
+
+---
+
+## 12. `BinaryInputs.pins_used == 0` — an undocumented three-way split (recorded 2026-08-22)
+
+Dedup survey Q8. **Recorded, not resolved:** which reading is normative is a host-visible decision,
+and `opendisplay_structs.h` defines neither — the field's doc says only "per-pin used/invert/pull".
+No firmware change is made here.
+
+| Target | Code | `pins_used == 0` means |
+|---|---|---|
+| ESP32 | `device_control.cpp:743` — `if (input->pins_used != 0 && (input->pins_used & (1 << pinIdx)) == 0) continue;` | **all pins used** — the mask is skipped entirely |
+| nordic-zephyr | `opendisplay_button.c:55` — same special case | **all pins used** |
+| efr32bg22-slc | `opendisplay_ble.c:414` — `bool pin_used = (input->pins_used & (1u << bi)) != 0u;` | **no pins used** — the bit is tested directly |
+
+So a config with a zero mask configures every pin on two targets and none on the third. Both
+readings are defensible from the wire alone: zero as "unspecified, take the default" and zero as
+"an empty set".
+
+**Why it matters and why it is not fixed here.** `py-opendisplay` decides what a host actually
+sends; changing either firmware without checking that is how a working deployment breaks. The
+resolution belongs with a host-side check and, if the answer is "unspecified means all", a
+sentence in the canonical header — which is frozen. Until then, a config that means to use every
+pin should set the mask explicitly rather than rely on zero.
