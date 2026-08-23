@@ -92,8 +92,7 @@ boundary_includes() {
     # vendored copy shared by all targets, not a per-target fork. Do not "fix" it by moving it
     # under shared/.
     local hits rc
-    # STATUS, NOT EMPTINESS. `|| true` here made an unreadable shared/ read as clean -- and this is
-    # one of the six permanent rules, so it is the last check that should answer without looking.
+    # Preserve grep status; an unreadable tree is unproven.
     hits=$(grep -rInE "$pattern" shared/)
     rc=$?
     if [ "$rc" -gt 1 ]; then
@@ -382,9 +381,8 @@ check "transfer: no target response literal for a promoted opcode" promoted_resp
 core_reset_is_the_teardown() {
     local rc=0 d n found=0
 
-    # DERIVED FROM targets/, not a hardcoded list: a fourth target arriving with no teardown is
-    # exactly what a fixed list of three files cannot see. Each target directory must contain at
-    # least one od_core_reset() call somewhere in its sources; which file is the target's business.
+    # Discover targets dynamically; each target must contain an od_core_reset() caller. Which file
+    # holds it is the target's business.
     for d in targets/*/; do
         [ -d "$d" ] || continue
         found=1
