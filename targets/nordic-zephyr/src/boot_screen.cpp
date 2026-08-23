@@ -5,7 +5,7 @@
 #include "opendisplay_config_parser.h"
 #include "opendisplay_display_color.h"
 #include "opendisplay_structs.h"
-#include "nrf54_zephyr_compat.h"
+#include "od_zephyr_compat.h"
 #include "qr/qrcode.h"
 #include <bb_epaper.h>
 #include <ctype.h>

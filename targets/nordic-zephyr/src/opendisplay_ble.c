@@ -16,7 +16,7 @@
 #include "opendisplay_sensor_bq27220.h"
 #include "opendisplay_sensor_npm1300.h"
 #include "opendisplay_nfc.h"
-#include "board_nrf54.h"
+#include "od_board.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -783,8 +783,8 @@ static void flash_powerdown_from_config(void)
 		od_log_info("flash powerdown MOSI=%u SCK=%u CS=%u MISO=%u WP=%u HOLD=%u",
 		       fc->mosi_pin, fc->sck_pin, fc->cs_pin,
 		       fc->miso_pin, fc->wp_pin, fc->hold_pin);
-		board_nrf54_flash_powerdown(fc->mosi_pin, fc->sck_pin, fc->cs_pin,
-					    fc->miso_pin, fc->wp_pin, fc->hold_pin);
+		od_board_flash_powerdown(fc->mosi_pin, fc->sck_pin, fc->cs_pin,
+					 fc->miso_pin, fc->wp_pin, fc->hold_pin);
 		break;
 	}
 }

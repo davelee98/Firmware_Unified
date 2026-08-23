@@ -3,7 +3,7 @@
 #include "opendisplay_sensor_common.h"
 #include "opendisplay_ble.h"
 #include "opendisplay_structs.h"
-#include "nrf54_gpio.h"
+#include "od_gpio.h"
 
 #include <stdio.h>
 #include <zephyr/kernel.h>
@@ -76,7 +76,7 @@ static bool charger_gpio_charging(void)
 		return false;
 	}
 	bool active_low = (cfg->power_option.charger_flags & CHARGER_FLAG_STATE_ACTIVE_LOW) != 0u;
-	int level = nrf54_gpio_read(st);
+	int level = od_gpio_read(st);
 
 	/* Matches reference charger_gpio_charging(). */
 	return active_low ? (level == 1) : (level == 0);
@@ -104,12 +104,12 @@ void opendisplay_sensor_bq27220_init(void)
 	if (valid_pin(en)) {
 		bool active_low = (cfg->power_option.charger_flags &
 				   CHARGER_FLAG_ENABLE_ACTIVE_LOW) != 0u;
-		nrf54_gpio_configure_output(en, !active_low);
+		od_gpio_configure_output(en, !active_low);
 	}
 	uint8_t st = cfg->power_option.charge_state_pin;
 
 	if (valid_pin(st)) {
-		nrf54_gpio_configure_input(st, true, false);
+		od_gpio_configure_input(st, true, false);
 	}
 
 	const struct SensorData *s = bq27220_config();

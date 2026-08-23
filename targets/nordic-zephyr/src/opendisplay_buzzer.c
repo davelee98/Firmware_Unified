@@ -3,7 +3,7 @@
 #include "opendisplay_ble.h"
 #include "opendisplay_constants.h"
 #include "opendisplay_structs.h"
-#include "nrf54_gpio.h"
+#include "od_gpio.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -92,7 +92,7 @@ static void buzzer_set_enable(const struct PassiveBuzzerConfig *b, bool on)
 	if ((b->flags & BUZZER_FLAG_ENABLE_ACTIVE_HIGH) == 0u) {
 		high = !high;
 	}
-	nrf54_gpio_write(b->enable_pin, high);
+	od_gpio_write(b->enable_pin, high);
 }
 
 static void buzzer_stop_tone(void)
@@ -101,7 +101,7 @@ static void buzzer_stop_tone(void)
 	k_timer_stop(&s_tone_timer);
 	s_bz.tone_high = false;
 	if (s_bz.cfg != NULL && s_bz.cfg->drive_pin != GPIO_PIN_UNUSED) {
-		nrf54_gpio_write(s_bz.cfg->drive_pin, false);
+		od_gpio_write(s_bz.cfg->drive_pin, false);
 	}
 }
 
@@ -114,7 +114,7 @@ static void buzzer_start_tone(uint32_t hz)
 	s_bz.drive_pin = s_bz.cfg->drive_pin;
 	if (hz == 0u) {
 		/* Rest / silence: hold the drive line low for the step duration. */
-		nrf54_gpio_write(s_bz.drive_pin, false);
+		od_gpio_write(s_bz.drive_pin, false);
 		return;
 	}
 
@@ -140,7 +140,7 @@ static void buzzer_start_tone(uint32_t hz)
 	s_bz.off_us = period_us - on_us;
 	s_bz.tone_high = true;
 	s_bz.tone_running = true;
-	nrf54_gpio_write(s_bz.drive_pin, true);
+	od_gpio_write(s_bz.drive_pin, true);
 	k_timer_start(&s_tone_timer, K_USEC(on_us), K_NO_WAIT);
 }
 
@@ -151,7 +151,7 @@ static void buzzer_finish(void)
 	k_timer_stop(&s_step_timer);
 	if (s_bz.cfg != NULL) {
 		if (s_bz.cfg->drive_pin != GPIO_PIN_UNUSED) {
-			nrf54_gpio_write(s_bz.cfg->drive_pin, false);
+			od_gpio_write(s_bz.cfg->drive_pin, false);
 		}
 		buzzer_set_enable(s_bz.cfg, false);
 	}
@@ -261,11 +261,11 @@ static void buzzer_tone_timer_cb(struct k_timer *timer)
 		return;
 	}
 	if (s_bz.tone_high) {
-		nrf54_gpio_write(s_bz.drive_pin, false);
+		od_gpio_write(s_bz.drive_pin, false);
 		s_bz.tone_high = false;
 		k_timer_start(&s_tone_timer, K_USEC(s_bz.off_us), K_NO_WAIT);
 	} else {
-		nrf54_gpio_write(s_bz.drive_pin, true);
+		od_gpio_write(s_bz.drive_pin, true);
 		s_bz.tone_high = true;
 		k_timer_start(&s_tone_timer, K_USEC(s_bz.on_us), K_NO_WAIT);
 	}
@@ -289,12 +289,12 @@ void opendisplay_buzzer_init(void)
 		if (b->drive_pin == GPIO_PIN_UNUSED) {
 			continue;
 		}
-		nrf54_gpio_configure_output(b->drive_pin, false);
+		od_gpio_configure_output(b->drive_pin, false);
 		if (b->enable_pin != GPIO_PIN_UNUSED) {
 			bool active_high = (b->flags & BUZZER_FLAG_ENABLE_ACTIVE_HIGH) != 0u;
 
 			/* Initialise to the disabled level (active-low -> drive high). */
-			nrf54_gpio_configure_output(b->enable_pin, !active_high);
+			od_gpio_configure_output(b->enable_pin, !active_high);
 		}
 		od_log_info("buzzer %u drive=0x%02X enable=0x%02X duty=%u",
 		       (unsigned)b->instance_number, (unsigned)b->drive_pin,

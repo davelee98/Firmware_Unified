@@ -16,8 +16,8 @@
 #ifndef NRF54_ZEPHYR_IO_INL
 #define NRF54_ZEPHYR_IO_INL
 
-#include "nrf54_gpio.h"
-#include "nrf54_zephyr_compat.h"
+#include "od_gpio.h"
+#include "od_zephyr_compat.h"
 #include "od_log.h"
 
 #include <string.h>
@@ -45,13 +45,13 @@ static void bb_spi_bitbang(BBEPDISP *pBBEP, const uint8_t *pData, int iLen)
 	for (int i = 0; i < iLen; i++) {
 		uint8_t uc = pData[i];
 		for (int j = 0; j < 8; j++) {
-			nrf54_gpio_write(pBBEP->iCLKPin, false);
-			nrf54_gpio_write(pBBEP->iMOSIPin, (uc & 0x80u) != 0u);
-			nrf54_gpio_write(pBBEP->iCLKPin, true);
+			od_gpio_write(pBBEP->iCLKPin, false);
+			od_gpio_write(pBBEP->iMOSIPin, (uc & 0x80u) != 0u);
+			od_gpio_write(pBBEP->iCLKPin, true);
 			uc <<= 1;
 		}
 	}
-	nrf54_gpio_write(pBBEP->iCLKPin, false);
+	od_gpio_write(pBBEP->iCLKPin, false);
 }
 
 static void bb_spi_write(BBEPDISP *pBBEP, const uint8_t *pData, int iLen)
@@ -66,34 +66,34 @@ static void bb_spi_init(uint8_t mosi, uint8_t sck, uint32_t speed)
 
 	(void)speed;
 	if (nrf54_pin_decode(mosi, &port, &pin)) {
-		nrf54_gpio_configure_output(mosi, false);
+		od_gpio_configure_output(mosi, false);
 	}
 	if (nrf54_pin_decode(sck, &port, &pin)) {
-		nrf54_gpio_configure_output(sck, false);
+		od_gpio_configure_output(sck, false);
 	}
 }
 
 void digitalWrite(int iPin, int iState)
 {
-	nrf54_gpio_write((uint8_t)iPin, iState != 0);
+	od_gpio_write((uint8_t)iPin, iState != 0);
 }
 
 void pinMode(int iPin, int iMode)
 {
 	if (iMode == INPUT) {
-		nrf54_gpio_configure_input((uint8_t)iPin, false, false);
+		od_gpio_configure_input((uint8_t)iPin, false, false);
 	} else if (iMode == INPUT_PULLUP) {
-		nrf54_gpio_configure_input((uint8_t)iPin, true, false);
+		od_gpio_configure_input((uint8_t)iPin, true, false);
 	} else if (iMode == INPUT_PULLDOWN) {
-		nrf54_gpio_configure_input((uint8_t)iPin, false, true);
+		od_gpio_configure_input((uint8_t)iPin, false, true);
 	} else {
-		nrf54_gpio_configure_output((uint8_t)iPin, false);
+		od_gpio_configure_output((uint8_t)iPin, false);
 	}
 }
 
 int digitalRead(int iPin)
 {
-	return nrf54_gpio_read((uint8_t)iPin);
+	return od_gpio_read((uint8_t)iPin);
 }
 
 void delay(long ms)
@@ -163,7 +163,7 @@ void bbepInitIO(BBEPDISP *pBBEP, uint8_t u8DC, uint8_t u8RST, uint8_t u8BUSY, ui
 
 	/*
 	 * PIN RESOLUTION IS THE FIRST THING TO CHECK when the panel is silent, because a pin
-	 * that fails to decode does not fault -- nrf54_gpio_write() simply returns and the
+	 * that fails to decode does not fault -- od_gpio_write() simply returns and the
 	 * bit-bang writes go nowhere. That failure mode already cost one bring-up session
 	 * (config bytes decoded to a port the chip does not have), and it is invisible without
 	 * this dump. "ok=0" on any row means every transfer on that line is a no-op.

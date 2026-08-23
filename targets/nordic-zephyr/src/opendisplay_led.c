@@ -2,7 +2,7 @@
 #include "opendisplay_ble.h"
 #include "opendisplay_constants.h"
 #include "opendisplay_structs.h"
-#include "nrf54_gpio.h"
+#include "od_gpio.h"
 
 #include <stdbool.h>
 #include <string.h>
@@ -50,7 +50,7 @@ static volatile bool s_timer_due;
 
 static void od_gpio_write(uint8_t cfg, bool level_high)
 {
-  nrf54_gpio_write(cfg, level_high);
+  od_gpio_write(cfg, level_high);
 }
 
 static void od_led_all_off(const struct LedConfig *led)
@@ -324,13 +324,13 @@ void opendisplay_led_init(void)
   for (uint8_t i = 0; i < gc->led_count; i++) {
     const struct LedConfig *led = &gc->leds[i];
     if (led->led_1_r != GPIO_PIN_UNUSED) {
-      nrf54_gpio_configure_output(led->led_1_r, (led->led_flags & LED_FLAG_INVERT_RED) != 0u);
+      od_gpio_configure_output(led->led_1_r, (led->led_flags & LED_FLAG_INVERT_RED) != 0u);
     }
     if (led->led_2_g != GPIO_PIN_UNUSED) {
-      nrf54_gpio_configure_output(led->led_2_g, (led->led_flags & LED_FLAG_INVERT_GREEN) != 0u);
+      od_gpio_configure_output(led->led_2_g, (led->led_flags & LED_FLAG_INVERT_GREEN) != 0u);
     }
     if (led->led_3_b != GPIO_PIN_UNUSED) {
-      nrf54_gpio_configure_output(led->led_3_b, (led->led_flags & LED_FLAG_INVERT_BLUE) != 0u);
+      od_gpio_configure_output(led->led_3_b, (led->led_flags & LED_FLAG_INVERT_BLUE) != 0u);
     }
     od_led_all_off(led);
   }
