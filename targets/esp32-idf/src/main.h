@@ -99,9 +99,7 @@ ButtonState buttonStates[MAX_BUTTONS] = {0};  // Button state tracking
 uint8_t buttonStateCount = 0;  // Number of initialized buttons
 volatile bool buttonEventPending = false;  // Flag set by ISR to indicate button event
 volatile uint8_t lastChangedButtonIndex = 0xFF;  // Index of button that last changed (set by ISR)
-uint8_t ledFlashPosition = 0;  // Current position in LED flash pattern group
 uint8_t activeLedInstance = 0xFF;  // LED instance index for flashing (0xFF = none configured)
-bool ledFlashActive = false;  // Flag to indicate if LED flashing is active (set by command)
 
 uint8_t staticRowBuffer[BOOT_ROW_BUFFER_SIZE];
 

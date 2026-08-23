@@ -7,6 +7,7 @@
  */
 
 #include "od_inflate_tinfl.h"
+#include "od_zlib_header.h"
 
 #if OPENDISPLAY_USE_TINFL
 
@@ -18,9 +19,10 @@
  *
  *  1) LZ77 history — the correctness FLOOR, equal to the DEFLATE window. A match can
  *     never reference further back than the window, so bytes beyond it are unreachable
- *     (never read as history). tinfl additionally REJECTS a stream whose CMF byte
- *     declares a window larger than this buffer — a clean decode error at the zlib
- *     header, never silent corruption — so the size must be >= the window.
+ *     (never read as history), so the size must be >= the window. tinfl also refuses a
+ *     stream declaring a window larger than this buffer, but that bound is this ring's
+ *     size and not the fleet's: od_zlib_header refuses an over-wide stream before tinfl can
+ *     accept its completed header.
  *
  *  2) Output staging ring — SPEED. tinfl's bulk paths need CONTIGUOUS headroom to the
  *     ring end: symbol decode wants a couple of bytes, and the 8-bytes-at-a-time match
@@ -39,7 +41,6 @@
  *     internal DRAM versus the old unconditional 32768.
  *   - window > 9 bits: use the window size exactly. It already provides ample headroom,
  *     so padding beyond the correctness floor would only waste DRAM.
- *     (env:esp32-s3-E1004 pins BITS=15 => 32768, unchanged.)
  *
  * Overridable per-env via -DOD_TINFL_DICT_SIZE=<power of 2> to trade RAM against speed.
  *
@@ -91,6 +92,14 @@ static bool     s_done;
 static bool     s_initialized;
 static const char *s_error;
 
+/* tinfl parses the zlib header itself and bounds the declared window against s_dict, which is
+ * sized for decode speed rather than the wire contract -- so it would accept streams every other
+ * engine in the fleet refuses. The two header bytes may arrive in separate pushes, and the pump
+ * polls after every push -- so tinfl can be handed a lone CMF byte, which it cannot complete a
+ * header from. The refusal lands on the push that supplies FLG, so tinfl never acts on an
+ * ACCEPTED over-wide header. That, not "before tinfl sees anything", is the invariant. */
+static od_zlib_header_t s_header;
+
 extern "C" {
 
 void od_inflate_tinfl_reset(uint32_t expected_output_size) {
@@ -106,6 +115,7 @@ void od_inflate_tinfl_reset(uint32_t expected_output_size) {
     s_done = false;
     s_error = NULL;
     s_initialized = true;
+    od_zlib_header_reset(&s_header);
     /* s_dict is not cleared: tinfl only reads history bytes it has written. */
 }
 
@@ -117,6 +127,16 @@ od_zlib_status_t od_inflate_tinfl_push(const uint8_t *input, size_t len, bool fi
     if (s_done) {
         if (len != 0) { s_error = "input after end of zlib stream"; return OD_ZLIB_STATUS_ERROR; }
         return OD_ZLIB_STATUS_DONE;
+    }
+    switch (od_zlib_header_observe(&s_header, input, len)) {
+    case OD_ZLIB_HEADER_BAD:
+        s_error = "invalid zlib header";
+        return OD_ZLIB_STATUS_ERROR;
+    case OD_ZLIB_HEADER_WINDOW_TOO_BIG:
+        s_error = "zlib stream window exceeds firmware limit";
+        return OD_ZLIB_STATUS_ERROR;
+    default:
+        break;
     }
     s_in = input;
     s_in_remaining = len;

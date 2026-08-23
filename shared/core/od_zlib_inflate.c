@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include "od_zlib_inflate.h"
+#include "od_zlib_header.h"
 
 #define TINF_ARRAY_SIZE(arr) (sizeof(arr) / sizeof(*(arr)))
 
@@ -605,13 +606,15 @@ od_zlib_status_t od_zlib_stream_poll(uint8_t *output, size_t capacity, size_t *p
         case ST_ZLIB_FLG:
             rc = read_byte(&byte);
             if (rc <= 0) return s.stage == ST_ERROR ? OD_ZLIB_STATUS_ERROR : OD_ZLIB_STATUS_NEEDS_INPUT;
-            if (((256u * s.cmf + byte) % 31u) != 0 || (s.cmf & 0x0fu) != 8u || (byte & 0x20u) != 0) {
+            switch (od_zlib_header_check(s.cmf, byte)) {
+            case OD_ZLIB_HEADER_BAD:
                 set_error("invalid zlib header");
                 return OD_ZLIB_STATUS_ERROR;
-            }
-            if (((s.cmf >> 4) + 8u) > OPENDISPLAY_ZLIB_WINDOW_BITS) {
+            case OD_ZLIB_HEADER_WINDOW_TOO_BIG:
                 set_error("zlib stream window exceeds firmware limit");
                 return OD_ZLIB_STATUS_ERROR;
+            default:
+                break;
             }
             s.stage = ST_BLOCK_FINAL;
             break;

@@ -24,16 +24,6 @@ typedef struct {
 static ButtonState s_buttons[MAX_BUTTONS];
 static uint8_t s_button_count;
 
-/* Set from GPIO ISR context (both-edges interrupt). The ISR does NO I2C/BLE
- * work: it only raises this flag, which opendisplay_button_process() consumes on
- * the main loop. Polling remains as a fallback in case an edge is missed. */
-static volatile bool s_button_irq_pending;
-
-static void button_irq_handler(void)
-{
-  s_button_irq_pending = true;
-}
-
 static bool read_logical_pressed(const ButtonState *btn)
 {
   bool level = od_gpio_read(btn->pin) != 0;
@@ -66,7 +56,15 @@ void opendisplay_button_init(void)
         continue;
       }
       uint8_t pin = *instance_pins[pin_idx];
-      if (pin == 0xFFu || s_button_count >= MAX_BUTTONS) {
+      if (pin == 0xFFu) {
+        continue;
+      }
+      /* The contract allows 4 blocks x 8 pins; this target tracks MAX_BUTTONS. Refusing
+       * quietly leaves a host with a configured button that never reports and no way to
+       * find out. */
+      if (s_button_count >= MAX_BUTTONS) {
+        od_log_warn("button pin=0x%02X refused: %u configured, this target tracks %u",
+               (unsigned)pin, (unsigned)(s_button_count + 1u), (unsigned)MAX_BUTTONS);
         continue;
       }
       if (opendisplay_touch_gpio_is_touch_int(pin)) {
@@ -87,12 +85,6 @@ void opendisplay_button_init(void)
       od_gpio_configure_input(pin, pull_up, pull_down);
       btn->current_state = read_logical_pressed(btn) ? 1u : 0u;
       btn->initialized = true;
-      /* Attach a both-edges interrupt (reference uses CHANGE, device_control.cpp:604).
-       * On failure we still have the polling path in _process(). */
-      if (od_gpio_configure_interrupt(pin, button_irq_handler) != 0) {
-        od_log_info("button pin=0x%02X interrupt setup failed; polling only",
-               (unsigned)pin);
-      }
       od_log_info("button id=%u pin=0x%02X byte=%u pull=%s", (unsigned)btn->button_id,
              (unsigned)pin, (unsigned)btn->byte_index,
              pull_up ? "up" : (pull_down ? "down" : "none"));
@@ -100,12 +92,13 @@ void opendisplay_button_init(void)
   }
 }
 
+/* Detection is by level comparison on each call, so a press and release that both complete
+ * between two calls is not reported. The caller sets that window: opendisplay_ble_process() runs
+ * every 10 ms while connected, but only every 500 ms to 1 s while idle-advertising, depending on
+ * whether a sleep_timeout_ms is configured (main.c idle_delay_ms). Closing it needs the edge
+ * recorded in ISR context -- docs/FOLLOWUPS.md § 12. */
 void opendisplay_button_process(void)
 {
-  /* Consume any interrupt signal. The actual state change is detected by the
-   * poll below (edge-agnostic), which also covers a missed/coalesced edge. */
-  s_button_irq_pending = false;
-
   for (uint8_t i = 0; i < s_button_count; i++) {
     ButtonState *btn = &s_buttons[i];
     bool pressed;

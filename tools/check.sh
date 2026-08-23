@@ -580,6 +580,50 @@ inflate_pump_structure() {
 }
 check "structure: od_zlib_pump owns inflater progression"  inflate_pump_structure
 
+# The declared-window bound is a wire contract with the host encoder, not a buffer size. An engine
+# that applies its own limit accepts streams the rest of the fleet refuses, and no host can
+# interrogate the difference -- so the comparison lives in shared/core/od_zlib_header.h and every
+# decoder reaches it. Engines are found by what they do (drive tinfl, or parse the zlib header
+# themselves), so a new one cannot arrive without an answer here.
+zlib_header_single_rule() {
+    local hits rc engines tu
+
+    if ! grep -q 'OPENDISPLAY_ZLIB_WINDOW_BITS' shared/core/od_zlib_header.h; then
+        echo "shared/core/od_zlib_header.h no longer holds the window bound"
+        return 1
+    fi
+    hits=$(grep -RIn --include='*.c' --include='*.cpp' --include='*.h' \
+           --exclude='od_zlib_header.h' --exclude-dir=build \
+           -e '>[[:space:]]*OPENDISPLAY_ZLIB_WINDOW_BITS' shared targets)
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo "$hits"
+        echo "the zlib window bound is compared outside od_zlib_header.h"
+        return 1
+    fi
+    if [ "$rc" -gt 1 ]; then
+        echo "grep could not scan for the window bound (status $rc); single-rule is unproven"
+        return 1
+    fi
+
+    engines=$(grep -RIl --include='*.c' --include='*.cpp' --exclude-dir=build \
+              -e 'tinfl_decompress[[:space:]]*(' -e 'ST_ZLIB_FLG' shared targets)
+    rc=$?
+    if [ "$rc" -ne 0 ] || [ -z "$engines" ]; then
+        echo "found no inflate engine to check (grep status $rc); single-rule is unproven"
+        return 1
+    fi
+    for tu in $engines; do
+        # A CALL, not a mention: the rule is named in prose in more than one comment.
+        if ! grep -qE 'od_zlib_header_(check|observe)[[:space:]]*\(' "$tu"; then
+            echo "$tu decodes a zlib stream without calling od_zlib_header_check/observe"
+            return 1
+        fi
+    done
+}
+check "transfer: one zlib header rule" zlib_header_single_rule
+
+
 silabs_c13_config() {
     grep -q '^#define PSA_WANT_ALG_CCM 1$' \
         targets/efr32bg22-slc/config/od_psa_config_autogen.h || {

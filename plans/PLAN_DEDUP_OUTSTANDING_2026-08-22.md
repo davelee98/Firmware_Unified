@@ -175,6 +175,13 @@ against that buffer, so those boards **accept** 10–12-bit streams the rest of 
 Latent because py-opendisplay pins 9 — but the wire contract should not depend on the client's
 politeness.
 
+**Implemented 2026-08-22.** `shared/core/od_zlib_header.h` is the rule, all-inline: both engines
+call it, and the tinfl adapter observes across pushes so the refusal lands before tinfl can accept
+a completed header (the pump polls after every push, so a lone CMF byte does reach tinfl — it
+simply cannot finish a header from it), and
+`tests/host/zlib_header_test.c` covers every window 8..15 plus the split-push cases. Ratcheted by
+"transfer: one zlib header rule", which finds engines by what they do rather than by a fixed list.
+
 **The fix is not two unconditional lines, and the obvious test would not cover it.**
 
 - The check needs adapter **state**: the CMF byte may arrive in an empty or fragmented first
@@ -198,6 +205,11 @@ began and ended between polls is already lost by the time anyone looks. So the c
 explicit — either delete the flag and accept documented polling semantics, or capture per-button
 edge events in the ISR and drain them at service time. Do not add a reader and call it fixed.
 
+**Resolved 2026-08-22: delete, by project direction.** The flag, its handler and the orphaned
+`od_gpio_configure_interrupt()` are gone, the 8-of-32 cap now logs its refusal, and the window is
+recorded in `docs/FOLLOWUPS.md` § 12. The comprehensive fix — ESP32 already implements it — is
+`plans/PLAN_NORDIC_BUTTONS_2026-08-22.md`, which needs a hardware gate this step could not carry.
+
 Separately, `MAX_BUTTONS 8u` (`:12`) silently drops pins past 8 (`:69`) against a contract of 4
 `BinaryInputs` blocks × 8 pins (`shared/core/od_config.h:72`). Either raise the cap or log the
 refusal; silent truncation is the failure mode this repo has a standing rule against.
@@ -211,15 +223,18 @@ same at `hal/od_hal_radio.cpp:49-50` and `:75-76`. `shared/core/od_txq.c:191-194
 by dropping **every** queued frame for that `{origin, tag}` — so one malformed call discards
 unrelated queued replies. One-line verdict change; the dead-connection arm keeps `GONE`.
 
+**Implemented 2026-08-22**, with the LAN-origin arm folded into the malformed case for the same
+reason both peers do: this target has no LAN transport, so that origin is a routing bug.
+
 ---
 
 ## 3. Tier A remnants — mechanical, no seam
 
 | Item | Validated | Work |
 |---|---|---|
-| Dead LED symbols | `ledFlashActive`/`ledFlashPosition` **defined in a header** (`targets/esp32-idf/src/main.h:102,104`), written at `device_control.cpp:349,351,564,565`; **zero** non-write references repo-wide. `opendisplay_led_is_active()` defined on Nordic (`opendisplay_led.c:396`) and BG22 (`:482`), **zero** callers | Delete all three |
-| FastEPD board-set cross-check | `OD_FASTEPD_BOARDS` still hand-maintained at `targets/esp32-idf/main/CMakeLists.txt:122`, the comment still narrating both historical mismatches. The survey's ~8-line assertion ("best value-per-line") was never written | Assert the list against what the board fragments declare; fail configure on mismatch |
-| QR differential corpus | **Correction to the survey's "no host test":** `od_boot_screen_test` compiles `third_party/qrcode/qrcode.c` (`tests/host/CMakeLists.txt:127-128`) and hashes QR-containing output, so the encoder is exercised today — just not *differentially* | Add the standalone 43-case output-identity corpus from the survey's QR review. Lower priority than the survey implied |
+| Dead LED symbols — **done 2026-08-22** | `ledFlashActive`/`ledFlashPosition` **defined in a header** (`targets/esp32-idf/src/main.h:102,104`), written at `device_control.cpp:349,351,564,565`; **zero** non-write references repo-wide. `opendisplay_led_is_active()` defined on Nordic (`opendisplay_led.c:396`) and BG22 (`:482`), **zero** callers | Delete all three |
+| FastEPD board-set cross-check — **done 2026-08-22** | `OD_FASTEPD_BOARDS` still hand-maintained at `targets/esp32-idf/main/CMakeLists.txt:122`, the comment still narrating both historical mismatches. The survey's ~8-line assertion ("best value-per-line") was never written | Assert the list against what the board fragments declare; fail configure on mismatch |
+| QR differential corpus — **done 2026-08-22** | **Correction to the survey's "no host test":** `od_boot_screen_test` compiles `third_party/qrcode/qrcode.c` (`tests/host/CMakeLists.txt:127-128`) and hashes QR-containing output, so the encoder is exercised today — just not *differentially* | **Done 2026-08-22:** `tests/host/qrcode_test.c` freezes **45** module bitmaps — versions 1..10 crossed with short, at-capacity, one-under-capacity and byte-mode payloads, plus the boot-screen and BG22 payloads — alongside geometry and capacity-refusal checks. The survey's "43 cases" named a corpus this repo does not vendor; this is a characterization baseline of the vendored encoder, which is what a re-vendor needs |
 
 ## 4. Tier B — needs a seam
 
@@ -282,18 +297,23 @@ different ADCs).
 - **The same stale claim was copied into this repo** at `od_inflate_tinfl.cpp:42` — delete it
   with the D9 fix. That one *is* an in-repo commit.
 - **Q8 → `docs/DIVERGENCE_MATRIX.md`, now.** `pins_used == 0` means "all pins" on ESP32
-  (`device_control.cpp:744`) and Nordic (`opendisplay_button.c:65`) — both special-case `!= 0` —
-  while BG22 tests the bit directly (`opendisplay_ble.c:419`), so `0` means "no pins". The struct
+  (`device_control.cpp:743`) and Nordic (`opendisplay_button.c:55`) — both special-case `!= 0` —
+  while BG22 tests the bit directly (`opendisplay_ble.c:414`), so `0` means "no pins". The struct
   doc defines neither, and the matrix has **zero** `pins_used` matches. Record first; deciding
   which is normative is host-visible and separate.
 
-## 7. Tier C remainder — host-test duplication, drifting the wrong way
+## 7. Tier C remainder — host-test duplication
 
-Counted today: **35** files under `tests/host/` define their own `CHECK` macro (survey: 25), 32
-declare their own `g_checks`/`g_failures`, `od_session_app_now_ms` is redefined in 13 files and
-`od_txq_app_dropped` in 12. One `tests/host/od_check.h` plus one session-app default fixture
-would stop the growth; migrating existing suites can be piecemeal. Low priority — but add the
-helper **before the next suite is authored**, not as a sweep, or the count keeps climbing.
+`tests/host/od_check.h` exists as of 2026-08-22 and the three suites authored that day use it, so
+the count is back to the **35** files that predate it (the survey counted 25; it had already grown
+before anyone acted). `od_session_app_now_ms` is still redefined in 13 files and
+`od_txq_app_dropped` in 12 — a session-app default fixture is the other half and is not written.
+
+**The rule, restated because the original was too weak to hold.** "Add the helper before the next
+suite" did not survive contact with a session that authored three: each one reached for the
+boilerplate that was already in every neighbouring file. So: **a new suite uses `od_check.h`**, and
+migrating the existing 35 stays piecemeal and low priority. A suite that needs different reporting
+should say why in its header rather than quietly re-declaring the macro.
 
 ## 8. Sequencing
 

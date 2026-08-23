@@ -12,8 +12,14 @@ od_radio_result_t od_hal_radio_send(od_origin_t origin, uint32_t tag,
 {
   sl_status_t sc;
 
-  if (origin != OD_ORIGIN_BLE || frame == NULL || len == 0u ||
-      !od_hal_radio_tag_is_live(origin, tag)) {
+  /* A malformed call is the caller's bug and concerns this frame only. GONE means the tag is
+   * dead, and od_txq answers it by dropping every frame queued for that tag -- so folding the two
+   * together discards unrelated replies. This target has no LAN transport, so a LAN origin is a
+   * routing bug rather than a closed link. */
+  if (frame == NULL || len == 0u || origin != OD_ORIGIN_BLE) {
+    return OD_RADIO_ERROR;
+  }
+  if (!od_hal_radio_tag_is_live(origin, tag)) {
     return OD_RADIO_GONE;
   }
   /* Subscription state can change only by delivering a BGAPI event. Retrying while the queue's

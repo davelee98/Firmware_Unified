@@ -14,6 +14,5 @@ int opendisplay_led_stop(uint8_t instance, bool instance_given);
 
 void opendisplay_led_process(void);
 
-bool opendisplay_led_is_active(void);
 
 #endif
