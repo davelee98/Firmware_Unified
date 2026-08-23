@@ -1,6 +1,10 @@
 # Consolidated de-duplication plan
 
-**Status:** proposed, 2026-08-17. Synthesis of six parallel surveys:
+**Status:** SUPERSEDED in full, 2026-08-22, by
+[PLAN_DEDUP_OUTSTANDING_2026-08-22.md](PLAN_DEDUP_OUTSTANDING_2026-08-22.md), which re-validated
+every item against the tree and records what the boot-screen, od_color, C14, Transfer Phase 1
+and shared-logging promotions closed. Read this file only for the original survey rationale.
+Originally proposed 2026-08-17. Synthesis of six parallel surveys:
 [boot screen](DEDUP_1_BOOT_SCREEN_2026-08-17.md) · [qrcode](DEDUP_2_QRCODE_2026-08-17.md) ·
 [LED](DEDUP_3_LED_2026-08-17.md) · [sensors](DEDUP_4_SENSORS_2026-08-17.md) ·
 [compression](DEDUP_5_COMPRESSION_2026-08-17.md) · [sweep](DEDUP_6_SWEEP_2026-08-17.md).
