@@ -1,6 +1,9 @@
 # De-duplication — outstanding items
 
-**Status:** proposed, 2026-08-22; revised same day after implementation review. Supersedes
+**Status:** proposed, 2026-08-22; revised same day after implementation review. **§ 8 step 1
+(D1, D2, D8) implemented on `fix/bg22-gate2-blockers`, 2026-08-22 — software only; its hardware
+rows are open in `docs/HARDWARE_VERIFICATION_CHECKLIST.md` § LED runner and panel rail, which
+covers all three targets because D1's sentinel change is not BG22-only.** Supersedes
 [PLAN_DEDUP_CONSOLIDATED_2026-08-17.md](PLAN_DEDUP_CONSOLIDATED_2026-08-17.md) in full.
 Every item below was re-validated against `main` — file, line and symbol references are to
 today's tree, not inherited from the 2026-08-17 survey. Items the survey listed that are
@@ -69,6 +72,12 @@ alone silently changes behaviour for deployed configs built against the shipped 
 yields. Accept **both** raw `0xFE` and raw `0xFF` as indefinite, for deployed compatibility, and
 record the divergence — the contract wants only `0xFF`, the field has both.
 
+**Implemented 2026-08-22.** The floor and the group-closing yield are ported from the authority;
+`repeat_forever` replaces the wrapped-count sentinel on all three targets;
+`tests/host/silabs_led_test.c` drives the production machine (146 checks) and the divergence is
+recorded in `docs/DIVERGENCE_MATRIX.md` § 11. Removing the group-closing yield makes that suite
+hang rather than fail, so its ctest entry carries a timeout.
+
 **Acceptance test, mandatory and not optional:** a production-machine host case driving an
 all-zero-delay pattern at raw `0xFE` and at raw `0xFF`, asserting the runner yields — performs
 at most one **LED emission or other yield-requiring action** per service call and returns —
@@ -96,6 +105,11 @@ production-source failure-policy suite. `od_dispatch_silabs_test`
 (`:409`) reaches the fixture archive. **All eight currently pass under the wrong profile**, which
 is the point: passing is not evidence when the ABI differs.
 
+**Implemented 2026-08-22** as `shared/profiles.cmake`, included by `shared/sources.cmake` and
+consumed by `opendisplay-bg22.cmake` and both host archives; ratcheted by "silabs: one profile
+definer". The four missing gates changed `struct od_config`'s layout under all eight executables
+and the suite still passes, 65/65.
+
 **Fix — one definition, two consumers; not a list diff.** A raw `OD_`-definition diff is brittle:
 it has to special-case test-only definitions like `OD_BOOT_LOGO_SIZES`, and it re-breaks whenever
 a legitimately host-only knob is added. Instead define the BG22 shared profile **once** in a
@@ -116,17 +130,12 @@ linear. **The table alone is not the whole promotion** — see § 4's buzzer row
 duration-cap decisions that come with it. If the promotion is deferred, porting the table alone
 is a valid standalone fix and leaves those decisions open.
 
-### D6 — MAJOR (legal): QR licence still stripped — HALF-FIXED, and now inside `third_party/`
+### D6 — QR licence — DROPPED BY PROJECT DIRECTION, 2026-08-22
 
-The move happened: `third_party/qrcode/{qrcode.c,qrcode.h}`. The licence restoration did not.
-`qrcode.h` carries one line ("Minimal QR header (MIT) derived from ricmoo/QRCode"); `qrcode.c`
-opens on a bare `#include` with no notice; there is no `LICENSE` file; the © 2017 Richard Moore
-and © 2017 Project Nayuki lines and the MIT terms — all retained in upstream's own header — are
-absent; and `third_party/NOTICE.md`, whose header says "Record the origin and licence of each
-vendored tree", has **zero** QR/Moore/Nayuki matches. MIT requires notice retention, and the tree
-now sits in the one directory whose accounting file claims to be complete. Minutes of work:
-restore both file headers from upstream, add `LICENSE`, add the `NOTICE.md` section (origin
-ricmoo/QRCode v0.0.1, revision, what was pruned and renamed on the way in).
+Not in scope for this plan and not to be re-raised as an outstanding item. The finding stands as
+described in the 2026-08-17 survey (`third_party/qrcode/qrcode.c` carries no notice, there is no
+`LICENSE` file, and `third_party/NOTICE.md` has no QR entry); the decision is that no licence work
+is done here. Recorded rather than deleted so a later reader does not re-survey it as an omission.
 
 ### D8 — MAJOR: BG22 panel rail — no settle, and drives pin 0x00 when unset
 
@@ -137,6 +146,11 @@ driving a guessed pin as "the unsafe case" (`opendisplay_display.cpp:153`). Neit
 `display_power_set(true)` site has a settle: `:647` goes straight into `bbepSetPanelType()`, and
 `:716` is the refresh path. Nordic carries `OD_PANEL_RAIL_SETTLE_MS 800` with the rationale at
 `:114-121` — 48,000 bytes clocked into a dead controller, only symptom a 60 s timeout.
+
+**Implemented 2026-08-22.** `0xFF` now returns before touching a pad, the settle uses
+`sl_sleeptimer_delay_millisecond()` (the mechanism already accepted on this path), and it is
+charged on the off→on edge only. The dead `OD_FALLBACK_DISPLAY_PWR_PIN` copy in
+`opendisplay_ble.c` went with it.
 
 **Two fixes, and the second needs a mechanism decision.**
 
@@ -286,9 +300,9 @@ helper **before the next suite is authored**, not as a sweep, or the count keeps
 1. **BG22 Gate 2 blockers, first and together:** D1 (fix + the yield regression test + the
    `0xFE`/`0xFF` sentinel decision recorded in `DIVERGENCE_MATRIX`), D2 (shared CMake profile
    fragment + absence ratchet), D8 (`0xFF` skip + settle, with the sleep mechanism chosen).
-2. **Independent small commits, any order:** D6, D9 (with its validator extraction and the tinfl
+2. **Independent small commits, any order:** D9 (with its validator extraction and the tinfl
    comment), D10 (decide delete-vs-events first), D11, the Q8 matrix entry, `FOLLOWUPS` § 11,
-   and § 3's Tier A remnants.
+   and § 3's Tier A remnants. (D6 is dropped — see above.)
 3. **Design step — the storage seam** (§ 4 config-storage row). Written design covering partial
    access, BG22's assembler overlay and ESP32 secure erase, reviewed before code.
 4. **Design step — the sensor/touch seam set** (§ 5). Written design covering bus shape, the

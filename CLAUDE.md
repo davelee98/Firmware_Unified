@@ -417,6 +417,21 @@ looks arbitrary and is not); delete the story.
   No fake ever sees an expected reply: the generated table is included by the runner and nothing
   else, and profiles get semantic knobs instead. That is what stops the corpus becoming its own
   oracle.
+- **BG22 Gate 2 blockers fixed in software, none hardware-qualified (2026-08-22).** Three defects
+  from plans/PLAN_DEDUP_OUTSTANDING_2026-08-22.md § 8 step 1. **`0x0073` could wedge the BG22
+  superloop permanently from any connection** — its phase loop re-entered on every zero-delay
+  transition, and that target has no watchdog. ESP32 and Nordic already yielded at both the flash
+  and the group-closing edge; BG22 now does too, pinned by `tests/host/silabs_led_test.c` against
+  the production machine. **The `group_repeats` sentinel was inverted on all three targets**: raw
+  `0xFE` ran forever and raw `0xFF` — the header's "forever" — stopped immediately. Both now mean
+  indefinite, which is what py-opendisplay encodes and decodes (`DIVERGENCE_MATRIX` § 11).
+  **`shared/profiles.cmake` is now the single definer of BG22's compile-time profile**: the host
+  archives were missing `OD_CONFIG_WITH_{TOUCH,BUZZER,WIFI,DATA_EXTENDED}=0`, so eight executables
+  — including the target-production corpus profile — compiled a `struct od_config` the firmware
+  does not have and passed anyway. Ratcheted by "silabs: one profile definer". And BG22 no longer
+  drives pad `0x00` when `pwr_pin` is unset, and settles the rail 800 ms on the off→on edge.
+  Hardware rows for all three targets: docs/HARDWARE_VERIFICATION_CHECKLIST.md § LED runner
+  and panel rail.
 - Live plan: plans/PLAN_TRANSFER_PHASE45_2026-08-20.md, **complete** — Phase 4 (NFC) and Phase 5
   (cleanup and release evidence), steps 0–13 all landed. Its hardware rows are the outstanding
   work, not its steps.

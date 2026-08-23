@@ -151,11 +151,6 @@ static uint8_t fw_patch_from_build_version(void)
 #define BUTTON_STATE_SHIFT         7u
 #define OD_MAX_CONNECTION_MS       300000u
 
-/* When system_config.pwr_pin is 0xFF, drive this pin HIGH as display rail enable (PA0). Set to 0xFF to disable. */
-#ifndef OD_FALLBACK_DISPLAY_PWR_PIN
-#define OD_FALLBACK_DISPLAY_PWR_PIN 0x00u
-#endif
-
 /* OD_TNB132M_BOOT_PROBE=1 (e.g. -DOD_TNB132M_BOOT_PROBE=1): read the phone-visible
  * NDEF via TNB132M at boot and log it over RTT. Type-3 AI lives at I2C 0x48 sub=0;
  * NDEF data blocks are byte-offset reads at I2C 0x40 sub=0x10/0x20/... The tag

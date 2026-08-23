@@ -511,3 +511,19 @@ software-qualified only — see `docs/HARDWARE_VERIFICATION_CHECKLIST.md` § Tra
 | 10.4 | Reply failure on START / DATA | Both ports discarded the queue result: the verdict stayed OK and the staged bytes survived a frame the client never saw answered | A failed ACK clears the assembler and the verdict is NACK | The client cannot know its frame landed and its only recovery is a fresh START; leaving bytes staged guarantees a later `0x08` or `0x09` on a transfer it believes never began. A deliberate divergence from the donors, which ignore the send result. READ / inline WRITE / END keep the opposite rule — the tag has already been touched, so a failed reply is reported and never reverted |
 | 10.5 | Read cap requested from the tag | Both donors pass `OD_PIPE_MAX_PAYLOAD - 6` = **238** | Both ports request `OD_SESSION_PAYLOAD_MAX - 4` = **218**, unchanged by the promotion | A sealed 238-byte record exceeds one BLE frame. Applied in both plaintext and encrypted sessions so the answer's size never depends on whether the session happens to be encrypted. **A host cannot interrogate this**; restoring 238 is a protocol decision, not a firmware one |
 | 10.6 | Behaviour above that cap | Nordic truncates for verbatim and well-known records and **refuses** an over-cap MIME record; BG22 refuses everything past its 128-byte staging buffer | Unchanged, and deliberately not normalised | Refusal versus truncation is a property of the record **and** the adapter together, not of the target. The shared machine passes the cap down and reports what came back — `false` becomes `0x02`, a short answer is sent at its true length. Normalising them is controller-code work on two targets with a hardware gate of its own |
+
+---
+
+## 11. LED_ACTIVATE 0x0073 — group repeats and the yield floor (2026-08-22)
+
+Two defects the dedup survey found (`plans/PLAN_DEDUP_OUTSTANDING_2026-08-22.md` D1). 11.1 is
+wire-visible on all three targets; 11.2 is a BG22-only liveness fix.
+
+Neither is hardware-verified — see `docs/HARDWARE_VERIFICATION_CHECKLIST.md`
+§ LED runner and panel rail, which carries sentinel rows for all three targets because 11.1
+changed all three.
+
+| # | Behaviour | Before | After | Why |
+|---|---|---|---|---|
+| 11.1 | `group_repeats` sentinel | All three runners store `(uint8_t)(raw + 1)` and treat internal 255 as endless. Raw `0xFE` therefore ran **forever** while raw `0xFF` — the value `opendisplay_structs.h:1114` documents as "repeat forever" — wrapped to 0 and stopped **immediately** | Raw `0xFE` **and** `0xFF` are both endless, held in an explicit `repeat_forever` flag rather than inferred from the wrapped count | `py-opendisplay` is the deciding evidence: `led_flash.py:102` encodes indefinite as `0xFE`, `:133` decodes both `0xFE` and `0xFF` as indefinite, and `:52` caps finite counts at 254 so `0xFF` is never a count. Accepting both matches the host exactly and keeps every deployed pattern working. The canonical header's "255" describes neither the host nor any shipped firmware; it is frozen, so the divergence is recorded rather than fixed there |
+| 11.2 | Zero-delay step yield | BG22 alone re-entered its `for (;;)` phase loop on every zero-delay transition and at the group-closing edge, so a pattern with all delays zero and an endless group never returned. Superloop, no watchdog: recovery was removing power. Reachable from any `0x0073` frame | Every flash and the group-closing edge schedule at least `LED_MIN_STEP_DELAY_MS` and return | ESP32 and Nordic already do exactly this, and Nordic's own comment names the group-closing edge as "the only yield when every loop count is zero and no flash ever runs". A port of the authority's shape, not a new design. Pinned by `tests/host/silabs_led_test.c`, which drives the production machine and bounds emissions per service call |

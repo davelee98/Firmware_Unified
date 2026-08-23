@@ -634,6 +634,67 @@ silabs_advertising_ownership() {
 }
 check "silabs: advertising lifecycle ownership" silabs_advertising_ownership
 
+# The BG22 compile-time profile decides the ABI of shared structs (OD_CONFIG_WITH_* gate members
+# of struct od_config, OD_CONFIG_MAX_SIZE sizes the assembler). A host archive built from a
+# different set validates a layout the firmware never runs -- and passes while doing it. So
+# shared/profiles.cmake is the only definer, and every silabs consumer reads it from there.
+silabs_profile_single_definer() {
+    local names name block hits rc
+    local bg22=targets/efr32bg22-slc/cmake_gcc/opendisplay-bg22.cmake
+
+    if ! grep -q 'include(\${CMAKE_CURRENT_LIST_DIR}/profiles.cmake)' shared/sources.cmake; then
+        echo "shared/sources.cmake no longer brings in the per-target profiles"
+        return 1
+    fi
+    names=$(sed -n '/^set(OD_PROFILE_SILABS/,/)$/p' shared/profiles.cmake \
+            | grep -oE '\bOD_[A-Z0-9_]+=' | tr -d '=')
+    if [ -z "$names" ]; then
+        echo "shared/profiles.cmake defines no OD_PROFILE_SILABS macros; the rule cannot be proven"
+        return 1
+    fi
+    if ! grep -q '\${OD_PROFILE_SILABS}' "$bg22"; then
+        echo "$bg22 no longer consumes OD_PROFILE_SILABS"
+        return 1
+    fi
+
+    # Only the two silabs archives are in scope: unrelated executables set capability macros of
+    # their own, and those are not this profile.
+    block=$(sed -n '/target_compile_definitions(od_shared_silabs PUBLIC/,/)$/p;
+                    /target_compile_definitions(od_shared_dispatch_fixture_silabs PUBLIC/,/)$/p' \
+            tests/host/CMakeLists.txt)
+    if [ "$(printf '%s\n' "$block" | grep -c '\${OD_PROFILE_SILABS}')" -ne 2 ]; then
+        echo "both host silabs archives must take their profile from shared/profiles.cmake"
+        return 1
+    fi
+
+    # grep's status is the proof: 0 restated, 1 clean, >1 unreadable and therefore unproven.
+    for name in $names; do
+        hits=$(grep -nE "\b${name}=" "$bg22")
+        rc=$?
+        if [ "$rc" -eq 0 ]; then
+            echo "$hits"
+            echo "$bg22 restates $name, which shared/profiles.cmake owns"
+            return 1
+        fi
+        if [ "$rc" -gt 1 ]; then
+            echo "could not scan $bg22 (status $rc); single-definer is unproven"
+            return 1
+        fi
+        hits=$(printf '%s\n' "$block" | grep -nE "\b${name}=")
+        rc=$?
+        if [ "$rc" -eq 0 ]; then
+            echo "$hits"
+            echo "a host silabs archive restates $name, which shared/profiles.cmake owns"
+            return 1
+        fi
+        if [ "$rc" -gt 1 ]; then
+            echo "could not scan the host silabs archives (status $rc); single-definer is unproven"
+            return 1
+        fi
+    done
+}
+check "silabs: one profile definer" silabs_profile_single_definer
+
 log_hal_structure() {
     local rc=0 hits count
 
@@ -668,8 +729,10 @@ log_hal_structure() {
         rc=1
     fi
 
-    if ! grep -q '"OD_CAP_LOG=0"' targets/efr32bg22-slc/cmake_gcc/opendisplay-bg22.cmake; then
-        echo "BG22 must state logging capability-off explicitly"
+    # BG22 states this through shared/profiles.cmake; "silabs: one profile definer" proves the
+    # target consumes that list and restates none of it.
+    if ! grep -qE '^[[:space:]]*OD_CAP_LOG=0$' shared/profiles.cmake; then
+        echo "the BG22 profile must state logging capability-off explicitly"
         rc=1
     fi
     hits=$(grep -rInE '^([A-Za-z_][A-Za-z0-9_]*[[:space:]]+)+od_hal_log_[A-Za-z0-9_]+[[:space:]]*\(' \

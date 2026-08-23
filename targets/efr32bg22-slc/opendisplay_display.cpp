@@ -42,9 +42,10 @@ struct XferAppHardwareState {
 
 static XferAppHardwareState s_xfer_app;
 
-#ifndef OD_FALLBACK_DISPLAY_PWR_PIN
-#define OD_FALLBACK_DISPLAY_PWR_PIN 0x00u
-#endif
+/* The rail has to be up before the controller is addressed. Without it a full frame is clocked
+ * into an unpowered part, every write reports success, and the only symptom is the busy-wait
+ * timeout. Charged once per switch-on, so an always-on rail never pays it. */
+#define OD_PANEL_RAIL_SETTLE_MS 800u
 
 static const struct DisplayConfig *display_cfg(void)
 {
@@ -99,10 +100,11 @@ void opendisplay_display_park_pins(void)
   display_park_signal_pin(d->busy_pin);
 }
 
+static bool s_rail_on;
+
 static void display_power_set(bool on)
 {
   const struct GlobalConfig *cfg = opendisplay_get_global_config();
-  uint8_t p;
   GPIO_Port_TypeDef port;
   uint8_t pin;
   if (cfg == nullptr) {
@@ -112,14 +114,19 @@ static void display_power_set(bool on)
   if (!on) {
     opendisplay_display_park_pins();
   }
-  p = cfg->system_config.pwr_pin;
-  if (p == GPIO_PIN_UNUSED) {
-    p = OD_FALLBACK_DISPLAY_PWR_PIN;
+  /* 0xFF is the contract's documented "no rail to switch". Substituting a pin drives whatever
+   * that pad is wired to on a board that never asked for a rail. */
+  if (cfg->system_config.pwr_pin == GPIO_PIN_UNUSED) {
+    return;
   }
-  if (!decode_pin(p, &port, &pin)) {
+  if (!decode_pin(cfg->system_config.pwr_pin, &port, &pin)) {
     return;
   }
   GPIO_PinModeSet(port, pin, gpioModePushPull, on ? 1u : 0u);
+  if (on && !s_rail_on) {
+    sl_sleeptimer_delay_millisecond(OD_PANEL_RAIL_SETTLE_MS);
+  }
+  s_rail_on = on;
 }
 
 void opendisplay_display_power_off(void)

@@ -16,6 +16,9 @@
 
 #define LED_DELAY_FACTOR_MS    100u
 #define LED_PWM_DELAY_US       100u
+/* Floor on every step that would otherwise re-enter the phase loop with no wait. This is a
+ * superloop with no watchdog, so a pattern whose delays are all zero must still yield. */
+#define LED_MIN_STEP_DELAY_MS  1u
 
 typedef enum {
   LED_PHASE_IDLE = 0,
@@ -49,6 +52,7 @@ static struct {
   uint8_t ildelay2;
   uint8_t ildelay3;
   uint8_t grouprepeats;
+  bool repeat_forever;
   uint8_t group_pos;
   uint8_t i1;
   uint8_t i2;
@@ -216,6 +220,10 @@ static void led_load_config(struct LedConfig *led)
   s_run.ildelay1 = ledcfg[3];
   s_run.ildelay2 = ledcfg[6];
   s_run.ildelay3 = ledcfg[9];
+  /* The count is stored minus one and the host caps a finite request at 254, so raw 0xFE and
+   * 0xFF both mean indefinite: py-opendisplay encodes 0xFE and decodes either. The canonical
+   * header names only 0xFF. */
+  s_run.repeat_forever = (ledcfg[10] >= 0xFEu);
   s_run.grouprepeats = (uint8_t)(ledcfg[10] + 1u);
   s_run.group_pos = 0;
   s_run.i1 = 0;
@@ -274,7 +282,7 @@ static void led_run_step(void)
 
     switch (s_run.phase) {
       case LED_PHASE_GROUP:
-        if (s_run.group_pos >= s_run.grouprepeats && s_run.grouprepeats != 255u) {
+        if (!s_run.repeat_forever && s_run.group_pos >= s_run.grouprepeats) {
           led->reserved[0] = 0x00u;
           led_run_finish();
           return;
@@ -300,9 +308,10 @@ static void led_run_step(void)
         if (s_run.loop1delay > 0u) {
           s_run.phase = LED_PHASE_LOOP1_DELAY;
           led_schedule_delay_ms((uint16_t)(s_run.loop1delay * LED_DELAY_FACTOR_MS));
-          return;
+        } else {
+          led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
         }
-        break;
+        return;
 
       case LED_PHASE_LOOP1_DELAY:
         if (!led_delay_ready()) {
@@ -333,9 +342,10 @@ static void led_run_step(void)
         if (s_run.loop2delay > 0u) {
           s_run.phase = LED_PHASE_LOOP2_DELAY;
           led_schedule_delay_ms((uint16_t)(s_run.loop2delay * LED_DELAY_FACTOR_MS));
-          return;
+        } else {
+          led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
         }
-        break;
+        return;
 
       case LED_PHASE_LOOP2_DELAY:
         if (!led_delay_ready()) {
@@ -358,18 +368,22 @@ static void led_run_step(void)
             led_schedule_delay_ms((uint16_t)(s_run.ildelay3 * LED_DELAY_FACTOR_MS));
             return;
           }
+          /* Group-closing edge: also the only yield when every loop count is zero and no
+           * flash ever runs. */
           s_run.group_pos++;
           s_run.phase = LED_PHASE_GROUP;
-          break;
+          led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
+          return;
         }
         od_flash_led(led, s_run.c3, s_run.brightness);
         s_run.i3++;
         if (s_run.loop3delay > 0u) {
           s_run.phase = LED_PHASE_LOOP3_DELAY;
           led_schedule_delay_ms((uint16_t)(s_run.loop3delay * LED_DELAY_FACTOR_MS));
-          return;
+        } else {
+          led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
         }
-        break;
+        return;
 
       case LED_PHASE_LOOP3_DELAY:
         if (!led_delay_ready()) {

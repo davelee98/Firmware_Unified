@@ -22,6 +22,53 @@ right SHA to reach for; it just isn't a gate this checklist enforces.
 
 ---
 
+## LED runner and panel rail — dedup D1/D2/D8 (2026-08-22)
+
+Software-fixed on `fix/bg22-gate2-blockers`; nothing here is hardware-qualified. The
+`group_repeats` sentinel changed on **all three targets**, so it carries rows on each. D1's yield
+floor and D8 are BG22-only and are the rows
+`plans/PLAN_DEDUP_OUTSTANDING_2026-08-22.md` § 8 names as blockers on that target's Gate 2 run.
+
+Wire encoding for these rows: `group_repeats` is sent **minus one**, so "raw `0x02`" is a request
+for three groups. `py-opendisplay` sends raw `0xFE` for indefinite and never sends a finite `0xFF`.
+
+### EFR32BG22 (`efr32bg22-slc`) — Gate 2 blockers
+
+- [ ] **D1 liveness:** send `0x0073` with every loop count and delay zero and `group_repeats` raw
+      `0xFE`, then confirm the device still answers a subsequent command (e.g. FIRMWARE_VERSION)
+      and advertising continues. Before the fix this wedged the superloop permanently.
+- [ ] **D1 sentinel, raw `0xFE`:** an endless pattern runs until `LED_STOP`.
+- [ ] **D1 sentinel, raw `0xFF`:** same — it must NOT stop immediately, which is what shipped.
+- [ ] **D1 finite count:** raw `0x02` flashes exactly three groups, stops on its own, and a later
+      `LED_STOP` reports "already idle" rather than stopping a live pattern.
+- [ ] **D8 rail with `pwr_pin` configured:** an image upload renders after a cold panel bring-up;
+      the 800 ms settle is charged once per switch-on, not per refresh.
+- [ ] **D8 rail with `pwr_pin == 0xFF`:** the device must not drive PA0. Confirm on a board whose
+      config leaves the rail unset.
+      **Read this before the first flash:** the removed fallback drove PA0 whenever `pwr_pin` was
+      unset, so a bench board that relied on it now sees no rail and the panel stays dark. That is
+      the fix working, not a regression — put the real pin in the config.
+- [ ] **D2 (build evidence, not on-air):** the flashed image is built from the same
+      `shared/profiles.cmake` list the host suite compiles. Record the profile hash or the
+      `opendisplay-bg22.cmake` SHA alongside the run.
+
+### ESP32 (`s3-n16r8-extuart-debug`) — sentinel only
+
+The yield floor and the rail fix are not ESP32 changes; only `repeat_forever` is.
+
+- [ ] **Raw `0xFE`:** endless until `LED_STOP`.
+- [ ] **Raw `0xFF`:** endless — before the change this stopped immediately, so this is the row
+      that proves the fix rather than the absence of a regression.
+- [ ] **Finite count:** raw `0x02` flashes exactly three groups and stops on its own.
+
+### Nordic (`xiao_nrf52840`) — sentinel only
+
+- [ ] **Raw `0xFE`:** endless until `LED_STOP`.
+- [ ] **Raw `0xFF`:** endless — the row that proves the fix.
+- [ ] **Finite count:** raw `0x02` flashes exactly three groups and stops on its own.
+
+---
+
 ## Shared time HAL Phase 1
 
 - [ ] ESP32: exercise the D-FF clock path and verify the retained 50 us setup/hold timing.
