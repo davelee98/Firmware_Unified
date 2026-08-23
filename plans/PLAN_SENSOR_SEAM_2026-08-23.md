@@ -1,0 +1,469 @@
+# Sensor and touch seam set — design
+
+**Status:** proposed, revised 2026-08-23. Step 4 of
+[PLAN_DEDUP_OUTSTANDING_2026-08-22.md](PLAN_DEDUP_OUTSTANDING_2026-08-22.md) § 8 — the written
+design that row requires before code. No implementation is in this document.
+
+**What it unblocks:** SHT40 + BQ27220 (~950 lines) and GT911 touch (~1,450 lines) in that plan's
+§ 4. Roughly 2,400 lines, the largest remaining block.
+
+---
+
+## 1. The boundary in the live code
+
+### The logical bus is already shared
+
+`SensorData.bus_id` and `TouchController.bus_id` reference the canonical `DataBus` table.
+`DataBus` supplies the bus type, SCL/SDA pins, speed and pull configuration. Both active targets
+already resolve that same logical ID:
+
+- ESP32: `initOrRestoreWireForBus(bus_id)` validates `globalConfig.data_buses[bus_id]`, switches
+  the one live IDF bus when its pins change, and initializes it on demand.
+- Nordic: `od_sensor_bus_for(bus_id, &bus)` validates the same entry and constructs a caller-owned
+  bit-banged `struct od_i2c_bus`.
+
+The low-level APIs do not currently take a bus ID, but the layer immediately above them does.
+That is the natural shared-HAL boundary.
+
+### There are three engines, not three contracts
+
+| Implementation | Engine shape |
+|---|---|
+| ESP32 `hal/od_hal_i2c` | One implicit live bus, IDF `i2c_master`, switched between configured pin sets on demand |
+| Nordic `opendisplay_i2c` | Caller-owned bit-banged bus with explicit STOP selection |
+| Nordic `opendisplay_touch.c` | A second private bit-banger duplicating the first |
+| BG22 `opendisplay_ble.c` | A fourth bit-banger for the TNB132M NFC tag. Its operations are ordinary writes and one repeated-START read — see T6 |
+
+The Nordic touch copy is target-local duplication and must fold into `opendisplay_i2c.c` before
+touch promotion. **The BG22 NFC one is in scope** — its transactions fit the four operations
+exactly (T6), and leaving it out would make the "no second I2C engine" ratchet a false statement
+about the tree. After both cleanups there are **three** engines, one per target, which is exactly
+what a HAL is for.
+
+### Four operations express every transaction in scope
+
+| Consumer | Required framing |
+|---|---|
+| SHT40 | write command with STOP; yielding 12 ms wait; bare read |
+| BQ27220 | selector write followed by repeated START and read |
+| GT911 | both repeated-START read and STOP-then-START read; deployed clones differ |
+| nPM1300 | ordinary writes and repeated-START reads |
+| AXP2101 | probe, ordinary writes and reads |
+
+ESP32's existing `write`, `read`, `write_read` and `probe` operations already express all
+four. Nordic can implement the same operations over its bit-banger. A generic STOP flag is not
+needed: `write_read` means no STOP between phases, while `write` followed by `read` means
+STOP-then-START.
+
+### I2C is necessary, not sufficient
+
+| Driver | Additional seam |
+|---|---|
+| SHT40 | A yielding 12 ms delay |
+| BQ27220 | Charger enable/state GPIO and MSD dynamic-byte output |
+| GT911 | Reset/enable GPIO, interrupt attach/detach and long reset delays |
+
+Those requirements do not argue against an I2C HAL. They stay narrow APP or GPIO seams alongside
+it.
+
+### The authority proves portable operations
+
+`../Firmware` serves ESP32 and nRF52840 with the same SHT40, BQ27220 and GT911 driver sources over
+Arduino `Wire`. The chip split is in bus setup, not device transactions. That proves the driver
+logic is portable, but it does **not** justify rebuilding Arduino: this plan takes only the four
+operations the live drivers require, with bounded buffers and explicit framing.
+
+The earlier suggested trigger — a fourth I2C driver — has already fired: SHT40, BQ27220, GT911 and
+nPM1300 exist now, with AXP2101 as a fifth target-private consumer. The HAL should be created in
+this promotion rather than after another chip-specific APP surface is added.
+
+## 2. Decisions
+
+### T1 — Create a minimal shared I2C transaction HAL now
+
+`shared/hal/od_hal_i2c.h` owns this surface:
+
+```c
+int od_hal_i2c_probe(uint8_t bus_id, uint8_t addr7);
+
+int od_hal_i2c_write(uint8_t bus_id, uint8_t addr7,
+                     const uint8_t *data, uint16_t len);
+
+int od_hal_i2c_read(uint8_t bus_id, uint8_t addr7,
+                    uint8_t *data, uint16_t len);
+
+int od_hal_i2c_write_read(uint8_t bus_id, uint8_t addr7,
+                          const uint8_t *tx, uint16_t tx_len,
+                          uint8_t *rx, uint16_t rx_len);
+```
+
+Semantics:
+
+- `write` completes with STOP.
+- `read` is a complete START/read/STOP operation.
+- `write_read` is one atomic transaction with a repeated START and no intervening STOP.
+- Every call resolves and selects `bus_id` before touching hardware. A completed call retains no
+  bus ownership.
+- **The key is `DataBus.instance_number`, not an array index.** The canonical header settles it:
+  `instance_number` is *"0-based bus-block index; referenced by SensorData.bus_id,
+  TouchController.bus_id, etc."* (`opendisplay_structs.h:802`). BG22's NFC resolves it correctly
+  by scanning for a match (`opendisplay_ble.c:1101-1103`); ESP32 and Nordic sensors index the
+  array directly (`opendisplay_sensor_common.h:28`), which agrees only while records arrive in
+  order with no gaps. **Out-of-order or sparse `DataBus` records bind those sensors to the wrong
+  bus** — recorded in `DIVERGENCE_MATRIX` § 14, and the HAL's resolution is the scan.
+- **The scan is one shared helper, and it defines malformed-config behaviour.** "Scan for a match"
+  is underspecified: `od_config.c` appends repeatable packets without rejecting a duplicate
+  `instance_number`, so a bare scan silently means *first match wins by packet order*. Put the
+  policy in a pure `od_config` lookup rather than letting three HALs each invent one:
+
+  ```c
+  /* Resolve a DataBus by its instance_number. NULL on no match or on ambiguity. */
+  const struct DataBus *od_config_data_bus(const struct od_config *cfg, uint8_t instance);
+  ```
+
+  | Case | Result |
+  |---|---|
+  | Exactly one record matches | return it |
+  | No record matches | **refuse before touching hardware** |
+  | More than one matches | **refuse as ambiguous** — never pick by packet order |
+
+  Refusing a duplicate is a choice, not an obvious default: it turns a malformed config into no
+  device rather than an arbitrary one. Host-tested with sparse, out-of-order and duplicated
+  records.
+- **The bus argument is taken literally; `0xFF` is not a HAL rule.** Normalisation — or refusal —
+  belongs to the consumer. A transport that invents a default for its caller's sentinel cannot
+  know which rule applies, and that is how the substitution defect in `DIVERGENCE_MATRIX` § 13
+  arose.
+- **`0xFF` means UNCONFIGURED. Project ruling, 2026-08-23, reaffirmed.** It is the contract's
+  pervasive absent sentinel (`opendisplay_structs.h:295-298`) and it now means the same thing for
+  every `bus_id`-shaped field. Shared sensor and touch policy **refuses** it; the device is not
+  probed. `NfcConfig.bus_instance` was already literal and is unchanged.
+
+  **This is a deliberate protocol change and it has two external consequences**, tracked rather
+  than argued:
+
+  | Consequence | Where |
+  |---|---|
+  | `opendisplay_structs.h:945` documents `TouchController.bus_id == 0xFF` as "bus 0". It contradicts the ruling and the header is frozen | `FOLLOWUPS` § 14 |
+  | `py-opendisplay` defaults an **omitted** touch `bus_id` to `0xff` (`config_json.py:643`) and its model comments it as "default bus 0" (`config.py:886`). Under this ruling the host must default to `0` instead, or touch stops being configured for any block that omits the field | `FOLLOWUPS` § 15 — **must land before or with the firmware change** |
+
+  Four firmware sites currently substitute bus 0 and are corrected to refuse
+  (`DIVERGENCE_MATRIX` § 13); Nordic touch (`opendisplay_touch.c:299`) already behaves this way.
+- Return values distinguish success, invalid bus/argument, address NACK and other transport
+  failure. Exact constants are fixed in the header and host-tested.
+
+There is no shared `init`, `deinit`, `set_clock` or STOP flag. Setup, caching, locking,
+reconfiguration and invalidation are implementation details below each target's four operations.
+
+### T2 — Bus setup and engine state stay target-owned
+
+ESP32 folds `initOrRestoreWireForBus()` into the start of each HAL operation. It may keep one IDF
+bus live and switch it when the requested configured pins differ. Its panel-refresh invalidation
+remains target-private; the next operation restores the requested bus.
+
+Nordic resolves the configured `DataBus` and initializes a local bit-banged bus inside each
+operation. Its `write_read` adapter performs `od_i2c_write(..., stop=false)` and
+`od_i2c_read()` with the same bus object.
+
+BG22 implements the I2C header for its NFC transport (T6) and takes **neither** `APP_SENSOR` nor
+the touch sources — it has no sensor and no touch consumer, and grows no dummy functions or
+dormant symbols for them.
+
+Target-private nPM1300 and AXP2101 may call the canonical HAL without being promoted. Sharing an
+engine does not imply sharing every device driver.
+
+### T3 — Keep yielding delay narrow; do not create a sleep HAL
+
+SHT40 needs a yielding wait between two completed I2C operations. The shared sensor driver uses:
+
+```c
+/* od_sensor_app.h */
+void od_sensor_app_delay_ms(uint16_t delay_ms);
+```
+
+Nordic implements it with `k_msleep`; ESP32 uses its existing target-private millisecond delay.
+This function belongs to `APP_SENSOR`, so BG22 does not implement it when it takes no sensor
+driver.
+
+This is not a general time or scheduler HAL. D8 already uses the BG22 sleeptimer directly and the
+LED machine returns deadlines. No other consumer is waiting on a portable sleep contract.
+
+### T4 — Shared sensor drivers own device policy, not only conversion
+
+The shared SHT40 driver owns:
+
+- config walk (**all** matching sensor entries — SHT40 is multi-instance today,
+  `sensor_sht40.cpp:226,240`), and refusal of an unconfigured `bus_id`;
+- default/candidate addresses and probing;
+- soft reset at initialization;
+- command byte, measurement sequence and retry policy;
+- CRC-8, conversion, clamping, poll TTL and MSD packing.
+
+The shared BQ27220 driver owns:
+
+- config walk (**first match only** — `sensor_bq27220.cpp:64-70` returns the first BQ entry and
+  the promotion must not silently make it multi-instance; this is why the BQ seams below need
+  no instance argument while `od_sensor_app_msd_write()` takes an index), default address and
+  initial probe;
+- register selectors and widths;
+- poll TTL and the “have polled” latch;
+- cached voltage and failed/implausible-read behavior;
+- SOC clamp and MSD packing.
+
+There is no opaque `od_sensor_target_t`. It would put address discovery and retry policy into an
+object populated by the target while claiming shared code owns both. Shared code instead reads the
+shared `od_config` and passes explicit `bus_id` and address values to the HAL.
+
+The remaining target functions are:
+
+```c
+/* od_sensor_app.h */
+void od_sensor_app_delay_ms(uint16_t delay_ms);
+bool od_sensor_app_bq_enable(bool on);
+bool od_sensor_app_bq_charging(bool *charging);
+void od_sensor_app_msd_write(uint8_t index, uint8_t value);
+```
+
+`od_sensor_app_bq_enable()` preserves the existing GPIO ordering: configure the output and then
+establish the active level. These are GPIO operations, not BQ register writes. An absent enable
+pin is a successful no-op. `od_sensor_app_bq_charging()` returns false when no state pin exists,
+so “unknown” remains distinct from “not charging”.
+
+The shared public surface preserves the callers both targets have today while making config
+ownership explicit:
+
+```c
+void od_sensor_sht40_init(const struct od_config *cfg);
+void od_sensor_sht40_poll(const struct od_config *cfg);
+
+void od_sensor_bq27220_init(const struct od_config *cfg);
+void od_sensor_bq27220_poll(const struct od_config *cfg);
+bool od_sensor_bq27220_is_configured(const struct od_config *cfg);
+float od_sensor_bq27220_voltage_volts(void);
+```
+
+The functions do not retain `cfg` after return. Both current ports keep their TTL/cache statics
+across an init call, so the shared version preserves that behavior rather than silently making
+config reload a state reset. A separate reset policy can change it later with an explicit test.
+
+### T5 — Touch uses the same HAL later
+
+GT911 promotion happens after the sensor promotions and after the Nordic private bit-banger is
+gone. Its shared driver calls the same I2C HAL directly and takes the donor/ESP32 two-framing
+fallback because real clones require different forms. Nordic currently tries repeated START only;
+adding the STOP-separated fallback belongs to the shared-driver promotion, not the mechanical
+bit-banger cleanup.
+
+GPIO reset and IRQ handling remain behind a touch/GPIO seam. ESP32's
+`od_hal_gpio_{config_irq,config_irq_arg,clear_irq,irq_enable,irq_disable,irq_lock,irq_unlock}`
+surface is the starting point for Nordic. The `_arg` variant is required by both multi-button
+events and multiple touch instances.
+
+Q7 remains an entry condition: Nordic clears GT911 status register `0x814E` after consuming a
+sample while ESP32 does not. Decide and record the authority before touch cutover.
+
+`TouchController.bus_id == 0xFF` means **not configured**, so Nordic touch's refusal
+(`opendisplay_touch.c:299`, "an explicit data_bus is required") is the behaviour to keep and
+propagate. The divergence to record is the other way round: **four sites substitute bus 0** —
+`display_service.cpp:726`, `sensor_sht40.cpp:52`, `sensor_bq27220.cpp:43` and
+`opendisplay_sensor_common.h:22`. All four then validate the substituted bus, so the failure is
+narrower than D8's: it misfires only when a valid `data_buses[0]` exists and a sensor was never
+assigned a bus — that sensor is then probed on someone else's bus, where an address collision
+yields plausible-but-wrong readings rather than an error.
+
+### T6 — BG22 implements the HAL for its NFC transport, and takes nothing else
+
+BG22 has no sensors and no touch, so it takes neither `APP_SENSOR` nor the touch sources. It does
+implement `od_hal_i2c`, because it already has an I2C engine and its transactions are the same
+four operations:
+
+| TNB132M operation | HAL call |
+|---|---|
+| Block read (`opendisplay_ble.c:606-632`) — START, addr\|W, sub, **repeated START**, addr\|R, 16 bytes, NACK on the last | `write_read(bus, dev7, &sub, 1, out, 16)` |
+| Block write — sub byte followed by 16 data bytes | `write(bus, dev7, buf, 17)` |
+| Prime commands | ordinary `write`, or `write_read` |
+| Presence | `probe` — unnecessary here, harmless |
+
+**No NFC-specific operation belongs in the shared HAL.** Everything above the transaction stays
+target-owned adapter policy, and there is a lot of it: NFC powers the controller, enters a
+critical section, runs several transactions, powers down, then parks SCL and SDA. That session is
+the adapter's, not the HAL's.
+
+**The failure contract is a decision, not an extraction.** BG22's engine reads SDA only — for ACK
+(`opendisplay_ble.c:566`) and for data (`:581`) — and **never checks that SCL was released**, so it
+cannot detect clock stretching or a stuck bus, and a held-low SDA reads as ACK and as data `0`.
+Nordic's engine does check (`opendisplay_i2c.c:35-41`, `OD_I2C_STRETCH_TIMEOUT_US`) but returns a
+bool, so its caller cannot tell a stretch timeout from an address NACK.
+
+So the portable status surface is **`OK`, `EINVAL`, `ENODEV` (address NACK) and an aggregate
+`EIO`** — no distinct stuck-bus code, because two of three engines cannot produce one honestly.
+And this cutover takes the first of two options, explicitly:
+
+1. **Extract nearly verbatim and claim no stuck-bus detection** — chosen. The GPIO trace pins what
+   the engine actually does. Neither the host contract nor the hardware gate may assert stuck-bus
+   behaviour on BG22.
+2. Authorise bounded idle/SCL-release checks as a **deliberate behavioural addition**, with the
+   trace proving their timing. Not taken here: it is new behaviour on a transport no board in this
+   fleet can exercise.
+
+**Keep the bit-banging and its electrical timing.** Do not substitute the Silabs I2C peripheral
+driver during this cutover — the existing `sl_udelay_wait()`-paced edges are what the deployed
+TNB132M sequence was tuned against, and no board here can prove a replacement works (§ 5).
+
+**Block writes need a 17-byte workspace** (sub + 16). Use a bounded local; if a stack measurement
+rejects it on a 32 KB part, add a justified scatter-write operation rather than a heap allocation.
+
+This makes the repo-wide "no second I2C engine" ratchet **truthful**, which it would not be with
+BG22 excluded.
+
+### T7 — Not promoted
+
+Battery acquisition (three different ADCs), nPM1300, AXP2101 and the ADC ladder remain
+target-private. nPM1300 and AXP2101 may consume the shared I2C HAL without moving their policy.
+
+## 3. Staging
+
+Each numbered cutover is independently revertable and receives its own software gate before the
+next subsystem promotion. **Steps that touch silicon this fleet has also receive a hardware gate;
+step 9 does not, and says so** — no board here carries a TNB132M, so that cutover ships as a
+software candidate with its rows open.
+
+1. **Record the bus-default divergence, in the correct direction:** `0xFF` means *not
+   configured*. Nordic touch already refuses it; four sites substitute bus 0 (T5). Record in
+   `DIVERGENCE_MATRIX`, report the canonical header line via `FOLLOWUPS` § 14, and decide whether
+   the four substitutions are corrected in this promotion or before it — a sensor with no bus
+   assigned should not be probed on somebody else's.
+2. **Nordic-local cleanup:** fold `opendisplay_touch.c`'s private bit-banger into
+   `opendisplay_i2c.c`. Preserve its current repeated-START behavior exactly; do not add the
+   donor's STOP-separated fallback in this mechanical step. Hardware-check touch before proceeding.
+   **This step changes bit timing and that is the risk, not the framing.** The private bit-banger
+   runs at a fixed `I2C_HALF_BIT_US 5` (`opendisplay_touch.c:44`); `opendisplay_i2c.c` derives
+   `half_period_us` from `DataBus.bus_speed_hz` (`:167`). Fold it at the half-period the touch code
+   uses today and change the rate only as a separate, measured step — a timing difference may be
+   why the fork exists at all.
+3. **Add `shared/hal/od_hal_i2c.h` and its scripted host contract test.** A header has no source
+   tier; the target implementations remain in their target builds. No shared device driver yet.
+4. **ESP32 HAL cutover:** add `bus_id` to the four operations, move bus selection beneath them,
+   and repoint the existing SHT40, BQ27220, GT911 and AXP2101 callers. Hardware gate.
+5. **Nordic HAL cutover:** implement the same four operations over `opendisplay_i2c.c`, then
+   repoint SHT40, BQ27220, GT911 and nPM1300. Hardware gate.
+6. **SHT40 promotion:** add `shared/core/od_sensor_sht40.{c,h}` and the `APP_SENSOR` tier,
+   whose linkage contract requires both `od_hal_i2c` and the delay/MSD APP seams. Delete both
+   target policy copies after their last callers move. Hardware gate.
+7. **BQ27220 promotion:** add `shared/core/od_sensor_bq27220.{c,h}` and the charger GPIO seams.
+   Delete both target policy copies. Hardware gate.
+8. **Touch promotion:** only after Q7 is decided and the IRQ seam exists. Hardware gate.
+9. **BG22 NFC transport cutover — a software candidate, explicitly NOT hardware-qualified.**
+   Separate from every sensor step, because BG22 takes no sensor code and because no board in this
+   fleet carries a TNB132M.
+   a. Extract the existing bit-banger **nearly verbatim** into
+      `targets/efr32bg22-slc/hal/od_hal_i2c.c`. Preserve the `sl_udelay_wait()` edge pacing; do
+      not substitute the Silabs peripheral driver.
+   b. Bind that production file against fake GPIO and delay functions and pin the **trace**:
+      START, STOP, repeated START, per-byte ACK/NACK, NACK on the final read byte, and the
+      address-failure path. Current BG22 NFC host tests fake `od_nfc_app_read`/`write`, which sits
+      **above** the transport — they cannot qualify this and must not be cited as if they do.
+   c. Repoint the TNB132M helpers to `write` / `write_read`. Power sequencing, the critical
+      section, prime commands and SCL/SDA parking stay in the NFC adapter.
+   d. Use a bounded 17-byte workspace for block writes, or add a justified scatter-write operation
+      if a stack measurement on a 32 KB part rejects the copy.
+   e. Confirm BG22 flash, `data + bss` and `heap_size` against the pre-change image; run
+      `tools/check.sh --targets`.
+   f. **Every BG22 NFC hardware row stays open.** This is a software candidate under the standing
+      missing-hardware constraint, exactly as Transfer Phase 4 was — merged code is not evidence.
+10. **Ratchet:** **no second I2C engine on any target** — one named HAL implementation each, and
+    the statement is now truthful because BG22's NFC transport is inside it (T6). No second
+    SHT40/BQ CRC, conversion, polling or register-policy copy. BG22 links no **sensor** or touch
+    symbol.
+
+## 4. Host and production-source tests
+
+The HAL test uses a scripted fake medium and binds the production adapters where practical. It
+must pin:
+
+- the requested bus reaches every operation **by `DataBus.instance_number`**, proven with
+  out-of-order and sparse records where index and instance disagree;
+- the HAL takes its bus argument literally — `0xFF` is not special-cased there; the refusal is
+  asserted in the shared sensor/touch policy instead;
+- `write` ends with STOP and `write_read` does not;
+- STOP-separated `write` + `read` remains distinguishable from `write_read`;
+- address NACK, invalid bus and stuck-bus failures remain distinct;
+- Nordic `write_read` reuses one initialized bus object for both phases;
+- ESP32 switches configured buses and reuses an already-selected bus;
+- no operation retains ownership after return.
+
+The shared SHT40 suite pins reset/fallback addresses, write–delay–read ordering, both CRC bytes,
+conversion/clamping, TTL and failure output. The BQ suite pins two-byte voltage, one-byte SOC,
+enable ordering, TTL/cache behavior, charging-state tri-state and MSD packing. Mutation checks
+must prove the framing, widths, CRC and cache-order assertions are live.
+
+GT911's later suite must exercise both register byte orders and both I2C read framings even if the
+available board carries only one clone.
+
+**BG22's transport suite is a GPIO trace, and it is mandatory** (staging step 9b). The production
+`od_hal_i2c.c` is bound to fake GPIO and delay functions and the emitted edge sequence is pinned:
+START, STOP, repeated START, per-byte ACK/NACK, NACK on the final read byte, address failure. The
+existing BG22 NFC tests fake `od_nfc_app_read`/`write` — above the transport — so they say nothing
+about it.
+
+## 5. Hardware gate
+
+- [ ] **ESP32 HAL:** SHT40, BQ27220, GT911 and AXP2101 behavior unchanged after their callers gain
+      explicit bus IDs.
+- [ ] **ESP32 bus switching:** two configured bus entries can be selected in sequence and returning
+      to the first restores its pins and speed.
+- [ ] **Nordic HAL:** SHT40, BQ27220, GT911 and nPM1300 behavior unchanged after the adapter cutover.
+- [ ] **Nordic touch cleanup:** touch still reports contacts after its private bit-banger is removed.
+- [ ] **Repeated START:** BQ27220/nPM1300 reads return plausible values; a production-source fake
+      proves an inserted STOP fails the contract.
+- [ ] **SHT40, each target:** temperature and humidity match a reference instrument and the
+      pre-change image; a production-source fault test rejects either CRC-byte mutation.
+- [ ] **BQ27220, each target:** voltage and SOC match the pre-change image, charging tracks a
+      plugged/unplugged transition, and MSD bytes are unchanged.
+- [ ] **Failure path:** disconnecting a sensor or holding SDA low reports failure rather than a
+      plausible value. If unsafe on the bench, the production-source fault test is the gate.
+- [ ] **Unconfigured bus:** a sensor or touch entry with `bus_id == 0xFF` is not probed, on either
+      target — it must not be attached to bus 0. Nordic touch already behaves this way; the four
+      substituting sites are what this row is checking.
+- [ ] **A configured bus still resolves:** the same entry with an explicit `bus_id` works, so the
+      refusal above did not simply disable the device.
+- [ ] **Touch promotion:** multi-touch points, the Q7 status-clear decision and the 100 ms process
+      interval are unchanged.
+- [ ] **BG22:** image links no **sensor** or touch symbol, and `data + bss` plus `heap_size` are
+      unchanged against the pre-change image.
+- [ ] **BG22 NFC transport — OPEN, AND EXPECTED TO STAY OPEN.** No board in this fleet carries a
+      TNB132M, so on-air qualification of the repointed transport is not available here. The GPIO
+      trace test is the software gate; it does not qualify silicon. Same standing constraint as
+      Transfer Phase 4's `0x0083` rows.
+
+## 6. Open questions
+
+1. **Q7 — GT911 status authority.** Decide whether shared touch clears `0x814E` after consuming a
+   report. Required before touch promotion.
+2. **Bus serialization.** Confirm which ESP32 tasks can submit I2C concurrently and put the lock
+   below the HAL if more than one can. The contract already requires each operation to be atomic;
+   this question chooses the implementation, not the API.
+3. **Hardware inventory.** Identify which available boards carry SHT40, BQ27220, GT911, nPM1300
+   and AXP2101 before scheduling the per-target gates. Missing hardware leaves its row open; a host
+   fault test does not qualify silicon. **BG22's TNB132M is already known absent** — that row is
+   open on arrival, not pending an inventory.
+4. ~~**Which key does the HAL take?**~~ **Answered by the contract**: `DataBus.instance_number`
+   (`opendisplay_structs.h:802`). BG22's NFC scan is right and the sensors' array indexing is the
+   defect (`DIVERGENCE_MATRIX` § 14). Open only in *when* the four sensor sites are corrected —
+   with the HAL cutover, or before it.
+
+---
+
+## 7. Reading this design against the survey
+
+| Survey proposal | Decision here |
+|---|---|
+| One shared I2C seam | **Accepted.** The canonical config already supplies a logical bus ID |
+| `bus_id`-keyed | **Accepted at the operation boundary.** Each target resolves it differently; `0xFF` is refused, not defaulted |
+| Expose a STOP flag | **Rejected.** `write_read` versus `write` + `read` expresses the two legal shapes more precisely |
+| I2C alone unblocks sensors/touch | **Rejected.** Delay, GPIO, MSD and IRQ remain narrow adjacent seams |
+| Recreate `Wire` | **Rejected.** Only four bounded transaction operations are shared |
+| — | **BG22 is in.** It implements the HAL for its existing NFC transport and takes no sensor code, which is what makes the "no second engine" ratchet true |
+
+The result is a real HAL boundary without an Arduino compatibility layer: shared device policy,
+target-owned engines, explicit framing and no chip-specific transaction RPC for every new driver.

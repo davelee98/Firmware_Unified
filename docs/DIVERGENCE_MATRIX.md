@@ -551,3 +551,58 @@ sends; changing either firmware without checking that is how a working deploymen
 resolution belongs with a host-side check and, if the answer is "unspecified means all", a
 sentence in the canonical header — which is frozen. Until then, a config that means to use every
 pin should set the mask explicitly rather than rely on zero.
+
+---
+
+## 13. `bus_id == 0xFF` — four sites substitute bus 0 for "not configured" (recorded 2026-08-23)
+
+Project ruling 2026-08-23, reaffirmed: **`0xFF` means unconfigured**, for every `bus_id`-shaped
+field. It is the contract's pervasive absent sentinel (`opendisplay_structs.h:295-298`).
+
+This is a deliberate protocol change with a host dependency, not just a firmware correction. The
+canonical header still documents `TouchController.bus_id == 0xFF` as "bus 0" (`:945`) and is
+frozen — `FOLLOWUPS` § 14. More urgently, `py-opendisplay` **defaults an omitted touch `bus_id` to
+`0xff`** (`config_json.py:643`), so the host change in `FOLLOWUPS` § 15 must land before or with
+the firmware refusal, or touch silently stops being configured for any block relying on that
+default.
+
+| Site | Behaviour |
+|---|---|
+| `esp32-idf/src/display_service.cpp:726` | substitutes bus 0, then validates |
+| `esp32-idf/src/sensor_sht40.cpp:52` | substitutes bus 0 |
+| `esp32-idf/src/sensor_bq27220.cpp:43` | substitutes bus 0 |
+| `nordic-zephyr/src/opendisplay_sensor_common.h:22` | substitutes bus 0, then validates |
+| `nordic-zephyr/src/opendisplay_touch.c:299` | **refuses** — the correct behaviour |
+
+Because all four validate afterwards, the misbehaviour requires a valid `data_buses[0]` *and* a
+device that was never assigned a bus: that device is then probed on an unrelated bus, where an
+address collision yields plausible-but-wrong readings rather than a clean failure.
+
+Same defect class as § 11.2 (`pwr_pin == 0xFF` driving pad `0x00` on BG22), fixed 2026-08-22 by
+refusing. Correcting these four is scheduled with the I2C HAL cutover —
+`plans/PLAN_SENSOR_SEAM_2026-08-23.md` staging step 1 — or earlier if a sensor is ever seen
+reporting from a bus it was not assigned to.
+
+---
+
+## 14. `DataBus` reference: instance_number vs array index (recorded 2026-08-23)
+
+The canonical header defines the key: `DataBus.instance_number` is *"0-based bus-block index;
+referenced by SensorData.bus_id, TouchController.bus_id, etc."* (`opendisplay_structs.h:802`). So
+a consumer's `bus_id` names an **instance_number**, not a position in `data_buses[]`.
+
+| Site | Resolution |
+|---|---|
+| `efr32bg22-slc/opendisplay_ble.c:1101-1103` (NFC) | **scans for a matching `instance_number`** — correct |
+| `esp32-idf/src/display_service.cpp:729` | indexes `data_buses[bus_id]` |
+| `nordic-zephyr/src/opendisplay_sensor_common.h:28` | indexes `data_buses[bus_id]` |
+
+Index and instance agree only when records arrive in ascending order with no gaps, which is the
+common case and why this has never been seen. A host that sends `instance_number` 1 before 0, or
+that omits an instance, binds every indexing consumer to the **wrong bus** — a sensor then talks
+on another device's pins, and an address collision yields plausible-but-wrong readings rather than
+a failure.
+
+Not yet fixed. Scheduled with the I2C HAL cutover, whose resolution is the scan —
+`plans/PLAN_SENSOR_SEAM_2026-08-23.md` T1. Related: § 13, the `0xFF` substitution, which affects
+the same call sites.
