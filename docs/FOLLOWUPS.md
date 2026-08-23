@@ -899,3 +899,119 @@ board with buttons fitted. `od_gpio_configure_interrupt()` is in git history if 
 (`git show f4f0aa1:targets/nordic-zephyr/src/od_gpio.c`).
 
 **Planned:** `plans/PLAN_NORDIC_BUTTONS_2026-08-22.md` ports the ESP32 ISR that already does this.
+
+
+---
+
+## 13. `Firmware_Unified` — the sensor drivers diverged because Arduino left, not because the chips differ
+
+Recorded 2026-08-23 while designing the sensor seam
+(`plans/PLAN_SENSOR_SEAM_2026-08-23.md` § 1a). Not a defect; a fact that should not have to be
+rediscovered.
+
+`../Firmware` builds **both** ESP32 and nRF52840 from one tree (`-DTARGET_NRF` at
+`platformio.ini:77`, `-DTARGET_ESP32` at `:201`). Its sensor drivers contain **no chip
+conditionals** — `sensor_sht40.cpp` has zero, `sensor_bq27220.cpp` has two `#ifndef` macro
+fallbacks. One measurement function serves both parts, over Arduino `Wire` and `delay()`.
+
+The chip split in that repository is in **bus setup only**: `Wire.begin(sda, scl, hz)` on ESP32
+with a note that `pinMode()` must not precede it, versus `pinMode()` for pull-ups then a bare
+`Wire.begin()` on nRF52840 (`display_service.cpp:880`, `:968-990`).
+
+So the two SHT40 and two BQ27220 implementations in this repository are **not** evidence that the
+drivers need to differ. They diverged because Arduino removal left each port to invent its own
+bus, and each did. Anyone arguing that a difference between them is load-bearing should check it
+against the sibling first.
+
+Corollary worth keeping: **a shared I2C HAL is proven for these chips, not speculative.** `Wire`
+is one. It is not adopted here because reproducing it also requires a portable `delay()`, and
+Arduino removal is completed and ratcheted (`docs/ARCHIVE_esp32_arduino_shim.md`) — but if the
+driver count grows, that is the convergence target, and the transaction seams become its callers.
+
+
+---
+
+## 14. `opendisplay-protocol` — `TouchController.bus_id`'s "0xFF means bus 0" contradicts the sentinel
+
+Found 2026-08-23 while designing the sensor/I2C seam. **The canonical header is frozen, so this is
+reported, not fixed.**
+
+`opendisplay_structs.h:945` documents `TouchController.bus_id` as *"data_bus instance for I2C;
+0xFF means bus 0."* That is the only field in the contract giving `0xFF` a concrete value. Every
+neighbour uses it as the absent/not-configured sentinel, which `:295-298` calls "the pervasive
+'pin not present' sentinel":
+
+- `TouchController.i2c_addr_7bit` — "0 or 0xFF = auto-detect"
+- `TouchController.int_pin` — "0xFF = poll only"
+- `TouchController.rst_pin` — "0xFF = skip hardware reset"
+- `SensorData.msd_data_start_byte` — "0xFF = do not publish"
+- `SensorData.bus_id` — **no 0xFF note at all**
+
+**Project ruling, 2026-08-23, reaffirmed: `0xFF` means unconfigured.** The header line is
+therefore out of step with the contract as the project now defines it. Note this is a deliberate
+*change*, not merely a documentation fix: the host currently relies on the old meaning, which is
+why § 15 exists and must land with it.
+
+**Four firmware sites substitute bus 0 for it**, and should be corrected to refuse:
+
+| Site | |
+|---|---|
+| `targets/esp32-idf/src/display_service.cpp:726` | `initOrRestoreWireForBus()` |
+| `targets/esp32-idf/src/sensor_sht40.cpp:52` | `sht40_bus_id()` |
+| `targets/esp32-idf/src/sensor_bq27220.cpp:43` | `bq27220_bus_id()` |
+| `targets/nordic-zephyr/src/opendisplay_sensor_common.h:22` | `od_sensor_bus_for()` |
+
+`targets/nordic-zephyr/src/opendisplay_touch.c:299` refuses it and is the one correct site.
+
+**Severity is lower than the pattern suggests**, and the reason matters: all four validate the
+substituted bus afterwards, so the misbehaviour needs a valid `data_buses[0]` *and* a device with
+no bus assigned. That device is then probed on an unrelated bus, where an address collision
+produces plausible-but-wrong readings instead of a clean failure.
+
+This is the same defect class as dedup D8 — `pwr_pin == 0xFF` driving pad `0x00` on BG22 — which
+was fixed on 2026-08-22 by refusing rather than substituting. See
+`docs/DIVERGENCE_MATRIX.md` § 11.2 for that precedent.
+
+**Canonical fix when the freeze lifts:** change `:945` to match every other field — "0xFF = not
+configured". No wire bytes change; only the documented meaning of a value firmware should already
+be refusing.
+
+**A second, unrelated gap in the same area, for the same visit:** `SensorData.bus_id` and
+`TouchController.bus_id` are documented as naming a `DataBus` *instance*, and `:802` confirms the
+key is `instance_number` — but neither field says what happens when no record carries that
+instance. BG22's NFC scan simply fails (`opendisplay_ble.c:1101-1108`); the indexing consumers
+cannot express the question. Worth one clause each. See `DIVERGENCE_MATRIX` § 14.
+
+
+---
+
+## 15. `py-opendisplay` — the touch `bus_id` default must change to 0
+
+**Required by the 2026-08-23 project ruling that `0xFF` means unconfigured** (see § 14 and
+`DIVERGENCE_MATRIX` § 13). Sibling repository, so it is filed here rather than fixed.
+
+`py-opendisplay/src/opendisplay/models/config_json.py:643` supplies the default for a touch block
+that omits the field:
+
+```python
+bus_id=_parse_int(fields.get("bus_id", "0xff")),
+```
+
+and `models/config.py:886` documents the field as `# uint8 (0xFF = default bus 0)`.
+
+Under the ruling, firmware refuses `0xFF` and does not probe the controller. **So any touch
+configuration that omits `bus_id` stops working the moment firmware adopts the ruling** — the host
+emits the sentinel, the device declines it, and touch is silently absent.
+
+Two changes, both host-side:
+
+1. `config_json.py:643` — default to `"0"`, matching what the sensor block already does at `:569`.
+2. `config.py:886` — drop the "0xFF = default bus 0" comment; `0xFF` means unconfigured.
+
+**Ordering matters.** This should land before or with the firmware change, not after: the reverse
+order leaves a window where a current host and a new firmware disagree about every touch config
+that relies on the default. Configurations that name `bus_id` explicitly are unaffected in either
+order.
+
+Worth checking at the same time whether any stored/deployed configuration blob carries `0xFF` in
+that field; those need rewriting, and only the host can tell.

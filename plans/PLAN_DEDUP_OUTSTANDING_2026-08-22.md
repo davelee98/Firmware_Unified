@@ -243,47 +243,39 @@ per capable target where behaviour can differ on silicon.
 
 | Item | Validated size | Blocked on | Decisions that must be made first |
 |---|---|---|---|
-| **LED runner** | Nordic 399 + BG22 485 + **≈380 LED-related lines** of ESP32's `device_control.cpp` (`led_*` plus `processLedFlash`/`ledStopForSleep`/`flashLed`, `:278`–`:660`; the file is 905 lines total, and the survey's 1,130 figure counted all of it) | D1 + the yielding-sleep decision | `od_led_service(now_ms)` returning ms-to-next-step; `od_hal_gpio` + the yielding-sleep decision shared with D8. Land D1's fix and its regression test **first**, so the promotion inherits a proven contract rather than re-deriving it |
-| **Buzzer** | Nordic 401 + ESP32 398 + 103 | `HAL_IO` tier (LED first) | **Not mechanical.** Three divergences beyond D3's table: ESP32 octave-folds indices outside 117–234 into the playable window (`buzzer_control.cpp:67,80-83`) and Nordic does not fold at all; ESP32's total cap is `kBuzzerMaxTotalMs = 30000u` (`:20`) against Nordic's `BUZZER_MAX_TOTAL_MS 5000u` (`opendisplay_buzzer.c:37`, enforced at `:183,203,215`). Both are wire-visible. Decide authority explicitly and pin each with a differential test before promoting |
-| **Config storage record + CRC-32** | Three `0xEDB88320` bit-loops — Nordic `opendisplay_config_storage.c:22`, BG22 `:63`, ESP32 `config_parser.cpp:215` — and three `0xDEADBEEF` record headers (ESP32's at `config_parser.h:12`). Nordic 106 lines, BG22 165 | **a storage-seam design step — this row is NOT unblocked** | The survey's "`od_hal_nvs.h` already exists" is wrong as a readiness claim: it exists only as the ESP32-local `targets/esp32-idf/hal/od_hal_nvs.h`, its API is **whole-blob** (`od_hal_nvs_load/save/erase`, `:46-52`), and it carries an ESP32-only `od_hal_nvs_secure_erase()` (`:68`). BG22 reads its header separately from its payload (`opendisplay_config_storage.c:74,107`) and its 2,064-byte record **overlays the assembler buffer** at offset 16, statically asserted at `:25,37-39`. A whole-blob seam would force staging a second full copy on the 32 KB part. Design the seam for partial access, the overlay, and secure erase before writing any of it |
-| **SHT40 + BQ27220** | 888 lines across the four files | **§ 5's seam set** | See § 5 |
+| **LED runner** (designed: `PLAN_LED_RUNNER_2026-08-23.md`) | Nordic 399 + BG22 485 + **≈380 LED-related lines** of ESP32's `device_control.cpp` (`led_*` plus `processLedFlash`/`ledStopForSleep`/`flashLed`, `:278`–`:660`; the file is 905 lines total, and the survey's 1,130 figure counted all of it) | D1 + the yielding-sleep decision | `od_led_service(now_ms)` returning ms-to-next-step; `od_hal_gpio` + the yielding-sleep decision shared with D8. Land D1's fix and its regression test **first**, so the promotion inherits a proven contract rather than re-deriving it |
+| **Buzzer** | Nordic 401 + ESP32 398 + 103 | the authority decisions at right; it reuses `APP_LED`'s shape but is not blocked on that tier | **Not mechanical.** Three divergences beyond D3's table: ESP32 octave-folds indices outside 117–234 into the playable window (`buzzer_control.cpp:67,80-83`) and Nordic does not fold at all; ESP32's total cap is `kBuzzerMaxTotalMs = 30000u` (`:20`) against Nordic's `BUZZER_MAX_TOTAL_MS 5000u` (`opendisplay_buzzer.c:37`, enforced at `:183,203,215`). Both are wire-visible. Decide authority explicitly and pin each with a differential test before promoting |
+| **Config storage record + CRC-32** (designed: `PLAN_STORAGE_SEAM_2026-08-23.md`) | Three `0xEDB88320` bit-loops — Nordic `opendisplay_config_storage.c:22`, BG22 `:63`, ESP32 `config_parser.cpp:215` — and three `0xDEADBEEF` record headers (ESP32's at `config_parser.h:12`). Nordic 106 lines, BG22 165 | **a storage-seam design step — this row is NOT unblocked** | The survey's "`od_hal_nvs.h` already exists" is wrong as a readiness claim: it exists only as the ESP32-local `targets/esp32-idf/hal/od_hal_nvs.h`, its API is **whole-blob** (`od_hal_nvs_load/save/erase`, `:46-52`), and it carries an ESP32-only `od_hal_nvs_secure_erase()` (`:68`). BG22 reads its header separately from its payload (`opendisplay_config_storage.c:74,107`) and its 2,064-byte record **overlays the assembler buffer** at offset 16, statically asserted at `:25,37-39`. A whole-blob seam would force staging a second full copy on the 32 KB part. Design the seam for partial access, the overlay, and secure erase before writing any of it |
+| **SHT40 + BQ27220** (designed: `PLAN_SENSOR_SEAM_2026-08-23.md`) | 888 lines across the four files | the shared I2C HAL and per-target adapter gates in that plan | See § 5 |
 | **Touch (GT911)** | Nordic 704 + ESP32 745; both name `GT911_REG_STATUS 0x814E` | **§ 5's seam set**, and Q7 | Do after the sensors prove the seams. Q7 is a real authority question: Nordic clears `0x814E` after read, ESP32 wedges — the second place `Firmware`-as-authority points at the defective behaviour |
 
-## 5. The sensor/touch seam set — a design step, not one header
+## 5. The sensor/touch seam set — shared I2C plus narrow APP seams
 
-The survey called this "there is no shared I2C seam" and specified `bus_id`-keyed with a STOP
-flag. **That prescription matches neither implementation, and I2C alone does not unblock either
-consumer.** What is actually in the tree:
+Designed in `plans/PLAN_SENSOR_SEAM_2026-08-23.md`. The canonical config already supplies the
+logical boundary the low-level implementations lack: `SensorData.bus_id` and
+`TouchController.bus_id` reference `DataBus`, and both targets resolve that ID immediately
+above their I2C engines.
 
-| | ESP32 `hal/od_hal_i2c.h` | Nordic `src/opendisplay_i2c.h` |
-|---|---|---|
-| Bus identity | single implicit global bus; no `bus_id` anywhere | caller-owned `struct od_i2c_bus` (`:21-29`), carrying pins, half-period and pull-ups |
-| Framing control | `od_hal_i2c_write_read()` (`:76`) — repeated-START expressed as one call | explicit `bool stop` argument on `od_i2c_write()` (`:37-39`) |
-| Implementation | IDF `i2c_master` driver | bit-banged |
+The design therefore creates `shared/hal/od_hal_i2c.h` now, keyed by `bus_id`, with four
+bounded operations:
 
-Neither is `bus_id`-keyed; one has no STOP flag and the other has no bus id. Promoting either
-shape unchanged breaks the other target, so **the seam shape is a decision to write down before
-code**, and it should be argued from the two drivers' actual framing needs — which the ESP32
-header already documents at `:1-14` (SHT40 wants write, STOP, delay, bare read; BQ27220 wants
-repeated-START with no STOP).
+- `probe`;
+- `write` with STOP;
+- `read`;
+- atomic `write_read` with repeated START.
 
-**And I2C is not sufficient.** Each consumer needs seams this plan must name explicitly:
+It does **not** expose a generic STOP flag or recreate Arduino `Wire`. ESP32 keeps its one live
+IDF bus and switches configured pin sets beneath each operation; Nordic resolves the same
+`DataBus` into its bit-banger. Nordic touch's private second bit-banger folds into that engine
+before promotion.
 
-- **SHT40** — a **yielding 12 ms** wait between the command and the read
-  (`SHT40_MEASURE_DELAY_MS`; Nordic `k_msleep` at `opendisplay_sensor_sht40.c:60`, ESP32
-  `od_hal_delay_ms` at `sensor_sht40.cpp:86`). `od_hal_time` cannot serve this — see D8. Decide
-  **synchronous yielding sleep vs. a state machine that returns and resumes**; on BG22's
-  superloop that choice is architectural, not stylistic.
-- **BQ27220** — GPIO and an MSD-output seam in addition to I2C.
-- **GT911** — GPIO reset and IRQ handling in addition to I2C.
-
-**Decide, per seam, shared HAL vs. APP seam** — a driver-shaped `od_hal_*` that every target
-implements, or an `od_*_app.h` link-time seam the target answers, as `od_nfc_app`/`od_xfer_app`
-do. The distinction is the one `shared/sources.cmake` already draws: HAL tiers are named for a
-driver, APP tiers for a seam that needs a target *function*. Sensors may well be APP.
-
-ADC stays target-local; battery acquisition remains not-worth-promoting (three genuinely
-different ADCs).
+I2C remains necessary rather than sufficient. SHT40 gets a narrow yielding-delay APP function;
+BQ27220 gets charger GPIO and MSD-output functions; GT911 later gets reset and IRQ seams. BG22
+**implements the I2C HAL for its existing TNB132M NFC transport** — it already has a private
+bit-banger whose operations are ordinary writes and one repeated-START read — but takes **no
+sensor or touch tier**. That cutover is a separate, explicitly software-only step: no board in
+this fleet carries a TNB132M. ADC acquisition, nPM1300 and AXP2101
+policy stay target-local, though the latter two may consume the shared bus HAL.
 
 ## 6. Documentation and small records
 
@@ -323,13 +315,29 @@ should say why in its header rather than quietly re-declaring the macro.
 2. **Independent small commits, any order:** D9 (with its validator extraction and the tinfl
    comment), D10 (decide delete-vs-events first), D11, the Q8 matrix entry, `FOLLOWUPS` § 11,
    and § 3's Tier A remnants. (D6 is dropped — see above.)
-3. **Design step — the storage seam** (§ 4 config-storage row). Written design covering partial
-   access, BG22's assembler overlay and ESP32 secure erase, reviewed before code.
-4. **Design step — the sensor/touch seam set** (§ 5). Written design covering bus shape, the
-   yielding-delay decision, the GPIO/MSD seams, and shared-HAL-vs-APP per seam.
-5. **Tier B in order:** LED runner (creates `HAL_IO`) → buzzer (authority decisions first) →
-   config storage (after step 3) → SHT40/BQ27220 (after step 4) → touch (resolve Q7 first). Each
-   with its own hardware gate on capable targets, per the standing one-subsystem-per-swap rule.
+3. **Design step — the storage seam** (§ 4 config-storage row). **Written 2026-08-23:**
+   `plans/PLAN_STORAGE_SEAM_2026-08-23.md`. Partial-offset seam (a whole-blob one is disqualified
+   by BG22's assembler overlay), framing and CRC in `shared/`, caching behind the HAL, secure
+   erase left ESP32-only, and `MAX_CONFIG_SIZE` collapsed into `OD_CONFIG_MAX_SIZE`.
+4. **Design step — the sensor/touch seam set** (§ 5). **Written 2026-08-23:**
+   `plans/PLAN_SENSOR_SEAM_2026-08-23.md`, revised after checking the logical bus layer. It
+   creates a `bus_id`-keyed shared I2C HAL with explicit STOP-separated and repeated-START
+   operations, while keeping delay, GPIO, MSD and IRQ as narrow adjacent seams.
+5. **Tier B, each on its own branch with its own hardware gate** — the one-subsystem-per-swap
+   rule makes them un-batchable. The order below is by readiness, not by dependency: the three
+   designs are independent of each other.
+   - **LED runner** — designed, `plans/PLAN_LED_RUNNER_2026-08-23.md`. Creates the `APP_LED` tier.
+     **Not** the survey's `HAL_IO` tier: that design creates no shared GPIO HAL, because one seam
+     function avoids needing one.
+   - **Buzzer** — after the LED runner only because it reuses that tier's shape, not because it is
+     blocked on one. Its real entry condition is the authority decisions in § 4 (octave folding,
+     30,000 ms vs 5,000 ms cap).
+   - **Config storage** — designed, `plans/PLAN_STORAGE_SEAM_2026-08-23.md`. Independent of the
+     LED work; it schedules nothing.
+   - **SHT40 / BQ27220** — designed, `plans/PLAN_SENSOR_SEAM_2026-08-23.md`. Independent of LED
+     scheduling: its yielding 12 ms wait is a narrow `APP_SENSOR` call. The I2C HAL and both
+     per-target adapter gates land before either shared device driver.
+   - **Touch** — last. Needs Q7 decided and the GPIO IRQ seam restored.
 6. **§ 7's test helper** whenever the next host suite is authored, at latest.
 
 ## 9. Open questions carried forward
@@ -344,8 +352,9 @@ should say why in its header rather than quietly re-declaring the macro.
    normative is a protocol question, and the header is frozen.
 4. **Buzzer authority** (§ 4) — octave folding: fold or refuse out-of-range indices? Total cap:
    30,000 ms or 5,000 ms? Both are wire-visible and neither is a mere port.
-5. **The yielding-sleep seam** — D8, the LED runner and SHT40 all want one, and ESP32's
-   `od_hal_sleep.h` is explicitly parked pending reconciliation with Nordic's `k_msleep` wrapper.
-   Resolving it once unblocks three items; leaving it unresolved forces three local answers.
+5. ~~**The yielding-sleep seam**~~ — **closed 2026-08-23.** No consumer is waiting on one: D8
+   landed using BG22's own sleeptimer call, SHT40 uses a narrow `APP_SENSOR` delay rather than a
+   general sleep HAL (sensor plan T3), and the LED machine returns a deadline instead of sleeping
+   (LED plan L1). ESP32's `od_hal_sleep.h` stays target-private. Do not build one speculatively.
 6. **BG22 buzzer/touch scope** — BG22 compiles `OD_CONFIG_WITH_{TOUCH,BUZZER}=0`; those
    promotions are two-target promotions and must stay zero-cost on BG22 (decision 9).
