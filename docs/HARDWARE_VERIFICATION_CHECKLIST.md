@@ -283,6 +283,56 @@ with the dispatch reroute.
 
 **Hardware rows: 0 passed, 16 open.** Not one `0x0083` row has run, and none can here.
 
+### Phase 5 close, 2026-08-22
+
+**Step 10 — deletion inventory: empty, and that is the result rather than an omission.** X1 forbids
+speculative deletion, so the inventory was built from evidence and came back with nothing to
+delete. Checked: orphaned declarations in target headers (none); target constants that lost
+their last user (`OD_NFC_ASSEMBLY_MAX` and `OD_NFC_READ_MAX` are live in
+`shared/core/od_nfc.{c,h}`;
+**`OD_PIPE_MAX_PAYLOAD` has no user left anywhere** — the Nordic NFC cutover removed
+its last one, and it stays because `opendisplay_protocol.h` is a byte-for-byte copy of the
+canonical header and is not ours to edit, which is a different reason from being referenced);
+target-side response literals for promoted opcodes (none);
+target-local transfer, pump, PIPE or NFC state (none); build entries naming deleted files (none —
+and a real one would fail the build); and every scaffold the plan created, all still referenced.
+
+The reason is that each cutover deleted its own orphans in the same commit: `7c4fcb5` removed
+`od_cmd_nfc.h`, `5b6ecbf` removed `od_cmd_nfc.c`, and the BG22 and ESP32 wrappers went from files
+that keep their other hooks. Dead *code* cannot survive `-Wall -Wextra -Werror`, so what a sweep
+could still find is dead declarations and macros — and the ones present are pre-existing driver
+registers and config-packet constants that no promotion orphaned. Deleting those would be exactly
+the speculative deletion X1 rules out.
+
+**Step 12 — every LINK MAP read, not merely produced.** The plan asks for maps, and a symbol
+table is not one: `nm` says a symbol exists, the map says which object contributed it. That
+difference is the whole value here, because the question is whether PIPE and NFC state comes from
+`shared/` or from a target.
+
+Criterion: for each `.bss.<symbol>` entry, the contributing object named on that line — or on its
+continuation line, which is how the format wraps a long section name. All 15 maps, every image:
+
+| image | `s_pipe` | `s_reorder` | `s_nfc` |
+|---|---|---|---|
+| `efr32bg22-slc` | — | — | `od_nfc.c.obj` |
+| Nordic × 3 | `od_pipe.c.obj` | `od_pipe.c.obj` | `od_nfc.c.obj` |
+| ESP32 × 11 | `od_pipe.c.obj` | `od_pipe.c.obj` | — |
+
+Every occurrence is attributed to a `shared/core/` object; no target object contributes any of
+them. The two dashes are the capability-off arms carrying no state at all — BG22 declines PIPE,
+ESP32 declines NFC — which is the claim `nm` alone cannot make, since a symbol's absence looks the
+same whatever removed it.
+
+A first pass at this table read a one-line context window and attributed Nordic's `s_pipe` to
+`od_nfc.c.obj`, because the next map entry happened to be `s_nfc`. The criterion above is what
+fixed it, and it is stated so the next reader can reproduce it rather than trust the
+result.
+
+**Step 13 — release evidence.** Per-unit measurements are recorded above under Step 9
+consolidation, per phase and per target rather than for a final squash. The § 9 matrix stands at
+**0 passed, 16 open**, every open row named with what it needs. No row is closed by this phase, and
+none is closed by any amount of the software evidence above it.
+
 ### Nordic — needs a board with an NFC antenna fitted
 
 Enabling `CONFIG_NFC_T2T_NRFXLIB` (2026-08-21) makes the tag real on all three boards; none has an

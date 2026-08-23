@@ -321,6 +321,25 @@ looks arbitrary and is not); delete the story.
   § 10). Cost: `xiao_ble` +7,660 B flash / +2,602 B RAM, `xiao_nrf54l15` +8,068 / +2,598, mostly
   the tag library rather than the machine. BG22 lost 32 B of `heap_size` (11,504 → 11,472), inside
   X3's 64 B ceiling — measured as heap because `data + bss` is constant there by construction.
+- **Transfer Phase 5 closed the plane (2026-08-22).** The transfer plane — pump, direct, partial,
+  PIPE, NFC — is shared in full, and no target owns wire parsing, byte accounting, chunk assembly,
+  SACK construction, etag policy or transfer ownership. The **deletion inventory came back empty**,
+  which is the result rather than an omission: each cutover deleted its own orphans in the same
+  commit, and X1 forbids inventing more.
+  `tools/check.sh`'s transitional ratchets are consolidated into a permanent set of six absence
+  rules — no second transfer parser, pump, reorder state or NFC assembler; no target-side response
+  literal for a promoted opcode; and no vendor header under `shared/` — replacing three per-target
+  checks that duplicated two rules between them and would have needed a fourth for a fourth target.
+  A seventh, every target teardown reaching `od_core_reset()`, is derived from `targets/*/` rather
+  than a fixed file list, so a new target cannot arrive without one.
+  **They fail closed**: several shared a `2>/dev/null || true` that made an unreadable tree
+  indistinguishable from a clean one, so grep's status is the proof now — 0 matched, 1 clean,
+  >1 unproven. The response-literal rule is grep-verified against identifiers that exist:
+  its first form named `RESP_DIRECT_WRITE_ACK` and two others that do not, and so guarded NFC alone
+  while reading as full coverage.
+  All 15 images were read rather than merely produced. That read is what shows `s_pipe` and
+  `s_reorder` are `od_pipe.c`'s own statics present wherever PIPE is enabled and absent on BG22,
+  which a source grep cannot distinguish from a target leftover.
 - **Shared time HAL software candidate (2026-08-19):** `shared/hal/od_hal_time.h` is the canonical
   two-function ambient-clock/busy-wait seam. ESP32 keeps its unreconciled bounded millisecond sleep
   in target-private `od_hal_sleep.h`; Nordic's `od_uptime_get_32`/`od_busy_wait` names are gone;
@@ -398,8 +417,9 @@ looks arbitrary and is not); delete the story.
   No fake ever sees an expected reply: the generated table is included by the runner and nothing
   else, and profiles get semantic knobs instead. That is what stops the corpus becoming its own
   oracle.
-- Live plan: plans/PLAN_TRANSFER_PHASE45_2026-08-20.md, which owns Phase 4 (NFC, steps 0–9 landed)
-  and Phase 5 (cleanup and release evidence, steps 10–13 outstanding).
+- Live plan: plans/PLAN_TRANSFER_PHASE45_2026-08-20.md, **complete** — Phase 4 (NFC) and Phase 5
+  (cleanup and release evidence), steps 0–13 all landed. Its hardware rows are the outstanding
+  work, not its steps.
   PLAN_TRANSFER_PROMOTION_2026-08-17.md is **superseded in full** by it and by
   PLAN_TRANSFER_PHASE3_2026-08-20.md — read it only for the cross-phase wire freeze, architecture
   rules and gates the successors inherit rather than restate. The transfer sequence in

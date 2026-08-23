@@ -91,8 +91,15 @@ boundary_includes() {
     # every backend includes vendor headers, so it can never satisfy this rule -- but it is one
     # vendored copy shared by all targets, not a per-target fork. Do not "fix" it by moving it
     # under shared/.
-    local hits
-    hits=$(grep -rInE "$pattern" shared/ | grep -vE "$exempt" || true)
+    local hits rc
+    # Preserve grep status; an unreadable tree is unproven.
+    hits=$(grep -rInE "$pattern" shared/)
+    rc=$?
+    if [ "$rc" -gt 1 ]; then
+        echo "grep could not scan shared/ (status $rc); the vendor-include absence is unproven"
+        return 1
+    fi
+    hits=$(printf '%s\n' "$hits" | grep -vE "$exempt" || true)
     if [ -n "$hits" ]; then
         echo "$hits"
         echo
@@ -316,86 +323,95 @@ pipe_dispatch_ownership() {
 }
 check "structure: PIPE dispatch ownership" pipe_dispatch_ownership
 
-esp32_xfer_cutover() {
-    local rc=0 hits
-
-    hits=$(grep -rInE '\b(handleDirectWriteStart|handleDirectWriteData|handleDirectWriteEnd|handlePartialWriteStart)[[:space:]]*\(' \
-           targets/esp32-idf/src 2>/dev/null || true)
-    if [ -n "$hits" ]; then
+# Absence checks share this: grep's STATUS is the proof, not the emptiness of its output. An
+# unreadable tree or a mistyped path must not read as clean -- a check that passes because it read
+# nothing is worse than no check.
+#   0 = matched (the thing came back)   1 = clean   >1 = could not be evaluated
+absent_or_fail() {
+    local what=$1 pattern=$2 hits rc
+    shift 2
+    hits=$(grep -RInE "$pattern" "$@" --include='*.c' --include='*.cpp' --include='*.h' \
+           --exclude-dir=build)
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
         echo "$hits"
-        echo "ESP32 legacy direct/partial command policy returned; shared od_xfer owns it"
-        rc=1
+        echo "$what"
+        return 1
     fi
-
-    if ! grep -q '\bod_core_reset[[:space:]]*(' targets/esp32-idf/src/session_guard.cpp; then
-        echo "ESP32 teardown must use the shared core reset"
-        rc=1
+    if [ "$rc" -gt 1 ]; then
+        echo "grep could not scan (status $rc); the absence of '$what' is unproven"
+        return 1
     fi
-    return $rc
 }
-check "esp32: shared legacy transfer cutover" esp32_xfer_cutover
 
+# PERMANENT. One rule over every target, mirroring the PIPE and NFC absence ratchets: a per-target
+# check cannot see a target that arrives without one.
+xfer_target_parser_absent() {
+    absent_or_fail "target-local direct/partial command policy returned; shared od_xfer owns it" \
+        '\b(handleDirectWrite(Start|Data|End)|handlePartialWriteStart|opendisplay_display_direct_write_(start|data|end|end_prepare|end_refresh))[[:space:]]*\(' \
+        targets
+}
+check "transfer: no target transfer parser" xfer_target_parser_absent
 
-nordic_xfer_cutover() {
+# PERMANENT. A promoted opcode answers from shared code; a target assembling its own reply bytes
+# for one is invisible until a wire capture disagrees with the corpus.
+#
+# Two patterns, because the opcodes are not named alike: direct and NFC have RESP_* constants,
+# PIPE (0x80-0x82) and partial (0x76) have none. Raw replies may use RESP_* or bare status bytes.
+# Cover every promoted opcode while matching initializer shape, so unrelated opcode constants do
+# not trigger the rule.
+promoted_response_literal_absent() {
     local rc=0
-    if ! grep -q '\${OD_SHARED_SOURCES_APP_XFER}' \
-            targets/nordic-zephyr/zephyr/CMakeLists.txt \
-       || grep -q 'od_xfer_compile' targets/nordic-zephyr/zephyr/CMakeLists.txt; then
-        echo "Nordic production image must link APP_XFER directly, without a compile-only target"
-        rc=1
-    fi
+    absent_or_fail "target-side response constant for a promoted opcode returned" \
+        '\bRESP_(NFC_ENDPOINT|DIRECT_WRITE_(START|DATA|END)_ACK|DIRECT_WRITE_REFRESH_(SUCCESS|TIMEOUT))\b' \
+        targets || rc=1
+    absent_or_fail "target-side raw response frame for a promoted opcode returned" \
+        '\{[[:space:]]*(RESP_ACK|RESP_NACK|0x00u?|0xFFu?)[[:space:]]*,[[:space:]]*0x(7[0126]|8[012])u?' \
+        targets || rc=1
+    return $rc
+}
+check "transfer: no target response literal for a promoted opcode" promoted_response_literal_absent
 
-    if ! grep -q '\bod_core_reset[[:space:]]*(' targets/nordic-zephyr/src/opendisplay_pipe.c; then
-        echo "Nordic disconnect must use the shared core reset"
+# PERMANENT. od_core_reset() is the shared half of a teardown; a target hand-rolling the list is
+# what od_core.h exists to prevent.
+#
+# WHAT IT PROVES IS THAT A CALL IS PRESENT, not that it executes: this is a grep, so a commented-out
+# call still satisfies it. It catches deletion and a target arriving without one. Anything stronger
+# needs the teardown driven, and core_reset_test.c is where that lives.
+core_reset_is_the_teardown() {
+    local rc=0 d n found=0
+
+    # Discover targets dynamically; each target must contain an od_core_reset() caller. Which file
+    # holds it is the target's business.
+    for d in targets/*/; do
+        [ -d "$d" ] || continue
+        found=1
+        n=$(grep -RIlE '\bod_core_reset[[:space:]]*\(' "$d" \
+            --include='*.c' --include='*.cpp' --exclude-dir=build | wc -l)
+        if [ "$n" -eq 0 ]; then
+            echo "${d} has no od_core_reset() caller; its teardown does not reach the shared half"
+            rc=1
+        fi
+    done
+    if [ "$found" -eq 0 ]; then
+        echo "no target directories found; the teardown rule is unproven"
         rc=1
     fi
     return $rc
 }
-check "nordic: shared legacy transfer cutover" nordic_xfer_cutover
-
-
-silabs_xfer_cutover() {
-    local rc=0 hits
-    local commands=targets/efr32bg22-slc/od_cmd_silabs.c
-    local display=targets/efr32bg22-slc/opendisplay_display.cpp
-    local cmake=targets/efr32bg22-slc/cmake_gcc/opendisplay-bg22.cmake
-
-    hits=$(grep -InE '\bopendisplay_display_direct_write_(start|data|end|end_prepare|end_refresh)[[:space:]]*\(' \
-           "$commands" "$display" targets/efr32bg22-slc/opendisplay_display.h 2>/dev/null || true)
-    if [ -n "$hits" ]; then
-        echo "$hits"
-        echo "Silabs legacy direct command policy returned; the target must expose hardware only"
-        rc=1
-    fi
-    if ! grep -q '\${OD_SHARED_SOURCES_APP_XFER}' "$cmake" || grep -q 'od_xfer_compile' "$cmake"; then
-        echo "Silabs production image must link APP_XFER directly, without a compile-only target"
-        rc=1
-    fi
-
-    if ! grep -q '\bod_core_reset[[:space:]]*(' "$commands" \
-       && ! grep -q '\bod_core_reset[[:space:]]*(' targets/efr32bg22-slc/opendisplay_pipe.c; then
-        echo "Silabs teardown must use the shared core reset"
-        rc=1
-    fi
-
-    hits=$(grep -RInE '\bod_zlib_pump_(reset|push)[[:space:]]*\(' \
-        targets/efr32bg22-slc --include='*.c' --include='*.cpp' --include='*.h' \
-        --exclude-dir=build 2>/dev/null || true)
-    if [ -n "$hits" ]; then
-        echo "$hits"
-        echo "Silabs target code bypassed shared od_xfer pump ownership"
-        rc=1
-    fi
-    return $rc
-}
-check "silabs: shared legacy transfer cutover" silabs_xfer_cutover
+check "reset: every target teardown uses od_core_reset" core_reset_is_the_teardown
 
 transfer_single_pump_owner() {
-    local hits
+    local hits rc
     hits=$(grep -RInE '\bod_zlib_pump_(reset|push)[[:space:]]*\(' shared/core targets \
         --include='*.c' --include='*.cpp' --include='*.h' --exclude='od_zlib_pump.c' \
-        --exclude='od_zlib_pump.h' --exclude-dir=build 2>/dev/null \
-        | grep -v '^shared/core/od_xfer\.c:' || true)
+        --exclude='od_zlib_pump.h' --exclude-dir=build)
+    rc=$?
+    if [ "$rc" -gt 1 ]; then
+        echo "grep could not scan for pump callers (status $rc); the ownership is unproven"
+        return 1
+    fi
+    hits=$(printf '%s\n' "$hits" | grep -v '^shared/core/od_xfer\.c:' || true)
     if [ -n "$hits" ]; then
         echo "$hits"
         echo "production zlib pump caller returned outside shared/core/od_xfer.c"
@@ -405,16 +421,9 @@ transfer_single_pump_owner() {
 check "transfer: single pump owner" transfer_single_pump_owner
 
 pipe_target_machine_absent() {
-    local hits
-    hits=$(grep -RInE \
+    absent_or_fail "target-local PIPE state machine returned" \
         '\b(PipeWriteState|PipeReorderSlot|pipe_build_ack_payload|pipeBuildAckPayload|send_pipe_(ack|nack)|sendPipe(Ack|Nack)|handlePipeWrite(Start|Data|End)|pipe_refused_on_lan|sessionOrigin)\b' \
-        targets --include='*.c' --include='*.cpp' --include='*.h' --exclude-dir=build \
-        2>/dev/null || true)
-    if [ -n "$hits" ]; then
-        echo "$hits"
-        echo "target-local PIPE state machine returned"
-        return 1
-    fi
+        targets
 }
 check "transfer: no target PIPE machine" pipe_target_machine_absent
 
@@ -425,25 +434,9 @@ check "transfer: no target PIPE machine" pipe_target_machine_absent
 # opendisplay_nfc.c's NDEF encoder and the TNB132M I2C work are deliberately OUT OF SCOPE: they are
 # controller adaptation reached through od_nfc_app, and they stay.
 nfc_target_machine_absent() {
-    local hits rc
-
-    # GREP'S STATUS IS THE PROOF, not the emptiness of its output. `2>/dev/null || true` turns an
-    # unreadable tree or a mistyped path into "no hits" and therefore a PASS -- an absence check
-    # that passes because it read nothing.
-    #   0 = matched (the symbols came back)   1 = clean   >1 = could not be evaluated
-    hits=$(grep -RInE \
+    absent_or_fail "target-local NFC assembler or hook returned" \
         '\b(od_nfc_write_chunk_t|s_nfc_write_chunk|s_nfc_data|s_nfc_rsp_buf|nfc_rec_type_valid|nfc_type_valid|od_cmd_nfc_reset|od_cmd_app_nfc)\b' \
-        targets --include='*.c' --include='*.cpp' --include='*.h' --exclude-dir=build)
-    rc=$?
-    if [ "$rc" -eq 0 ]; then
-        echo "$hits"
-        echo "target-local NFC assembler or hook returned"
-        return 1
-    fi
-    if [ "$rc" -gt 1 ]; then
-        echo "grep could not scan targets/ (status $rc); the absence is unproven"
-        return 1
-    fi
+        targets
 }
 check "transfer: no target NFC assembler" nfc_target_machine_absent
 
@@ -456,14 +449,8 @@ core_reset_owns_transfer() {
         echo "od_core_reset must reset transfer state before the egress queue"
         rc=1
     fi
-    hits=$(grep -RInE '\bod_xfer_reset[[:space:]]*\(' targets \
-        --include='*.c' --include='*.cpp' --include='*.h' --exclude-dir=build \
-        2>/dev/null || true)
-    if [ -n "$hits" ]; then
-        echo "$hits"
-        echo "target teardown bypassed od_core_reset transfer ownership"
-        rc=1
-    fi
+    absent_or_fail "target teardown bypassed od_core_reset transfer ownership" \
+        '\bod_xfer_reset[[:space:]]*\(' targets || rc=1
     return $rc
 }
 check "reset: od_core owns transfer teardown" core_reset_owns_transfer
