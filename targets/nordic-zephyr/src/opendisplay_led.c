@@ -45,6 +45,7 @@ static struct {
   uint8_t loopcnt1, loopcnt2, loopcnt3;
   uint8_t ildelay1, ildelay2, ildelay3;
   uint8_t grouprepeats;
+  bool repeat_forever;
   uint8_t group_pos;
   uint8_t i1, i2, i3;
   led_phase_t phase;
@@ -167,6 +168,10 @@ static void led_load_config(struct LedConfig *led)
   s_run.ildelay1 = ledcfg[3];
   s_run.ildelay2 = ledcfg[6];
   s_run.ildelay3 = ledcfg[9];
+  /* The count is stored minus one and the host caps a finite request at 254, so raw 0xFE and
+   * 0xFF both mean indefinite: py-opendisplay encodes 0xFE and decodes either. The canonical
+   * header names only 0xFF. */
+  s_run.repeat_forever = (ledcfg[10] >= 0xFEu);
   s_run.grouprepeats = (uint8_t)(ledcfg[10] + 1u);
   s_run.group_pos = 0;
   s_run.i1 = s_run.i2 = s_run.i3 = 0;
@@ -207,7 +212,7 @@ static void led_run_step(void)
     }
     switch (s_run.phase) {
     case LED_PHASE_GROUP:
-      if (s_run.group_pos >= s_run.grouprepeats && s_run.grouprepeats != 255u) {
+      if (!s_run.repeat_forever && s_run.group_pos >= s_run.grouprepeats) {
         led->reserved[0] = 0x00u;
         led_run_finish();
         return;

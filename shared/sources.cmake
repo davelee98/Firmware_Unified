@@ -9,6 +9,9 @@
 #                            hand-maintained there like every other out-of-tree source)
 #   tests/host/              the host unit-test build
 #
+# It also brings in shared/profiles.cmake, which owns the per-target compile-time profile. The
+# source list and the macro set that decides those sources' ABI travel together on purpose.
+#
 # One list, four consumers, so a file added to shared/ that is not tested is a build
 # error in three places rather than an omission nobody notices. That is the whole point
 # of the file existing instead of each build globbing — do not replace this with a GLOB.
@@ -242,3 +245,5 @@ set(OD_SHARED_INCLUDE_DIRS
 # consumer whose own include dirs contain either name MUST put OD_SHARED_INCLUDE_DIRS ahead of
 # them for the shared sources, per-source if the target's own translation units still need their
 # copies. targets/nordic-zephyr/zephyr/CMakeLists.txt does exactly that and says so.
+
+include(${CMAKE_CURRENT_LIST_DIR}/profiles.cmake)

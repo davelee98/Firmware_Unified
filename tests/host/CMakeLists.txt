@@ -46,14 +46,10 @@ if(OD_SHARED_SOURCES)
     # a real second variant; executable-local definitions cannot retroactively change od_shared.
     add_library(od_shared_silabs STATIC ${OD_SHARED_SOURCES})
     target_include_directories(od_shared_silabs PUBLIC ${OD_SHARED_INCLUDE_DIRS})
+    # The profile comes from shared/profiles.cmake, the same list the firmware compiles with;
+    # OD_BOOT_LOGO_SIZES is host-only, because BG22 declines APP_BOOT and never builds the logo.
     target_compile_definitions(od_shared_silabs PUBLIC
-        OD_CONFIG_MAX_SIZE=2048u
-        OD_TXQ_SLOTS=3u
-        OD_CAP_PIPE=0
-        OD_CAP_PARTIAL=0
-        OD_CAP_RXQ=0
-        OD_CAP_DUAL_CS=0
-        OD_CAP_LOG=0
+        ${OD_PROFILE_SILABS}
         OD_BOOT_LOGO_SIZES=2)
 
     # The classic ESP32 profile negotiates a 16-frame PIPE window. Compile the complete shared
@@ -80,12 +76,7 @@ if(OD_SHARED_SOURCES)
     add_library(od_shared_dispatch_fixture_silabs STATIC ${OD_SHARED_DISPATCH_FIXTURE_SOURCES})
     target_include_directories(od_shared_dispatch_fixture_silabs PUBLIC ${OD_SHARED_INCLUDE_DIRS})
     target_compile_definitions(od_shared_dispatch_fixture_silabs PUBLIC
-        OD_CONFIG_MAX_SIZE=2048u
-        OD_TXQ_SLOTS=3u
-        OD_CAP_PIPE=0
-        OD_CAP_PARTIAL=0
-        OD_CAP_RXQ=0
-        OD_CAP_DUAL_CS=0
+        ${OD_PROFILE_SILABS}
         OD_BOOT_LOGO_SIZES=2)
     message(STATUS "od: shared/ has ${CMAKE_CURRENT_LIST_DIR} sources — building od_shared")
 else()
@@ -724,6 +715,21 @@ if(Python3_FOUND)
     target_link_libraries(od_silabs_fault_test od_session_fake_silabs)
     add_test(NAME silabs_fault COMMAND od_silabs_fault_test)
 endif()
+
+# The LED runner's yield contract, against the production state machine. Vendor GPIO/timer calls
+# are fakes; the phase loop and the group-repeat sentinel are the real ones. Deliberately outside
+# any optional-tool gate: a regression here is an unbounded loop, so the suite must not be one of
+# the things a missing tool quietly removes.
+add_executable(od_silabs_led_test
+    silabs_led_test.c
+    ../../targets/efr32bg22-slc/opendisplay_led.c)
+target_include_directories(od_silabs_led_test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/fake_silabs
+    ../../targets/efr32bg22-slc)
+target_link_libraries(od_silabs_led_test od_shared_silabs)
+add_test(NAME silabs_led COMMAND od_silabs_led_test)
+# An unbounded loop does not fail on its own; the timeout is what turns it into a failure.
+set_tests_properties(silabs_led PROPERTIES TIMEOUT 30)
 
 # bench_dispatch_gate: the two `dispatch-gate` helpers against a fake BLE client.
 #
