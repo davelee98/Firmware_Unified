@@ -453,6 +453,41 @@ software candidate with its rows open.
 
    Q7 is closed (clear the status on the over-count branch; `FOLLOWUPS` § 17) and the rate is
    settled (follow `bus_speed_hz`), so those are no longer entry conditions.
+
+   **FIRST ATTEMPT AT THE DRIVER FAILED REVIEW, 2026-08-24. Its findings are the specification
+   for the next one.** `shared/core/od_touch_gt911.c` exists on `feat/sensor-drivers-and-touch`
+   marked DRAFT — DO NOT MERGE. Three of the six are API-shape problems, not bugs, which is why
+   patching the draft is the wrong move:
+
+   1. **The coordinate map cannot live in an adapter.** Both donors apply
+      `apply_touch_map()` — swap, invert, clip to display size — **before caching and before
+      packing** (`touch_input.cpp:743`). By the time a byte-write seam sees the MSD the sample and
+      its `TouchController` are gone, so the transform has to be inside the shared driver. Every
+      config using those flags gets wrong coordinates without it, for both live contacts and the
+      latched release.
+   2. **Cadence and publication cannot be split out either.** The donors carry per-controller
+      `poll_interval_ms`, poll only the controller an IRQ or held-low line selected, back off
+      100 ms after an I2C failure using private failure state, detach the IRQ when a controller is
+      disabled, and publish the MSD **only when a decoded sample changed**. A `poll(cfg, now_ms)`
+      that walks every controller and writes bytes cannot express any of it. The core needs to
+      expose per-controller control and a changed/commit signal.
+   3. **`enable_pin` is never asserted.** The donors drive it before the bus check
+      (`touch_input.cpp:548`); a controller behind that enable never probes at all.
+   4. **The address cascade is wrong.** After an explicitly configured address fails the donors
+      `return 0` (`touch_input.cpp:355`); the draft falls through to auto-detection, which can
+      bind a *different* controller. Its auto-detect also probes both addresses after each reset
+      where the donors do reset-low → probe 0x5D, reset-high → probe 0x14.
+   5. **Resume was gutted.** The donors probe the PID at the retained address, clear and wake INT
+      on success, do a full reset and re-resolve on failure, and recover a controller whose `ok`
+      is false but which is not disabled. The draft clears two fields and the status.
+   6. **ESP32's no-DataBus default-pin path is dropped.** That target accepts `data_bus_count == 0`
+      with a non-`0xFF` `bus_id` and transacts on the already-selected board-default bus. The step-1
+      ruling retired the literal `0xFF` case, **not** this one, and the shared HAL cannot name that
+      bus — so preserving it needs its own decision.
+
+   Correct in the draft and worth keeping: the reset edge order, the three-attempt
+   repeated-START-then-STOP-separated retry with its 500 µs spacing, the register byte-order
+   fallback, the MSD packing cases and bound, the failure-streak reset point, and Q7's clears.
 9. **BG22 NFC transport cutover — a software candidate, explicitly NOT hardware-qualified.**
    Separate from every sensor step, because BG22 takes no sensor code and because no board in this
    fleet carries a TNB132M.
