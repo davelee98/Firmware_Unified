@@ -435,6 +435,24 @@ software candidate with its rows open.
 7. **BQ27220 promotion:** add `shared/core/od_sensor_bq27220.{c,h}` and the charger GPIO seams.
    Delete both target policy copies. Hardware gate.
 8. **Touch promotion:** only after Q7 is decided and the IRQ seam exists. Hardware gate.
+
+   **NO NORDIC BOARD IN THIS FLEET HAS A TOUCH CONTROLLER** (project direction, 2026-08-24). So
+   the Nordic half of this step ships as a software candidate under the standing missing-hardware
+   constraint, exactly as Transfer Phase 4's NFC did, and **ESP32 is the only target where the
+   shared GT911 driver can be qualified at all**. Two consequences worth stating before the work
+   starts rather than discovering them in review:
+
+   - The Nordic GPIO IRQ seam this step needs — ESP32 has the full
+     `od_hal_gpio_{config_irq,config_irq_arg,clear_irq,irq_enable,irq_disable,irq_lock,irq_unlock}`
+     surface and Nordic has none of it — would be built to serve a consumer no board here can
+     run. That is still worth doing if the seam has another user (multi-button events need
+     `_arg` too), and hard to justify if it does not. **Decide which before building it.**
+   - The two GT911 read framings can only be distinguished on ESP32 hardware. The host decoder
+     that would tell them apart in a test is therefore the *only* mechanism covering the Nordic
+     side, which raises its value rather than lowering it.
+
+   Q7 is closed (clear the status on the over-count branch; `FOLLOWUPS` § 17) and the rate is
+   settled (follow `bus_speed_hz`), so those are no longer entry conditions.
 9. **BG22 NFC transport cutover — a software candidate, explicitly NOT hardware-qualified.**
    Separate from every sensor step, because BG22 takes no sensor code and because no board in this
    fleet carries a TNB132M.

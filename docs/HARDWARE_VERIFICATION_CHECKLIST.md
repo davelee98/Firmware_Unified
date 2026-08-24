@@ -679,24 +679,38 @@ Treat the rows below as the only thing standing behind that.
       fixes, and it is invisible on an in-order config.
 - [ ] **A duplicated `instance_number` yields no device** rather than an arbitrary one.
 
-### Nordic (`xiao_nrf52840`)
+### Nordic (`xiao_nrf52840`) — runnable rows
 
-- [ ] **Touch still reports contacts** after its private bit-banger was folded into
-      `opendisplay_i2c.c` — the plan requires this before the cutover proceeds past step 2.
 - [ ] **BQ27220 and nPM1300 reads still return plausible values.** Their repeated START gained a
       half-period `tLOW` that it never had; the change is meant to be an improvement, and this
       row is what shows it is not a regression.
-- [ ] **GT911 at the configured bus rate.** Touch now follows `bus_speed_hz` (project ruling
-      2026-08-24; the authority has no touch-specific clock). With `bus_speed_hz` unset or
-      100000 this reproduces the private engine's 5 µs half-period exactly, so that case is a
-      regression check.
-- [ ] **GT911 at 400 kHz.** Set a board's `bus_speed_hz = 400000` and confirm touch still reports
-      contacts, and that sensors sharing that bus still read. This is the one case the private
-      engine could never reach, and the ruling's only real risk. **If touch fails here, that is
-      the measured evidence for a clamp** — record it and clamp with a reason, rather than
-      restoring a hardcoded 5 µs.
-- [ ] **A clone that stretches the clock now fails the transfer** rather than sampling garbage,
-      and five consecutive failures disable touch. Confirm ordinary hardware never reaches that.
+- [ ] **SHT40 reads match the pre-change image**, after its driver moved to `shared/core` and
+      gained the authority's second retry pass.
+- [ ] **A sensor with `bus_id == 0xFF` is not probed**, and is not attached to bus 0.
+
+### Nordic touch — NO BOARD IN THIS FLEET HAS A TOUCH CONTROLLER (2026-08-24)
+
+**Stated by project direction.** These rows are open **release debt awaiting hardware that does not
+exist here**, the same standing constraint as BG22's TNB132M and NFC antenna — a stronger form of
+open than the rows above, because nothing schedules them. No host coverage qualifies one, and
+merged code is not evidence.
+
+Everything Nordic touch has received — the step-2 fold onto `opendisplay_i2c.c`, the step-5 repoint
+onto `od_hal_i2c`, and the `bus_speed_hz` ruling — is therefore a **software candidate that has
+never driven a GT911 on this target**. That is not a reason to undo any of it; it is a reason not to
+cite the Nordic side as evidence for the shared driver when step 8 lands.
+
+- [ ] **Touch reports contacts at all** after the private bit-banger was folded away.
+- [ ] **GT911 at the configured bus rate.** With `bus_speed_hz` unset or 100000 this reproduces the
+      private engine's 5 µs half-period exactly, so that case is a regression check.
+- [ ] **GT911 at 400 kHz** — the one case the private engine could never reach, and the rate
+      ruling's only real risk. **If touch fails here, that is the measured evidence for a clamp:**
+      record it and clamp with a reason, rather than restoring a hardcoded 5 µs.
+- [ ] **A clone that stretches the clock fails the transfer** rather than sampling garbage, and
+      five consecutive failures disable touch.
+
+**ESP32 is where touch can actually be exercised**, so the GT911 rows in the ESP32 section above
+are the ones that carry weight for the shared behaviour.
 
 ### EFR32BG22 NFC transport — step 9, a software candidate (2026-08-24)
 
