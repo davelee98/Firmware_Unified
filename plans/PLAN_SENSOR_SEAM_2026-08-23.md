@@ -390,6 +390,21 @@ software candidate with its rows open.
 
 5. **Nordic HAL cutover:** implement the same four operations over `opendisplay_i2c.c`, then
    repoint SHT40, BQ27220, GT911 and nPM1300. Hardware gate.
+
+   **GT911 was NOT repointed here (2026-08-24), because this step and step 2 contradict each
+   other and step 2 is the more specific instruction.** Step 2 pinned touch at 100 kHz to
+   reproduce the private bit-banger's fixed 5 µs, and said to change the rate only as a separate
+   measured step. The shared seam has **no speed argument** — `od_hal_i2c_*` derives the rate from
+   `DataBus.bus_speed_hz` — so routing GT911 through it hands the touch clock to whatever the
+   config declares, quintupling it on a 400 kHz entry. That is precisely the change step 2
+   forbade, and there is no way to have both through a seam with no rate.
+
+   T5 already places GT911's shared driver in **step 8**, after the sensor promotions, so the
+   touch repoint belongs there — with the rate decision made explicitly and measured, rather than
+   arriving as a side effect of a cutover. Until then Nordic touch keeps calling
+   `opendisplay_i2c.c` directly at its pinned rate, which is one consumer of that engine not
+   going through the HAL. The "one engine per target" ratchet is unaffected: it forbids a second
+   engine, not a second caller of the one engine.
 6. **SHT40 promotion:** add `shared/core/od_sensor_sht40.{c,h}` and the `APP_SENSOR` tier,
    whose linkage contract requires both `od_hal_i2c` and the delay/MSD APP seams. Delete both
    target policy copies after their last callers move. Hardware gate.

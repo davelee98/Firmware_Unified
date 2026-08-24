@@ -1,6 +1,7 @@
 #include "opendisplay_sensor_sht40.h"
 #include "od_log.h"
 #include "opendisplay_sensor_common.h"
+#include "od_hal_i2c.h"
 #include "opendisplay_ble.h"
 #include "od_runtime_types.h"
 
@@ -49,19 +50,21 @@ static uint8_t sht40_msd_start(const struct SensorData *s)
 	return st;
 }
 
-static bool sht40_read_measurement(struct od_i2c_bus *bus, uint8_t addr7,
+static bool sht40_read_measurement(uint8_t bus_id, uint8_t addr7,
 				   int16_t *temp_centi, uint16_t *rh_centi)
 {
 	uint8_t cmd = SHT40_CMD_MEASURE_HIGH;
 
-	if (!od_i2c_write(bus, addr7, &cmd, 1, true)) {
+	/* Command, STOP, wait for the conversion, then a BARE read. Two transactions with a delay
+	 * between, not a repeated-START register read -- that is the BQ27220's idiom. */
+	if (od_hal_i2c_write(bus_id, addr7, &cmd, 1) != OD_HAL_I2C_OK) {
 		return false;
 	}
 	k_msleep(SHT40_MEASURE_DELAY_MS);
 
 	uint8_t b[6];
 
-	if (!od_i2c_read(bus, addr7, b, sizeof(b))) {
+	if (od_hal_i2c_read(bus_id, addr7, b, sizeof(b)) != OD_HAL_I2C_OK) {
 		return false;
 	}
 	if (sht40_crc8(b, 2) != b[2] || sht40_crc8(b + 3, 2) != b[5]) {
@@ -86,9 +89,9 @@ static bool sht40_read_measurement(struct od_i2c_bus *bus, uint8_t addr7,
 static bool read_sht40_sample(const struct SensorData *s, int16_t *temp_centi,
 			      uint16_t *rh_centi)
 {
-	struct od_i2c_bus bus;
-
-	if (!od_sensor_bus_for(s->bus_id, &bus)) {
+	/* 0xFF is unassigned and refused; the transport takes bus_id literally, so the rule lives
+	 * here (DIVERGENCE_MATRIX 13). */
+	if (s->bus_id == 0xFFu) {
 		return false;
 	}
 	const uint8_t candidates[] = {sht40_addr_7bit(s), 0x44u, 0x45u};
@@ -105,7 +108,7 @@ static bool read_sht40_sample(const struct SensorData *s, int16_t *temp_centi,
 		if (dup) {
 			continue;
 		}
-		if (sht40_read_measurement(&bus, candidates[i], temp_centi, rh_centi)) {
+		if (sht40_read_measurement(s->bus_id, candidates[i], temp_centi, rh_centi)) {
 			return true;
 		}
 	}
@@ -171,16 +174,14 @@ void opendisplay_sensor_sht40_init(void)
 		if (s->sensor_type != OD_SENSOR_TYPE_SHT40) {
 			continue;
 		}
-		struct od_i2c_bus bus;
-
-		if (!od_sensor_bus_for(s->bus_id, &bus)) {
+		if (s->bus_id == 0xFFu) {
 			continue;
 		}
 		uint8_t cmd = SHT40_CMD_SOFT_RESET;
 
-		if (!od_i2c_write(&bus, sht40_addr_7bit(s), &cmd, 1, true)) {
-			(void)od_i2c_write(&bus, 0x44u, &cmd, 1, true);
-			(void)od_i2c_write(&bus, 0x45u, &cmd, 1, true);
+		if (od_hal_i2c_write(s->bus_id, sht40_addr_7bit(s), &cmd, 1) != OD_HAL_I2C_OK) {
+			(void)od_hal_i2c_write(s->bus_id, 0x44u, &cmd, 1);
+			(void)od_hal_i2c_write(s->bus_id, 0x45u, &cmd, 1);
 		}
 		k_msleep(2);
 	}

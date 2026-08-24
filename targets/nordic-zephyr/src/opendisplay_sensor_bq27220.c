@@ -1,6 +1,7 @@
 #include "opendisplay_sensor_bq27220.h"
 #include "od_log.h"
 #include "opendisplay_sensor_common.h"
+#include "od_hal_i2c.h"
 #include "opendisplay_ble.h"
 #include "od_runtime_types.h"
 #include "od_gpio.h"
@@ -50,17 +51,15 @@ static uint8_t bq27220_addr_7bit(const struct SensorData *s)
 static bool bq27220_read_block(const struct SensorData *s, uint8_t cmd,
 			       uint8_t *buf, uint8_t len)
 {
-	struct od_i2c_bus bus;
 
-	if (!od_sensor_bus_for(s->bus_id, &bus)) {
+	if (s->bus_id == 0xFFu) {
 		return false;
 	}
 	uint8_t addr = bq27220_addr_7bit(s);
 
-	if (!od_i2c_write(&bus, addr, &cmd, 1, false)) {
-		return false;
-	}
-	return od_i2c_read(&bus, addr, buf, len);
+	/* Selector then read as ONE transaction: this gauge answers a STOP-then-START read with
+	 * whatever an unaddressed read yields, which is plausible garbage rather than an error. */
+	return od_hal_i2c_write_read(s->bus_id, addr, &cmd, 1, buf, len) == OD_HAL_I2C_OK;
 }
 
 static bool charger_gpio_charging(void)

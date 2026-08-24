@@ -221,6 +221,7 @@ target_sources(app PRIVATE
   ${SRC_DIR}/newlib_stubs.c
   ${SRC_DIR}/od_hal_log.c
   ${SRC_DIR}/od_hal_nvs.c
+  ${SRC_DIR}/od_hal_i2c.c
   ${SRC_DIR}/od_hal_wdt.c
   ${SRC_DIR}/od_hal_crypto.c
   ${SRC_DIR}/od_watchdog_app.c

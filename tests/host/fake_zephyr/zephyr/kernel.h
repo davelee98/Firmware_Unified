@@ -21,6 +21,11 @@ void fake_zephyr_reset(void);
 
 void k_msleep(int32_t ms);
 
+/* Busy-wait, for the bit-banged I2C engine. The suite that uses it checks EDGE ORDER, not
+ * timing, so an implementation may discard the argument -- but it must exist, or the engine
+ * compiles with an implicit declaration and the delays vanish silently. */
+void k_busy_wait(uint32_t us);
+
 /* Milliseconds since boot. Settable, so a test can pin a timestamp rather than race one. */
 extern uint32_t fake_k_uptime_ms;
 uint32_t k_uptime_get_32(void);

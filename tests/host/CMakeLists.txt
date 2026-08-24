@@ -251,6 +251,23 @@ target_include_directories(od_silabs_i2c_trace_test PRIVATE
 target_link_libraries(od_silabs_i2c_trace_test od_shared_silabs)
 add_test(NAME silabs_i2c_trace COMMAND od_silabs_i2c_trace_test)
 
+# nordic_i2c_trace: the PREREQUISITE the plan gained after step 4's review. An adapter that hands
+# pins to an engine can transpose SCL and SDA, and that compiles, links and passes everything else
+# here -- it is exactly what shipped in b5bdffe. The trace is labelled by pin CONFIG BYTE, the two
+# the DataBus record carries, so a swap moves every clock edge onto the data line and fails.
+# Binds the production od_hal_i2c.c and opendisplay_i2c.c.
+add_executable(od_nordic_i2c_trace_test
+    nordic_i2c_trace_test.c
+    fake_nordic_i2c/od_gpio_trace.c
+    ../../targets/nordic-zephyr/src/od_hal_i2c.c
+    ../../targets/nordic-zephyr/src/opendisplay_i2c.c)
+target_include_directories(od_nordic_i2c_trace_test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/fake_nordic_i2c
+    ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr
+    ../../targets/nordic-zephyr/src)
+target_link_libraries(od_nordic_i2c_trace_test od_shared)
+add_test(NAME nordic_i2c_trace COMMAND od_nordic_i2c_trace_test)
+
 # silabs_storage: the BG22 overlay, where od_config_asm's reassembly state and the NVM3 record are
 # one object. The two static asserts in the storage file compare LAYOUT; this compares SEQUENCING
 # -- the header is written over the four live assembler state words, so the order of capture,
