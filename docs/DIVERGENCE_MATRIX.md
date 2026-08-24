@@ -794,3 +794,40 @@ is a separate, measured change.
 **NOT HARDWARE-QUALIFIED**, and this is the step where that matters most:
 `plans/PLAN_SENSOR_SEAM_2026-08-23.md` § 3 step 2 requires a touch hardware check before the
 cutover proceeds, and § 5's "Nordic touch cleanup" row is open.
+
+---
+
+## 19. SHT40 — the Nordic port had dropped the retry pass (2026-08-24)
+
+Resolved by sensor-seam staging step 6: `shared/core/od_sensor_sht40.c` is the only SHT40 driver,
+and it takes the authority's behaviour where the two ports disagreed.
+
+| Behaviour | `../Firmware` / ESP32 | nordic-zephyr before | Shared |
+|---|---|---|---|
+| Address candidates | configured, then 0x44, then 0x45 | same | same |
+| Retry | **two passes**, with a bus recovery between | **one pass** | two passes |
+| CRC-8 words | checked **separately**, distinct error codes | checked together in one `if` | separately |
+| Error byte on failure | 0xFB/0xFC/0xFD/0xFE by cause | not reported | preserved |
+| Conversion, clamps, TTL, MSD packing | identical | identical | unchanged |
+
+**The retry is the one that matters.** `Firmware/src/sensor_sht40.cpp:128` runs the candidate
+sweep twice, tearing the bus down and bringing it back up before the second attempt. The Nordic
+port swept once, so a sensor that needed a bus recovery never got one — and on a target that
+re-initialises per operation the difference is invisible in code review, because "retry" there
+looks like it already re-opens the bus. It does not: the recovery is the point, not the re-open.
+
+Recovery is a seam (`od_sensor_app_bus_recover`), because it means different things per target.
+ESP32 caches one live IDF bus, so it tears down and re-selects — without that, its "retry" is a
+repeat. Nordic re-initialises inside every operation and has nothing to tear down, so its
+implementation is the settle alone.
+
+**Checking both CRC words separately is not cosmetic.** A part answering with one good word and
+one bad is reporting a real fault; a combined test cannot say which, and the error byte is
+wire-visible in the MSD failure path where a host may already be matching on it.
+
+`tests/host/sensor_sht40_test.c` pins all of it and is mutation-checked: dropping the second CRC
+word, collapsing the two transactions into a repeated START, reducing to one pass, or polling only
+the first configured sensor each fail it.
+
+**NOT HARDWARE-QUALIFIED.** Both targets' SHT40 rows are open in
+docs/HARDWARE_VERIFICATION_CHECKLIST.md, and this change deletes both ports' driver policy.

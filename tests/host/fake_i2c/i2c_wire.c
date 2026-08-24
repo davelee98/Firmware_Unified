@@ -71,6 +71,24 @@ void i2c_wire_set_read_data(uint8_t addr7, const uint8_t *data, uint8_t len)
 
 void i2c_wire_fail_next_data(void) { s_fail_data = true; }
 
+void i2c_wire_mark_delay(void) { emit(I2C_EV_DELAY, 0); }
+
+bool i2c_wire_delay_between_transactions(void)
+{
+    bool seen_stop = false;
+
+    for (unsigned i = 0; i < i2c_wire_len && i < I2C_WIRE_MAX_EVENTS; ++i) {
+        if (i2c_wire_trace[i].ev == I2C_EV_STOP) { seen_stop = true; }
+        else if (i2c_wire_trace[i].ev == I2C_EV_DELAY && seen_stop) {
+            /* A later START means the wait genuinely separated two transactions. */
+            for (unsigned j = i + 1; j < i2c_wire_len && j < I2C_WIRE_MAX_EVENTS; ++j) {
+                if (i2c_wire_trace[j].ev == I2C_EV_START) { return true; }
+            }
+        }
+    }
+    return false;
+}
+
 bool i2c_wire_start(uint8_t scl, uint8_t sda)
 {
     if (scl == 0xFF || sda == 0xFF || scl == sda) {

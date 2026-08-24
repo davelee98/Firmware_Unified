@@ -21,6 +21,7 @@ enum i2c_ev {
     I2C_EV_ADDR_R,
     I2C_EV_TX,          /* arg = byte */
     I2C_EV_RX,          /* arg = byte */
+    I2C_EV_DELAY,       /* the driver yielded -- placed by the test's delay seam */
 };
 
 struct i2c_event {
@@ -40,6 +41,12 @@ extern uint8_t i2c_wire_last_scl;
 extern uint8_t i2c_wire_last_sda;
 
 void i2c_wire_reset(void);
+
+/* Record that the driver waited. Lets a suite assert the SHT40's conversion delay falls BETWEEN
+ * the command and the read rather than merely happening. */
+void i2c_wire_mark_delay(void);
+/* True when a delay was recorded between one transaction's STOP and the next one's START. */
+bool i2c_wire_delay_between_transactions(void);
 
 /* Script one device present at addr7 on the bus identified by these pins. Anything else NACKs
  * its address. */

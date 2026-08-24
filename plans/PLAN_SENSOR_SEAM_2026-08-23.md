@@ -234,13 +234,21 @@ ownership explicit:
 
 ```c
 void od_sensor_sht40_init(const struct od_config *cfg);
-void od_sensor_sht40_poll(const struct od_config *cfg);
+void od_sensor_sht40_poll(const struct od_config *cfg, uint32_t now_ms);   /* clock: see below */
 
 void od_sensor_bq27220_init(const struct od_config *cfg);
 void od_sensor_bq27220_poll(const struct od_config *cfg);
 bool od_sensor_bq27220_is_configured(const struct od_config *cfg);
 float od_sensor_bq27220_voltage_volts(void);
 ```
+
+**`poll` takes the clock explicitly (amended 2026-08-24, during step 6).** The sketch above had
+no `now_ms`, and the first implementation called `od_hal_uptime_ms()` — which `tools/check.sh`
+rejects: `shared/core` does not sample the ambient time HAL, and only `od_log.c` is exempt. The
+rule is the same discipline that makes `od_led` and `od_buzzer` return a delay instead of
+sleeping. Policy that reads a clock it does not own cannot be tested against a 32-bit wrap and
+cannot be driven by a target that schedules differently. The ratchet caught it; the signature
+changed rather than the rule.
 
 The functions do not retain `cfg` after return. Both current ports keep their TTL/cache statics
 across an init call, so the shared version preserves that behavior rather than silently making

@@ -268,6 +268,18 @@ target_include_directories(od_nordic_i2c_trace_test PRIVATE
 target_link_libraries(od_nordic_i2c_trace_test od_shared)
 add_test(NAME nordic_i2c_trace COMMAND od_nordic_i2c_trace_test)
 
+# sensor_sht40: the shared driver's DEVICE POLICY over the fake wire -- reset and fallback
+# addresses, the write/delay/read ordering (two transactions, not a repeated START), both CRC-8
+# words independently, conversion and clamping, the poll TTL, the invalid-sample marker, and the
+# two-pass retry the Nordic port had dropped.
+add_executable(od_sensor_sht40_test
+    sensor_sht40_test.c
+    fake_i2c/i2c_wire.c
+    fake_i2c/i2c_ref_impl.c)
+target_include_directories(od_sensor_sht40_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(od_sensor_sht40_test od_shared)
+add_test(NAME sensor_sht40 COMMAND od_sensor_sht40_test)
+
 # silabs_storage: the BG22 overlay, where od_config_asm's reassembly state and the NVM3 record are
 # one object. The two static asserts in the storage file compare LAYOUT; this compares SEQUENCING
 # -- the header is written over the four live assembler state words, so the order of capture,

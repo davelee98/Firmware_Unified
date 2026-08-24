@@ -91,6 +91,9 @@
 #                         the config subsystem, over shared/hal/od_hal_nvs.h. Dormant on
 #                         arrival: it changes no target's behaviour until each target's
 #                         cutover replaces its own copy of the same framing.)
+#   core/od_sensor_sht40.c SHT40 device policy                  (LANDED — config walk, address
+#                         candidates, soft reset, both CRC-8 words, conversion, TTL and MSD
+#                         packing. Multi-instance, because both ports were.)
 #   core/od_color.c       direct-stream color geometry          (LANDED — stateless checked
 #                         geometry shared by all three target families; GRAY8 value 9 remains an
 #                         explicitly unsupported local placeholder with no wire representation.)
@@ -217,6 +220,14 @@ set(OD_SHARED_SOURCES_APP_BUZZER
     "${CMAKE_CURRENT_LIST_DIR}/core/od_buzzer.c"
 )
 
+# APP_SENSOR is the shared device drivers. Named for a SEAM rather than a HAL because it needs
+# od_sensor_app.h -- a yielding delay, the target's MSD block, and bus recovery on a target that
+# caches one -- as well as shared/hal/od_hal_i2c.h. A target with no sensors takes neither and
+# grows no dummy functions: BG22 declines this tier entirely.
+set(OD_SHARED_SOURCES_APP_SENSOR
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_sensor_sht40.c"
+)
+
 # HAL_LOG owns portable record formatting. Enabled targets must implement od_hal_log and
 # od_hal_time; OD_CAP_LOG=0 compiles explicit no-op entry points with no HAL references or state.
 set(OD_SHARED_SOURCES_HAL_LOG
@@ -243,6 +254,7 @@ set(OD_SHARED_SOURCES
     ${OD_SHARED_SOURCES_APP_NFC}
     ${OD_SHARED_SOURCES_APP_LED}
     ${OD_SHARED_SOURCES_APP_BUZZER}
+    ${OD_SHARED_SOURCES_APP_SENSOR}
     ${OD_SHARED_SOURCES_HAL_LOG}
     ${OD_SHARED_SOURCES_HAL_WDT}
 )
