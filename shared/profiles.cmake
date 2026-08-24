@@ -23,6 +23,8 @@ set(OD_PROFILE_SILABS
     OD_CAP_DUAL_CS=0
     OD_CAP_LOG=0
     OD_CONFIG_WITH_TOUCH=0
+    # Product decision 2026-08-24: this target will never carry a buzzer.
+    # DIVERGENCE_MATRIX 16; ratcheted by check.sh "silabs: BG22 has no buzzer runner".
     OD_CONFIG_WITH_BUZZER=0
     OD_CONFIG_WITH_WIFI=0
     OD_CONFIG_WITH_DATA_EXTENDED=0)

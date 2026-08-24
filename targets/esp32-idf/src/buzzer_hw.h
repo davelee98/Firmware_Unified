@@ -13,9 +13,9 @@
 // hardware adapter's math integer on soft-float parts.
 
 // Start a tone on `pin` at `centihz` centi-Hz with the given duty cycle
-// (percent, 1..100). Returns false if the tone could not be started (bad
-// frequency, or the PWM resource is owned by someone else). Calling again on an
-// already-playing pin retunes it.
+// (percent, 1..100). Returns false for a zero frequency or when the LEDC timer
+// or channel cannot be configured. Calling again reconfigures the reserved
+// buzzer channel for the requested pin and tone.
 bool buzzer_hw_tone_start(uint8_t pin, uint32_t centihz, uint8_t duty_percent);
 
 // Stop the tone on `pin`. Idempotent; always leaves the pin driven LOW.

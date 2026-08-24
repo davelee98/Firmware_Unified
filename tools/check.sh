@@ -362,6 +362,40 @@ buzzer_target_machine_absent() {
 }
 check "buzzer: one melody policy" buzzer_target_machine_absent
 
+# PERMANENT, and a product decision rather than a current-state observation: the EFR32BG22 will
+# never carry a buzzer. It compiles OD_CONFIG_WITH_BUZZER=0, takes no APP_BUZZER tier, and answers
+# 0x0077 with a capability refusal from its own command hook.
+#
+# The rule is worth having because the failure is silent: adding ${OD_SHARED_SOURCES_APP_BUZZER}
+# to that target builds and links cleanly, and costs a 256-entry pitch table plus runner state on
+# a part with 480 B of RAM headroom. Nothing else would notice.
+bg22_has_no_buzzer_runner() {
+    local img
+    local nm=~/.silabs/slt/installs/conan/p/gcc-a442105b5c2637/p/bin/arm-none-eabi-nm
+
+    if grep -q 'OD_SHARED_SOURCES_APP_BUZZER' \
+        targets/efr32bg22-slc/cmake_gcc/opendisplay-bg22.cmake; then
+        echo "BG22 took the shared buzzer tier; this target has no buzzer by product decision"
+        return 1
+    fi
+    if ! grep -qE '^[[:space:]]*OD_CONFIG_WITH_BUZZER=0$' shared/profiles.cmake; then
+        echo "the BG22 profile must state OD_CONFIG_WITH_BUZZER=0 explicitly"
+        return 1
+    fi
+
+    # When an image exists, the map is the proof a source grep cannot give: a shared symbol can
+    # arrive through a tier the .cmake does not name.
+    img=targets/efr32bg22-slc/cmake_gcc/build/base/opendisplay-bg22.out
+    if [ -x "$nm" ] && [ -f "$img" ]; then
+        if "$nm" "$img" | grep -q 'od_buzzer'; then
+            "$nm" "$img" | grep 'od_buzzer'
+            echo "BG22 image links a shared buzzer symbol"
+            return 1
+        fi
+    fi
+}
+check "silabs: BG22 has no buzzer runner" bg22_has_no_buzzer_runner
+
 # PERMANENT. A promoted opcode answers from shared code; a target assembling its own reply bytes
 # for one is invisible until a wire capture disagrees with the corpus.
 #

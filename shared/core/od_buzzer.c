@@ -57,7 +57,6 @@ static struct {
     bool tone_on;
     struct od_buzzer_config config;
     uint8_t payload[OD_BUZZER_PAYLOAD_MAX];
-    uint16_t payload_len;
     uint8_t outer;
     uint8_t repeat;
     uint8_t pattern_count;
@@ -165,7 +164,6 @@ int od_buzzer_activate(const struct od_buzzer_config *config,
     finish();
     s_run.config = *config;
     memcpy(s_run.payload, payload, payload_len);
-    s_run.payload_len = payload_len;
     s_run.outer = payload[1] == 0u ? 1u : payload[1];
     s_run.pattern_count = payload[2];
     s_run.offset = 3u;

@@ -19,7 +19,6 @@ _Static_assert(sizeof(struct BuzzerConfig) == 32, "BuzzerConfig must be 32 bytes
 static struct k_timer s_step_timer;
 static struct k_timer s_tone_timer;
 static volatile bool s_step_due;
-static bool s_step_armed;
 static bool s_running;
 
 static struct {
@@ -116,7 +115,6 @@ static void step_timer_stop(void)
 {
 	k_timer_stop(&s_step_timer);
 	s_step_due = false;
-	s_step_armed = false;
 }
 
 static void buzzer_pump(void)
@@ -129,7 +127,6 @@ static void buzzer_pump(void)
 		return;
 	}
 	step_timer_stop();
-	s_step_armed = true;
 	k_timer_start(&s_step_timer, K_MSEC(delay_ms), K_NO_WAIT);
 }
 
@@ -200,7 +197,7 @@ int opendisplay_buzzer_activate(const uint8_t *payload, uint16_t payload_len)
 
 void opendisplay_buzzer_process(void)
 {
-	if (!s_running || (s_step_armed && !s_step_due)) {
+	if (!s_running || !s_step_due) {
 		return;
 	}
 	s_step_due = false;
