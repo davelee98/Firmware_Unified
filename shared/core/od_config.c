@@ -309,3 +309,22 @@ enum od_config_tlv_result od_config_parse(struct od_config *cfg, od_span_t blob,
     cfg->loaded = true;
     return OD_CFG_TLV_OK;
 }
+
+const struct DataBus *od_config_data_bus(const struct od_config *cfg, uint8_t instance)
+{
+    const struct DataBus *found = NULL;
+
+    if (cfg == NULL) {
+        return NULL;
+    }
+    for (uint8_t i = 0; i < cfg->data_bus_count && i < (uint8_t)OD_CONFIG_MAX_DATA_BUSES; ++i) {
+        if (cfg->data_buses[i].instance_number != instance) {
+            continue;
+        }
+        if (found != NULL) {
+            return NULL;   /* declared twice: ambiguous, so no bus rather than an arbitrary one */
+        }
+        found = &cfg->data_buses[i];
+    }
+    return found;
+}

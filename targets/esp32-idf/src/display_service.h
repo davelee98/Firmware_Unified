@@ -33,11 +33,15 @@ float readChipTemperature();
 void updatemsdata();
 void initio();
 void initDataBuses();
-/** True when data_bus[0] is a configured I2C bus (pin_1/pin_2 not 0xFF). */
+/** True when ANY configured DataBus record is a usable I2C bus (pin_1/pin_2 not 0xFF). */
 bool openDisplayI2cBusConfigured(void);
-/** Re-apply I2C from data_bus[0] when set; else Wire.begin(). Call before TCON/touch on shared bus. */
+/** Re-apply I2C from the first DataBus record when usable; else default pins. Call before
+ *  TCON/touch on a shared bus. */
 void initOrRestoreWireForOpenDisplay(void);
-/** Select data_buses[bus_id] on Wire (bus_id 0xFF → 0). Switches pins when multiple I2C buses are configured. */
+/** Select the bus whose DataBus.instance_number is bus_id -- NOT data_buses[bus_id], which is
+ *  only the same while records arrive in order (DIVERGENCE_MATRIX 14). 0xFF means unassigned and
+ *  is REFUSED, never resolved to bus 0 (DIVERGENCE_MATRIX 13). A duplicated instance_number is
+ *  ambiguous and also refused. Switches pins when multiple I2C buses are configured. */
 bool initOrRestoreWireForBus(uint8_t bus_id);
 /** Call after Wire.end() so the next touch/sensor access re-inits the bus. */
 void invalidateOpenDisplayWire(void);

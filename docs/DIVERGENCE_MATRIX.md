@@ -598,13 +598,19 @@ and only the host can identify them.
 The canonical header still documents `TouchController.bus_id == 0xFF` as "bus 0" (`:945`) and is
 frozen — `FOLLOWUPS` § 14.
 
-| Site | Behaviour |
-|---|---|
-| `esp32-idf/src/display_service.cpp:726` | substitutes bus 0, then validates |
-| `esp32-idf/src/sensor_sht40.cpp:52` | substitutes bus 0 |
-| `esp32-idf/src/sensor_bq27220.cpp:43` | substitutes bus 0 |
-| `nordic-zephyr/src/opendisplay_sensor_common.h:22` | substitutes bus 0, then validates |
-| `nordic-zephyr/src/opendisplay_touch.c:299` | **refuses** — the correct behaviour |
+**Resolved 2026-08-24** by sensor-seam staging step 1. Every site below now refuses, matching what
+Nordic touch always did. **There were five substituting sites, not four** — `touch_input.cpp` was
+missed by the original survey and is the one that mattered most, because it also returned "bus ok"
+when *no* `DataBus` record existed at all.
+
+| Site | Behaviour before | Now |
+|---|---|---|
+| `esp32-idf/src/display_service.cpp:726` | substitutes bus 0, then validates | refuses |
+| `esp32-idf/src/sensor_sht40.cpp:52` | substitutes bus 0 | refuses |
+| `esp32-idf/src/sensor_bq27220.cpp:43` | substitutes bus 0 | refuses |
+| `esp32-idf/src/touch_input.cpp:274` | substitutes bus 0 **and** accepts any bus when `data_bus_count == 0` | refuses `0xFF`; the no-records default-pin path is unchanged |
+| `nordic-zephyr/src/opendisplay_sensor_common.h:22` | substitutes bus 0, then validates | refuses |
+| `nordic-zephyr/src/opendisplay_touch.c:299` | **refuses** — the reference | unchanged |
 
 Because all four validate afterwards, the misbehaviour requires a valid `data_buses[0]` *and* a
 device that was never assigned a bus: that device is then probed on an unrelated bus, where an
@@ -622,11 +628,21 @@ The canonical header defines the key: `DataBus.instance_number` is *"0-based bus
 referenced by SensorData.bus_id, TouchController.bus_id, etc."* (`opendisplay_structs.h:802`). So
 a consumer's `bus_id` names an **instance_number**, not a position in `data_buses[]`.
 
-| Site | Resolution |
-|---|---|
-| `efr32bg22-slc/opendisplay_ble.c:1101-1103` (NFC) | **scans for a matching `instance_number`** — correct |
-| `esp32-idf/src/display_service.cpp:729` | indexes `data_buses[bus_id]` |
-| `nordic-zephyr/src/opendisplay_sensor_common.h:28` | indexes `data_buses[bus_id]` |
+**Resolved 2026-08-24** by sensor-seam staging step 1, alongside § 13 — the two defects shared
+every call site, and correcting the sentinel alone would have left a refusal that still resolved to
+the wrong bus. `shared/core/od_config.c`'s `od_config_data_bus()` is now the one resolution policy:
+exactly one match, **NULL on no match and on ambiguity**. Refusing a duplicated `instance_number`
+is a decision — nothing rejects a config declaring one twice, so "first match wins" would have
+resolved by packet order, the same accident one layer up.
+
+| Site | Before | Now |
+|---|---|---|
+| `efr32bg22-slc/opendisplay_ble.c:1101` (NFC) | scanned by `instance_number` — right key, but took the first duplicate and had no bound against a corrupted count | uses the shared resolver |
+| `esp32-idf/src/display_service.cpp:729` | indexed `data_buses[bus_id]` | resolved |
+| `esp32-idf/src/display_service.cpp:938` (AXP2101) | bounds-checked and indexed, so its prechecks could pass on one record while the bus call selected another | resolved |
+| `esp32-idf/src/touch_input.cpp:282` | indexed | resolved |
+| `nordic-zephyr/src/opendisplay_sensor_common.h:28` | indexed | resolved |
+| `nordic-zephyr/src/opendisplay_touch.c:302` | refused `0xFF` correctly, but range-checked and indexed — so it rejected a sparse instance and picked the wrong record for out-of-order ones | resolved |
 
 Index and instance agree only when records arrive in ascending order with no gaps, which is the
 common case and why this has never been seen. A host that sends `instance_number` 1 before 0, or
@@ -634,9 +650,10 @@ that omits an instance, binds every indexing consumer to the **wrong bus** — a
 on another device's pins, and an address collision yields plausible-but-wrong readings rather than
 a failure.
 
-Not yet fixed. Scheduled with the I2C HAL cutover, whose resolution is the scan —
-`plans/PLAN_SENSOR_SEAM_2026-08-23.md` T1. Related: § 13, the `0xFF` substitution, which affects
-the same call sites.
+`tests/host/config_test.c`'s `test_data_bus_lookup()` pins the decision table and is
+mutation-checked: restoring the indexing implementation fails 11 assertions. **No hardware gate has
+run** — `plans/PLAN_SENSOR_SEAM_2026-08-23.md` § 5's "unconfigured bus" row is open on both
+targets.
 
 ---
 

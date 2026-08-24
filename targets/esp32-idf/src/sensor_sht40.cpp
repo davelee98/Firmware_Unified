@@ -47,16 +47,14 @@ static uint8_t sht40_msd_start(const SensorData* s) {
     return st;
 }
 
-static uint8_t sht40_bus_id(const SensorData* s) {
-    uint8_t bid = s->bus_id;
-    if (bid == 0xFF) {
-        bid = 0;
-    }
-    return bid;
-}
-
+// 0xFF means this sensor was never assigned a bus. Refused, not resolved to bus 0: probing it on
+// another device's pins risks an address collision returning a plausible-but-wrong temperature
+// (DIVERGENCE_MATRIX 13).
 static bool sht40_ensure_bus(const SensorData* s) {
-    return initOrRestoreWireForBus(sht40_bus_id(s));
+    if (s->bus_id == 0xFF) {
+        return false;
+    }
+    return initOrRestoreWireForBus(s->bus_id);
 }
 
 // err_out keeps Arduino's endTransmission() encoding (0 ok, 2 address NACK, 4 other) because
@@ -239,8 +237,8 @@ void initSht40Sensors(void) {
     }
     for (uint8_t i = 0; i < globalConfig.sensor_count; i++) {
         const SensorData* s = &globalConfig.sensors[i];
-        if (s->sensor_type == OD_SENSOR_TYPE_SHT40) {
-            sht40_probe_bus_once(sht40_bus_id(s));
+        if (s->sensor_type == OD_SENSOR_TYPE_SHT40 && s->bus_id != 0xFF) {
+            sht40_probe_bus_once(s->bus_id);
             break;
         }
     }
@@ -271,9 +269,16 @@ void pollSht40SensorsForMsd(void) {
         uint8_t err = 0;
         if (!read_sht40_sample(s, &tc, &rhc, &err)) {
             if (!logged_fail) {
-                uint8_t bid = sht40_bus_id(s);
-                od_log_warn("SHT40: read failed err=%u (I2C bus %u SCL=GPIO%u SDA=GPIO%u)",
-                    err, bid, globalConfig.data_buses[bid].pin_1, globalConfig.data_buses[bid].pin_2);
+                // Resolved rather than indexed: bus_id is an instance number, so data_buses[bid]
+                // can name a different record entirely, and a log line that reports the wrong
+                // pins is worse than one that reports none.
+                const struct DataBus* bus = od_config_data_bus(&globalConfig, s->bus_id);
+                if (bus != nullptr) {
+                    od_log_warn("SHT40: read failed err=%u (I2C bus %u SCL=GPIO%u SDA=GPIO%u)",
+                                err, s->bus_id, bus->pin_1, bus->pin_2);
+                } else {
+                    od_log_warn("SHT40: read failed err=%u (I2C bus %u unresolved)", err, s->bus_id);
+                }
                 logged_fail = true;
             }
             write_sht40_invalid(start);

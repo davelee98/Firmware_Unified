@@ -296,10 +296,16 @@ static bool touch_get_bus(const struct TouchController *tc, struct TouchBus *out
   if (cfg == NULL) {
     return false;
   }
-  if (bid == 0xFFu || bid >= cfg->data_bus_count) {
+  if (bid == 0xFFu) {
     return false; /* nRF54 has no implicit shared I2C; an explicit data_bus is required */
   }
-  const struct DataBus *bus = &cfg->data_buses[bid];
+  /* Resolved by instance_number rather than indexed: the range check this replaces rejected a
+   * sparse instance and selected the wrong record for out-of-order ones (DIVERGENCE_MATRIX 14). */
+  const struct DataBus *bus = od_config_data_bus(cfg, bid);
+
+  if (bus == NULL) {
+    return false;
+  }
   if (bus->bus_type != OD_BUS_TYPE_I2C || bus->pin_1 == 0xFFu || bus->pin_2 == 0xFFu) {
     return false;
   }

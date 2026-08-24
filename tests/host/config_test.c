@@ -421,9 +421,90 @@ static void test_nfc_does_not_end_the_walk(void)
 #endif
 }
 
+/* od_config_data_bus: the key is instance_number, and ambiguity is refused.
+ *
+ * The cases that matter are the ones where index and instance DISAGREE, because agreement is the
+ * common configuration and is why indexing survived this long. */
+static void test_data_bus_lookup(void)
+{
+    static struct od_config cfg;
+
+    CASE("in-order records: index and instance agree");
+    od_config_reset(&cfg);
+    cfg.data_bus_count = 2u;
+    cfg.data_buses[0].instance_number = 0u;
+    cfg.data_buses[0].pin_1 = 10u;
+    cfg.data_buses[1].instance_number = 1u;
+    cfg.data_buses[1].pin_1 = 20u;
+    CHECK(od_config_data_bus(&cfg, 0u) == &cfg.data_buses[0]);
+    CHECK(od_config_data_bus(&cfg, 1u) == &cfg.data_buses[1]);
+
+    CASE("out-of-order records: indexing would return the wrong bus");
+    od_config_reset(&cfg);
+    cfg.data_bus_count = 2u;
+    cfg.data_buses[0].instance_number = 1u;   /* instance 1 arrived first */
+    cfg.data_buses[0].pin_1 = 20u;
+    cfg.data_buses[1].instance_number = 0u;
+    cfg.data_buses[1].pin_1 = 10u;
+    CHECK(od_config_data_bus(&cfg, 0u) == &cfg.data_buses[1]);   /* NOT data_buses[0] */
+    CHECK(od_config_data_bus(&cfg, 1u) == &cfg.data_buses[0]);
+
+    CASE("sparse records: an absent instance is refused, not clamped");
+    od_config_reset(&cfg);
+    cfg.data_bus_count = 2u;
+    cfg.data_buses[0].instance_number = 1u;
+    cfg.data_buses[0].pin_1 = 11u;
+    cfg.data_buses[1].instance_number = 3u;
+    cfg.data_buses[1].pin_1 = 33u;
+    CHECK(od_config_data_bus(&cfg, 0u) == NULL);
+    CHECK(od_config_data_bus(&cfg, 2u) == NULL);
+    /* The exact record, not merely "a" record: `!= NULL` would accept what indexing returns. */
+    CHECK(od_config_data_bus(&cfg, 1u) == &cfg.data_buses[0]);
+    CHECK(od_config_data_bus(&cfg, 3u) == &cfg.data_buses[1]);
+
+    CASE("duplicate instance is ambiguous: no bus, never the first by packet order");
+    od_config_reset(&cfg);
+    cfg.data_bus_count = 3u;
+    cfg.data_buses[0].instance_number = 2u;
+    cfg.data_buses[0].pin_1 = 10u;
+    cfg.data_buses[1].instance_number = 5u;
+    cfg.data_buses[2].instance_number = 2u;   /* declared twice */
+    cfg.data_buses[2].pin_1 = 99u;
+    CHECK(od_config_data_bus(&cfg, 2u) == NULL);
+    CHECK(od_config_data_bus(&cfg, 5u) == &cfg.data_buses[1]);   /* the unambiguous one resolves */
+
+    CASE("empty config and a null config resolve to nothing");
+    od_config_reset(&cfg);
+    CHECK(od_config_data_bus(&cfg, 0u) == NULL);
+    CHECK(od_config_data_bus(NULL, 0u) == NULL);
+
+    CASE("0xFF is taken literally, not treated as a sentinel here");
+    /* Refusing the sentinel is the CONSUMER's rule -- a resolver that invented a default for it
+     * is how DIVERGENCE_MATRIX 13 happened. A record genuinely numbered 0xFF resolves. */
+    od_config_reset(&cfg);
+    cfg.data_bus_count = 2u;
+    cfg.data_buses[0].instance_number = 0u;
+    cfg.data_buses[0].pin_1 = 10u;
+    cfg.data_buses[1].instance_number = 0xFFu;
+    cfg.data_buses[1].pin_1 = 77u;
+    CHECK(od_config_data_bus(&cfg, 0xFFu) == &cfg.data_buses[1]);
+
+    CASE("a count beyond the array is bounded by the array");
+    od_config_reset(&cfg);
+    cfg.data_bus_count = 200u;   /* a corrupted count must not walk off the end */
+    cfg.data_buses[0].instance_number = 4u;
+    CHECK(od_config_data_bus(&cfg, 4u) == &cfg.data_buses[0]);
+    CHECK(od_config_data_bus(&cfg, 9u) == NULL);
+    /* Every reachable slot past the real records is zeroed, so instance 0 matches all of them and
+     * must read as ambiguous rather than as slot 0. An implementation that trusted the count
+     * would instead run off the array. */
+    CHECK(od_config_data_bus(&cfg, 0u) == NULL);
+}
+
 int main(void)
 {
     test_single_instance_packets();
+    test_data_bus_lookup();
     test_instance_caps();
     test_security_zero_key();
 #if OD_CONFIG_WITH_DATA_EXTENDED

@@ -271,31 +271,33 @@ static void gt911_hw_reset(const TouchController* t, bool int_low_for_addr_5d) {
     od_hal_gpio_config_input(t->int_pin, /*pull_up=*/true, /*pull_down=*/false);
 }
 
-static uint8_t touch_bus_id(const TouchController* t) {
-    uint8_t bid = t->bus_id;
-    if (bid == 0xFF) {
-        bid = 0;
-    }
-    return bid;
-}
-
 static bool touch_bus_ok(const TouchController* t) {
+    // 0xFF means no bus was assigned. Refused, not resolved to bus 0 -- probing an unassigned
+    // controller on another device's pins is how an address collision returns plausible-but-wrong
+    // contacts instead of nothing (DIVERGENCE_MATRIX 13). Nordic touch has always refused it.
+    if (t->bus_id == 0xFF) {
+        return false;
+    }
+    // No DataBus records at all: this target has a default-pin Wire fallback
+    // (initOrRestoreWireForOpenDisplay), and that path is unchanged here.
     if (globalConfig.data_bus_count == 0) {
         return true;
     }
-    uint8_t bid = touch_bus_id(t);
-    if (bid >= globalConfig.data_bus_count) {
-        return false;
-    }
-    const struct DataBus& bus = globalConfig.data_buses[bid];
-    return bus.bus_type == 0x01 && bus.pin_1 != 0xFF && bus.pin_2 != 0xFF;
+    // Resolved by instance_number, not indexed (DIVERGENCE_MATRIX 14).
+    const struct DataBus* bus = od_config_data_bus(&globalConfig, t->bus_id);
+    return bus != nullptr && bus->bus_type == 0x01 && bus->pin_1 != 0xFF && bus->pin_2 != 0xFF;
 }
 
 static bool touch_ensure_bus(const TouchController* t) {
+    // Same order as touch_bus_ok(): the unassigned sentinel is refused before the no-records
+    // default-pin path, so 0xFF never reaches the bus either way.
+    if (t->bus_id == 0xFF) {
+        return false;
+    }
     if (globalConfig.data_bus_count == 0) {
         return true;
     }
-    return initOrRestoreWireForBus(touch_bus_id(t));
+    return initOrRestoreWireForBus(t->bus_id);
 }
 
 static void touch_apply_enable_pin(const TouchController* tc) {
@@ -513,8 +515,12 @@ void initTouchInput(void) {
         }
         touch_apply_enable_pin(tc);
         if (!touch_bus_ok(tc)) {
-            uint8_t busId = touch_bus_id(tc);
-            od_log_warn("Touch[%u]: invalid I2C data_bus %u (data_bus_count=%u)", i, busId, globalConfig.data_bus_count);
+            if (tc->bus_id == 0xFF) {
+                od_log_warn("Touch[%u]: no data_bus assigned (bus_id 0xFF); not probed", i);
+            } else {
+                od_log_warn("Touch[%u]: invalid I2C data_bus %u (data_bus_count=%u)",
+                            i, tc->bus_id, globalConfig.data_bus_count);
+            }
             continue;
         }
         if (tc->touch_data_start_byte > 6u) {

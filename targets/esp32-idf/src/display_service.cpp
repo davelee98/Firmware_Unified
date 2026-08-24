@@ -698,21 +698,25 @@ static bool wireBeginForOpenDisplay(int sda, int scl, uint32_t hz) {
     return false;
 }
 
-static bool i2cDataBusValid(uint8_t bus_id) {
-    if (bus_id >= globalConfig.data_bus_count) {
-        return false;
-    }
-    const struct DataBus& bus = globalConfig.data_buses[bus_id];
+// Usable as an I2C bus, asked of a RECORD rather than a position: whether a bus can be driven is
+// a property of its pins, and which bus a device meant is od_config_data_bus()'s question.
+static bool dataBusUsable(const struct DataBus& bus) {
     return bus.bus_type == 0x01 && bus.pin_1 != 0xFF && bus.pin_2 != 0xFF;
 }
 
-bool openDisplayI2cBusConfigured(void) {
+// The first usable I2C record, or nullptr. For consumers that want "whichever bus exists" rather
+// than a particular one -- the panel's own bring-up, which no config field names.
+static const struct DataBus* firstUsableI2cBus(void) {
     for (uint8_t i = 0; i < globalConfig.data_bus_count; i++) {
-        if (i2cDataBusValid(i)) {
-            return true;
+        if (dataBusUsable(globalConfig.data_buses[i])) {
+            return &globalConfig.data_buses[i];
         }
     }
-    return false;
+    return nullptr;
+}
+
+bool openDisplayI2cBusConfigured(void) {
+    return firstUsableI2cBus() != nullptr;
 }
 
 void invalidateOpenDisplayWire(void) {
@@ -722,14 +726,19 @@ void invalidateOpenDisplayWire(void) {
     s_wire_open_display_ready = false;
 }
 
+// bus_id is a DataBus.instance_number. 0xFF means the device was never assigned one, and is
+// REFUSED rather than resolved to bus 0: substituting a bus probes an unassigned device on
+// somebody else's pins, where an address collision returns a plausible-but-wrong reading instead
+// of a failure (DIVERGENCE_MATRIX 13).
 bool initOrRestoreWireForBus(uint8_t bus_id) {
     if (bus_id == 0xFF) {
-        bus_id = 0;
-    }
-    if (!i2cDataBusValid(bus_id)) {
         return false;
     }
-    const struct DataBus& bus = globalConfig.data_buses[bus_id];
+    const struct DataBus* found = od_config_data_bus(&globalConfig, bus_id);
+    if (found == nullptr || !dataBusUsable(*found)) {
+        return false;
+    }
+    const struct DataBus& bus = *found;
     uint32_t hz = bus.bus_speed_hz ? bus.bus_speed_hz : 100000u;
     int sda = (int)bus.pin_2;
     int scl = (int)bus.pin_1;
@@ -748,8 +757,12 @@ bool initOrRestoreWireForBus(uint8_t bus_id) {
 }
 
 void initOrRestoreWireForOpenDisplay(void) {
-    if (globalConfig.data_bus_count > 0 && i2cDataBusValid(0)) {
-        (void)initOrRestoreWireForBus(0);
+    // The panel has no bus_id of its own and takes the FIRST RECORD, which is what this has
+    // always done -- the change here is only that it asks for that record's instance_number
+    // rather than for instance 0, because those are no longer the same question. Which record
+    // the panel should prefer is a separate decision and not this cutover's to make.
+    if (globalConfig.data_bus_count > 0 && dataBusUsable(globalConfig.data_buses[0])) {
+        (void)initOrRestoreWireForBus(globalConfig.data_buses[0].instance_number);
         return;
     }
     if (!s_wire_open_display_ready) {
@@ -922,11 +935,14 @@ void initAXP2101(uint8_t busId){
     od_hal_delay_ms(100);
     od_hal_gpio_write(21, true);
     od_log_info("=== Initializing AXP2101 PMIC ===");
-    if(busId >= globalConfig.data_bus_count){
-        od_log_error("ERROR: Invalid bus ID %u (only %u buses configured)", busId, globalConfig.data_bus_count);
+    // Resolved the same way initOrRestoreWireForBus() resolves it, or these prechecks can pass
+    // on one record while the call below selects another (DIVERGENCE_MATRIX 14).
+    const struct DataBus* bus = od_config_data_bus(&globalConfig, busId);
+    if(bus == nullptr){
+        od_log_error("ERROR: Bus instance %u is absent or declared more than once (%u buses configured)",
+                     busId, globalConfig.data_bus_count);
         return;
     }
-    struct DataBus* bus = &globalConfig.data_buses[busId];
     if(bus->bus_type != 0x01){
         od_log_error("ERROR: Bus %u is not an I2C bus", busId);
         return;

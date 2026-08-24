@@ -38,16 +38,13 @@ static uint8_t bq27220_addr_7bit(const SensorData* s) {
     return a;
 }
 
-static uint8_t bq27220_bus_id(const SensorData* s) {
-    uint8_t bid = s->bus_id;
-    if (bid == 0xFF) {
-        bid = 0;
-    }
-    return bid;
-}
-
+// 0xFF means this gauge was never assigned a bus. Refused, not resolved to bus 0 -- see
+// DIVERGENCE_MATRIX 13; a colliding address returns a plausible-but-wrong voltage.
 static bool bq27220_ensure_bus(const SensorData* s) {
-    return initOrRestoreWireForBus(bq27220_bus_id(s));
+    if (s->bus_id == 0xFF) {
+        return false;
+    }
+    return initOrRestoreWireForBus(s->bus_id);
 }
 
 static bool bq27220_read_block(const SensorData* s, uint8_t cmd, uint8_t* buf, uint8_t len) {

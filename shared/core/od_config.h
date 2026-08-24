@@ -209,6 +209,25 @@ enum od_config_apply od_config_apply_packet(struct od_config *cfg, uint8_t packe
 enum od_config_tlv_result od_config_parse(struct od_config *cfg, od_span_t blob,
                                           struct od_config_report *report);
 
+/* Resolve a DataBus by its instance_number. NULL when there is no match or more than one.
+ *
+ * THE KEY IS instance_number, NOT AN ARRAY POSITION. The contract says so --
+ * `opendisplay_structs.h:802` defines it as the thing SensorData.bus_id and
+ * TouchController.bus_id reference -- but od_config_apply_packet() appends repeatable records in
+ * ARRIVAL ORDER and never reads the field, so `data_buses[bus_id]` is only ever right while
+ * records arrive in ascending order with no gaps. Indexing is what bound a sensor to another
+ * device's pins when a host sent instance 1 before instance 0 (DIVERGENCE_MATRIX 14).
+ *
+ * AMBIGUITY IS REFUSED, and that is a decision rather than a fallback. Nothing rejects a config
+ * declaring instance_number 2 twice, so a bare "first match wins" would resolve by packet order
+ * -- the same accident, one layer up. Refusing turns a malformed config into no device instead of
+ * an arbitrary one.
+ *
+ * The instance is taken LITERALLY. 0xFF is the contract's absent sentinel, but normalising or
+ * refusing it belongs to the consumer that knows what an unassigned device should do; a resolver
+ * that invents a default for its caller's sentinel is how DIVERGENCE_MATRIX 13 happened. */
+const struct DataBus *od_config_data_bus(const struct od_config *cfg, uint8_t instance);
+
 #ifdef __cplusplus
 }
 #endif

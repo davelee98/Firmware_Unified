@@ -19,14 +19,21 @@ static inline bool od_sensor_bus_for(uint8_t bus_id, struct od_i2c_bus *out)
 	if (cfg == NULL) {
 		return false;
 	}
+	/* 0xFF means this device was never assigned a bus. Refused, not resolved to bus 0:
+	 * substituting one probes it on somebody else's pins, where an address collision
+	 * returns a plausible-but-wrong reading rather than a failure (DIVERGENCE_MATRIX 13).
+	 * opendisplay_touch.c has always refused; this is the same rule. */
 	if (bus_id == 0xFFu) {
-		bus_id = 0u;
-	}
-	if (bus_id >= cfg->data_bus_count || bus_id >= 4u) {
 		return false;
 	}
-	const struct DataBus *bus = &cfg->data_buses[bus_id];
+	/* Resolved by instance_number, not indexed: od_config appends records in arrival order,
+	 * so data_buses[bus_id] names the intended bus only while they arrive in ascending order
+	 * with no gaps (DIVERGENCE_MATRIX 14). */
+	const struct DataBus *bus = od_config_data_bus(cfg, bus_id);
 
+	if (bus == NULL) {
+		return false;
+	}
 	if (bus->bus_type != 0x01u) {
 		return false;
 	}

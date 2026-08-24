@@ -1098,12 +1098,11 @@ static void od_nfc_autoinit_from_config(const struct GlobalConfig *cfg)
     return;
   }
 
-  for (i = 0u; i < cfg->data_bus_count; i++) {
-    if (cfg->data_buses[i].instance_number == nfc_cfg->bus_instance) {
-      bus = &cfg->data_buses[i];
-      break;
-    }
-  }
+  /* The shared resolver rather than a local scan: this one already keyed on instance_number and
+   * was the correct site, but it stopped at the first duplicate and had no bound against a
+   * corrupted data_bus_count. One policy, so "declared twice" means no bus everywhere rather than
+   * an arbitrary one here. */
+  bus = od_config_data_bus(cfg, nfc_cfg->bus_instance);
   if (bus == NULL || bus->bus_type != OD_BUS_TYPE_I2C) {
     printf("[OD][NFC] bus instance=%u missing/non-I2C; NFC init disabled\r\n", (unsigned)nfc_cfg->bus_instance);
     return;
