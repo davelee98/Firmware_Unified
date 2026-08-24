@@ -198,7 +198,7 @@ static void reloadConfigAfterSave(void) {
 bool isEncryptionEnabled();
 void secureEraseConfig();
 // chunked_write_state_t comes from config_parser.h; this file used to redefine it
-// with a hardcoded 4096 in place of MAX_CONFIG_SIZE.
+// with a hardcoded 4096 in place of OD_CONFIG_MAX_SIZE.
 extern uint8_t configReadResponseBuffer[128];
 extern uint8_t msd_payload[16];
 float readBatteryVoltage();
@@ -373,7 +373,7 @@ od_cmd_result_t handleReadConfig(const od_cmd_ctx_t *ctx) {
     // reloading through this same buffer mid-read would splice two configs into one CRC-valid
     // read-back.
     uint8_t* configData = getConfigScratch();
-    uint32_t configLen = MAX_CONFIG_SIZE;
+    uint32_t configLen = OD_CONFIG_MAX_SIZE;
     const bool loaded = loadConfig(configData, &configLen);
 
     /* The reservation is TRANSFERRED to the producer, which pays chunk 0 out of it and keeps the

@@ -127,8 +127,8 @@ bool parseConfigBytes(uint8_t *configData, uint32_t configLen, struct od_config 
 
 bool loadGlobalConfig(struct od_config *globalConfig)
 {
-	static uint8_t configData[MAX_CONFIG_SIZE];
-	uint32_t configLen = MAX_CONFIG_SIZE;
+	static uint8_t configData[OD_CONFIG_MAX_SIZE];
+	uint32_t configLen = OD_CONFIG_MAX_SIZE;
 
 	if (globalConfig == NULL) {
 		od_log_info("Invalid parameter for loadGlobalConfig");

@@ -15,8 +15,8 @@
 #include <string.h>
 
 /* ESP32: config storage is NVS, not LittleFS -- see config_parser.cpp and
- * hal/od_hal_nvs.h. This file only needs to invalidate the stored record. */
-#include "od_hal_nvs.h"
+ * shared/hal/od_hal_nvs.h. This file only needs to invalidate the stored record. */
+#include "od_hal_nvs_secure.h"
 #include <esp_system.h>
 
 
@@ -125,7 +125,7 @@ void secureEraseConfig() {
      * nvs_erase_key() only marks the entry deleted, so the AES-128 master key in config
      * packet 0x27 stayed recoverable from a raw flash dump after a "secure erase".
      *
-     * od_hal_nvs_secure_erase() restores the zero-write. Read its contract in od_hal_nvs.h
+     * od_hal_nvs_secure_erase() restores the zero-write. Read its contract in od_hal_nvs_secure.h
      * before relying on it: on a log-structured store it is best-effort, not a guaranteed
      * overwrite. The overwrite stays inside the HAL rather than here, so this file is not a
      * second writer of the config record's byte format. */

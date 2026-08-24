@@ -16,7 +16,14 @@
 #include <stdint.h>
 
 typedef uint32_t nvm3_ObjectKey_t;
-typedef struct nvm3_Handle nvm3_Handle_t;
+
+/* The real handle is a static object the SDK binds nvm3_defaultHandle to at link time, so the
+ * pointer is NEVER null and `hasBeenOpened` is the only thing that says whether the instance is
+ * usable (nvm3_generic.h:239). Modelled that way here: a fake whose "unmounted" state is a null
+ * pointer would validate an adapter that cannot work on silicon. */
+typedef struct nvm3_Handle {
+    bool hasBeenOpened;
+} nvm3_Handle_t;
 
 #define ECODE_NVM3_ERR_KEY_NOT_FOUND SL_STATUS_NOT_FOUND
 #define NVM3_OBJECTTYPE_DATA 0u
@@ -30,14 +37,18 @@ sl_status_t nvm3_readPartialData(nvm3_Handle_t *h, nvm3_ObjectKey_t key,
 sl_status_t nvm3_getObjectInfo(nvm3_Handle_t *h, nvm3_ObjectKey_t key,
                                uint32_t *type, size_t *len);
 sl_status_t nvm3_deleteObject(nvm3_Handle_t *h, nvm3_ObjectKey_t key);
+sl_status_t nvm3_initDefault(void);
 
 /* ---- test control ---- */
 
 #define NVM3_FAKE_MAX_OBJECT 2112u
 
 void nvm3_fake_reset(void);
-/* Detach the backing store the way an uninitialised NVM3 instance would present. */
+/* Present the instance as never opened, and make nvm3_initDefault() fail -- what an NVM3 whose
+ * flash region is unusable looks like. */
 void nvm3_fake_set_mounted(bool mounted);
+/* Present the instance as closed but openable, so that on-demand initialisation is observable. */
+void nvm3_fake_set_opened(bool opened);
 
 extern sl_status_t nvm3_fake_write_status;
 extern sl_status_t nvm3_fake_read_status;

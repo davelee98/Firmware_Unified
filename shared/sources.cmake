@@ -87,6 +87,10 @@
 #   core/od_zlib_inflate.c portable streaming zlib inflate     (LANDED — one bounded static
 #                         window, shared by all three target families; ESP32 may remap the API
 #                         to its ROM-backed tinfl adapter without changing the wire contract.)
+#   core/od_config_store.c stored config record framing + CRC-32 (LANDED — the storage half of
+#                         the config subsystem, over shared/hal/od_hal_nvs.h. Dormant on
+#                         arrival: it changes no target's behaviour until each target's
+#                         cutover replaces its own copy of the same framing.)
 #   core/od_color.c       direct-stream color geometry          (LANDED — stateless checked
 #                         geometry shared by all three target families; GRAY8 value 9 remains an
 #                         explicitly unsupported local placeholder with no wire representation.)
@@ -103,6 +107,7 @@ get_filename_component(OD_SHARED_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
 #   HAL_CRYPTO needs shared/hal/od_hal_crypto.h implemented (prepared AES key + primitives).
 #   HAL_WDT  needs shared/hal/od_hal_wdt.h implemented (reset reason, retained byte, arm, feed).
 #   HAL_RADIO needs shared/hal/od_hal_radio.h implemented (send one frame, is this tag live).
+#   HAL_NVS   needs shared/hal/od_hal_nvs.h implemented (size/read-at-offset/write/erase).
 #
 # WHY THE SPLIT EXISTS. A target part-way through migration can consume the sources whose HAL it
 # has and add the rest as each HAL lands, instead of waiting to take all of shared/ at once. That
@@ -139,6 +144,12 @@ set(OD_SHARED_SOURCES_HAL_CRYPTO
 
 set(OD_SHARED_SOURCES_HAL_RADIO
     "${CMAKE_CURRENT_LIST_DIR}/core/od_txq.c"
+)
+
+# HAL_NVS is the stored config record's framing, CRC and bounds. It needs no seam beyond the
+# medium itself, so it is a HAL tier rather than an APP one.
+set(OD_SHARED_SOURCES_HAL_NVS
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_config_store.c"
 )
 
 # APP_SESSION needs MORE than a HAL: the target must supply the od_session_app seam and pair this
@@ -223,6 +234,7 @@ set(OD_SHARED_SOURCES
     ${OD_SHARED_SOURCES_HAL_ADV}
     ${OD_SHARED_SOURCES_HAL_CRYPTO}
     ${OD_SHARED_SOURCES_HAL_RADIO}
+    ${OD_SHARED_SOURCES_HAL_NVS}
     ${OD_SHARED_SOURCES_APP_SESSION}
     ${OD_SHARED_SOURCES_APP_RXQ}
     ${OD_SHARED_SOURCES_APP_BOOT}
@@ -249,11 +261,12 @@ set(OD_SHARED_INCLUDE_DIRS
 # note rather than silently fixed, because it is the first evidence that this file's "green
 # against an empty list" property also means "unexercised against an empty list".
 #
-# ORDER IS LOAD-BEARING WHEN A TARGET CARRIES ITS OWN PROTOCOL HEADERS. Two shared headers pull
-# in the wire contract by its bare name — od_config_asm.h includes "opendisplay_protocol.h",
-# od_config_tlv.h includes "opendisplay_structs.h" — and both names also exist, as hand-written
-# SUBSETS, in targets/nordic-zephyr/src/ (77 and 319 lines, against 991 and 1242 here). Neither
-# quoted include resolves relative to shared/core, so whichever -I comes first wins.
+# ORDER IS LOAD-BEARING IF A TARGET EVER CARRIES ITS OWN PROTOCOL HEADERS AGAIN. Two shared
+# headers pull in the wire contract by its bare name — od_config_asm.h includes
+# "opendisplay_protocol.h", od_config_tlv.h includes "opendisplay_structs.h" — and neither
+# quoted include resolves relative to shared/core, so whichever -I comes first wins. No target
+# tree holds either name today; targets/nordic-zephyr/src/ did, as hand-written subsets of 77
+# and 319 lines against 991 and 1242 here, which is how this rule was learnt.
 #
 # Getting that backwards is not a build error in the general case: od_config_tlv.c derives packet
 # body sizes with sizeof on the canonical structs, so a subset that merely differs in layout

@@ -63,7 +63,7 @@ extern "C" {
 /* ------------------------------------------------------------------------ instance caps --- */
 /* Not target-tunable. All three repos independently chose these numbers and a host that writes
  * a fifth display must get the same answer from every chip; a per-target cap would be a wire
- * divergence a host cannot discover, which is the reasoning behind MAX_CONFIG_SIZE in
+ * divergence a host cannot discover, which is the reasoning behind OD_CONFIG_MAX_SIZE in
  * CLAUDE.md decision 12. */
 #define OD_CONFIG_MAX_DISPLAYS       4u
 #define OD_CONFIG_MAX_LEDS           4u

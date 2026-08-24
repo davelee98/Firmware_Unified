@@ -108,9 +108,6 @@ bool clearStoredConfig(void)
     return true;
 }
 
-uint32_t calculateConfigCRC(uint8_t *data, uint32_t len)
-{ (void)data; (void)len; return 0u; }
-
 const struct SecurityConfig *od_get_parsed_security(void) { return NULL; }
 
 uint16_t opendisplay_ble_get_app_version(void) { return 0x0105u; }

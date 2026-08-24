@@ -10,10 +10,9 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ESP32: config lives in NVS, not LittleFS (decided 2026-07-25). The three-function seam
- * is od_hal_nvs, shaped per docs/SHARED_API_DESIGN.md so the eventual promotion of this
- * subsystem into shared/core is a repoint rather than a rewrite. */
-#include "od_hal_nvs.h"
+/* ESP32: config lives in NVS, not LittleFS (decided 2026-07-25). The record's framing, CRC and
+ * bounds are shared/core's; this file supplies the workspace and the target's log lines. */
+#include "od_config_store.h"
 /* The one network thing this file needs: the STA address, for a status log line. Included
  * unconditionally rather than under OPENDISPLAY_HAS_WIFI, because the log line itself is not
  * gated on WiFi being compiled in -- on a board without it, the lookup simply returns NULL
@@ -68,68 +67,50 @@ void resetChunkedWriteState(void) {
 }
 
 bool initConfigStorage(){
-    if (od_hal_nvs_init() != OD_HAL_NVS_OK) {
+    if (od_config_store_init() != OD_CONFIG_STORE_OK) {
         od_log_error("ERROR: Failed to initialise NVS config storage");
         return false;
     }
     return true;
-    return false; // Should never reach here
 }
 
 void formatConfigStorage(){
-    (void)od_hal_nvs_erase();
+    (void)od_config_store_clear();
 }
 
 // See getConfigScratch() in config_parser.h for the sharing contract. Replaces a
 // per-consumer 4 KB buffer each in loadGlobalConfig (static), hasValidStoredConfig
 // (static) and handleReadConfig (stack -- a 4 KB spike on the loop task).
-static uint8_t configScratch[MAX_CONFIG_SIZE];
+static uint8_t configScratch[OD_CONFIG_MAX_SIZE];
 
 uint8_t* getConfigScratch(void) {
     return configScratch;
 }
 
 bool saveConfig(uint8_t* configData, uint32_t len){
-    if (len > MAX_CONFIG_SIZE) {
-        od_log_error("ERROR: Config data too large (%u bytes)", (unsigned)len);
-        return false;
-    }
+    /* The workspace od_config_store fills: header at offset 0, payload after it, written to the
+     * medium as one span. Static because it is 4 KB and config writes are serialised on the
+     * loop task. The factory-provisioning caller passes a flash pointer, which the core copies
+     * in here -- there is nowhere else it could be assembled contiguously. */
+    static uint8_t workspace[OD_CONFIG_STORE_MAX_RECORD];
+
     if (configData == nullptr) {
         return false;
     }
-    // Header on the stack; the payload is written straight from the caller's
-    // buffer. Two writes produce the same bytes the old single write did, and
-    // the factory-provisioning caller passes a flash pointer, so this also drops
-    // a 4 KB flash->RAM copy at first boot.
-    config_header_t header;
-    header.magic = CONFIG_STORAGE_MAGIC;
-    header.version = CONFIG_STORAGE_VERSION;
-    header.crc = calculateConfigCRC(configData, len);
-    header.data_len = len;
-    /* NVS stores one opaque blob, so header and payload are staged contiguously. The
-     * LittleFS path wrote them as two sequential file writes; the bytes on the medium are
-     * the same record either way, which keeps loadConfig's validation unchanged.
-     *
-     * The staging buffer is the cost of the blob interface. It is affordable here -- an
-     * ESP32-S3 has 512 KB plus PSRAM -- and it is NOT affordable on the EFR32BG22, whose
-     * whole heap is 10.3 KB. When this subsystem is promoted to shared/core, that target
-     * will need either a two-key record or a streaming write; do not carry this buffer
-     * across as if it were free. See docs/MEMORY_CONSTRAINTS.md.
-     */
-    static uint8_t blob[sizeof(config_header_t) + MAX_CONFIG_SIZE];
-    memcpy(blob, &header, sizeof(header));
-    if (len > 0) {
-        memcpy(blob + sizeof(header), configData, len);
-    }
-    if (od_hal_nvs_save(blob, (uint32_t)(sizeof(header) + len)) != OD_HAL_NVS_OK) {
+    switch (od_config_store_save(workspace, sizeof(workspace), configData, len)) {
+    case OD_CONFIG_STORE_OK:
+        return true;
+    case OD_CONFIG_STORE_TOO_BIG:
+        od_log_error("ERROR: Config data too large (%u bytes)", (unsigned)len);
+        return false;
+    default:
         od_log_error("ERROR: Failed to write config to NVS");
         return false;
     }
-    return true;
 }
 
 bool clearStoredConfig(void) {
-    if (od_hal_nvs_erase() != OD_HAL_NVS_OK) {
+    if (od_config_store_clear() != OD_CONFIG_STORE_OK) {
         od_log_error("ERROR: Failed to remove stored config");
         return false;
     }
@@ -147,79 +128,34 @@ bool loadConfig(uint8_t* configData, uint32_t* len){
     if (configData == nullptr || len == nullptr) {
         return false;
     }
-    config_header_t header;
-    /* One blob out of NVS, then the same validation the LittleFS path applied. Reading the
-     * record whole rather than header-then-payload is the one behavioural difference, and it
-     * is the safer order: the length check below happens before anything is copied into the
-     * caller's buffer, which the sequential-read version could only do after staging. */
-    static uint8_t blob[sizeof(config_header_t) + MAX_CONFIG_SIZE];
-    uint32_t blobLen = 0;
-    int rc = od_hal_nvs_load(blob, (uint32_t)sizeof(blob), &blobLen);
-    if (rc == OD_HAL_NVS_ENOENT) {
+    switch (od_config_store_load(configData, len)) {
+    case OD_CONFIG_STORE_OK:
+        return true;
+    case OD_CONFIG_STORE_EMPTY:
         return false;           /* unprovisioned device -- not an error, just nothing stored */
-    }
-    if (rc != OD_HAL_NVS_OK || blobLen < sizeof(config_header_t)) {
-        od_log_error("ERROR: Failed to read config from NVS (rc=%d, len=%u)", rc, (unsigned)blobLen);
+    case OD_CONFIG_STORE_TOO_BIG:
+        od_log_error("ERROR: Stored config larger than this build accepts");
+        return false;
+    case OD_CONFIG_STORE_CORRUPT:
+        od_log_error("ERROR: Stored config rejected (magic, length or CRC)");
+        return false;
+    default:
+        od_log_error("ERROR: Failed to read config from NVS");
         return false;
     }
-    memcpy(&header, blob, sizeof(header));
-    if (header.magic != CONFIG_STORAGE_MAGIC) {
-        od_log_error("ERROR: Invalid config magic number");
-        return false;
-    }
-    if (header.data_len > MAX_CONFIG_SIZE) {
-        od_log_error("ERROR: Config data too large");
-        return false;
-    }
-    if (header.data_len > *len) {
-        od_log_error("ERROR: Config data larger than buffer");
-        return false;
-    }
-    if (blobLen < sizeof(config_header_t) + header.data_len) {
-        od_log_error("ERROR: Stored config truncated (header says %u, blob holds %u)",
-                     (unsigned)header.data_len, (unsigned)(blobLen - sizeof(config_header_t)));
-        return false;
-    }
-    memcpy(configData, blob + sizeof(config_header_t), header.data_len);
-    uint32_t calculatedCRC = calculateConfigCRC(configData, header.data_len);
-    if (header.crc != calculatedCRC) {
-        od_log_error("ERROR: Config CRC mismatch");
-        return false;
-    }
-    *len = header.data_len;
-    return true;
 }
 
 bool hasValidStoredConfig(void) {
-    /* No presence probe on ESP32. The obvious one -- load into a sizeof(config_header_t)
-     * buffer and check for ENOENT -- cannot work: any real record is header + payload, so
-     * the HAL returns E2BIG and logs "stored config is N B, buffer is 12 B" at ERROR level
-     * on EVERY boot of a perfectly healthy device. The probe never told us anything either,
-     * since loadConfig() below already returns false on ENOENT. */
-    uint32_t len = MAX_CONFIG_SIZE;
+    /* No presence probe: "valid" here means the magic and the CRC hold, which only a full
+     * load can answer, and loadConfig() already returns false when nothing is stored. */
+    uint32_t len = OD_CONFIG_MAX_SIZE;
     return loadConfig(getConfigScratch(), &len);
 }
 
-/* The toolbox CRC-16/CCITT that used to live here is now
- * od_config_tlv_crc16() in shared/core. Deleted rather than left beside it: a local copy of a
- * promoted function is dead code that still compiles, and the next edit to one of them is the
- * drift this repo exists to prevent. calculateConfigCRC() below is a DIFFERENT checksum --
- * CRC-32 over the storage record -- and stays. */
-
-uint32_t calculateConfigCRC(uint8_t* data, uint32_t len){
-    uint32_t crc = 0xFFFFFFFF;
-    for (uint32_t i = 0; i < len; i++) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
-            if (crc & 1) {
-                crc = (crc >> 1) ^ 0xEDB88320;
-            } else {
-                crc = crc >> 1;
-            }
-        }
-    }
-    return ~crc;
-}
+/* Two checksums used to live here and neither does now: the toolbox CRC-16/CCITT moved to
+ * shared/core/od_config_tlv, and the storage record's CRC-32 to shared/core/od_config_store.
+ * A local copy of a promoted function is dead code that still compiles, and the next edit to
+ * one of them is the drift this repo exists to prevent. */
 
 /* The WiFi side effects. Deliberately NOT promoted (shared/core/od_config.h): the credential
  * copies and the server_host numeric-IP coercion are LAN-transport behaviour on the one target
@@ -363,7 +299,7 @@ bool loadGlobalConfig(){
     wifiEncryptionType = 0;
 
     uint8_t* configData = getConfigScratch();
-    uint32_t configLen = MAX_CONFIG_SIZE;
+    uint32_t configLen = OD_CONFIG_MAX_SIZE;
     if (!loadConfig(configData, &configLen)) {
         od_config_reset(&globalConfig);
         return false;

@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "opendisplay_config_storage.h" /* MAX_CONFIG_SIZE */
+#include "od_config_asm.h" /* OD_CONFIG_MAX_SIZE */
 
 /*
  * Optional build-time factory config embed. scripts/factory_config_gen.py runs as
@@ -13,7 +13,7 @@
  * defining g_factory_embed and adds -DFACTORY_HAS_EMBED. Otherwise it writes a
  * stub and this file's provisioning path compiles to a no-op. Ported from the
  * reference firmware (Firmware/src/factory_config.{h,cpp}); the generator's
- * MAX_PACKET (tools/config_packet.py) equals MAX_CONFIG_SIZE so data[] fits the
+ * MAX_PACKET (tools/config_packet.py) equals OD_CONFIG_MAX_SIZE so data[] fits the
  * padded blob exactly.
  */
 #define FACTORY_CFG_MAGIC 0xFAC70A5Au
@@ -21,7 +21,7 @@
 typedef struct __attribute__((packed)) {
   uint32_t magic;
   uint32_t len;
-  uint8_t data[MAX_CONFIG_SIZE];
+  uint8_t data[OD_CONFIG_MAX_SIZE];
 } factory_flash_cfg_t;
 
 #ifdef FACTORY_HAS_EMBED

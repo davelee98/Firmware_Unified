@@ -32,7 +32,7 @@ typedef struct {
   /* Whether this transfer OPENED unauthenticated, under the key-loss exemption. Every continuation
    * must match, so a transfer cannot be started with a session and finished without one. */
   bool unauth;
-  uint8_t buffer[MAX_CONFIG_SIZE];
+  uint8_t buffer[OD_CONFIG_MAX_SIZE];
 } od_chunked_config_t;
 
 static od_chunked_config_t s_cfg_chunk;
@@ -93,8 +93,8 @@ od_cmd_result_t od_cmd_app_config_read(const od_cmd_ctx_t *ctx, od_span_t body)
   /* File-static: the producer reads from this across many pump passes, which is exactly why
    * od_dispatch DEFERS every config-mutating opcode while a read is active -- a write reloading
    * through the same buffer mid-read would splice two configs into one CRC-valid read-back. */
-  static uint8_t config_data[MAX_CONFIG_SIZE];
-  uint32_t config_len = MAX_CONFIG_SIZE;
+  static uint8_t config_data[OD_CONFIG_MAX_SIZE];
+  uint32_t config_len = OD_CONFIG_MAX_SIZE;
 
   (void)body;
   if (!initConfigStorage()) {
@@ -185,7 +185,7 @@ od_cmd_result_t od_cmd_app_config_write(const od_cmd_ctx_t *ctx, od_span_t body)
 
     if (len >= CONFIG_CHUNK_SIZE_WITH_PREFIX) {
       s_cfg_chunk.total_size = (uint32_t)data[0] | ((uint32_t)data[1] << 8);
-      if (s_cfg_chunk.total_size > MAX_CONFIG_SIZE || s_cfg_chunk.total_size == 0u) {
+      if (s_cfg_chunk.total_size > OD_CONFIG_MAX_SIZE || s_cfg_chunk.total_size == 0u) {
         od_cmd_config_reset();
         (void)od_cmd_reply_plain(ctx, err, sizeof(err));
         return OD_CMD_NACK;
@@ -203,7 +203,7 @@ od_cmd_result_t od_cmd_app_config_write(const od_cmd_ctx_t *ctx, od_span_t body)
       }
     } else {
       s_cfg_chunk.total_size = len;
-      if (s_cfg_chunk.total_size > MAX_CONFIG_SIZE) {
+      if (s_cfg_chunk.total_size > OD_CONFIG_MAX_SIZE) {
         od_cmd_config_reset();
         (void)od_cmd_reply_plain(ctx, err, sizeof(err));
         return OD_CMD_NACK;
@@ -297,7 +297,7 @@ od_cmd_result_t od_cmd_app_config_chunk(const od_cmd_ctx_t *ctx, od_span_t body)
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return OD_CMD_NACK;
   }
-  if (s_cfg_chunk.received_size + len > MAX_CONFIG_SIZE) {
+  if (s_cfg_chunk.received_size + len > OD_CONFIG_MAX_SIZE) {
     od_cmd_config_reset();
     (void)od_cmd_reply_plain(ctx, err, sizeof(err));
     return OD_CMD_NACK;

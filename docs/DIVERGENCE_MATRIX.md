@@ -675,3 +675,52 @@ which is why the map check is part of it.
 `uint32_t` pitch table (1 KB of flash) plus runner state on a part with 480 B of RAM headroom, and
 the config struct's layout would change — which is an ABI break against every host test compiled
 for that profile.
+
+---
+
+## 17. Stored config record — three loaders that disagreed about malformed input (2026-08-24)
+
+Resolved by `shared/core/od_config_store.c`, which is now the only implementation of the record's
+framing and validation. The record itself is unchanged and stays unchanged: `0xDEADBEEF`,
+version 1, a 16-byte little-endian header, CRC-32 over the payload. What differed was **which
+malformed records each target accepted**, and the shared loader is stricter than the loosest of
+them. Written down because that is an observable acceptance change, not a refactor.
+
+| Check | ESP32 | nordic-zephyr | efr32bg22-slc | Shared |
+|---|---|---|---|---|
+| `magic == 0xDEADBEEF` | yes | yes | yes | yes |
+| `version` | **not checked** | **not checked** | **not checked** | **not checked** — see below |
+| `data_len` against the build's cap | yes | yes | yes | yes |
+| `data_len` against the **caller's** buffer | yes | **no** | yes | yes |
+| declared payload actually present | yes | **no** | yes | yes |
+| stored span not longer than a legal record | in its HAL | in its HAL | yes, before the header | **in the core** |
+| CRC-32 over the payload | yes | yes | yes | yes |
+
+Three consequences worth stating:
+
+1. **Nordic accepted a physically truncated record.** It zeroes its whole 4 KB staging struct
+   before loading and never compares the bytes it got against the header's `data_len`, so a
+   short record whose CRC happens to cover the implicit zero tail passed. It now fails.
+2. **Nordic ignored the caller's capacity.** The shared loader refuses rather than relying on
+   every caller having passed a buffer of exactly `MAX_CONFIG_SIZE`.
+3. **The over-long-span check moved into the core.** ESP32 and Nordic reject one inside their
+   caching HALs as a side effect of buffer size; BG22 rejects it explicitly because NVM3 objects
+   go to 2112 bytes against a 2064-byte record cap, so the window is physically reachable there
+   and a device provisioned by a larger-cap build is how one arrives. Leaving it to the medium
+   made the core's acceptance target-dependent, which is the thing this promotion removes.
+
+**Nordic's failed clear used to report success.** `clearStoredConfig()` discarded
+`settings_delete()`'s result and returned `true` regardless, so a device that could not erase its
+config told the caller it had. It now reports what the medium did. ESP32 and BG22 already
+reported it.
+
+**`version` stays carried and unchecked, deliberately.** All three targets write 1 and none has
+ever read it back. Enforcing it would be a new rejection introduced under a refactor: a device
+holding a record this firmware did not write would stop booting on its stored config. Pinned by
+`tests/host/config_store_test.c`, which loads records carrying version 2 and `0xFFFFFFFF`.
+
+Validation **order** follows ESP32, the authority per CLAUDE.md: magic, then the cap checks, then
+truncation, then CRC. BG22 tested truncation before the caller's capacity, so a record that is
+both truncated and too large for the caller now reports the cap where BG22 would have reported
+truncation. Every caller collapses the result to a refusal, so this is visible only through the
+shared result enum — pinned so it stays a decision.

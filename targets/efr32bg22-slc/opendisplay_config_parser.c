@@ -48,7 +48,7 @@ bool parseConfigBytes(uint8_t *config_data, uint32_t config_len,
 bool loadGlobalConfig(struct GlobalConfig *global_config)
 {
   uint8_t *data;
-  uint32_t len = MAX_CONFIG_SIZE;
+  uint32_t len = OD_CONFIG_MAX_SIZE;
 
   if (global_config == NULL) {
     return false;

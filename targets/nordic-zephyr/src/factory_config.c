@@ -34,7 +34,7 @@ static uint16_t factory_outer_crc16(const uint8_t *data, uint32_t body_len)
 
 static bool factory_packet_valid(const uint8_t *data, uint32_t len)
 {
-  if (len < 4u || len > MAX_CONFIG_SIZE) {
+  if (len < 4u || len > OD_CONFIG_MAX_SIZE) {
     return false;
   }
   const uint16_t declared = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
@@ -54,7 +54,7 @@ static bool factory_embed_present(const factory_flash_cfg_t *fc)
   if (fc == NULL || fc->magic != FACTORY_CFG_MAGIC) {
     return false;
   }
-  if (fc->len < 4u || fc->len > MAX_CONFIG_SIZE) {
+  if (fc->len < 4u || fc->len > OD_CONFIG_MAX_SIZE) {
     return false;
   }
   return factory_packet_valid(fc->data, fc->len);

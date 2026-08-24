@@ -207,6 +207,22 @@ add_executable(od_config_asm_cap_test config_asm_cap_test.c)
 target_link_libraries(od_config_asm_cap_test od_shared_silabs)
 add_test(NAME config_asm_cap COMMAND od_config_asm_cap_test)
 
+# config_store: the stored record's framing, CRC and bounds over a fake MEDIUM -- one that holds
+# bytes and injects failures, and knows nothing about magic, versions or checksums. The record
+# shape is asserted as literal little-endian bytes rather than by re-encoding it, so a change
+# made in both the writer and the reader still fails here.
+#
+# Built against both caps, because OD_CONFIG_MAX_SIZE is the one thing that differs per target
+# and it decides what is refused -- and because it changes the ABI of the structs this module
+# static-asserts against (CLAUDE.md decision 12).
+add_executable(od_config_store_test config_store_test.c)
+target_link_libraries(od_config_store_test od_shared)
+add_test(NAME config_store COMMAND od_config_store_test)
+
+add_executable(od_config_store_cap_test config_store_test.c)
+target_link_libraries(od_config_store_cap_test od_shared_silabs)
+add_test(NAME config_store_cap COMMAND od_config_store_cap_test)
+
 # silabs_storage: the BG22 overlay, where od_config_asm's reassembly state and the NVM3 record are
 # one object. The two static asserts in the storage file compare LAYOUT; this compares SEQUENCING
 # -- the header is written over the four live assembler state words, so the order of capture,
@@ -215,6 +231,7 @@ add_test(NAME config_asm_cap COMMAND od_config_asm_cap_test)
 add_executable(od_silabs_storage_test
     silabs_storage_test.c
     fake_silabs/nvm3_fake.c
+    ../../targets/efr32bg22-slc/od_hal_nvs.c
     ../../targets/efr32bg22-slc/opendisplay_config_storage.c)
 target_include_directories(od_silabs_storage_test PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/fake_silabs

@@ -90,7 +90,7 @@ static const od_reply_t BLE = { OD_ORIGIN_BLE, 5u };
 
 /* Big enough that its chunk count EXCEEDS the queue depth, which is the only way the backpressure
  * case actually stalls: at ~96 bytes of payload per chunk, OD_TXQ_SLOTS-1 slots absorb roughly
- * 3.1 KB, so a 1.4 KB read simply completes and proves nothing. MAX_CONFIG_SIZE is 4096. */
+ * 3.1 KB, so a 1.4 KB read simply completes and proves nothing. OD_CONFIG_MAX_SIZE is 4096. */
 static uint8_t g_blob[4096];
 
 static void setup(bool security_on)

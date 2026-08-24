@@ -326,24 +326,55 @@ int od_hal_i2c_write(uint8_t addr, uint8_t reg, const uint8_t *buf, uint16_t len
 Note: `od_hal_i2c` should land on ESP-IDF's `driver/i2c_master.h` (IDF ≥ 5.2), never the
 deprecated `driver/i2c.h` (TOOLCHAINS.md).
 
-### `od_hal_nvs` — config blob persistence
+### `od_hal_nvs` — the config record, as bytes — **SHIPPED**
 
-The one storage semantic all three converge on. NRF54 = Zephyr `settings`, Silabs = NVM3,
-ESP32 = LittleFS/NVS. Reduce to three calls (the NRF54 `opendisplay_config_storage.c` is the
-model — three functions behind an already-clean seam):
+**Implemented 2026-08-24 (`shared/hal/od_hal_nvs.h`, step 1 of
+`plans/PLAN_STORAGE_SEAM_2026-08-23.md`). The signatures below are what shipped; the whole-blob
+sketch this section used to carry is superseded.** Per CLAUDE.md decision 14, read the header
+over this doc where they differ.
 
 ```c
-int  od_hal_nvs_load(uint8_t *buf, uint32_t cap, uint32_t *len_out);  /* 0 ok, -ENOENT empty */
-int  od_hal_nvs_save(const uint8_t *buf, uint32_t len);
-int  od_hal_nvs_erase(void);
+int od_hal_nvs_init (void);
+int od_hal_nvs_size (uint32_t *len_out);                 /* stored size, or ENOENT */
+int od_hal_nvs_read (uint32_t offset, void *buf, uint32_t len);
+int od_hal_nvs_write(const void *record, uint32_t len);  /* ONE contiguous span */
+int od_hal_nvs_erase(void);
 ```
 
-The core owns the record framing (magic, version, inner CRC32 — which *is* enforced on load in
-all three) so the HAL stores an opaque blob. `cap` carries `MAX_CONFIG_SIZE`, which since
-2026-07-25 is **4096 on every target** (DIVERGENCE_MATRIX 2.7) — the parameter stays rather
-than becoming a constant, because the HAL should not have to be recompiled to change a size the
-core owns, and because it keeps the bound explicit at the call site. On BG22 this is the
-4112-byte NVM3 record; see MEMORY_CONSTRAINTS.md item 3 for what that costs there.
+The core owns the record framing (magic, version, inner CRC-32) so the HAL sees an opaque byte
+range. **Read takes an offset** because BG22 reads the 16-byte header, validates it, and only
+then reads the payload — `nvm3_readPartialData()` does that with no staging buffer at all, on a
+part whose whole heap is ~10.5 KB, and a whole-record read would force it to find a second 2 KB
+it does not have (MEMORY_CONSTRAINTS.md item 3).
+
+Neither of the other two media can read at an offset, and that is a property of the media rather
+than of the port: the Zephyr settings NVS backend registers no `csi_load_one`, so
+`settings_load_one()` falls back to a full partition scan, and the only primitive under it,
+`nvs_read()`, starts at byte 0; ESP-IDF's `nvs_get_blob()` likewise returns the whole blob or
+nothing. Both therefore read the record once into a buffer of their own and serve offsets from
+it. `od_hal_nvs_size()` is cheap on ESP32 (`nvs_get_blob` with a NULL destination resolves the
+entry through the page index without touching a data page) and on BG22 (`nvm3_getObjectInfo`);
+on Nordic it is answered from the same fill, because `settings_get_val_len()` would walk the
+partition a second time for a number the fill already has.
+
+**Write takes one contiguous span**, not a header pointer plus a payload pointer: BG22's single
+`nvm3_writeData` works only because a union puts header and payload adjacent, and two unrelated
+pointers would force exactly the copy the offset seam exists to avoid. The caller supplies the
+workspace with the header at offset 0.
+
+Failure semantics are part of the seam, not left to each implementation. A failed mutation must
+leave a *whole* record — the complete old one, the complete new one, or nothing on a device that
+had none — never a partial write, and an implementation that caches
+must **invalidate on failure** rather than either keep or clear its copy: ESP-IDF's
+`nvs_set_blob()` writes the new entry before erasing the previous, and Zephyr's settings delete
+removes the name entry before the value entry, so in both cases the error arrives after the
+medium may already have changed. Invalidating re-reads the medium, so a config that survived is
+still served; clearing to empty is the failure the rule exists to prevent — a device reporting
+itself unconfigured while the medium still holds its config, and coming back configured on the
+next boot.
+
+`od_hal_nvs_secure_erase()` is **not** here. One target defines it and one call site uses it, so
+it lives in `targets/esp32-idf/hal/od_hal_nvs_secure.h`.
 
 ### `od_hal_crypto` — **SHIPPED**, and the header is now the contract
 

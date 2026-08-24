@@ -11,7 +11,7 @@
 typedef struct __attribute__((packed)) {
     uint32_t magic;
     uint32_t len;
-    uint8_t data[MAX_CONFIG_SIZE];
+    uint8_t data[OD_CONFIG_MAX_SIZE];
 } factory_flash_cfg_t;
 
 #ifdef FACTORY_HAS_EMBED

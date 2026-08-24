@@ -271,7 +271,7 @@ xfer_direct_dispatch() {
 
     hits=$(grep -RInE '\bod_cmd_app_(direct_start|direct_data|direct_end|partial_start)\b' \
         shared/core targets --include='*.c' --include='*.cpp' --include='*.h' \
-        --exclude-dir=build 2>/dev/null || true)
+        --exclude-dir='build*' 2>/dev/null || true)
     if [ -n "$hits" ]; then
         echo "$hits"
         echo "legacy direct/partial target hook returned; dispatch must route straight to od_xfer"
@@ -300,7 +300,7 @@ pipe_dispatch_ownership() {
     done
 
     hits=$(grep -RInE '\bod_cmd_app_pipe_(start|data|end)\b' shared/core targets \
-        --include='*.c' --include='*.cpp' --include='*.h' --exclude-dir=build \
+        --include='*.c' --include='*.cpp' --include='*.h' --exclude-dir='build*' \
         2>/dev/null || true)
     if [ -n "$hits" ]; then
         echo "$hits"
@@ -330,8 +330,11 @@ check "structure: PIPE dispatch ownership" pipe_dispatch_ownership
 absent_or_fail() {
     local what=$1 pattern=$2 hits rc
     shift 2
+    # 'build*', not 'build': Nordic's trees are build-xiao_ble, build-nrf54l15, ... so a bare
+    # 'build' left every generated Zephyr header in scope, where a pattern can match code no one
+    # here wrote.
     hits=$(grep -RInE "$pattern" "$@" --include='*.c' --include='*.cpp' --include='*.h' \
-           --exclude-dir=build)
+           --exclude-dir='build*')
     rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "$hits"
@@ -430,7 +433,7 @@ core_reset_is_the_teardown() {
         [ -d "$d" ] || continue
         found=1
         n=$(grep -RIlE '\bod_core_reset[[:space:]]*\(' "$d" \
-            --include='*.c' --include='*.cpp' --exclude-dir=build | wc -l)
+            --include='*.c' --include='*.cpp' --exclude-dir='build*' | wc -l)
         if [ "$n" -eq 0 ]; then
             echo "${d} has no od_core_reset() caller; its teardown does not reach the shared half"
             rc=1
@@ -448,7 +451,7 @@ transfer_single_pump_owner() {
     local hits rc
     hits=$(grep -RInE '\bod_zlib_pump_(reset|push)[[:space:]]*\(' shared/core targets \
         --include='*.c' --include='*.cpp' --include='*.h' --exclude='od_zlib_pump.c' \
-        --exclude='od_zlib_pump.h' --exclude-dir=build)
+        --exclude='od_zlib_pump.h' --exclude-dir='build*')
     rc=$?
     if [ "$rc" -gt 1 ]; then
         echo "grep could not scan for pump callers (status $rc); the ownership is unproven"
@@ -636,7 +639,7 @@ zlib_header_single_rule() {
         return 1
     fi
     hits=$(grep -RIn --include='*.c' --include='*.cpp' --include='*.h' \
-           --exclude='od_zlib_header.h' --exclude-dir=build \
+           --exclude='od_zlib_header.h' --exclude-dir='build*' \
            -e '>[[:space:]]*OPENDISPLAY_ZLIB_WINDOW_BITS' shared targets)
     rc=$?
     if [ "$rc" -eq 0 ]; then
@@ -649,7 +652,7 @@ zlib_header_single_rule() {
         return 1
     fi
 
-    engines=$(grep -RIl --include='*.c' --include='*.cpp' --exclude-dir=build \
+    engines=$(grep -RIl --include='*.c' --include='*.cpp' --exclude-dir='build*' \
               -e 'tinfl_decompress[[:space:]]*(' -e 'ST_ZLIB_FLG' shared targets)
     rc=$?
     if [ "$rc" -ne 0 ] || [ -z "$engines" ]; then
@@ -694,6 +697,51 @@ silabs_c13_config() {
     fi
 }
 check "silabs: C13 config ratchets" silabs_c13_config
+
+# PERMANENT. shared/core/od_config_store.c is the only implementation of the stored config
+# record -- its magic, its 16-byte header, its version field and its CRC-32. A target owns the
+# MEDIUM (shared/hal/od_hal_nvs.h) and nothing above it. All three carried their own copy of this
+# framing before the promotion, and they agreed only by maintenance.
+config_store_target_framing_absent() {
+    absent_or_fail "target-local config record framing returned; shared od_config_store owns it" \
+        '\b(CONFIG_STORAGE_MAGIC|CONFIG_STORAGE_VERSION|calculateConfigCRC|config_header_t|od_config_header_t|opendisplay_config_storage_t|OD_CONFIG_STORE_MAGIC|OD_CONFIG_STORE_VERSION|od_config_store_crc32)\b|0[xX][dD][eE][aA][dD][bB][eE][eE][fF]' \
+        targets
+}
+check "config storage: one record framing" config_store_target_framing_absent
+
+# The CRC-32 itself, by polynomial rather than by name: a second copy under a different function
+# name is the same defect. Both spellings, because a table-driven version reverses the constant.
+# Checked in two directions -- absent from targets/, and in exactly ONE file under shared/ -- so
+# that neither "a target grew one back" nor "shared grew a second" can pass.
+CONFIG_STORE_CRC_FILES=$'shared/core/od_config_store.c\nshared/core/od_config_store.h'
+config_store_single_crc32() {
+    local files rc
+    absent_or_fail "a second CRC-32 returned to a target; od_config_store_crc32 is the one" \
+        '0[xX](EDB88320|edb88320|04C11DB7|04c11db7)' \
+        targets || return 1
+
+    files=$(grep -RIlE '0[xX](EDB88320|edb88320|04C11DB7|04c11db7)' shared \
+            --include='*.c' --include='*.h' --exclude-dir='build*')
+    rc=$?
+    if [ "$rc" -gt 1 ]; then
+        echo "grep could not scan shared/ (status $rc); the CRC-32 location is unproven"
+        return 1
+    fi
+    files=$(printf '%s\n' "$files" | LC_ALL=C sort | grep -v '^$')
+    # An exact set, not a count: "every match is in the right file" also passes when there are NO
+    # matches, which would let the canonical implementation be deleted or renamed silently. The
+    # header is listed because it names the polynomial in prose.
+    if [ "$files" != "$CONFIG_STORE_CRC_FILES" ]; then
+        echo "expected the CRC-32 polynomial in exactly:"
+        printf '  %s\n' $CONFIG_STORE_CRC_FILES
+        echo "found:"
+        printf '  %s\n' ${files:-"(nothing)"}
+        echo "shared/core/od_config_store is the only home for the record's CRC-32"
+        return 1
+    fi
+    return 0
+}
+check "config storage: one CRC-32" config_store_single_crc32
 
 silabs_advertising_ownership() {
     local count close_calls

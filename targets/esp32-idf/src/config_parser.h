@@ -3,32 +3,9 @@
 
 #include <stdint.h>
 
+#include "od_config_asm.h"   // OD_CONFIG_MAX_SIZE, defined there and overridden per target by shared/profiles.cmake
+
 #define CONFIG_FILE_PATH "/config.bin"
-#define MAX_CONFIG_SIZE 4096
-
-// Sentinel in the first 4 bytes of /config.bin. Cheap provenance gate checked
-// before data_len is trusted or the CRC is computed: erased flash, a truncated
-// write, or a file from other firmware fails here in 4 bytes.
-#define CONFIG_STORAGE_MAGIC   0xDEADBEEFu
-#define CONFIG_STORAGE_VERSION 1u
-
-// On-flash header, written verbatim ahead of the payload. This was previously
-// the front of a config_storage_t that also carried a uint8_t[MAX_CONFIG_SIZE]
-// payload array, so save/load each kept a private 4 KB staging copy of the whole
-// blob purely to have somewhere contiguous to read/write it from. The payload is
-// now streamed straight to/from the caller's buffer; only the header is staged.
-// The on-flash byte layout is unchanged -- header(16) followed by data_len bytes.
-typedef struct {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t crc;
-    uint32_t data_len;
-} config_header_t;
-
-// The on-flash layout depends on this exact size: saveConfig() writes the header
-// verbatim and loadConfig() reads it back verbatim, so any padding introduced here
-// silently shifts the payload offset and orphans every previously stored config.
-static_assert(sizeof(config_header_t) == 16, "config_header_t must stay 16 bytes on flash");
 
 // Chunked CONFIG_WRITE reassembly state moved to shared/core/od_config_asm.h (F3, 2026-08-05).
 // The local chunked_write_state_t is GONE: its shape checks and bounds were the defect, and a
@@ -46,7 +23,7 @@ static_assert(sizeof(config_header_t) == 16, "config_header_t must stay 16 bytes
  * reset function, so no disconnect path and no watchdog touched it.
  *
  * The payload buffer is deliberately not zeroed: `active = false` makes it
- * unreachable, and MAX_CONFIG_SIZE is large enough that clearing it on every
+ * unreachable, and OD_CONFIG_MAX_SIZE is large enough that clearing it on every
  * teardown would be pointless work.
  */
 void resetChunkedWriteState(void);
@@ -57,7 +34,6 @@ bool saveConfig(uint8_t* configData, uint32_t len);
 bool clearStoredConfig(void);
 bool loadConfig(uint8_t* configData, uint32_t* len);
 bool hasValidStoredConfig(void);
-uint32_t calculateConfigCRC(uint8_t* data, uint32_t len);
 bool loadGlobalConfig();
 void printConfigSummary();
 // Suppress the informational config dumps (parse-time detail + printConfigSummary)

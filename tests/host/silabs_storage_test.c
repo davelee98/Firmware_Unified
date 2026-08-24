@@ -14,6 +14,7 @@
 
 #include "nvm3_default.h"
 #include "od_config_asm.h"
+#include "od_config_store.h"
 #include "od_span.h"
 
 #include <stdio.h>
@@ -132,7 +133,7 @@ static void test_header_overwrites_live_assembler_state(void)
 
     CASE("the CRC covers the payload as stored, not the header");
     {
-        uint32_t expect = calculateConfigCRC(&nvm3_fake_last_write[HDR_LEN], 1000u);
+        uint32_t expect = od_config_store_crc32(&nvm3_fake_last_write[HDR_LEN], 1000u);
         CHECK(wrote_crc() == expect);
     }
 }
@@ -183,7 +184,7 @@ static void test_read_back_across_reboot(void)
     simulate_reboot();
     CHECK(!s->active);
     CHECK(initConfigStorage());
-    out_len = MAX_CONFIG_SIZE;
+    out_len = OD_CONFIG_MAX_SIZE;
     /* The CONFIG_READ path loads straight back into the overlay's buffer. */
     CHECK(loadConfig(s->buffer, &out_len));
     CHECK(out_len == 2048u);
@@ -194,7 +195,7 @@ static void test_read_back_across_reboot(void)
     len = assemble((uint16_t)(CONFIG_CHUNK_SIZE + 1u), 0x03u);
     CHECK(saveConfig(s->buffer, len));
     simulate_reboot();
-    out_len = MAX_CONFIG_SIZE;
+    out_len = OD_CONFIG_MAX_SIZE;
     CHECK(loadConfig(s->buffer, &out_len));
     CHECK(out_len == CONFIG_CHUNK_SIZE + 1u);
     CHECK(payload_matches(s->buffer, out_len, 0x03u));
@@ -211,7 +212,7 @@ static void test_load_rejects_damaged_records(void)
     CHECK(saveConfig(s->buffer, 600u));
     nvm3_fake_object[HDR_LEN + 100u] ^= 0xffu;
     simulate_reboot();
-    out_len = MAX_CONFIG_SIZE;
+    out_len = OD_CONFIG_MAX_SIZE;
     CHECK(!loadConfig(s->buffer, &out_len));
 
     CASE("a wrong magic is refused before any length is trusted");
@@ -220,7 +221,7 @@ static void test_load_rejects_damaged_records(void)
     CHECK(saveConfig(s->buffer, 600u));
     nvm3_fake_object[0] ^= 0xffu;
     simulate_reboot();
-    out_len = MAX_CONFIG_SIZE;
+    out_len = OD_CONFIG_MAX_SIZE;
     CHECK(!loadConfig(s->buffer, &out_len));
 
     CASE("a data_len longer than the stored object is refused");
@@ -230,7 +231,7 @@ static void test_load_rejects_damaged_records(void)
     nvm3_fake_object[12] = 0xffu;   /* data_len -> 0x000002ff, past the 600-byte body */
     nvm3_fake_object[13] = 0x02u;
     simulate_reboot();
-    out_len = MAX_CONFIG_SIZE;
+    out_len = OD_CONFIG_MAX_SIZE;
     CHECK(!loadConfig(s->buffer, &out_len));
 
     CASE("a caller buffer smaller than the stored config is refused, never truncated into");
@@ -243,7 +244,7 @@ static void test_load_rejects_damaged_records(void)
 
     CASE("an absent record is not a load");
     setup();
-    out_len = MAX_CONFIG_SIZE;
+    out_len = OD_CONFIG_MAX_SIZE;
     CHECK(!loadConfig(s->buffer, &out_len));
 }
 
@@ -266,7 +267,7 @@ static void test_write_failure_preserves_prior_record(void)
 
     nvm3_fake_write_status = SL_STATUS_OK;
     simulate_reboot();
-    out_len = MAX_CONFIG_SIZE;
+    out_len = OD_CONFIG_MAX_SIZE;
     CHECK(loadConfig(s->buffer, &out_len));
     CHECK(out_len == 400u);
     CHECK(payload_matches(s->buffer, 400u, 0x90u));
@@ -300,10 +301,44 @@ static void test_write_failure_preserves_prior_record(void)
     CHECK(nvm3_fake_writes == 0u);
     CHECK(s->active);
     CHECK(s->received == CONFIG_CHUNK_SIZE);
-    out_len = MAX_CONFIG_SIZE;
+    out_len = OD_CONFIG_MAX_SIZE;
     CHECK(!loadConfig(s->buffer, &out_len));
     CHECK(!clearStoredConfig());
     nvm3_fake_set_mounted(true);
+}
+
+static void test_on_demand_open(void)
+{
+    struct od_config_asm *s = opendisplay_config_assembler();
+    uint32_t out_len;
+
+    /* nvm3_defaultHandle is statically bound, so a pointer test says nothing about whether the
+     * instance was ever opened -- hasBeenOpened does. Every entry point must therefore open on
+     * demand rather than assume some earlier call did. The fake now refuses operations on a
+     * closed handle, so an adapter that stopped doing this fails here. */
+    CASE("a closed but openable instance is opened on demand by save");
+    setup();
+    (void)assemble(400u, 0x90u);
+    nvm3_fake_set_opened(false);
+    CHECK(saveConfig(s->buffer, 400u));
+    CHECK(nvm3_fake_writes == 1u);
+
+    CASE("and by load");
+    nvm3_fake_set_opened(false);
+    od_config_asm_reset(s);
+    out_len = OD_CONFIG_MAX_SIZE;
+    CHECK(loadConfig(s->buffer, &out_len));
+    CHECK(out_len == 400u);
+    CHECK(payload_matches(s->buffer, 400u, 0x90u));
+
+    CASE("and by clear");
+    nvm3_fake_set_opened(false);
+    CHECK(clearStoredConfig());
+    CHECK(nvm3_fake_deletes == 1u);
+
+    CASE("and by init itself");
+    nvm3_fake_set_opened(false);
+    CHECK(initConfigStorage());
 }
 
 static void test_clear(void)
@@ -318,7 +353,7 @@ static void test_clear(void)
     CHECK(clearStoredConfig());
     CHECK(!nvm3_fake_present);
     simulate_reboot();
-    out_len = MAX_CONFIG_SIZE;
+    out_len = OD_CONFIG_MAX_SIZE;
     CHECK(!loadConfig(s->buffer, &out_len));
     /* KEY_NOT_FOUND is success here: od_cmd_app_config_clear must not NACK a clear of nothing. */
     CHECK(clearStoredConfig());
@@ -364,7 +399,7 @@ static void test_load_into_a_live_assembler_destroys_it(void)
               OD_CONFIG_ASM_ACCEPTED);
     }
     CHECK(s->buffer[0] == 0xa0u);
-    out_len = MAX_CONFIG_SIZE;
+    out_len = OD_CONFIG_MAX_SIZE;
     CHECK(loadConfig(s->buffer, &out_len));
     CHECK(s->buffer[0] == 0x21u);       /* the in-flight chunk is gone */
 }
@@ -376,6 +411,7 @@ int main(void)
     test_read_back_across_reboot();
     test_load_rejects_damaged_records();
     test_write_failure_preserves_prior_record();
+    test_on_demand_open();
     test_clear();
     test_load_into_a_live_assembler_destroys_it();
     printf("silabs_storage: %u checks, %u failures\n", g_checks, g_failures);
