@@ -9,6 +9,10 @@
 
 #include "display_service.h"
 #include "od_hal_sleep.h"
+#include "od_hal_gpio.h"
+#include "structs.h"
+
+extern struct od_config globalConfig;
 
 extern uint8_t dynamicreturndata[11];
 
@@ -33,4 +37,48 @@ void od_sensor_app_bus_recover(uint8_t bus_id)
     invalidateOpenDisplayWire();
     (void)initOrRestoreWireForBus(bus_id);
     od_hal_delay_ms(2);
+}
+
+#ifndef OD_CHARGER_FLAG_ENABLE_ACTIVE_LOW
+#define OD_CHARGER_FLAG_ENABLE_ACTIVE_LOW (1u << 0)
+#endif
+#ifndef OD_CHARGER_FLAG_STATE_ACTIVE_LOW
+#define OD_CHARGER_FLAG_STATE_ACTIVE_LOW (1u << 1)
+#endif
+
+static bool validPin(uint8_t pin) { return pin != 0 && pin != 0xFF; }
+
+bool od_sensor_app_bq_enable(bool on)
+{
+    const uint8_t en = globalConfig.power_option.charge_enable_pin;
+    const bool activeLow =
+        (globalConfig.power_option.charger_flags & OD_CHARGER_FLAG_ENABLE_ACTIVE_LOW) != 0;
+    const uint8_t st = globalConfig.power_option.charge_state_pin;
+
+    if (validPin(en)) {
+        // Configure the output and establish the level in one call -- gpio_config() then
+        // gpio_set_level(), the same two register writes in the same order the port used.
+        od_hal_gpio_config_output(en, on ? !activeLow : activeLow);
+    }
+    if (validPin(st)) {
+        od_hal_gpio_config_input(st, /*pull_up=*/true, /*pull_down=*/false);
+    }
+    // An absent enable pin is a successful no-op: plenty of boards have no software charge
+    // control, and reporting failure would make a normal board look broken.
+    return true;
+}
+
+bool od_sensor_app_bq_charging(bool *charging)
+{
+    const uint8_t st = globalConfig.power_option.charge_state_pin;
+
+    if (!validPin(st) || charging == nullptr) {
+        return false;      // no state pin: UNKNOWN, not "not charging"
+    }
+    const bool activeLow =
+        (globalConfig.power_option.charger_flags & OD_CHARGER_FLAG_STATE_ACTIVE_LOW) != 0;
+    const int level = od_hal_gpio_read(st);
+
+    *charging = activeLow ? (level == 1) : (level == 0);
+    return true;
 }

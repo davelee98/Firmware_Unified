@@ -226,6 +226,7 @@ set(OD_SHARED_SOURCES_APP_BUZZER
 # grows no dummy functions: BG22 declines this tier entirely.
 set(OD_SHARED_SOURCES_APP_SENSOR
     "${CMAKE_CURRENT_LIST_DIR}/core/od_sensor_sht40.c"
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_sensor_bq27220.c"
 )
 
 # HAL_LOG owns portable record formatting. Enabled targets must implement od_hal_log and

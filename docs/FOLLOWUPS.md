@@ -1103,3 +1103,77 @@ That is the behaviour the shared driver takes.
 This is one of the rare cases where the Nordic port is right and the authority is not, so it is
 recorded rather than resolved by the usual "`Firmware` wins" default (CLAUDE.md § Migration
 constraints).
+
+---
+
+## 18. `Firmware_Unified` / both targets — a dead BQ27220 keeps advertising its last state of charge
+
+Found 2026-08-24 while promoting the driver (sensor-seam step 7).
+**PROJECT RULING 2026-08-24: leave it.** Recorded so the behaviour reads as a decision rather than
+an oversight, and so nobody "fixes" it later on the grounds that SHT40 does the opposite.
+
+On a failed voltage read the BQ27220 poll invalidates its cached voltage and returns — **before the
+MSD write**:
+
+```c
+if (!bq27220_read_block(s, BQ27220_CMD_VOLTAGE, raw, 2)) {
+    s_gauge_ok = false; s_batt_v = -1.0f; s_soc = 0xFF;
+    return;                       /* <-- the MSD byte is never touched */
+}
+```
+
+So a gauge that stops answering — disconnected, failed, or on a bus that has gone quiet — leaves
+its last good SOC byte in the advertisement indefinitely. A host sees a battery frozen at whatever
+it last read, not an absent one. `od_sensor_bq27220_voltage_volts()` correctly returns -1, so the
+inconsistency is only in the advertised byte.
+
+**The two DEVICE DRIVERS disagree, not the two targets.** SHT40's poll writes an explicit invalid
+marker (`FF FF FF`) when it cannot read and BQ27220's does not — consistently, in `../Firmware` and
+in both ports. There is no evident reason for the difference beyond the drivers having been written
+separately.
+
+The fix would be one line — write `0xFF` to `msd_data_start_byte` on the failure path, matching
+SHT40 — and it is **not being made**. It changes what a deployed host sees for a failing gauge, and
+the ruling is that the existing behaviour stands.
+
+`tests/host/sensor_bq27220_test.c` pins it: a failed read leaves the previous byte and a
+subsequent poll does not overwrite it. Anyone changing this has to change that assertion, which is
+the point — it cannot drift silently in either direction.
+
+---
+
+## 19. `Firmware` / `Firmware_Unified` — the charge-state polarity is inverted against the contract
+
+Found 2026-08-24 during sensor-seam step 7's review. **Preserved, not fixed** — it is faithful to
+the authority and to both ports, and correcting it flips a wire-visible bit on every board that has
+a charge-state pin. Reported so the decision is deliberate.
+
+The canonical header is explicit (`opendisplay_structs.h:482`):
+
+> `OD_CHARGER_FLAG_STATE_ACTIVE_LOW` — *"charge-state (BQ25616 STAT) is active-low: **charging when
+> LOW**"*
+
+Every implementation reads it the other way round:
+
+```c
+return activeLow ? (level == HIGH) : (level == LOW);
+```
+— `Firmware/src/sensor_bq27220.cpp:120`, and identically in both `Firmware_Unified` ports before
+this promotion, now preserved in both `od_sensor_app` charger seams.
+
+**Both branches are backwards.** With the flag set, the contract says charging is LOW and the code
+reports charging on HIGH. With the flag clear — active-high, so charging is HIGH — the code reports
+charging on LOW. There is no reading of the header under which this is right.
+
+**What it costs:** bit 7 of the BQ27220 MSD byte is the charging indicator, so a host sees
+"charging" exactly when the battery is not, and vice versa, on any board that wires STAT. Boards
+with no state pin are unaffected — the seam returns "unknown" and the driver packs not-charging.
+
+**Why it has survived:** a board whose flag is *also* set backwards in its config reads correctly,
+because two inversions cancel. Any deployed config that was tuned by observation rather than from
+the datasheet is therefore compensating for this, and **fixing the code alone would break those
+boards**. That is the real reason this is a decision rather than a patch: it needs an audit of
+which deployed configs set `OD_CHARGER_FLAG_STATE_ACTIVE_LOW`, and probably a coordinated change
+with the host.
+
+Correcting it is one operator per target seam. Doing so without the config audit is not advised.

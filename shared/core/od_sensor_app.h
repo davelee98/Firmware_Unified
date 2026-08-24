@@ -9,6 +9,7 @@
 #ifndef OD_SENSOR_APP_H
 #define OD_SENSOR_APP_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -32,6 +33,16 @@ void od_sensor_app_msd_write(uint8_t index, uint8_t value);
  * re-initialises per operation and has nothing to tear down, so its implementation is the
  * settle alone. Called only on the retry path, never in the ordinary case. */
 void od_sensor_app_bus_recover(uint8_t bus_id);
+
+/* Establish the charger-enable GPIO. Configure the output and THEN drive the active level, which
+ * is the order both ports used; reversing it glitches the rail. An absent enable pin is a
+ * successful no-op, not a failure -- plenty of boards have no software charge control. */
+bool od_sensor_app_bq_enable(bool on);
+
+/* Charging state, TRI-STATE by return value: false means "no state pin, so unknown", and only
+ * then is *charging untouched. A board with no state pin is not "not charging", and collapsing
+ * the two would advertise a definite answer nobody measured. */
+bool od_sensor_app_bq_charging(bool *charging);
 
 #ifdef __cplusplus
 }

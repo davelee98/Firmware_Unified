@@ -1,183 +1,28 @@
+/* The four names opendisplay_ble.c and opendisplay_battery.c call, over the shared driver. */
+
 #include "opendisplay_sensor_bq27220.h"
-#include "od_log.h"
-#include "opendisplay_sensor_common.h"
-#include "od_hal_i2c.h"
+
+#include "od_sensor_bq27220.h"
 #include "opendisplay_ble.h"
-#include "od_runtime_types.h"
-#include "od_gpio.h"
 
-#include <stdio.h>
 #include <zephyr/kernel.h>
-
-#define BQ27220_CMD_VOLTAGE      0x08u
-#define BQ27220_CMD_SOC          0x2Cu
-#define BQ27220_MSD_CHARGING_BIT 0x80u
-#define BQ27220_MSD_POLL_TTL_MS  30000u
-
-static float s_batt_v = -1.0f;
-static bool s_gauge_ok;
-
-static bool valid_pin(uint8_t pin)
-{
-	return pin != 0u && pin != 0xFFu;
-}
-
-static const struct SensorData *bq27220_config(void)
-{
-	const struct od_config *cfg = opendisplay_get_global_config();
-
-	if (cfg == NULL) {
-		return NULL;
-	}
-	for (uint8_t i = 0; i < cfg->sensor_count; i++) {
-		if (cfg->sensors[i].sensor_type == OD_SENSOR_TYPE_BQ27220) {
-			return &cfg->sensors[i];
-		}
-	}
-	return NULL;
-}
-
-static uint8_t bq27220_addr_7bit(const struct SensorData *s)
-{
-	uint8_t a = s->i2c_addr_7bit;
-
-	if (a == 0u || a == 0xFFu) {
-		return 0x55u;
-	}
-	return a;
-}
-
-/* Register read: write command byte (repeated start, no STOP) then read len. */
-static bool bq27220_read_block(const struct SensorData *s, uint8_t cmd,
-			       uint8_t *buf, uint8_t len)
-{
-
-	if (s->bus_id == 0xFFu) {
-		return false;
-	}
-	uint8_t addr = bq27220_addr_7bit(s);
-
-	/* Selector then read as ONE transaction: this gauge answers a STOP-then-START read with
-	 * whatever an unaddressed read yields, which is plausible garbage rather than an error. */
-	return od_hal_i2c_write_read(s->bus_id, addr, &cmd, 1, buf, len) == OD_HAL_I2C_OK;
-}
-
-static bool charger_gpio_charging(void)
-{
-	const struct od_config *cfg = opendisplay_get_global_config();
-
-	if (cfg == NULL) {
-		return false;
-	}
-	uint8_t st = cfg->power_option.charge_state_pin;
-
-	if (!valid_pin(st)) {
-		return false;
-	}
-	bool active_low = (cfg->power_option.charger_flags & OD_CHARGER_FLAG_STATE_ACTIVE_LOW) != 0u;
-	int level = od_gpio_read(st);
-
-	/* Matches reference charger_gpio_charging(). */
-	return active_low ? (level == 1) : (level == 0);
-}
-
-bool opendisplay_sensor_bq27220_is_configured(void)
-{
-	return bq27220_config() != NULL;
-}
-
-float opendisplay_sensor_bq27220_voltage_volts(void)
-{
-	return s_gauge_ok ? s_batt_v : -1.0f;
-}
 
 void opendisplay_sensor_bq27220_init(void)
 {
-	const struct od_config *cfg = opendisplay_get_global_config();
-
-	if (cfg == NULL) {
-		return;
-	}
-	uint8_t en = cfg->power_option.charge_enable_pin;
-
-	if (valid_pin(en)) {
-		bool active_low = (cfg->power_option.charger_flags &
-				   OD_CHARGER_FLAG_ENABLE_ACTIVE_LOW) != 0u;
-		od_gpio_configure_output(en, !active_low);
-	}
-	uint8_t st = cfg->power_option.charge_state_pin;
-
-	if (valid_pin(st)) {
-		od_gpio_configure_input(st, true, false);
-	}
-
-	const struct SensorData *s = bq27220_config();
-
-	if (s == NULL) {
-		return;
-	}
-	uint8_t raw[2];
-
-	if (!bq27220_read_block(s, BQ27220_CMD_VOLTAGE, raw, 2)) {
-		od_log_info("BQ27220: not found @0x%02X", bq27220_addr_7bit(s));
-		return;
-	}
-	od_log_info("BQ27220: fuel gauge @0x%02X", bq27220_addr_7bit(s));
+	od_sensor_bq27220_init(opendisplay_get_global_config());
 }
 
 void opendisplay_sensor_bq27220_poll(void)
 {
-	static uint32_t last_poll_ms;
-	static bool have_polled;
+	od_sensor_bq27220_poll(opendisplay_get_global_config(), k_uptime_get_32());
+}
 
-	const struct SensorData *s = bq27220_config();
+bool opendisplay_sensor_bq27220_is_configured(void)
+{
+	return od_sensor_bq27220_is_configured(opendisplay_get_global_config());
+}
 
-	if (s == NULL) {
-		return;
-	}
-	uint32_t now = k_uptime_get_32();
-
-	if (have_polled && (now - last_poll_ms) < BQ27220_MSD_POLL_TTL_MS) {
-		return;
-	}
-	last_poll_ms = now;
-	have_polled = true;
-
-	uint8_t raw[2];
-
-	if (!bq27220_read_block(s, BQ27220_CMD_VOLTAGE, raw, 2)) {
-		s_gauge_ok = false;
-		s_batt_v = -1.0f;
-		return;
-	}
-	uint16_t mv = (uint16_t)raw[0] | ((uint16_t)raw[1] << 8);
-
-	s_batt_v = mv / 1000.0f;
-	s_gauge_ok = mv > 0u;
-
-	uint8_t soc = 0xFFu;
-
-	if (bq27220_read_block(s, BQ27220_CMD_SOC, &soc, 1)) {
-		if (soc > 100u) {
-			soc = 100u;
-		}
-	} else {
-		soc = 0xFFu;
-	}
-
-	bool charging = charger_gpio_charging();
-	uint8_t msd_idx = s->msd_data_start_byte;
-
-	if (msd_idx <= 10u) {
-		if (!s_gauge_ok || soc > 100u) {
-			opendisplay_ble_set_dynamic_byte(msd_idx, 0xFFu);
-		} else {
-			uint8_t packed = (uint8_t)(soc & 0x7Fu);
-
-			if (charging) {
-				packed |= BQ27220_MSD_CHARGING_BIT;
-			}
-			opendisplay_ble_set_dynamic_byte(msd_idx, packed);
-		}
-	}
+float opendisplay_sensor_bq27220_voltage_volts(void)
+{
+	return od_sensor_bq27220_voltage_volts();
 }
