@@ -4,7 +4,7 @@
 #include "opendisplay_constants.h"
 #include "od_runtime_types.h"
 #include "od_gpio.h"
-#include "opendisplay_i2c.h"
+#include "od_hal_i2c.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -40,12 +40,14 @@
 #define TOUCH_PROCESS_MIN_INTERVAL_MS 100u
 #define TOUCH_I2C_FAIL_DISABLE_THRESHOLD 5u
 
-/* GT911 runs at the half-bit period this file has always used: 5 us, which is what
- * od_i2c_init() derives from 100 kHz. The bus's configured bus_speed_hz is deliberately NOT
- * passed -- a 400 kHz entry would quintuple the clock, and a timing difference is a plausible
- * reason this engine was forked in the first place. Reconciling the two is a separate, measured
- * change (PLAN_SENSOR_SEAM_2026-08-23.md staging step 2). */
-#define TOUCH_I2C_SPEED_HZ 100000u
+/* GT911 runs at the bus's configured rate, like every other device on it.
+ *
+ * There is no "touch rate" in the authority: ../Firmware brings a bus up at
+ * `bus_speed_hz ? bus_speed_hz : 100000` (display_service.cpp:946) and touch_input.cpp never
+ * names a clock. The private bit-banger this file used to carry hardcoded a 5 us half-period,
+ * which is 100 kHz -- it ignored config rather than deciding anything, and that was the
+ * divergence. Project ruling 2026-08-24: follow bus_speed_hz.
+ */
 
 struct TouchRuntime {
   uint8_t addr7;
@@ -59,7 +61,7 @@ struct TouchRuntime {
   uint8_t touch_latched;
   uint8_t i2c_fail_streak;
   uint8_t disabled;
-  struct od_i2c_bus bus;
+  uint8_t bus_id;   /* DataBus.instance_number */
 };
 
 static struct TouchRuntime s_touch_rt[4];
@@ -85,7 +87,7 @@ static uint8_t gt911_reg_bytes(uint8_t *out, uint16_t reg, bool reg_high_first)
 /* The longest payload this driver writes is one status byte; the longest it reads is eight. */
 #define GT911_MAX_WRITE_PAYLOAD 8u
 
-static bool gt911_write_reg_once(struct od_i2c_bus *b, uint8_t addr7, uint16_t reg,
+static bool gt911_write_reg_once(uint8_t bus_id, uint8_t addr7, uint16_t reg,
                                  const uint8_t *buf, uint8_t len, bool reg_high_first)
 {
   uint8_t tx[2u + GT911_MAX_WRITE_PAYLOAD];
@@ -98,28 +100,26 @@ static bool gt911_write_reg_once(struct od_i2c_bus *b, uint8_t addr7, uint16_t r
   for (uint8_t i = 0; i < len; i++) {
     tx[n + i] = buf[i];
   }
-  return od_i2c_write(b, addr7, tx, (size_t)(n + len), true);
+  return od_hal_i2c_write(bus_id, addr7, tx, (uint16_t)(n + len)) == OD_HAL_I2C_OK;
 }
 
-static bool gt911_read_reg_once(struct od_i2c_bus *b, uint8_t addr7, uint16_t reg,
+static bool gt911_read_reg_once(uint8_t bus_id, uint8_t addr7, uint16_t reg,
                                 uint8_t *buf, uint8_t len, bool reg_high_first)
 {
   uint8_t tx[2];
   uint8_t n = gt911_reg_bytes(tx, reg, reg_high_first);
 
-  /* stop=false leaves SCL low with no STOP, so od_i2c_read()'s START is a REPEATED start --
-   * the framing this driver has always used, and the one GT911 needs. */
-  if (!od_i2c_write(b, addr7, tx, n, false)) {
-    return false;
-  }
-  return od_i2c_read(b, addr7, buf, len);
+  /* One transaction with a repeated START -- the framing this driver has always used, and the
+   * one GT911 needs. The STOP-separated fallback some clones want belongs to the shared driver
+   * promotion, not here. */
+  return od_hal_i2c_write_read(bus_id, addr7, tx, n, buf, len) == OD_HAL_I2C_OK;
 }
 
-static bool gt911_write_reg(struct od_i2c_bus *b, uint8_t addr7, uint16_t reg,
+static bool gt911_write_reg(uint8_t bus_id, uint8_t addr7, uint16_t reg,
                             const uint8_t *buf, uint8_t len, bool reg_high_first)
 {
   for (uint8_t attempt = 0; attempt < GT911_I2C_RETRIES; attempt++) {
-    if (gt911_write_reg_once(b, addr7, reg, buf, len, reg_high_first)) {
+    if (gt911_write_reg_once(bus_id, addr7, reg, buf, len, reg_high_first)) {
       return true;
     }
     k_busy_wait(500);
@@ -127,11 +127,11 @@ static bool gt911_write_reg(struct od_i2c_bus *b, uint8_t addr7, uint16_t reg,
   return false;
 }
 
-static bool gt911_read_reg(struct od_i2c_bus *b, uint8_t addr7, uint16_t reg,
+static bool gt911_read_reg(uint8_t bus_id, uint8_t addr7, uint16_t reg,
                            uint8_t *buf, uint8_t len, bool reg_high_first)
 {
   for (uint8_t attempt = 0; attempt < GT911_I2C_RETRIES; attempt++) {
-    if (gt911_read_reg_once(b, addr7, reg, buf, len, reg_high_first)) {
+    if (gt911_read_reg_once(bus_id, addr7, reg, buf, len, reg_high_first)) {
       return true;
     }
     k_busy_wait(500);
@@ -144,26 +144,26 @@ static bool gt911_product_id_match(const uint8_t *id)
   return id[0] == '9' && id[1] == '1' && id[2] == '1';
 }
 
-static bool gt911_probe_product(struct od_i2c_bus *b, uint8_t addr7, uint8_t *reg_high_first)
+static bool gt911_probe_product(uint8_t bus_id, uint8_t addr7, uint8_t *reg_high_first)
 {
   uint8_t id[4];
 
-  if (gt911_read_reg(b, addr7, GT911_REG_PID, id, 4, false) && gt911_product_id_match(id)) {
+  if (gt911_read_reg(bus_id, addr7, GT911_REG_PID, id, 4, false) && gt911_product_id_match(id)) {
     *reg_high_first = 0;
     return true;
   }
-  if (gt911_read_reg(b, addr7, GT911_REG_PID, id, 4, true) && gt911_product_id_match(id)) {
+  if (gt911_read_reg(bus_id, addr7, GT911_REG_PID, id, 4, true) && gt911_product_id_match(id)) {
     *reg_high_first = 1;
     return true;
   }
   return false;
 }
 
-static void gt911_clear_status(struct od_i2c_bus *b, uint8_t addr7, bool reg_high_first)
+static void gt911_clear_status(uint8_t bus_id, uint8_t addr7, bool reg_high_first)
 {
   uint8_t z = 0;
 
-  (void)gt911_write_reg(b, addr7, GT911_REG_STATUS, &z, 1, reg_high_first);
+  (void)gt911_write_reg(bus_id, addr7, GT911_REG_STATUS, &z, 1, reg_high_first);
 }
 
 /* Config helpers -------------------------------------------------------- */
@@ -195,13 +195,7 @@ static const struct DataBus *touch_bus_config(const struct TouchController *tc)
   return bus;
 }
 
-/* Bring the resolved bus up. Idles SCL and SDA, so callers must have powered the controller
- * first. */
-static bool touch_bus_open(const struct DataBus *bus, struct od_i2c_bus *out)
-{
-  /* Internal pull-ups on both lines, as this driver has always requested. */
-  return od_i2c_init(out, bus->pin_1, bus->pin_2, TOUCH_I2C_SPEED_HZ, true, true);
-}
+
 
 static void touch_apply_enable_pin(const struct TouchController *tc)
 {
@@ -266,7 +260,7 @@ static uint8_t gt911_resolve_and_init(const struct TouchController *tc, struct T
     } else {
       k_msleep(10);
     }
-    if (gt911_probe_product(&rt->bus, want, &rt->reg_high_first)) {
+    if (gt911_probe_product(rt->bus_id, want, &rt->reg_high_first)) {
       return want;
     }
     return 0;
@@ -276,20 +270,20 @@ static uint8_t gt911_resolve_and_init(const struct TouchController *tc, struct T
     k_msleep(GT911_PRE_RESET_DELAY_MS);
     gt911_hw_reset(tc, true);
     k_msleep(GT911_POST_RESET_SETTLE_MS);
-    if (gt911_probe_product(&rt->bus, a5d, &rt->reg_high_first)) {
+    if (gt911_probe_product(rt->bus_id, a5d, &rt->reg_high_first)) {
       return a5d;
     }
     k_msleep(GT911_PRE_RESET_DELAY_MS);
     gt911_hw_reset(tc, false);
     k_msleep(GT911_POST_RESET_SETTLE_MS);
-    if (gt911_probe_product(&rt->bus, a14, &rt->reg_high_first)) {
+    if (gt911_probe_product(rt->bus_id, a14, &rt->reg_high_first)) {
       return a14;
     }
   } else {
-    if (gt911_probe_product(&rt->bus, a5d, &rt->reg_high_first)) {
+    if (gt911_probe_product(rt->bus_id, a5d, &rt->reg_high_first)) {
       return a5d;
     }
-    if (gt911_probe_product(&rt->bus, a14, &rt->reg_high_first)) {
+    if (gt911_probe_product(rt->bus_id, a14, &rt->reg_high_first)) {
       return a14;
     }
   }
@@ -312,12 +306,7 @@ static bool touch_reinit_gt911(const struct TouchController *tc, struct TouchRun
     return false;
   }
   touch_apply_enable_pin(tc);
-  /* Bus brought up AFTER the enable pin, which is the order this driver has always used:
-   * od_i2c_init() idles SCL and SDA, and a controller powered up afterwards should find them
-   * already idle rather than see them move under it. */
-  if (!touch_bus_open(bus_cfg, &rt->bus)) {
-    return false;
-  }
+  rt->bus_id = tc->bus_id;
 
   addr = gt911_resolve_and_init(tc, rt);
   if (addr == 0u) {
@@ -329,30 +318,29 @@ static bool touch_reinit_gt911(const struct TouchController *tc, struct TouchRun
   rt->disabled = 0;
   rt->i2c_fail_streak = 0;
   rt->touch_latched = 0;
-  gt911_clear_status(&rt->bus, addr, rt->reg_high_first != 0);
+  gt911_clear_status(rt->bus_id, addr, rt->reg_high_first != 0);
   gt911_int_wake(tc);
   return true;
 }
 
 static bool touch_light_resume_gt911(const struct TouchController *tc, struct TouchRuntime *rt)
 {
-  const struct DataBus *bus_cfg;
   uint8_t id[4];
 
   if (tc->touch_ic_type != OD_TOUCH_IC_GT911 || !rt->ok || rt->addr7 == 0u) {
     return false;
   }
-  bus_cfg = touch_bus_config(tc);
-  if (bus_cfg == NULL || !touch_bus_open(bus_cfg, &rt->bus)) {
+  if (touch_bus_config(tc) == NULL) {
     return false;
   }
-  if (!gt911_read_reg(&rt->bus, rt->addr7, GT911_REG_PID, id, 4, rt->reg_high_first != 0) ||
+  rt->bus_id = tc->bus_id;
+  if (!gt911_read_reg(rt->bus_id, rt->addr7, GT911_REG_PID, id, 4, rt->reg_high_first != 0) ||
       !gt911_product_id_match(id)) {
     return false;
   }
   rt->i2c_fail_streak = 0;
   rt->touch_latched = 0;
-  gt911_clear_status(&rt->bus, rt->addr7, rt->reg_high_first != 0);
+  gt911_clear_status(rt->bus_id, rt->addr7, rt->reg_high_first != 0);
   gt911_int_wake(tc);
   return true;
 }
@@ -422,15 +410,14 @@ void opendisplay_touch_init(void)
       continue;
     }
     if (!touch_reinit_gt911(tc, rt)) {
-      od_log_info("touch[%u]: GT911 init failed (SCL=0x%02X SDA=0x%02X)", (unsigned)i,
-             (unsigned)rt->bus.scl_cfg, (unsigned)rt->bus.sda_cfg);
+      od_log_info("touch[%u]: GT911 init failed on bus %u", (unsigned)i, (unsigned)tc->bus_id);
       continue;
     }
     rt->last_poll_ms = k_uptime_get_32();
     s_any_initialized = true;
-    od_log_info("touch[%u]: GT911 @0x%02X %s SCL=0x%02X SDA=0x%02X byte=%u", (unsigned)i,
-           (unsigned)rt->addr7, rt->reg_high_first ? "BE" : "LE", (unsigned)rt->bus.scl_cfg,
-           (unsigned)rt->bus.sda_cfg, (unsigned)tc->touch_data_start_byte);
+    od_log_info("touch[%u]: GT911 @0x%02X %s bus=%u byte=%u", (unsigned)i,
+           (unsigned)rt->addr7, rt->reg_high_first ? "BE" : "LE", (unsigned)tc->bus_id,
+           (unsigned)tc->touch_data_start_byte);
   }
 }
 
@@ -510,7 +497,7 @@ void opendisplay_touch_process(void)
       continue;
     }
 
-    if (!gt911_read_reg(&rt->bus, rt->addr7, GT911_REG_STATUS, &st, 1, rh)) {
+    if (!gt911_read_reg(rt->bus_id, rt->addr7, GT911_REG_STATUS, &st, 1, rh)) {
       if (rt->i2c_fail_streak < 255u) {
         rt->i2c_fail_streak++;
       }
@@ -530,13 +517,13 @@ void opendisplay_touch_process(void)
     }
     n = (uint8_t)(st & 0x0Fu);
     if (n > GT911_MAX_CONTACTS) {
-      gt911_clear_status(&rt->bus, rt->addr7, rh);
+      gt911_clear_status(rt->bus_id, rt->addr7, rh);
       continue;
     }
 
     if (n > 0u) {
       uint8_t p[8];
-      if (!gt911_read_reg(&rt->bus, rt->addr7, GT911_REG_POINT1, p, 8, rh)) {
+      if (!gt911_read_reg(rt->bus_id, rt->addr7, GT911_REG_POINT1, p, 8, rh)) {
         if (rt->i2c_fail_streak < 255u) {
           rt->i2c_fail_streak++;
         }
@@ -556,7 +543,7 @@ void opendisplay_touch_process(void)
       y = rt->last_y;
       tid = rt->last_id;
     }
-    gt911_clear_status(&rt->bus, rt->addr7, rh);
+    gt911_clear_status(rt->bus_id, rt->addr7, rh);
 
     if (n > 0u) {
       apply_touch_map(tc, &x, &y);

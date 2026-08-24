@@ -399,8 +399,24 @@ software candidate with its rows open.
 5. **Nordic HAL cutover:** implement the same four operations over `opendisplay_i2c.c`, then
    repoint SHT40, BQ27220, GT911 and nPM1300. Hardware gate.
 
-   **GT911 was NOT repointed here (2026-08-24), because this step and step 2 contradict each
-   other and step 2 is the more specific instruction.** Step 2 pinned touch at 100 kHz to
+   **GT911 IS repointed, and the rate question is settled: follow `bus_speed_hz`** (project
+   ruling 2026-08-24). **There is no "touch rate" in the authority.** `../Firmware` brings a bus
+   up at `bus_speed_hz ? bus_speed_hz : 100000` (`display_service.cpp:946`) and
+   `touch_input.cpp` never names a clock — every device on the bus, GT911 included, runs at the
+   configured rate. Nordic's private bit-banger hardcoded a 5 µs half-period, which is 100 kHz;
+   it ignored config rather than deciding anything, and *that* was the divergence.
+
+   So routing GT911 through `od_hal_i2c` is not a rate change smuggled into a refactor — it is
+   the correction. Step 2's caution ("a timing difference may be why the fork exists") is
+   answered by the authority: the fork predates the shared engine and hardcoded a number.
+
+   **The bench condition this creates:** a Nordic board declaring `bus_speed_hz = 400000` now
+   clocks GT911 five times faster than the private engine did. That row is in the hardware
+   checklist. If touch fails at 400 kHz on real clones, the answer becomes a documented clamp
+   with measured evidence — not a hardcoded 5.
+
+   ~~**GT911 was NOT repointed here, because this step and step 2 contradict each other.**~~
+   Superseded by the ruling above. The original reasoning was: Step 2 pinned touch at 100 kHz to
    reproduce the private bit-banger's fixed 5 µs, and said to change the rate only as a separate
    measured step. The shared seam has **no speed argument** — `od_hal_i2c_*` derives the rate from
    `DataBus.bus_speed_hz` — so routing GT911 through it hands the touch clock to whatever the

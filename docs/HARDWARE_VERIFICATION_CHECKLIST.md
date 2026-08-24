@@ -686,9 +686,15 @@ Treat the rows below as the only thing standing behind that.
 - [ ] **BQ27220 and nPM1300 reads still return plausible values.** Their repeated START gained a
       half-period `tLOW` that it never had; the change is meant to be an improvement, and this
       row is what shows it is not a regression.
-- [ ] **GT911 bit timing unchanged**: touch pins 100 kHz explicitly rather than taking
-      `bus_speed_hz`, which reproduces the private engine's fixed 5 µs. A config declaring
-      400 kHz must not change the touch clock.
+- [ ] **GT911 at the configured bus rate.** Touch now follows `bus_speed_hz` (project ruling
+      2026-08-24; the authority has no touch-specific clock). With `bus_speed_hz` unset or
+      100000 this reproduces the private engine's 5 µs half-period exactly, so that case is a
+      regression check.
+- [ ] **GT911 at 400 kHz.** Set a board's `bus_speed_hz = 400000` and confirm touch still reports
+      contacts, and that sensors sharing that bus still read. This is the one case the private
+      engine could never reach, and the ruling's only real risk. **If touch fails here, that is
+      the measured evidence for a clamp** — record it and clamp with a reason, rather than
+      restoring a hardcoded 5 µs.
 - [ ] **A clone that stretches the clock now fails the transfer** rather than sampling garbage,
       and five consecutive failures disable touch. Confirm ordinary hardware never reaches that.
 

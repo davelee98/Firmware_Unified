@@ -783,10 +783,16 @@ always read that way**, so this was affecting deployed sensor reads on Nordic be
 folded in. `od_i2c_start()` now opens with a half-period delay, which is harmless on a first START
 and restores `tLOW` on a repeated one.
 
-**Touch does not pass `bus_speed_hz`.** It pins 100 kHz, which is the 5 µs the private engine used.
-A `DataBus` declaring 400 kHz would otherwise have quintupled the GT911 clock as a side effect of
-this cutover, and a timing difference is a plausible reason the fork existed. Reconciling the two
-is a separate, measured change.
+**Touch pinned 100 kHz at first, and no longer does.** The private engine's fixed 5 µs half-period
+is 100 kHz, so step 2 reproduced it rather than change timing inside a mechanical fold. The
+reconciliation happened at step 5, and the authority settles it: **there is no "touch rate"**.
+`../Firmware` brings a bus up at `bus_speed_hz ? bus_speed_hz : 100000`
+(`display_service.cpp:946`) and `touch_input.cpp` never names a clock. The private bit-banger
+hardcoded a number instead of reading config, which is the divergence — not the shared engine.
+
+Project ruling 2026-08-24: **GT911 follows `bus_speed_hz`**, like every other device on its bus.
+A board declaring 400 kHz now clocks touch five times faster than the private engine did, and that
+is a hardware row rather than an assumption.
 
 `opendisplay_touch.c` went 710 → 589 lines; `xiao_ble` flash 332,444 → 332,004 B (−440), `bss`
 140,477 → 140,509 (+32, four `struct od_i2c_bus` against four 2-byte `struct TouchBus`).
