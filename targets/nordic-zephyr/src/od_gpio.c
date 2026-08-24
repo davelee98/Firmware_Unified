@@ -155,3 +155,193 @@ ssize_t od_hwinfo_get_device_id(uint8_t *buffer, size_t length)
 {
 	return hwinfo_get_device_id(buffer, length);
 }
+
+/* ------------------------------------------------------------------ pin interrupts ------- */
+
+/* One slot per attachable pin. A fixed table rather than an allocation: this runs on a part with
+ * no heap policy for ISR state, and the consumers are bounded -- four buttons and up to four
+ * touch controllers. Zephyr wants a gpio_callback per registration, and it must outlive the
+ * registration, so the struct lives here. */
+#define OD_GPIO_IRQ_SLOTS 8u
+
+struct od_gpio_irq_slot {
+	struct gpio_callback cb;
+	uint8_t              cfg;
+	uint8_t              port;
+	uint8_t              pin;
+	od_gpio_irq_fn       fn;
+	od_gpio_irq_arg_fn   fn_arg;
+	void                *arg;
+	bool                 used;
+};
+
+static struct od_gpio_irq_slot s_irq_slots[OD_GPIO_IRQ_SLOTS];
+
+static void od_gpio_irq_trampoline(const struct device *dev, struct gpio_callback *cb,
+				   gpio_port_pins_t pins)
+{
+	struct od_gpio_irq_slot *slot = CONTAINER_OF(cb, struct od_gpio_irq_slot, cb);
+
+	ARG_UNUSED(dev);
+	ARG_UNUSED(pins);
+	if (!slot->used) {
+		return;
+	}
+	/* One or the other, never both -- config_irq clears the arg form and vice versa. */
+	if (slot->fn_arg != NULL) {
+		slot->fn_arg(slot->arg);
+	} else if (slot->fn != NULL) {
+		slot->fn();
+	}
+}
+
+static struct od_gpio_irq_slot *irq_slot_for(uint8_t cfg, bool create)
+{
+	struct od_gpio_irq_slot *free_slot = NULL;
+
+	for (uint8_t i = 0; i < OD_GPIO_IRQ_SLOTS; i++) {
+		if (s_irq_slots[i].used && s_irq_slots[i].cfg == cfg) {
+			return &s_irq_slots[i];   /* re-attach replaces */
+		}
+		if (!s_irq_slots[i].used && free_slot == NULL) {
+			free_slot = &s_irq_slots[i];
+		}
+	}
+	return create ? free_slot : NULL;
+}
+
+static gpio_flags_t edge_flags(od_gpio_edge_t edge)
+{
+	switch (edge) {
+	case OD_GPIO_EDGE_RISING:  return GPIO_INT_EDGE_RISING;
+	case OD_GPIO_EDGE_FALLING: return GPIO_INT_EDGE_FALLING;
+	default:                   return GPIO_INT_EDGE_BOTH;
+	}
+}
+
+static int irq_attach(uint8_t cfg, od_gpio_edge_t edge,
+		      od_gpio_irq_fn fn, od_gpio_irq_arg_fn fn_arg, void *arg)
+{
+	uint8_t port;
+	uint8_t pin;
+	const struct device *dev;
+	struct od_gpio_irq_slot *slot;
+	int err;
+
+	if (!od_pin_decode(cfg, &port, &pin)) {
+		return -EINVAL;
+	}
+	dev = gpio_dev(port);
+	if (dev == NULL || !device_is_ready(dev)) {
+		return -ENODEV;
+	}
+	slot = irq_slot_for(cfg, true);
+	if (slot == NULL) {
+		return -ENOMEM;
+	}
+	/* Remove any previous registration before rewriting the slot: Zephyr keeps the callback in
+	 * a list, and re-adding the same object twice corrupts it. */
+	if (slot->used) {
+		(void)gpio_remove_callback(gpio_dev(slot->port), &slot->cb);
+	}
+	slot->cfg = cfg;
+	slot->port = port;
+	slot->pin = pin;
+	slot->fn = fn;
+	slot->fn_arg = fn_arg;
+	slot->arg = arg;
+	slot->used = true;
+
+	gpio_init_callback(&slot->cb, od_gpio_irq_trampoline, BIT(pin));
+	err = gpio_add_callback(dev, &slot->cb);
+	if (err != 0) {
+		slot->used = false;
+		return err;
+	}
+	err = gpio_pin_interrupt_configure(dev, pin, edge_flags(edge));
+	if (err != 0) {
+		(void)gpio_remove_callback(dev, &slot->cb);
+		slot->used = false;
+		return err;
+	}
+	return 0;
+}
+
+int od_gpio_config_irq(uint8_t cfg, od_gpio_edge_t edge, od_gpio_irq_fn handler)
+{
+	return irq_attach(cfg, edge, handler, NULL, NULL);
+}
+
+int od_gpio_config_irq_arg(uint8_t cfg, od_gpio_edge_t edge,
+			   od_gpio_irq_arg_fn handler, void *arg)
+{
+	return irq_attach(cfg, edge, NULL, handler, arg);
+}
+
+void od_gpio_clear_irq(uint8_t cfg)
+{
+	struct od_gpio_irq_slot *slot = irq_slot_for(cfg, false);
+	const struct device *dev;
+
+	if (slot == NULL) {
+		return;   /* never attached: nothing to do, and not an error */
+	}
+	dev = gpio_dev(slot->port);
+	if (dev != NULL) {
+		(void)gpio_pin_interrupt_configure(dev, slot->pin, GPIO_INT_DISABLE);
+		(void)gpio_remove_callback(dev, &slot->cb);
+	}
+	slot->used = false;
+	slot->fn = NULL;
+	slot->fn_arg = NULL;
+	slot->arg = NULL;
+}
+
+/* Mask and unmask keep the callback registered, so the handler and its argument survive. */
+static void irq_set_enabled(uint8_t cfg, bool on)
+{
+	struct od_gpio_irq_slot *slot = irq_slot_for(cfg, false);
+	const struct device *dev;
+
+	if (slot == NULL) {
+		return;
+	}
+	dev = gpio_dev(slot->port);
+	if (dev == NULL) {
+		return;
+	}
+	if (on) {
+		(void)gpio_pin_interrupt_configure(dev, slot->pin, edge_flags(OD_GPIO_EDGE_BOTH));
+	} else {
+		(void)gpio_pin_interrupt_configure(dev, slot->pin, GPIO_INT_DISABLE);
+	}
+}
+
+void od_gpio_irq_enable(uint8_t cfg) { irq_set_enabled(cfg, true); }
+void od_gpio_irq_disable(uint8_t cfg) { irq_set_enabled(cfg, false); }
+
+static unsigned int s_irq_lock_key;
+static uint32_t s_irq_lock_depth;
+
+void od_gpio_irq_lock(void)
+{
+	unsigned int key = irq_lock();
+
+	/* Nested locks keep the OUTERMOST key: irq_unlock() restores the state captured when the
+	 * first lock was taken, and restoring an inner key would re-enable interrupts early. */
+	if (s_irq_lock_depth == 0u) {
+		s_irq_lock_key = key;
+	}
+	s_irq_lock_depth++;
+}
+
+void od_gpio_irq_unlock(void)
+{
+	if (s_irq_lock_depth == 0u) {
+		return;
+	}
+	s_irq_lock_depth--;
+	if (s_irq_lock_depth == 0u) {
+		irq_unlock(s_irq_lock_key);
+	}
+}
