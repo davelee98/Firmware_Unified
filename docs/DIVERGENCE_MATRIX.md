@@ -583,12 +583,20 @@ pin should set the mask explicitly rather than rely on zero.
 Project ruling 2026-08-23, reaffirmed: **`0xFF` means unconfigured**, for every `bus_id`-shaped
 field. It is the contract's pervasive absent sentinel (`opendisplay_structs.h:295-298`).
 
-This is a deliberate protocol change with a host dependency, not just a firmware correction. The
-canonical header still documents `TouchController.bus_id == 0xFF` as "bus 0" (`:945`) and is
-frozen — `FOLLOWUPS` § 14. More urgently, `py-opendisplay` **defaults an omitted touch `bus_id` to
-`0xff`** (`config_json.py:643`), so the host change in `FOLLOWUPS` § 15 must land before or with
-the firmware refusal, or touch silently stops being configured for any block relying on that
-default.
+**Ruling extended 2026-08-24: the firmware correction does NOT wait on the host.** A `bus_id` of
+`0xFF` makes the config invalid — the device was never assigned a bus — so refusing it is correct
+on its own terms, and a substituted bus 0 is invalid whatever the host sends. `py-opendisplay`
+defaulting an omitted touch `bus_id` to `0xff` (`config_json.py:643`) is a **host defect**
+(`FOLLOWUPS` § 15), not a schedule constraint on this repo.
+
+What that costs, stated plainly rather than discovered: a config that omits `bus_id` stops
+configuring touch. That is the intended outcome — the alternative is probing an unassigned device
+on somebody else's bus, where an address collision yields plausible-but-wrong readings instead of
+a failure. **Configs already stored on devices that carry `0xFF` in that field need re-provisioning**,
+and only the host can identify them.
+
+The canonical header still documents `TouchController.bus_id == 0xFF` as "bus 0" (`:945`) and is
+frozen — `FOLLOWUPS` § 14.
 
 | Site | Behaviour |
 |---|---|
@@ -603,9 +611,8 @@ device that was never assigned a bus: that device is then probed on an unrelated
 address collision yields plausible-but-wrong readings rather than a clean failure.
 
 Same defect class as § 11.2 (`pwr_pin == 0xFF` driving pad `0x00` on BG22), fixed 2026-08-22 by
-refusing. Correcting these four is scheduled with the I2C HAL cutover —
-`plans/PLAN_SENSOR_SEAM_2026-08-23.md` staging step 1 — or earlier if a sensor is ever seen
-reporting from a bus it was not assigned to.
+refusing. Correcting these four is `plans/PLAN_SENSOR_SEAM_2026-08-23.md` staging step 1, which no
+longer waits on anything outside this repo.
 
 ---
 

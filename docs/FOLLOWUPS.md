@@ -948,9 +948,10 @@ neighbour uses it as the absent/not-configured sentinel, which `:295-298` calls 
 - `SensorData.bus_id` — **no 0xFF note at all**
 
 **Project ruling, 2026-08-23, reaffirmed: `0xFF` means unconfigured.** The header line is
-therefore out of step with the contract as the project now defines it. Note this is a deliberate
-*change*, not merely a documentation fix: the host currently relies on the old meaning, which is
-why § 15 exists and must land with it.
+therefore out of step with the contract as the project now defines it. It is a deliberate *change*
+rather than a documentation fix, and **2026-08-24 the project ruled that firmware does not wait
+for the host to catch up**: a `bus_id` of `0xFF` makes the config invalid, so § 15 is a host defect
+to fix on its own schedule, not a precondition for the firmware refusal.
 
 **Four firmware sites substitute bus 0 for it**, and should be corrected to refuse:
 
@@ -990,6 +991,11 @@ cannot express the question. Worth one clause each. See `DIVERGENCE_MATRIX` § 1
 **Required by the 2026-08-23 project ruling that `0xFF` means unconfigured** (see § 14 and
 `DIVERGENCE_MATRIX` § 13). Sibling repository, so it is filed here rather than fixed.
 
+**This does NOT gate the firmware change (project ruling, 2026-08-24).** A `bus_id` of `0xFF`
+makes the config invalid, and a substituted bus 0 is invalid regardless of what the host emits, so
+firmware refuses it whenever the correction lands. What follows is a host bug worth fixing on its
+own merits — it makes `py-opendisplay` emit configs the device will reject.
+
 `py-opendisplay/src/opendisplay/models/config_json.py:643` supplies the default for a touch block
 that omits the field:
 
@@ -1008,13 +1014,14 @@ Two changes, both host-side:
 1. `config_json.py:643` — default to `"0"`, matching what the sensor block already does at `:569`.
 2. `config.py:886` — drop the "0xFF = default bus 0" comment; `0xFF` means unconfigured.
 
-**Ordering matters.** This should land before or with the firmware change, not after: the reverse
-order leaves a window where a current host and a new firmware disagree about every touch config
-that relies on the default. Configurations that name `bus_id` explicitly are unaffected in either
-order.
+**Ordering no longer gates firmware** (2026-08-24). Until this lands, a `py-opendisplay` config
+that omits touch `bus_id` produces a device with touch unconfigured — a rejected invalid config,
+which is the intended behaviour rather than a regression. Configurations that name `bus_id`
+explicitly are unaffected either way.
 
-Worth checking at the same time whether any stored/deployed configuration blob carries `0xFF` in
-that field; those need rewriting, and only the host can tell.
+Still worth checking at the same time whether any stored or deployed configuration blob carries
+`0xFF` in that field; those need rewriting, and only the host can tell.
+
 
 
 ---

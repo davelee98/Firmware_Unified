@@ -145,7 +145,7 @@ Semantics:
   | Consequence | Where |
   |---|---|
   | `opendisplay_structs.h:945` documents `TouchController.bus_id == 0xFF` as "bus 0". It contradicts the ruling and the header is frozen | `FOLLOWUPS` § 14 |
-  | `py-opendisplay` defaults an **omitted** touch `bus_id` to `0xff` (`config_json.py:643`) and its model comments it as "default bus 0" (`config.py:886`). Under this ruling the host must default to `0` instead, or touch stops being configured for any block that omits the field | `FOLLOWUPS` § 15 — **must land before or with the firmware change** |
+  | `py-opendisplay` defaults an **omitted** touch `bus_id` to `0xff` (`config_json.py:643`) and its model comments it as "default bus 0" (`config.py:886`). Under this ruling the host must default to `0` instead, or it emits configs the device rejects and touch stops being configured for any block that omits the field | `FOLLOWUPS` § 15 — a host defect, and **NOT a gate on the firmware change** (project ruling 2026-08-24): `0xFF` makes the config invalid, so refusing it stands on its own |
 
   Four firmware sites currently substitute bus 0 and are corrected to refuse
   (`DIVERGENCE_MATRIX` § 13); Nordic touch (`opendisplay_touch.c:299`) already behaves this way.
@@ -328,11 +328,25 @@ next subsystem promotion. **Steps that touch silicon this fleet has also receive
 step 9 does not, and says so** — no board here carries a TNB132M, so that cutover ships as a
 software candidate with its rows open.
 
-1. **Record the bus-default divergence, in the correct direction:** `0xFF` means *not
-   configured*. Nordic touch already refuses it; four sites substitute bus 0 (T5). Record in
-   `DIVERGENCE_MATRIX`, report the canonical header line via `FOLLOWUPS` § 14, and decide whether
-   the four substitutions are corrected in this promotion or before it — a sensor with no bus
-   assigned should not be probed on somebody else's.
+1. **Correct the bus-default divergence:** `0xFF` means *not configured*, so the four sites that
+   substitute bus 0 (T5) refuse instead. Nordic touch (`opendisplay_touch.c:299`) already does and
+   is the reference. Recorded in `DIVERGENCE_MATRIX` § 13; the canonical header line is reported
+   via `FOLLOWUPS` § 14.
+
+   **Project ruling 2026-08-24: this does NOT wait on `py-opendisplay`.** A `bus_id` of `0xFF`
+   makes the config invalid and a substituted bus 0 is invalid whatever the host sends, so
+   `FOLLOWUPS` § 15 is a host defect on its own schedule rather than a precondition. The cost is
+   stated rather than discovered: a config omitting `bus_id` stops configuring touch, which is the
+   point — the alternative is probing an unassigned device on another bus, where an address
+   collision gives plausible-but-wrong readings instead of a failure. Devices already holding
+   `0xFF` in that field need re-provisioning.
+
+   **Fix § 14's array-index defect in the same step.** `bus_id` names a `DataBus.instance_number`,
+   but `display_service.cpp:729` and `opendisplay_sensor_common.h:28` index `data_buses[bus_id]`,
+   and `od_config.c`'s `store_repeatable()` appends in arrival order without ever reading
+   `instance_number`. So slot 0 is "the first `0x24` packet that arrived", not instance 0. The two
+   defects share all four call sites, and correcting only the sentinel would leave a refusal that
+   still resolves to the wrong bus.
 2. **Nordic-local cleanup:** fold `opendisplay_touch.c`'s private bit-banger into
    `opendisplay_i2c.c`. Preserve its current repeated-START behavior exactly; do not add the
    donor's STOP-separated fallback in this mechanical step. Hardware-check touch before proceeding.
@@ -449,8 +463,11 @@ about it.
    open on arrival, not pending an inventory.
 4. ~~**Which key does the HAL take?**~~ **Answered by the contract**: `DataBus.instance_number`
    (`opendisplay_structs.h:802`). BG22's NFC scan is right and the sensors' array indexing is the
-   defect (`DIVERGENCE_MATRIX` § 14). Open only in *when* the four sensor sites are corrected —
-   with the HAL cutover, or before it.
+   defect (`DIVERGENCE_MATRIX` § 14). ~~Open only in *when*~~ **Closed 2026-08-24**: corrected in
+   staging step 1, alongside the `0xFF` refusal, since both defects live at the same four sites.
+
+5. ~~**Does the host change gate this?**~~ **Closed by project ruling 2026-08-24**: it does not.
+   See staging step 1.
 
 ---
 
