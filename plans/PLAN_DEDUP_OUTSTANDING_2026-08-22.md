@@ -246,7 +246,7 @@ per capable target where behaviour can differ on silicon.
 | Item | Validated size | Blocked on | Decisions that must be made first |
 |---|---|---|---|
 | **LED runner** (designed: `PLAN_LED_RUNNER_2026-08-23.md`) | Nordic 399 + BG22 485 + **≈380 LED-related lines** of ESP32's `device_control.cpp` (`led_*` plus `processLedFlash`/`ledStopForSleep`/`flashLed`, `:278`–`:660`; the file is 905 lines total, and the survey's 1,130 figure counted all of it) | D1 + the yielding-sleep decision | `od_led_service(now_ms)` returning ms-to-next-step; `od_hal_gpio` + the yielding-sleep decision shared with D8. Land D1's fix and its regression test **first**, so the promotion inherits a proven contract rather than re-deriving it |
-| **Buzzer** | Nordic 401 + ESP32 398 + 103 | the authority decisions at right; it reuses `APP_LED`'s shape but is not blocked on that tier | **Not mechanical.** Three divergences beyond D3's table: ESP32 octave-folds indices outside 117–234 into the playable window (`buzzer_control.cpp:67,80-83`) and Nordic does not fold at all; ESP32's total cap is `kBuzzerMaxTotalMs = 30000u` (`:20`) against Nordic's `BUZZER_MAX_TOTAL_MS 5000u` (`opendisplay_buzzer.c:37`, enforced at `:183,203,215`). Both are wire-visible. Decide authority explicitly and pin each with a differential test before promoting |
+| **Buzzer** (designed: `PLAN_BUZZER_2026-08-23.md`) | Nordic 401 + ESP32 398 + 103 | **closed:** software candidate on `feat/buzzer-shared`; hardware rows open | Authority resolved to the live `Firmware` donor and host: exponential quarter-tone table, octave-fold indices into 117–234, 30,000 ms cap. All 256 indices and the exact cap are pinned by `buzzer_test.c` before the target copies are removed |
 | **Config storage record + CRC-32** (designed: `PLAN_STORAGE_SEAM_2026-08-23.md`) | Three `0xEDB88320` bit-loops — Nordic `opendisplay_config_storage.c:22`, BG22 `:63`, ESP32 `config_parser.cpp:215` — and three `0xDEADBEEF` record headers (ESP32's at `config_parser.h:12`). Nordic 106 lines, BG22 165 | **a storage-seam design step — this row is NOT unblocked** | The survey's "`od_hal_nvs.h` already exists" is wrong as a readiness claim: it exists only as the ESP32-local `targets/esp32-idf/hal/od_hal_nvs.h`, its API is **whole-blob** (`od_hal_nvs_load/save/erase`, `:46-52`), and it carries an ESP32-only `od_hal_nvs_secure_erase()` (`:68`). BG22 reads its header separately from its payload (`opendisplay_config_storage.c:74,107`) and its 2,064-byte record **overlays the assembler buffer** at offset 16, statically asserted at `:25,37-39`. A whole-blob seam would force staging a second full copy on the 32 KB part. Design the seam for partial access, the overlay, and secure erase before writing any of it |
 | **SHT40 + BQ27220** (designed: `PLAN_SENSOR_SEAM_2026-08-23.md`) | 888 lines across the four files | the shared I2C HAL and per-target adapter gates in that plan | See § 5 |
 | **Touch (GT911)** | Nordic 704 + ESP32 745; both name `GT911_REG_STATUS 0x814E` | **§ 5's seam set**, and Q7 | Do after the sensors prove the seams. Q7 is a real authority question: Nordic clears `0x814E` after read, ESP32 wedges — the second place `Firmware`-as-authority points at the defective behaviour |
@@ -331,9 +331,8 @@ should say why in its header rather than quietly re-declaring the macro.
    - **LED runner** — designed, `plans/PLAN_LED_RUNNER_2026-08-23.md`. Creates the `APP_LED` tier.
      **Not** the survey's `HAL_IO` tier: that design creates no shared GPIO HAL, because one seam
      function avoids needing one.
-   - **Buzzer** — after the LED runner only because it reuses that tier's shape, not because it is
-     blocked on one. Its real entry condition is the authority decisions in § 4 (octave folding,
-     30,000 ms vs 5,000 ms cap).
+   - **Buzzer** — software candidate, `plans/PLAN_BUZZER_2026-08-23.md`. Creates `APP_BUZZER` and
+     leaves BG22 outside it. Its authority entry condition is resolved and pinned in the suite.
    - **Config storage** — designed, `plans/PLAN_STORAGE_SEAM_2026-08-23.md`. Independent of the
      LED work; it schedules nothing.
    - **SHT40 / BQ27220** — designed, `plans/PLAN_SENSOR_SEAM_2026-08-23.md`. Independent of LED
@@ -352,8 +351,9 @@ should say why in its header rather than quietly re-declaring the macro.
 3. **The `group_repeats` sentinel** (D1) — the contract says `0xFF` means forever; the field says
    `0xFE` does. Accepting both is the compatible fix; whether the contract or the fleet is
    normative is a protocol question, and the header is frozen.
-4. **Buzzer authority** (§ 4) — octave folding: fold or refuse out-of-range indices? Total cap:
-   30,000 ms or 5,000 ms? Both are wire-visible and neither is a mere port.
+4. ~~**Buzzer authority**~~ — **closed 2026-08-23.** The live `Firmware` donor and host agree on
+   exponential pitch plus octave folding; the donor's 30,000 ms cap wins over Nordic's 5,000 ms.
+   `PLAN_BUZZER_2026-08-23.md` B1–B3 and `DIVERGENCE_MATRIX` § 15 record the ruling.
 5. ~~**The yielding-sleep seam**~~ — **closed 2026-08-23.** No consumer is waiting on one: D8
    landed using BG22's own sleeptimer call, SHT40 uses a narrow `APP_SENSOR` delay rather than a
    general sleep HAL (sensor plan T3), and the LED machine returns a deadline instead of sleeping

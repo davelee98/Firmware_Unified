@@ -353,6 +353,15 @@ xfer_target_parser_absent() {
 }
 check "transfer: no target transfer parser" xfer_target_parser_absent
 
+# The parser, pitch policy, repeat machine and cap are shared/core/od_buzzer.c's. Target adapters
+# may own PWM/tone timers and config lookup, but not a second interpretation of the melody bytes.
+buzzer_target_machine_absent() {
+    absent_or_fail "target-local buzzer melody policy returned; shared od_buzzer owns it" \
+        '\b(buzzer_(index_to_(hz|centihz)|fold_index|run(_step)?)|kBuzzer(CentiHzTable|MaxTotalMs|InterPatternGapMs|DurationUnitMs)|BUZZER_(MAX_TOTAL_MS|INTER_PATTERN_GAP_MS|DURATION_UNIT_MS)|BZ_(PHASE_(STEP|GAP)|PATTERN_ENTER|PATTERN_END|STEP))\b' \
+        targets
+}
+check "buzzer: one melody policy" buzzer_target_machine_absent
+
 # PERMANENT. A promoted opcode answers from shared code; a target assembling its own reply bytes
 # for one is invisible until a wire capture disagrees with the corpus.
 #

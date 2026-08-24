@@ -69,6 +69,29 @@ The yield floor and the rail fix are not ESP32 changes; only `repeat_forever` is
 
 ---
 
+## Shared buzzer runner (2026-08-23)
+
+Software candidate on `feat/buzzer-shared`; none of these rows is hardware-qualified. A build or
+the 300-plus-check host suite is not evidence for a physical square wave.
+
+- [ ] **ESP32 pitch and folding:** on `s3-n16r8-extuart-debug`, measure indices 120, 1 and 255 at
+      the drive pin: 440.00 Hz, index 121's folded pitch, and index 231's folded pitch within the
+      PWM clock tolerance. Confirm duty 0 selects 50% and a configured duty reaches the pin.
+- [ ] **ESP32 schedule/cap:** a two-pattern melody preserves tones, rests, the 20 ms inter-pattern
+      gap and outer repeats; a repeating 1275 ms step stops at 30,000 ms, not 5,000 ms.
+- [ ] **ESP32 lifecycle:** a second melody preempts the first, session teardown leaves it running,
+      and deep sleep/power-off silence it before the existing two-chirp shutdown alert.
+- [ ] **Nordic pitch and folding:** on `xiao_nrf52840`, measure the same 120/1/255 vector. This row
+      proves removal of the linear mapper; hearing a plausible tone does not.
+- [ ] **Nordic schedule/cap:** the ESP32 timing vector matches, including the 30,000 ms cap and
+      enable-pin polarity.
+- [ ] **Nordic responsiveness:** commands and advertising continue during a 30-second melody, and
+      a new melody preempts it without leaving the software square-wave timer armed on the old pin.
+- [ ] **BG22 build exclusion:** the production map has no `od_buzzer*`, tone state or 256-byte
+      melody buffer, and RAM remains at the pre-promotion value. This is build evidence, not on-air.
+
+---
+
 ## Shared time HAL Phase 1
 
 - [ ] ESP32: exercise the D-FF clock path and verify the retained 50 us setup/hold timing.

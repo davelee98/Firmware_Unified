@@ -739,6 +739,13 @@ target_link_libraries(od_led_test od_shared)
 add_test(NAME led COMMAND od_led_test)
 set_tests_properties(led PROPERTIES TIMEOUT 30)
 
+# Shared buzzer policy: the live Firmware/host exponential scale, octave folding, parse and the
+# 30-second cap. Hardware PWM remains below od_buzzer_app and is gated per target.
+add_executable(od_buzzer_test buzzer_test.c)
+target_link_libraries(od_buzzer_test od_shared m)
+add_test(NAME buzzer COMMAND od_buzzer_test)
+set_tests_properties(buzzer PROPERTIES TIMEOUT 30)
+
 # The BG22 adapter's scheduler, against the production source. led_test covers the machine; this
 # covers turning its returned delay into a sleeptimer arm, and re-arming on every expiry -- an
 # adapter that stops re-arming leaves a superloop with no watchdog silently stuck.

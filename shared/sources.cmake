@@ -199,6 +199,13 @@ set(OD_SHARED_SOURCES_APP_LED
     "${CMAKE_CURRENT_LIST_DIR}/core/od_led.c"
 )
 
+# APP_BUZZER is the 0x0077 melody runner. Like APP_LED it returns a relative delay and leaves
+# scheduling to the target; tone generation stays behind od_buzzer_app because ESP32 uses LEDC
+# while Nordic uses a software square-wave timer. BG22 has no buzzer capability and declines it.
+set(OD_SHARED_SOURCES_APP_BUZZER
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_buzzer.c"
+)
+
 # HAL_LOG owns portable record formatting. Enabled targets must implement od_hal_log and
 # od_hal_time; OD_CAP_LOG=0 compiles explicit no-op entry points with no HAL references or state.
 set(OD_SHARED_SOURCES_HAL_LOG
@@ -223,6 +230,7 @@ set(OD_SHARED_SOURCES
     ${OD_SHARED_SOURCES_APP_XFER}
     ${OD_SHARED_SOURCES_APP_NFC}
     ${OD_SHARED_SOURCES_APP_LED}
+    ${OD_SHARED_SOURCES_APP_BUZZER}
     ${OD_SHARED_SOURCES_HAL_LOG}
     ${OD_SHARED_SOURCES_HAL_WDT}
 )

@@ -630,3 +630,21 @@ a failure.
 Not yet fixed. Scheduled with the I2C HAL cutover, whose resolution is the scan —
 `plans/PLAN_SENSOR_SEAM_2026-08-23.md` T1. Related: § 13, the `0xFF` substitution, which affects
 the same call sites.
+
+---
+
+## 15. Buzzer pitch, folding and total duration (resolved 2026-08-23)
+
+Resolved by the shared runner in `plans/PLAN_BUZZER_2026-08-23.md`; hardware rows remain open.
+
+| Behaviour | ESP32 / live `Firmware` | Nordic before promotion | Shared ruling |
+|---|---|---|---|
+| index to pitch | `round(100 * 13.75 * 2^(idx/24))` centi-Hz | linear interpolation from 400 to 12000 Hz | exponential table |
+| indices outside 117..234 | shift by 24 until inside the window | no fold | octave-fold, preserving pitch class |
+| total melody cap | 30,000 ms | 5,000 ms | 30,000 ms; clamp the final step to the remainder |
+| owned payload cap | 256 bytes | 244 bytes | 256 bytes; the host's 120-step maximum is 244 |
+
+This is not authority by name alone. `py-opendisplay` documents the same exponential inverse,
+accepts raw indices 1..255, and says firmware performs the fold. The cap is not host-encoded, so
+the standing live-`Firmware` donor rule decides it. `tests/host/buzzer_test.c` checks all 256
+indices against an independent formula and pins the exact 30,000 ms schedule.

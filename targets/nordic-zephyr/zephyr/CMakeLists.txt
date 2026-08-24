@@ -282,6 +282,7 @@ target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE} ${OD_SHARED_SOURCES_HAL_CRY
                            ${OD_SHARED_SOURCES_HAL_ADV} ${OD_SHARED_SOURCES_APP_BOOT}
                            ${OD_SHARED_SOURCES_APP_INFLATE} ${OD_SHARED_SOURCES_APP_XFER}
                            ${OD_SHARED_SOURCES_APP_NFC} ${OD_SHARED_SOURCES_APP_LED}
+                           ${OD_SHARED_SOURCES_APP_BUZZER}
                            ${OD_SHARED_SOURCES_HAL_LOG})
 
 # The per-source INCLUDE_DIRECTORIES property that used to sit here is GONE, and its removal is
