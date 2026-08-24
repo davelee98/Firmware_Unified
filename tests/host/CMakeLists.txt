@@ -274,6 +274,7 @@ add_test(NAME nordic_i2c_trace COMMAND od_nordic_i2c_trace_test)
 # two-pass retry the Nordic port had dropped.
 add_executable(od_sensor_sht40_test
     sensor_sht40_test.c
+    od_log_test_stub.c
     fake_i2c/i2c_wire.c
     fake_i2c/i2c_ref_impl.c)
 target_include_directories(od_sensor_sht40_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})

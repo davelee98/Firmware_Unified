@@ -807,7 +807,7 @@ and it takes the authority's behaviour where the two ports disagreed.
 | Address candidates | configured, then 0x44, then 0x45 | same | same |
 | Retry | **two passes**, with a bus recovery between | **one pass** | two passes |
 | CRC-8 words | checked **separately**, distinct error codes | checked together in one `if` | separately |
-| Error byte on failure | 0xFB/0xFC/0xFD/0xFE by cause | not reported | preserved |
+| Failure diagnosis | logged with cause, bus and pins | logged with no cause | logged with cause and bus |
 | Conversion, clamps, TTL, MSD packing | identical | identical | unchanged |
 
 **The retry is the one that matters.** `Firmware/src/sensor_sht40.cpp:128` runs the candidate
@@ -822,12 +822,27 @@ repeat. Nordic re-initialises inside every operation and has nothing to tear dow
 implementation is the settle alone.
 
 **Checking both CRC words separately is not cosmetic.** A part answering with one good word and
-one bad is reporting a real fault; a combined test cannot say which, and the error byte is
-wire-visible in the MSD failure path where a host may already be matching on it.
+one bad is reporting a real fault, and a combined test cannot say which.
 
-`tests/host/sensor_sht40_test.c` pins all of it and is mutation-checked: dropping the second CRC
-word, collapsing the two transactions into a repeated START, reducing to one pass, or polling only
-the first configured sensor each fail it.
+**The error code is a LOG code, not a wire byte** — this row said otherwise in its first form and
+that was wrong. Neither donor ever put it in the MSD: both failure writers emit `FF FF FF` and
+clear `start + 3`, and the code (`0xFB` no bus, `0xFC` humidity CRC, `0xFD` temperature CRC,
+`0xFE` read) only ever reached a warning line. The first version of the shared driver dropped that
+line entirely and left the code computed and unused, so the real unrecorded change was the loss of
+SHT40 failure diagnostics on both targets. The log is restored, once per failure run and reset on
+the next success, as ESP32 had it.
+
+`sht40_probe_bus_once()` is restored too — the address-only sweep of 0x44/0x45/0x51/0x55/0x6A that
+the authority runs at init. It is diagnostic and never changes sensor state, but "nothing answered
+anywhere on this bus" is the most useful line when a board comes up mute.
+
+`tests/host/sensor_sht40_test.c` pins all of it — 54 checks — and is mutation-checked. Dropping
+the second CRC word, collapsing the two transactions into a repeated START, reducing to one pass,
+polling only the first configured sensor, reversing the address candidates, removing the
+`start + 3 > 11` bound, dropping a temperature clamp, hardcoding bus 0, or comparing the TTL with
+a signed-style test that breaks at the 32-bit wrap all fail it. The bus instance in every fixture
+is deliberately **not** 0, because a driver that ignored `bus_id` passed the first version of this
+suite.
 
 **NOT HARDWARE-QUALIFIED.** Both targets' SHT40 rows are open in
 docs/HARDWARE_VERIFICATION_CHECKLIST.md, and this change deletes both ports' driver policy.

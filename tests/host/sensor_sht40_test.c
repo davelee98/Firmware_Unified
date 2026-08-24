@@ -67,21 +67,35 @@ static void script_sample(uint8_t addr, uint16_t raw_t, uint16_t raw_rh,
 /* The driver's poll TTL is a static that deliberately survives an init -- T4 says a config
  * reload must not silently reset it -- so every fixture moves time past it, or the second case
  * in a run is skipped and its assertions nothing. */
+/* The write-addresses actually driven, in order. Counting them proves nothing about which. */
+static unsigned addr_seq(uint8_t *out, unsigned cap)
+{
+    unsigned n = 0;
+    for (unsigned i = 0; i < i2c_wire_len && i < cap; ++i) {
+        if (i2c_wire_trace[i].ev == I2C_EV_ADDR_W) { out[n++] = i2c_wire_trace[i].arg; }
+    }
+    return n;
+}
+
+/* Non-zero on purpose: with instance 0 a driver that ignored bus_id and hardcoded 0 would pass
+ * every test in this file. */
+#define BUS_INSTANCE 3u
+
 static void setup(uint8_t addr, uint8_t msd_start)
 {
     g_now_ms += 60000u;
     memset(&g_cfg, 0, sizeof g_cfg);
-    memset(g_msd, 0, sizeof g_msd);
+    memset(g_msd, 0xA5, sizeof g_msd);
     g_delay_count = 0;
     g_recover_count = 0;
     g_cfg.data_bus_count = 1u;
-    g_cfg.data_buses[0].instance_number = 0u;
+    g_cfg.data_buses[0].instance_number = BUS_INSTANCE;
     g_cfg.data_buses[0].bus_type = 0x01u;
     g_cfg.data_buses[0].pin_1 = 10u;
     g_cfg.data_buses[0].pin_2 = 11u;
     g_cfg.sensor_count = 1u;
     g_cfg.sensors[0].sensor_type = OD_SENSOR_TYPE_SHT40;
-    g_cfg.sensors[0].bus_id = 0u;
+    g_cfg.sensors[0].bus_id = BUS_INSTANCE;
     g_cfg.sensors[0].i2c_addr_7bit = addr;
     g_cfg.sensors[0].msd_data_start_byte = msd_start;
     i2c_ref_cfg = &g_cfg;
@@ -120,11 +134,16 @@ static void test_conversion_and_msd(void)
     script_sample(0x44u, 0x6666u, 0x8000u, false, false);
     od_sensor_sht40_poll(&g_cfg, g_now_ms);
 
+    /* 25.0 C -> t_deci 250 -> tu 650 ; 56.5 % -> rh_deci 565.
+     * v = 565 | (650 << 10) = 0x0A2235. All three bytes exactly: masking each field would let a
+     * nonzero reserved high bit through. */
     v = (uint32_t)g_msd[7] | ((uint32_t)g_msd[8] << 8) | ((uint32_t)g_msd[9] << 16);
-    /* 25.0 C -> t_deci 250 -> tu 650 ; 56.5 % -> rh_deci 565 */
-    CHECK((v & 0x3FFu) == 565u);
-    CHECK(((v >> 10) & 0x7FFu) == 650u);
-    CHECK(g_msd[10] == 0u);
+    CHECK(v == (565u | (650u << 10)));
+    CHECK(g_msd[7] == (uint8_t)((565u | (650u << 10)) & 0xFFu));
+    CHECK(g_msd[8] == (uint8_t)(((565u | (650u << 10)) >> 8) & 0xFFu));
+    CHECK(g_msd[9] == (uint8_t)(((565u | (650u << 10)) >> 16) & 0xFFu));
+    CHECK(g_msd[10] == 0u);          /* start+3 cleared -- the sentinel proves it was written */
+    CHECK(g_msd[6] == 0xA5u);        /* and nothing below the window was touched */
 
     CASE("humidity is clamped to 0..100 %");
     setup(0x44u, 7u);
@@ -154,12 +173,33 @@ static void test_both_crc_words(void)
 
 static void test_address_fallback_and_retry(void)
 {
-    CASE("a part at 0x45 is found though the config says 0x44");
-    setup(0x44u, 7u);
+    CASE("a part at 0x45 is found, and the configured address is tried FIRST");
+    setup(0x46u, 7u);                /* configured somewhere the part is not */
     i2c_wire_add_device(10, 11, 0x45u);
     script_sample(0x45u, 0x6666u, 0x8000u, false, false);
     od_sensor_sht40_poll(&g_cfg, g_now_ms);
-    CHECK(g_msd[7] != 0xFFu || g_msd[8] != 0xFFu);
+    CHECK(g_msd[7] != 0xFFu && g_msd[7] != 0xA5u);   /* a real sample, not untouched */
+    {
+        uint8_t seq[16];
+        unsigned n = addr_seq(seq, 16u);
+        /* configured, then 0x44, then 0x45 -- order and identity, not just a count. */
+        CHECK(n >= 3u);
+        CHECK(seq[0] == 0x46u);
+        CHECK(seq[1] == 0x44u);
+        CHECK(seq[2] == 0x45u);
+    }
+
+    CASE("a configured address equal to a factory one is not tried twice");
+    setup(0x44u, 7u);
+    od_sensor_sht40_poll(&g_cfg, g_now_ms);          /* nothing present: full sweep, both passes */
+    {
+        uint8_t seq[32];
+        unsigned n = addr_seq(seq, 32u);
+        unsigned c44 = 0;
+        for (unsigned i = 0; i < n; ++i) { if (seq[i] == 0x44u) { c44++; } }
+        /* Two passes x one 0x44 each. Three would mean the dedup is gone. */
+        CHECK(c44 == 2u);
+    }
 
     CASE("nothing anywhere: TWO passes, with a bus recovery between them");
     /* The authority retries after recovering the bus; the Nordic port had dropped the second
@@ -225,12 +265,20 @@ static void test_init_soft_reset(void)
     i2c_wire_add_device(10, 11, 0x44u);
     od_sensor_sht40_init(&g_cfg);
     CHECK(i2c_wire_count(I2C_EV_TX) >= 1u);
+    CHECK(i2c_wire_trace[1].ev == I2C_EV_ADDR_W && i2c_wire_trace[1].arg == 0x44u);
     CHECK(i2c_wire_trace[2].ev == I2C_EV_TX && i2c_wire_trace[2].arg == 0x94u);
 
     CASE("and falls back to both factory addresses when that is not where it answers");
-    setup(0x44u, 7u);                /* nothing on the bus at all */
+    setup(0x46u, 7u);                /* custom address, nothing on the bus */
     od_sensor_sht40_init(&g_cfg);
-    CHECK(i2c_wire_count(I2C_EV_ADDR_W) == 3u);   /* configured, then 0x44, then 0x45 */
+    {
+        uint8_t seq[16];
+        unsigned n = addr_seq(seq, 16u);
+        CHECK(n >= 3u);
+        CHECK(seq[0] == 0x46u);      /* the configured one first */
+        CHECK(seq[1] == 0x44u);
+        CHECK(seq[2] == 0x45u);
+    }
 
     CASE("an unassigned sensor is not reset either");
     setup(0x44u, 7u);
@@ -239,8 +287,93 @@ static void test_init_soft_reset(void)
     CHECK(i2c_wire_len == 0u);
 }
 
+static void test_defaults_and_bounds(void)
+{
+    uint32_t v;
+
+    CASE("i2c_addr_7bit 0 and 0xFF both mean the factory default 0x44");
+    for (unsigned k = 0; k < 2u; ++k) {
+        setup(k == 0u ? 0x00u : 0xFFu, 7u);
+        i2c_wire_add_device(10, 11, 0x44u);
+        script_sample(0x44u, 0x6666u, 0x8000u, false, false);
+        od_sensor_sht40_poll(&g_cfg, g_now_ms);
+        {
+            uint8_t seq[8];
+            CHECK(addr_seq(seq, 8u) >= 1u);
+            CHECK(seq[0] == 0x44u);
+        }
+    }
+
+    CASE("msd_data_start_byte 0 and 0xFF both mean the default start 7");
+    setup(0x44u, 0xFFu);
+    i2c_wire_add_device(10, 11, 0x44u);
+    script_sample(0x44u, 0x6666u, 0x8000u, false, false);
+    od_sensor_sht40_poll(&g_cfg, g_now_ms);
+    CHECK(g_msd[7] != 0xA5u);
+    CHECK(g_msd[6] == 0xA5u);
+
+    CASE("a start that cannot hold three bytes is skipped, not truncated");
+    setup(0x44u, 9u);                 /* 9 + 3 > 11 */
+    i2c_wire_add_device(10, 11, 0x44u);
+    script_sample(0x44u, 0x6666u, 0x8000u, false, false);
+    od_sensor_sht40_poll(&g_cfg, g_now_ms);
+    CHECK(g_msd[9] == 0xA5u);         /* untouched: no partial sample corrupting the block */
+    CHECK(g_msd[10] == 0xA5u);
+    CHECK(i2c_wire_len == 0u);        /* and not even sampled */
+
+    CASE("humidity is clamped at the bottom too");
+    setup(0x44u, 7u);
+    i2c_wire_add_device(10, 11, 0x44u);
+    script_sample(0x44u, 0x6666u, 0x0000u, false, false);   /* -6 % */
+    od_sensor_sht40_poll(&g_cfg, g_now_ms);
+    v = (uint32_t)g_msd[7] | ((uint32_t)g_msd[8] << 8) | ((uint32_t)g_msd[9] << 16);
+    CHECK((v & 0x3FFu) == 0u);
+
+    CASE("temperature is clamped into the MSD's range at both ends");
+    setup(0x44u, 7u);
+    i2c_wire_add_device(10, 11, 0x44u);
+    script_sample(0x44u, 0x0000u, 0x8000u, false, false);   /* -45 C, below the -40 floor */
+    od_sensor_sht40_poll(&g_cfg, g_now_ms);
+    v = (uint32_t)g_msd[7] | ((uint32_t)g_msd[8] << 8) | ((uint32_t)g_msd[9] << 16);
+    CHECK(((v >> 10) & 0x7FFu) == 0u);          /* t_deci -400 -> tu 0 */
+
+    setup(0x44u, 7u);
+    i2c_wire_add_device(10, 11, 0x44u);
+    script_sample(0x44u, 0xFFFFu, 0x8000u, false, false);   /* 130 C, above the 125 ceiling */
+    od_sensor_sht40_poll(&g_cfg, g_now_ms);
+    v = (uint32_t)g_msd[7] | ((uint32_t)g_msd[8] << 8) | ((uint32_t)g_msd[9] << 16);
+    CHECK(((v >> 10) & 0x7FFu) == 1650u);       /* t_deci 1250 -> tu 1650 */
+}
+
+static void test_ttl_survives_the_32_bit_wrap(void)
+{
+    unsigned after;
+
+    /* The TTL is unsigned-subtraction arithmetic precisely so it survives the millisecond
+     * counter wrapping, and 29999/30000 either side of an arbitrary base never exercises that. */
+    CASE("a poll straddling the 32-bit millisecond wrap still honours the TTL");
+    setup(0x44u, 7u);
+    i2c_wire_add_device(10, 11, 0x44u);
+    script_sample(0x44u, 0x6666u, 0x8000u, false, false);
+    g_now_ms = 0xFFFFFF00u;
+    od_sensor_sht40_poll(&g_cfg, g_now_ms);
+    after = i2c_wire_len;
+
+    /* 0xFFFFFF00 + 20000 wraps past zero; the elapsed time is 20000 ms, not four billion. */
+    g_now_ms = 0xFFFFFF00u + 20000u;
+    od_sensor_sht40_poll(&g_cfg, g_now_ms);
+    CHECK(i2c_wire_len == after);
+
+    CASE("and samples once the TTL has genuinely elapsed across the wrap");
+    g_now_ms = 0xFFFFFF00u + 30000u;
+    od_sensor_sht40_poll(&g_cfg, g_now_ms);
+    CHECK(i2c_wire_len > after);
+}
+
 int main(void)
 {
+    test_defaults_and_bounds();
+    test_ttl_survives_the_32_bit_wrap();
     test_measurement_ordering();
     test_conversion_and_msd();
     test_both_crc_words();
@@ -248,5 +381,5 @@ int main(void)
     test_ttl_and_wrap();
     test_unassigned_bus_and_multi_instance();
     test_init_soft_reset();
-    return OD_CHECK_REPORT_NONEMPTY("sensor_sht40", 28u);
+    return OD_CHECK_REPORT_NONEMPTY("sensor_sht40", 54u);
 }

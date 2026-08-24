@@ -4,6 +4,7 @@
 
 #include "od_hal_i2c.h"
 #include "od_sensor_app.h"
+#include "od_log.h"
 
 #define SHT40_CMD_MEASURE_HIGH  0xFDu
 #define SHT40_CMD_SOFT_RESET    0x94u
@@ -209,8 +210,25 @@ static void sht40_write_msd_invalid(uint8_t start)
     }
 }
 
+/* Address-only probes of the addresses an SHT40-class part might answer on, logged. Diagnostic:
+ * the result never changes sensor state. Kept because the authority does it and because "nothing
+ * answered anywhere on this bus" is the single most useful line when a board comes up mute. */
+static void sht40_probe_bus_once(uint8_t bus_id)
+{
+    static const uint8_t addrs[5] = { 0x44u, 0x45u, 0x51u, 0x55u, 0x6Au };
+
+    for (uint8_t i = 0; i < 5u; i++) {
+        const int rc = od_hal_i2c_probe(bus_id, addrs[i]);
+
+        od_log_debug("SHT40: bus %u probe 0x%02X rc=%d%s", bus_id, addrs[i], rc,
+                     (rc == OD_HAL_I2C_OK) ? " (present)" : "");
+    }
+}
+
 void od_sensor_sht40_init(const struct od_config *cfg)
 {
+    bool probed = false;
+
     if (cfg == NULL) {
         return;
     }
@@ -227,6 +245,12 @@ void od_sensor_sht40_init(const struct od_config *cfg)
             (void)sht40_write_cmd(s->bus_id, 0x45u, SHT40_CMD_SOFT_RESET, NULL);
         }
         od_sensor_app_delay_ms(2u);
+        if (!probed) {
+            /* Once per init, on the first configured sensor's bus -- the authority probes one
+             * bus, not one per sensor. */
+            sht40_probe_bus_once(s->bus_id);
+            probed = true;
+        }
     }
 }
 
@@ -234,6 +258,7 @@ void od_sensor_sht40_poll(const struct od_config *cfg, uint32_t now_ms)
 {
     static uint32_t last_poll_ms;
     static bool have_polled;
+    static bool logged_fail;
 
     if (cfg == NULL) {
         return;
@@ -249,6 +274,7 @@ void od_sensor_sht40_poll(const struct od_config *cfg, uint32_t now_ms)
         const struct SensorData *s = &cfg->sensors[i];
         int16_t temp_centi = 0;
         uint16_t rh_centi = 0;
+        uint8_t err = 0;
         uint8_t start;
 
         if (s->sensor_type != OD_SENSOR_TYPE_SHT40) {
@@ -260,9 +286,22 @@ void od_sensor_sht40_poll(const struct od_config *cfg, uint32_t now_ms)
         if ((uint16_t)start + 3u > OD_MSD_DYNAMIC_LEN) {
             continue;
         }
-        if (sht40_sample(s, &temp_centi, &rh_centi, NULL)) {
+        if (sht40_sample(s, &temp_centi, &rh_centi, &err)) {
             sht40_write_msd(start, temp_centi, rh_centi);
+            logged_fail = false;
         } else {
+            /* Once per failure run, not once per poll: a mute sensor polled every 30 s would
+             * otherwise fill the log. Reset on the next success. The code says WHICH step failed
+             * -- 0xFB no bus, 0xFC humidity CRC, 0xFD temperature CRC, 0xFE read -- which is the
+             * diagnostic both ports had and which nothing else reports. */
+            if (!logged_fail) {
+                /* No parenthesis in the format string: the "no nested call in a log argument"
+                 * ratchet matches an identifier followed by "(" anywhere in the
+                 * call, and cannot tell a format-string paren from a real call. It
+                 * errs safe, so the message avoids one. */
+                od_log_warn("SHT40: read failed err=0x%02X bus=%u", err, s->bus_id);
+                logged_fail = true;
+            }
             sht40_write_msd_invalid(start);
         }
     }
