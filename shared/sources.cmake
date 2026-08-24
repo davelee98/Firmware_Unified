@@ -229,12 +229,17 @@ set(OD_SHARED_SOURCES_APP_SENSOR
     "${CMAKE_CURRENT_LIST_DIR}/core/od_sensor_bq27220.c"
 )
 
-# APP_TOUCH is the shared GT911 driver. Like APP_SENSOR it is named for a seam -- od_touch_app.h
-# carries GPIO and the delays, because there is no shared GPIO HAL and inventing one to serve a
-# single driver would be a larger change than the promotion. BG22 takes neither tier.
-set(OD_SHARED_SOURCES_APP_TOUCH
-    "${CMAKE_CURRENT_LIST_DIR}/core/od_touch_gt911.c"
-)
+# APP_TOUCH IS DELIBERATELY EMPTY AND NOT IN THE AGGREGATE.
+#
+# shared/core/od_touch_gt911.c exists but is a REJECTED DRAFT (its own header says so). Listing it
+# here put it in the aggregate, which targets/esp32-idf consumes -- so a file marked DO NOT MERGE
+# was being compiled into every ESP32 build, surviving only because --gc-sections discarded it and
+# because nothing implements the od_touch_app seam it references.
+#
+# That is not a safe place to leave a draft: the day someone implements the seam, an unreviewed
+# driver that publishes RAW GT911 coordinates instead of mapped, clipped panel pixels starts
+# linking. The tier stays declared so the next attempt has somewhere to land, and stays empty and
+# out of the aggregate until a driver passes review.
 
 # HAL_LOG owns portable record formatting. Enabled targets must implement od_hal_log and
 # od_hal_time; OD_CAP_LOG=0 compiles explicit no-op entry points with no HAL references or state.
@@ -263,7 +268,6 @@ set(OD_SHARED_SOURCES
     ${OD_SHARED_SOURCES_APP_LED}
     ${OD_SHARED_SOURCES_APP_BUZZER}
     ${OD_SHARED_SOURCES_APP_SENSOR}
-    ${OD_SHARED_SOURCES_APP_TOUCH}
     ${OD_SHARED_SOURCES_HAL_LOG}
     ${OD_SHARED_SOURCES_HAL_WDT}
 )

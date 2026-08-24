@@ -1104,6 +1104,21 @@ This is one of the rare cases where the Nordic port is right and the authority i
 recorded rather than resolved by the usual "`Firmware` wins" default (CLAUDE.md § Migration
 constraints).
 
+**The vendor documentation makes the consequence worse than a dead window.** GOODIX's *GT911
+Programming Guide* Rev.10 § 5 p.28 states that if the host does not clear `0x814E` within one
+refresh period the part "will output an INT pulse again **instead of update coordinates** even if
+it detects new coordinate", and that if the host still does not read, it "will keep outputting INT
+pulse". So the wedged state is not quiet: the controller holds a stale sample *and* asserts its
+interrupt line every 5..20 ms indefinitely, waking the host each time to re-read the same
+unusable byte. On an interrupt-driven board that is a power cost on top of the lost input.
+
+Two related facts from the same document, for whoever picks this up: the 1..5 contact bound is the
+*configuration* register `0x804C`, not a property of `0x814E` — Rev.10's own map enumerates six
+point blocks through `0x817F`, and HotKnot proximity detection adds a phantom contact with track id
+32 aliased onto point 1's address. So `n > 5` is a sound defensive rule for this fleet but is not
+the specification saying the sample is invalid, which is a further reason to clear and continue
+rather than to skip.
+
 ---
 
 ## 18. `Firmware_Unified` / both targets — a dead BQ27220 keeps advertising its last state of charge
