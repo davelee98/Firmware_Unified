@@ -74,9 +74,11 @@ record the divergence — the contract wants only `0xFF`, the field has both.
 
 **Implemented 2026-08-22.** The floor and the group-closing yield are ported from the authority;
 `repeat_forever` replaces the wrapped-count sentinel on all three targets;
-`tests/host/silabs_led_test.c` drives the production machine (146 checks) and the divergence is
-recorded in `docs/DIVERGENCE_MATRIX.md` § 11. Removing the group-closing yield makes that suite
-hang rather than fail, so its ctest entry carries a timeout.
+The original production-machine suite carried 146 checks; it is now incorporated into
+`tests/host/led_test.c`, with BG22 scheduling covered separately by
+`tests/host/silabs_led_adapter_test.c`. The divergence is recorded in
+`docs/DIVERGENCE_MATRIX.md` § 11. Removing the group-closing yield makes the machine suite hang
+rather than fail, so its ctest entry carries a timeout.
 
 **Acceptance test, mandatory and not optional:** a production-machine host case driving an
 all-zero-delay pattern at raw `0xFE` and at raw `0xFF`, asserting the runner yields — performs

@@ -731,20 +731,26 @@ if(Python3_FOUND)
     add_test(NAME silabs_fault COMMAND od_silabs_fault_test)
 endif()
 
-# The LED runner's yield contract, against the production state machine. Vendor GPIO/timer calls
-# are fakes; the phase loop and the group-repeat sentinel are the real ones. Deliberately outside
-# any optional-tool gate: a regression here is an unbounded loop, so the suite must not be one of
-# the things a missing tool quietly removes.
-add_executable(od_silabs_led_test
-    silabs_led_test.c
+# The shared LED runner. Vendor drivers are gone from this suite entirely: the machine's only
+# seam is od_led_app, so the fake is three functions and a millisecond clock the test advances
+# itself. An unbounded loop does not fail on its own, hence the timeout.
+add_executable(od_led_test led_test.c)
+target_link_libraries(od_led_test od_shared)
+add_test(NAME led COMMAND od_led_test)
+set_tests_properties(led PROPERTIES TIMEOUT 30)
+
+# The BG22 adapter's scheduler, against the production source. led_test covers the machine; this
+# covers turning its returned delay into a sleeptimer arm, and re-arming on every expiry -- an
+# adapter that stops re-arming leaves a superloop with no watchdog silently stuck.
+add_executable(od_silabs_led_adapter_test
+    silabs_led_adapter_test.c
     ../../targets/efr32bg22-slc/opendisplay_led.c)
-target_include_directories(od_silabs_led_test PRIVATE
+target_include_directories(od_silabs_led_adapter_test PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/fake_silabs
     ../../targets/efr32bg22-slc)
-target_link_libraries(od_silabs_led_test od_shared_silabs)
-add_test(NAME silabs_led COMMAND od_silabs_led_test)
-# An unbounded loop does not fail on its own; the timeout is what turns it into a failure.
-set_tests_properties(silabs_led PROPERTIES TIMEOUT 30)
+target_link_libraries(od_silabs_led_adapter_test od_shared_silabs)
+add_test(NAME silabs_led_adapter COMMAND od_silabs_led_adapter_test)
+set_tests_properties(silabs_led_adapter PROPERTIES TIMEOUT 30)
 
 # bench_dispatch_gate: the two `dispatch-gate` helpers against a fake BLE client.
 #
