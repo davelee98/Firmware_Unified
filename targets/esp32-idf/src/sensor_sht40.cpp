@@ -126,8 +126,11 @@ static bool read_sht40_sample(const SensorData* sensor, int16_t* temp_centi, uin
     const uint8_t candidates[] = {preferred_addr, 0x44u, 0x45u};
     for (uint8_t pass = 0; pass < 2; pass++) {
         if (pass > 0) {
-            // The next transaction re-selects the bus; nothing needs to re-open it here.
+            // Re-open BEFORE the dwell, not after. The 2 ms is idle-high settling time on an
+            // initialised bus -- where IDF's internal pull-ups may be the only pull-ups, waiting
+            // with the bus torn down is not the same wait.
             invalidateOpenDisplayWire();
+            (void)initOrRestoreWireForBus(bus_id);
             od_hal_delay_ms(2);
         }
         for (uint8_t i = 0; i < sizeof(candidates); i++) {

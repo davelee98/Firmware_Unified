@@ -24,9 +24,13 @@ extern "C" {
  * true: the next call for a different bus gets that bus. */
 bool od_hal_i2c_esp_select(uint8_t bus_id);
 
-/* Open the bus on explicit pins, for the board-default path that runs when no DataBus record
- * exists at all. hz == 0 means 100 kHz. */
-bool od_hal_i2c_esp_begin(int scl, int sda, uint32_t hz);
+/* Open the bus on explicit pins. hz == 0 means 100 kHz.
+ *
+ * ARGUMENT ORDER IS (sda, scl) AND MUST STAY THAT WAY. It reads backwards against DataBus, whose
+ * pin_1 is SCL and pin_2 is SDA, and "tidying" it to match cost a full review cycle: two
+ * same-typed parameters swap silently, every configured bus comes up with the lines crossed, and
+ * nothing on the host build can tell. */
+bool od_hal_i2c_esp_begin(uint8_t sda, uint8_t scl, uint32_t hz);
 
 /* Tear the bus down, releasing the cached device handle. Safe when already down. The panel
  * refresh path uses this; the next transaction re-selects. */

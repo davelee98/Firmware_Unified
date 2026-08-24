@@ -650,3 +650,44 @@ Re-provision rather than debug if that appears.
 - [ ] **RAM unchanged:** `heap_size` and `data + bss` against the pre-change image. Measured at
       32,284 B static RAM with 480 B headroom (flash 250,148 -> 250,552 B). The overlay existing is
       what makes this promotion affordable there, and losing it would be invisible except here.
+
+
+---
+
+## Sensor/I2C seam — steps 1-4 (2026-08-24)
+
+Nothing here is hardware-qualified. `tools/check.sh --targets` passes 40/0/0 and the shared
+resolver and I2C contract are host-tested and mutation-checked, but **the gate cannot see pin
+order or bus selection**: step 4 shipped, and review caught, a swapped SDA/SCL argument order that
+would have crossed the lines on every configured ESP32 bus while passing every automated check.
+Treat the rows below as the only thing standing behind that.
+
+### ESP32-S3 (`s3-n16r8-extuart-debug`)
+
+- [ ] **SDA and SCL are the right way round.** Scope or logic-analyse one transaction, or simply
+      confirm any I2C device answers at all — SHT40, BQ27220, GT911 or the AXP2101 probe. A
+      crossed pair fails every device on the bus, so one working device clears this row.
+- [ ] **SHT40, BQ27220, GT911 and AXP2101 all behave as before** the operations gained a bus
+      argument.
+- [ ] **Bus switching:** two configured `DataBus` entries selected in sequence, and returning to
+      the first restores its pins **and its speed** — the speed half is newly part of the
+      selection identity and was previously ignored on a same-pins switch.
+- [ ] **A sensor or touch entry with `bus_id == 0xFF` is not probed**, and is not attached to
+      bus 0.
+- [ ] **Out-of-order `DataBus` records bind correctly**: declare instance 1 before instance 0 and
+      confirm each device talks on its own pins. This is the § 14 defect the shared resolver
+      fixes, and it is invisible on an in-order config.
+- [ ] **A duplicated `instance_number` yields no device** rather than an arbitrary one.
+
+### Nordic (`xiao_nrf52840`)
+
+- [ ] **Touch still reports contacts** after its private bit-banger was folded into
+      `opendisplay_i2c.c` — the plan requires this before the cutover proceeds past step 2.
+- [ ] **BQ27220 and nPM1300 reads still return plausible values.** Their repeated START gained a
+      half-period `tLOW` that it never had; the change is meant to be an improvement, and this
+      row is what shows it is not a regression.
+- [ ] **GT911 bit timing unchanged**: touch pins 100 kHz explicitly rather than taking
+      `bus_speed_hz`, which reproduces the private engine's fixed 5 µs. A config declaring
+      400 kHz must not change the touch clock.
+- [ ] **A clone that stretches the clock now fails the transfer** rather than sampling garbage,
+      and five consecutive failures disable touch. Confirm ordinary hardware never reaches that.

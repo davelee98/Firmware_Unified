@@ -73,7 +73,7 @@ static int map_err(esp_err_t err)
     }
 }
 
-bool od_hal_i2c_esp_begin(int scl, int sda, uint32_t hz)
+bool od_hal_i2c_esp_begin(uint8_t sda, uint8_t scl, uint32_t hz)
 {
     if (s_bus) {
         /* Same pins: already up, nothing to do. Different pins: the caller must deinit first

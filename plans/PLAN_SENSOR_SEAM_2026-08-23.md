@@ -374,6 +374,20 @@ software candidate with its rows open.
    tier; the target implementations remain in their target builds. No shared device driver yet.
 4. **ESP32 HAL cutover:** add `bus_id` to the four operations, move bus selection beneath them,
    and repoint the existing SHT40, BQ27220, GT911 and AXP2101 callers. Hardware gate.
+   **PREREQUISITE ADDED 2026-08-24, after step 4's review: bind the production adapter to
+   `tests/host/i2c_contract.inc` before repeating this on Nordic.** Step 4 shipped a swapped
+   SDA/SCL pin order — the caller passed `(sda, scl)` and the function was redefined as
+   `(scl, sda)` — which would have crossed the lines on **every configured ESP32 bus**, and it
+   passed the whole gate: two same-typed parameters reorder silently and nothing on the host
+   drives them. Review caught it; no automated check could have. The same review found the
+   transport refusing a literal `0xFF` instance, contradicting T1 and the contract's own case.
+
+   Both live in the *resolution* half (`display_service.cpp`), which is C++ and reads
+   `globalConfig`, so it is not host-bindable as written. Binding it means moving bus resolution
+   into a translation unit a host test can link — a design change, not a fix, and the reason it
+   is written down here rather than done inside step 4. **Until it is done, the pin order and the
+   sentinel policy on both targets are protected by the hardware gate alone.**
+
 5. **Nordic HAL cutover:** implement the same four operations over `opendisplay_i2c.c`, then
    repoint SHT40, BQ27220, GT911 and nPM1300. Hardware gate.
 6. **SHT40 promotion:** add `shared/core/od_sensor_sht40.{c,h}` and the `APP_SENSOR` tier,

@@ -731,17 +731,30 @@ void invalidateOpenDisplayWire(void) {
 // REFUSED rather than resolved to bus 0: substituting a bus probes an unassigned device on
 // somebody else's pins, where an address collision returns a plausible-but-wrong reading instead
 // of a failure (DIVERGENCE_MATRIX 13).
+static bool selectConfiguredBus(uint8_t bus_id);
+
 /* The seam shared/hal/od_hal_i2c.h's four operations call before every transaction. It lives on
  * this side because resolving a bus_id means reading globalConfig; the HAL owns the IDF bus
- * handle and nothing above it. */
+ * handle and nothing above it.
+ *
+ * IT TAKES bus_id LITERALLY, including 0xFF, because that is what the shared header promises:
+ * refusing the unassigned sentinel is the CONSUMER's rule -- sensors, touch and the PMIC each
+ * apply it before they get here -- and a transport that applies it too makes a record genuinely
+ * numbered 0xFF unreachable. */
 extern "C" bool od_hal_i2c_esp_select(uint8_t bus_id) {
-    return initOrRestoreWireForBus(bus_id);
+    return selectConfiguredBus(bus_id);
 }
 
+/* Refuses the unassigned sentinel, then selects. For the callers that pre-open a bus rather than
+ * transacting through the shared operations. */
 bool initOrRestoreWireForBus(uint8_t bus_id) {
     if (bus_id == 0xFF) {
         return false;
     }
+    return selectConfiguredBus(bus_id);
+}
+
+static bool selectConfiguredBus(uint8_t bus_id) {
     const struct DataBus* found = od_config_data_bus(&globalConfig, bus_id);
     if (found == nullptr || !dataBusUsable(*found)) {
         return false;
@@ -750,7 +763,11 @@ bool initOrRestoreWireForBus(uint8_t bus_id) {
     uint32_t hz = bus.bus_speed_hz ? bus.bus_speed_hz : 100000u;
     int sda = (int)bus.pin_2;
     int scl = (int)bus.pin_1;
-    if (s_wire_open_display_ready && s_wire_sda_pin == sda && s_wire_scl_pin == scl) {
+    /* Speed is part of the identity, not just the pins. IDF fixes the clock when a DEVICE handle
+     * is attached, so two instances sharing pins at different rates would otherwise leave the
+     * second running at the first one's rate -- and a cached device handle keeps it. */
+    if (s_wire_open_display_ready && s_wire_sda_pin == sda && s_wire_scl_pin == scl &&
+        s_wire_clock_hz == hz) {
         return true;
     }
     if (s_wire_open_display_ready) {
