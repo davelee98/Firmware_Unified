@@ -237,6 +237,49 @@ static void test_early_call_and_wrap(void)
     CHECK(g_tone_count == 1u);
 }
 
+static void test_tone_stop_transitions(void)
+{
+    uint8_t tone_gap[] = {0u, 1u, 2u, 1u, 120u, 2u, 1u, 144u, 2u};
+    uint8_t tone_rest[] = {0u, 1u, 1u, 2u, 120u, 2u, 0u, 2u};
+
+    setup();
+    CASE("a tone is stopped before an inter-pattern gap");
+    CHECK(od_buzzer_activate(&ACTIVE_HIGH, tone_gap, sizeof tone_gap, g_now) == 0);
+    CHECK(service() == 10u);
+    CHECK(g_stop_count == 0u);
+    g_now += 10u;
+    CHECK(service() == OD_BUZZER_INTER_PATTERN_MS);
+    CHECK(g_stop_count == 1u);
+    CHECK(g_stop_pins[0] == ACTIVE_HIGH.drive_pin);
+
+    setup();
+    CASE("a tone is stopped at expiry and remains stopped through a rest");
+    CHECK(od_buzzer_activate(&ACTIVE_HIGH, tone_rest, sizeof tone_rest, g_now) == 0);
+    CHECK(service() == 10u);
+    CHECK(g_stop_count == 0u);
+    g_now += 10u;
+    CHECK(service() == 10u);
+    CHECK(g_stop_count == 2u);
+    CHECK(g_stop_pins[0] == ACTIVE_HIGH.drive_pin);
+    CHECK(g_stop_pins[1] == ACTIVE_HIGH.drive_pin);
+}
+
+static void test_late_call_slips(void)
+{
+    uint8_t p[] = {0u, 1u, 1u, 2u, 120u, 2u, 144u, 2u};
+
+    setup();
+    CASE("a late service call starts one next step without catching up");
+    CHECK(od_buzzer_activate(&ACTIVE_HIGH, p, sizeof p, g_now) == 0);
+    CHECK(service() == 10u);
+    g_now += 15u;
+    CHECK(service() == 10u);
+    CHECK(g_tone_count == 2u);
+    g_now += 5u;
+    CHECK(service() == 5u);
+    CHECK(g_tone_count == 2u);
+}
+
 static void test_zero_duration_and_copy(void)
 {
     uint8_t p[] = {0u, 1u, 1u, 3u, 117u, 0u, 144u, 0u, 120u, 1u};
@@ -296,6 +339,30 @@ static void test_total_cap(void)
     CHECK(g_now == 30000u);
 }
 
+static void test_total_cap_across_wrap(void)
+{
+    uint8_t p[] = {0u, 255u, 1u, 1u, 120u, 255u};
+    const uint32_t started_ms = UINT32_MAX - 10000u;
+    uint32_t elapsed = 0u;
+
+    setup();
+    g_now = started_ms;
+    CASE("the 30000 ms cap uses elapsed time across uint32 wrap");
+    CHECK(od_buzzer_activate(&ACTIVE_HIGH, p, sizeof p, g_now) == 0);
+    for (;;) {
+        const uint32_t delay = service();
+
+        if (delay == OD_BUZZER_IDLE) {
+            break;
+        }
+        elapsed += delay;
+        g_now += delay;
+    }
+    CHECK(elapsed == OD_BUZZER_MAX_TOTAL_MS);
+    CHECK(g_now == started_ms + OD_BUZZER_MAX_TOTAL_MS);
+    CHECK(g_tone_count == 24u);
+}
+
 static void test_total_cap_during_gap(void)
 {
     uint8_t p[55] = {0u, 1u, 2u, 24u};
@@ -340,9 +407,12 @@ int main(void)
     test_pattern_schedule();
     test_active_preemption();
     test_early_call_and_wrap();
+    test_tone_stop_transitions();
+    test_late_call_slips();
     test_zero_duration_and_copy();
     test_enable_polarity_and_start_failure();
     test_total_cap();
+    test_total_cap_across_wrap();
     test_total_cap_during_gap();
     return OD_CHECK_REPORT_NONEMPTY("buzzer_test", 340u);
 }

@@ -643,8 +643,35 @@ Resolved by the shared runner in `plans/PLAN_BUZZER_2026-08-23.md`; hardware row
 | indices outside 117..234 | shift by 24 until inside the window | no fold | octave-fold, preserving pitch class |
 | total melody cap | 30,000 ms | 5,000 ms | 30,000 ms; clamp the final step to the remainder |
 | owned payload cap | 256 bytes | 244 bytes | 256 bytes; the host's 120-step maximum is 244 |
+| zero-duration step | skip without touching enable or tone output | briefly assert enable and start the tone | skip as a complete no-op |
 
 This is not authority by name alone. `py-opendisplay` documents the same exponential inverse,
 accepts raw indices 1..255, and says firmware performs the fold. The cap is not host-encoded, so
 the standing live-`Firmware` donor rule decides it. `tests/host/buzzer_test.c` checks all 256
 indices against an independent formula and pins the exact 30,000 ms schedule.
+
+---
+
+## 16. Buzzer — BG22 has none, by product decision (2026-08-24)
+
+**The EFR32BG22 will never carry a buzzer.** Recorded so the absence reads as a decision rather
+than an omission waiting to be "completed".
+
+Consequences, all already true in the tree:
+
+- `shared/profiles.cmake` sets `OD_CONFIG_WITH_BUZZER=0`, so `struct BuzzerConfig` is not a member
+  of that target's `struct od_config`.
+- `opendisplay-bg22.cmake` takes no `APP_BUZZER` tier; the image links no `od_buzzer` symbol,
+  no 256-entry pitch table and no runner state. Verified by `nm` against the built image.
+- `0x0077` is answered by the target's own capability hook rather than falling silent, so a host
+  can distinguish "no buzzer" from "firmware older than the command".
+
+Ratcheted by `tools/check.sh` § "silabs: BG22 has no buzzer runner", which fails if the tier is
+taken, if the profile line is dropped, or — when an image is present — if any `od_buzzer` symbol
+reaches the ELF. The source rules alone would not catch a symbol arriving through some other tier,
+which is why the map check is part of it.
+
+**Adding buzzer support to BG22 is not a matter of taking the tier.** It would cost a 256-entry
+`uint32_t` pitch table (1 KB of flash) plus runner state on a part with 480 B of RAM headroom, and
+the config struct's layout would change — which is an ABI break against every host test compiled
+for that profile.
