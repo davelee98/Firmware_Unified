@@ -44,6 +44,18 @@ static bool args_ok(uint8_t addr7, const void *p, uint16_t len)
 	return addr7 <= 0x7Fu && p != NULL && len > 0u;
 }
 
+/* An address NACK is ENODEV and everything else is EIO, which is why the engine reports where it
+ * failed rather than just that it did: collapsing the two makes a missing device indistinguishable
+ * from a bus fault, and the other two targets keep them apart. */
+static int from_engine(enum od_i2c_result r)
+{
+	switch (r) {
+	case OD_I2C_RES_OK:        return OD_HAL_I2C_OK;
+	case OD_I2C_RES_NACK_ADDR: return OD_HAL_I2C_ENODEV;
+	default:                   return OD_HAL_I2C_EIO;
+	}
+}
+
 int od_hal_i2c_probe(uint8_t bus_id, uint8_t addr7)
 {
 	struct od_i2c_bus bus;
@@ -56,7 +68,7 @@ int od_hal_i2c_probe(uint8_t bus_id, uint8_t addr7)
 	}
 	/* Address-only: a zero-length write is not a portable presence check, which is why probe
 	 * is its own operation. This engine can express it directly. */
-	return od_i2c_write(&bus, addr7, NULL, 0u, true) ? OD_HAL_I2C_OK : OD_HAL_I2C_ENODEV;
+	return from_engine(od_i2c_write_ex(&bus, addr7, NULL, 0u, true));
 }
 
 int od_hal_i2c_write(uint8_t bus_id, uint8_t addr7, const uint8_t *data, uint16_t len)
@@ -69,7 +81,7 @@ int od_hal_i2c_write(uint8_t bus_id, uint8_t addr7, const uint8_t *data, uint16_
 	if (!select_bus(bus_id, &bus)) {
 		return OD_HAL_I2C_EINVAL;
 	}
-	return od_i2c_write(&bus, addr7, data, len, true) ? OD_HAL_I2C_OK : OD_HAL_I2C_EIO;
+	return from_engine(od_i2c_write_ex(&bus, addr7, data, len, true));
 }
 
 int od_hal_i2c_read(uint8_t bus_id, uint8_t addr7, uint8_t *data, uint16_t len)
@@ -82,7 +94,7 @@ int od_hal_i2c_read(uint8_t bus_id, uint8_t addr7, uint8_t *data, uint16_t len)
 	if (!select_bus(bus_id, &bus)) {
 		return OD_HAL_I2C_EINVAL;
 	}
-	return od_i2c_read(&bus, addr7, data, len) ? OD_HAL_I2C_OK : OD_HAL_I2C_EIO;
+	return from_engine(od_i2c_read_ex(&bus, addr7, data, len));
 }
 
 int od_hal_i2c_write_read(uint8_t bus_id, uint8_t addr7,
@@ -99,8 +111,10 @@ int od_hal_i2c_write_read(uint8_t bus_id, uint8_t addr7,
 	}
 	/* stop=false leaves SCL low with no STOP, so od_i2c_read()'s START is a REPEATED start.
 	 * The SAME bus object carries both phases -- see the note at the top of this file. */
-	if (!od_i2c_write(&bus, addr7, tx, tx_len, false)) {
-		return OD_HAL_I2C_EIO;
+	enum od_i2c_result r = od_i2c_write_ex(&bus, addr7, tx, tx_len, false);
+
+	if (r != OD_I2C_RES_OK) {
+		return from_engine(r);
 	}
-	return od_i2c_read(&bus, addr7, rx, rx_len) ? OD_HAL_I2C_OK : OD_HAL_I2C_EIO;
+	return from_engine(od_i2c_read_ex(&bus, addr7, rx, rx_len));
 }

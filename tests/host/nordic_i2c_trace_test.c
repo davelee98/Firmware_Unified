@@ -111,11 +111,16 @@ static void test_address_nack(void)
     const uint8_t tx[1] = { 0x11 };
     static uint8_t nack[128];
 
-    CASE("nothing answering the address stops the transaction and releases the bus");
+    CASE("nothing answering the address is ENODEV, not a bus fault");
     install(0);
     memset(nack, 1, sizeof nack);           /* SDA floats high at every ACK slot */
     nrf_gpio_set_sda_reads(nack, sizeof nack);
-    CHECK(od_hal_i2c_write(0, DEV7, tx, 1) != OD_HAL_I2C_OK);
+    /* Exactly ENODEV. "!= OK" would accept EIO, which is what this adapter returned before the
+     * engine was taught to report WHERE it failed -- and a missing device reported as a bus
+     * fault is the distinction the shared contract exists to keep. */
+    CHECK(od_hal_i2c_write(0, DEV7, tx, 1) == OD_HAL_I2C_ENODEV);
+    CHECK(od_hal_i2c_read(0, DEV7, (uint8_t[1]){0}, 1) == OD_HAL_I2C_ENODEV);
+    CHECK(od_hal_i2c_probe(0, DEV7) == OD_HAL_I2C_ENODEV);
     CHECK(nrf_trace_stops() >= 1u);
 }
 
@@ -159,8 +164,9 @@ static void test_probe_is_address_only(void)
     CHECK(od_hal_i2c_probe(0, DEV7) == OD_HAL_I2C_OK);
     CHECK(nrf_trace_starts() == 1u);
     CHECK(nrf_trace_stops() == 1u);
-    /* One byte only: 9 clocks, not 18. */
-    CHECK(nrf_trace_count(NRF_EDGE_SCL_HIGH) < 18u);
+    /* Exactly one byte clocked -- the address. "< 18" was satisfied by zero, so it would have
+     * passed an implementation that emitted START and STOP and never addressed anything. */
+    CHECK(nrf_trace_count(NRF_EDGE_SCL_HIGH) == 12u);
 }
 
 int main(void)

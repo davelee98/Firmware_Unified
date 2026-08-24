@@ -63,7 +63,6 @@ static uint8_t npm1300_addr_7bit(const struct SensorData *s)
 static bool npm1300_reg_write(const struct SensorData *s, uint8_t base, uint8_t offset,
 			      const uint8_t *data, size_t len)
 {
-	struct od_i2c_bus bus;
 	uint8_t buf[8];
 
 	if (len + 2u > sizeof(buf) || s->bus_id == 0xFFu) {
@@ -87,7 +86,6 @@ static bool npm1300_reg_write_u8(const struct SensorData *s, uint8_t base, uint8
 static bool npm1300_reg_read(const struct SensorData *s, uint8_t base, uint8_t offset,
 			     uint8_t *data, size_t len)
 {
-	struct od_i2c_bus bus;
 	uint8_t hdr[2] = {base, offset};
 
 	if (s->bus_id == 0xFFu) {
@@ -170,10 +168,12 @@ bool opendisplay_sensor_npm1300_is_available(void)
 {
 	const struct SensorData *s = npm1300_config();
 
-	/* "Available" means a bus was assigned and it resolves to a usable I2C record. A probe
-	 * would be a transaction; this is the same question the old bus construction answered. */
+	/* A CONFIG question, not a transaction. The helper this replaced built a bus object and
+	 * answered "did that resolve"; probing instead would put an address byte on the wire and
+	 * could spend a stretch timeout, which is not what a caller asking "is one configured" is
+	 * asking for. */
 	return s != NULL && s->bus_id != 0xFFu &&
-	       od_hal_i2c_probe(s->bus_id, npm1300_addr_7bit(s)) != OD_HAL_I2C_EINVAL;
+	       od_config_data_bus(opendisplay_get_global_config(), s->bus_id) != NULL;
 }
 
 bool opendisplay_sensor_npm1300_is_configured(void)

@@ -182,52 +182,63 @@ bool od_i2c_init(struct od_i2c_bus *bus, uint8_t scl_cfg, uint8_t sda_cfg,
 	return true;
 }
 
-bool od_i2c_write(struct od_i2c_bus *bus, uint8_t addr7, const uint8_t *data,
-		  size_t len, bool stop)
+enum od_i2c_result od_i2c_write_ex(struct od_i2c_bus *bus, uint8_t addr7, const uint8_t *data,
+				   size_t len, bool stop)
 {
 	if (!bus->ready) {
-		return false;
+		return OD_I2C_RES_ERR;
 	}
 	od_i2c_start(bus);
 	if (!od_i2c_write_byte(bus, (uint8_t)((addr7 << 1) | 0u))) {
 		od_i2c_stop(bus);
-		return false;
+		return OD_I2C_RES_NACK_ADDR;
 	}
 	for (size_t i = 0; i < len; i++) {
 		if (!od_i2c_write_byte(bus, data[i])) {
 			od_i2c_stop(bus);
-			return false;
+			return OD_I2C_RES_ERR;
 		}
 	}
 	if (stop) {
 		od_i2c_stop(bus);
 	}
-	return true;
+	return OD_I2C_RES_OK;
 }
 
-bool od_i2c_read(struct od_i2c_bus *bus, uint8_t addr7, uint8_t *data, size_t len)
+bool od_i2c_write(struct od_i2c_bus *bus, uint8_t addr7, const uint8_t *data,
+		  size_t len, bool stop)
+{
+	return od_i2c_write_ex(bus, addr7, data, len, stop) == OD_I2C_RES_OK;
+}
+
+enum od_i2c_result od_i2c_read_ex(struct od_i2c_bus *bus, uint8_t addr7, uint8_t *data, size_t len)
 {
 	if (!bus->ready) {
-		return false;
+		return OD_I2C_RES_ERR;
 	}
 	if (len == 0u) {
 		/* Refused, but not while holding the bus: a caller reaching here after a
 		 * stop=false write would otherwise leave SCL low with no STOP for ever. */
 		od_i2c_stop(bus);
-		return false;
+		return OD_I2C_RES_ERR;
 	}
 	od_i2c_start(bus);
 	if (!od_i2c_write_byte(bus, (uint8_t)((addr7 << 1) | 1u))) {
 		od_i2c_stop(bus);
-		return false;
+		return OD_I2C_RES_NACK_ADDR;
 	}
 	for (size_t i = 0; i < len; i++) {
 		bool ack = (i + 1u) < len; /* ACK all but the last byte */
 		if (!od_i2c_read_byte(bus, &data[i], ack)) {
 			od_i2c_stop(bus);
-			return false;
+			return OD_I2C_RES_ERR;
 		}
 	}
 	od_i2c_stop(bus);
-	return true;
+	return OD_I2C_RES_OK;
+}
+
+bool od_i2c_read(struct od_i2c_bus *bus, uint8_t addr7, uint8_t *data, size_t len)
+{
+	return od_i2c_read_ex(bus, addr7, data, len) == OD_I2C_RES_OK;
 }
