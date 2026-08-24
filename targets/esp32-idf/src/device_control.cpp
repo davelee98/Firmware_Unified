@@ -12,6 +12,8 @@ void enterDeepSleep(bool force = false, uint16_t overrideSleepSeconds = 0);
 #include "driver/gpio.h"
 #include "od_hal_adc.h"
 #include "od_hal_gpio.h"
+#include "od_led.h"
+#include "od_led_app.h"
 #include "od_hal_time.h"
 #include "od_hal_sleep.h"
 #include "od_txq.h"
@@ -271,266 +273,64 @@ void reboot(){
     esp32_ble_deinit_before_restart();
     esp_restart();
 }
+/* ESP32 adapter for the shared LED runner.
+ *
+ * The pattern machine, the software PWM and the group/loop accounting are shared/core/od_led.c.
+ * This target has no timer for it: the loop task calls processLedFlash() and the machine's
+ * returned delay becomes a deadline compared against od_hal_uptime_ms().
+ */
 
-#define LED_DELAY_FACTOR_MS 100u
-#define LED_MIN_STEP_DELAY_MS 1u
+static bool s_led_running = false;
+static uint32_t s_led_due_ms = 0;
 
-typedef enum {
-    LED_PHASE_IDLE = 0,
-    LED_PHASE_GROUP,
-    LED_PHASE_LOOP1,
-    LED_PHASE_LOOP1_DELAY,
-    LED_PHASE_INTER1_DELAY,
-    LED_PHASE_LOOP2,
-    LED_PHASE_LOOP2_DELAY,
-    LED_PHASE_INTER2_DELAY,
-    LED_PHASE_LOOP3,
-    LED_PHASE_LOOP3_DELAY,
-    LED_PHASE_INTER3_DELAY,
-} led_phase_t;
+static struct LedConfig* led_instance(uint8_t instance) {
+    if (instance >= globalConfig.led_count) {
+        return nullptr;
+    }
+    return &globalConfig.leds[instance];
+}
 
-static struct {
-    bool active;
-    uint8_t instance;
-    struct LedConfig* led;
-    uint8_t brightness;
-    uint8_t c1;
-    uint8_t c2;
-    uint8_t c3;
-    uint8_t loop1delay;
-    uint8_t loop2delay;
-    uint8_t loop3delay;
-    uint8_t loopcnt1;
-    uint8_t loopcnt2;
-    uint8_t loopcnt3;
-    uint8_t ildelay1;
-    uint8_t ildelay2;
-    uint8_t ildelay3;
-    uint8_t grouprepeats;
-    bool repeat_forever;
-    uint8_t group_pos;
-    uint8_t i1;
-    uint8_t i2;
-    uint8_t i3;
-    led_phase_t phase;
-    bool waiting_delay;
-    uint32_t delay_until_ms;
-} s_led;
-
-static void led_all_off(struct LedConfig* led) {
-    if (led == NULL) {
+extern "C" void od_led_app_write(uint8_t pin_cfg, bool level_high) {
+    if (pin_cfg == 0xFF) {
         return;
     }
-    bool invertRed = (led->led_flags & 0x01) != 0;
-    bool invertGreen = (led->led_flags & 0x02) != 0;
-    bool invertBlue = (led->led_flags & 0x04) != 0;
-    if (led->led_1_r != 0xFF) {
-        od_hal_gpio_write(led->led_1_r, invertRed);
-    }
-    if (led->led_2_g != 0xFF) {
-        od_hal_gpio_write(led->led_2_g, invertGreen);
-    }
-    if (led->led_3_b != 0xFF) {
-        od_hal_gpio_write(led->led_3_b, invertBlue);
+    od_hal_gpio_write(pin_cfg, level_high);
+}
+
+extern "C" uint8_t od_led_app_mode(uint8_t instance) {
+    const struct LedConfig* led = led_instance(instance);
+    return (led == nullptr) ? 0u : (uint8_t)(led->reserved[0] & 0x0F);
+}
+
+extern "C" void od_led_app_finished(uint8_t instance) {
+    struct LedConfig* led = led_instance(instance);
+    if (led != nullptr) {
+        led->reserved[0] = 0x00;
     }
 }
 
-static void led_stop_internal(bool clear_mode) {
-    struct LedConfig* led = s_led.led;
-    s_led.waiting_delay = false;
-    if (led != NULL) {
-        led_all_off(led);
-        if (clear_mode) {
-            led->reserved[0] = 0x00;
-        }
-    }
-    memset(&s_led, 0, sizeof(s_led));
-    activeLedInstance = 0xFF;
-}
+static void led_pump(void) {
+    const uint32_t now = od_hal_uptime_ms();
+    const uint32_t delay_ms = od_led_service(now);
 
-static void led_schedule_delay_ms(uint16_t ms) {
-    if (ms == 0) {
-        s_led.waiting_delay = false;
+    if (delay_ms == OD_LED_IDLE) {
+        s_led_running = false;
+        activeLedInstance = 0xFF;
         return;
     }
-    s_led.waiting_delay = true;
-    s_led.delay_until_ms = od_hal_uptime_ms() + ms;
-}
-
-static void led_load_config(struct LedConfig* led) {
-    // The 12-byte flash pattern persisted in LedConfig.reserved[] is struct
-    // LedFlashPattern (all single bytes, no endianness). Overlay-read to name the
-    // fields; the nibble packing (mode/brightness, delay/count) stays hand-decoded.
-    const struct LedFlashPattern* p = (const struct LedFlashPattern*)led->reserved;
-    s_led.led = led;
-    s_led.brightness = (uint8_t)(((p->mode_brightness >> 4) & 0x0F) + 1);
-    s_led.c1 = p->color1;
-    s_led.c2 = p->color2;
-    s_led.c3 = p->color3;
-    s_led.loop1delay = (uint8_t)((p->loop1_delay_count >> 4) & 0x0F);
-    s_led.loop2delay = (uint8_t)((p->loop2_delay_count >> 4) & 0x0F);
-    s_led.loop3delay = (uint8_t)((p->loop3_delay_count >> 4) & 0x0F);
-    s_led.loopcnt1 = (uint8_t)(p->loop1_delay_count & 0x0F);
-    s_led.loopcnt2 = (uint8_t)(p->loop2_delay_count & 0x0F);
-    s_led.loopcnt3 = (uint8_t)(p->loop3_delay_count & 0x0F);
-    s_led.ildelay1 = p->inter_loop_delay1;
-    s_led.ildelay2 = p->inter_loop_delay2;
-    s_led.ildelay3 = p->inter_loop_delay3;
-    /* The count is stored minus one and the host caps a finite request at 254, so raw 0xFE and
-     * 0xFF both mean indefinite: py-opendisplay encodes 0xFE and decodes either. The canonical
-     * header names only 0xFF. */
-    s_led.repeat_forever = (p->group_repeats >= 0xFE);
-    s_led.grouprepeats = (uint8_t)(p->group_repeats + 1);
-    s_led.group_pos = 0;
-    s_led.i1 = 0;
-    s_led.i2 = 0;
-    s_led.i3 = 0;
-    s_led.phase = LED_PHASE_GROUP;
-    s_led.waiting_delay = false;
-}
-
-static void led_run_finish(void) {
-    led_stop_internal(false);
-}
-
-static void led_run_step(void) {
-    struct LedConfig* led;
-    uint8_t mode;
-
-    if (!s_led.active || s_led.led == NULL) {
-        return;
-    }
-    led = s_led.led;
-    activeLedInstance = s_led.instance;
-    mode = (uint8_t)(led->reserved[0] & 0x0F);
-    if (mode != 1) {
-        led_run_finish();
-        return;
-    }
-
-    for (;;) {
-        if (!s_led.active) {
-            return;
-        }
-
-        switch (s_led.phase) {
-            case LED_PHASE_GROUP:
-                if (!s_led.repeat_forever && s_led.group_pos >= s_led.grouprepeats) {
-                    led->reserved[0] = 0x00;
-                    led_run_finish();
-                    return;
-                }
-                s_led.i1 = 0;
-                s_led.i2 = 0;
-                s_led.i3 = 0;
-                s_led.phase = LED_PHASE_LOOP1;
-                break;
-
-            case LED_PHASE_LOOP1:
-                if (s_led.i1 >= s_led.loopcnt1) {
-                    if (s_led.ildelay1 > 0) {
-                        s_led.phase = LED_PHASE_INTER1_DELAY;
-                        led_schedule_delay_ms((uint16_t)(s_led.ildelay1 * LED_DELAY_FACTOR_MS));
-                        return;
-                    }
-                    s_led.phase = LED_PHASE_LOOP2;
-                    break;
-                }
-                flashLed(s_led.c1, s_led.brightness);
-                s_led.i1++;
-                if (s_led.loop1delay > 0) {
-                    s_led.phase = LED_PHASE_LOOP1_DELAY;
-                    led_schedule_delay_ms((uint16_t)(s_led.loop1delay * LED_DELAY_FACTOR_MS));
-                } else {
-                    led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
-                }
-                return;
-
-            case LED_PHASE_LOOP1_DELAY:
-                s_led.phase = LED_PHASE_LOOP1;
-                break;
-
-            case LED_PHASE_INTER1_DELAY:
-                s_led.phase = LED_PHASE_LOOP2;
-                break;
-
-            case LED_PHASE_LOOP2:
-                if (s_led.i2 >= s_led.loopcnt2) {
-                    if (s_led.ildelay2 > 0) {
-                        s_led.phase = LED_PHASE_INTER2_DELAY;
-                        led_schedule_delay_ms((uint16_t)(s_led.ildelay2 * LED_DELAY_FACTOR_MS));
-                        return;
-                    }
-                    s_led.phase = LED_PHASE_LOOP3;
-                    break;
-                }
-                flashLed(s_led.c2, s_led.brightness);
-                s_led.i2++;
-                if (s_led.loop2delay > 0) {
-                    s_led.phase = LED_PHASE_LOOP2_DELAY;
-                    led_schedule_delay_ms((uint16_t)(s_led.loop2delay * LED_DELAY_FACTOR_MS));
-                } else {
-                    led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
-                }
-                return;
-
-            case LED_PHASE_LOOP2_DELAY:
-                s_led.phase = LED_PHASE_LOOP2;
-                break;
-
-            case LED_PHASE_INTER2_DELAY:
-                s_led.phase = LED_PHASE_LOOP3;
-                break;
-
-            case LED_PHASE_LOOP3:
-                if (s_led.i3 >= s_led.loopcnt3) {
-                    if (s_led.ildelay3 > 0) {
-                        s_led.phase = LED_PHASE_INTER3_DELAY;
-                        led_schedule_delay_ms((uint16_t)(s_led.ildelay3 * LED_DELAY_FACTOR_MS));
-                        return;
-                    }
-                    s_led.group_pos++;
-                    s_led.phase = LED_PHASE_GROUP;
-                    led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
-                    return;
-                }
-                flashLed(s_led.c3, s_led.brightness);
-                s_led.i3++;
-                if (s_led.loop3delay > 0) {
-                    s_led.phase = LED_PHASE_LOOP3_DELAY;
-                    led_schedule_delay_ms((uint16_t)(s_led.loop3delay * LED_DELAY_FACTOR_MS));
-                } else {
-                    led_schedule_delay_ms(LED_MIN_STEP_DELAY_MS);
-                }
-                return;
-
-            case LED_PHASE_LOOP3_DELAY:
-                s_led.phase = LED_PHASE_LOOP3;
-                break;
-
-            case LED_PHASE_INTER3_DELAY:
-                s_led.group_pos++;
-                s_led.phase = LED_PHASE_GROUP;
-                break;
-
-            default:
-                led_run_finish();
-                return;
-        }
-    }
+    s_led_due_ms = now + delay_ms;
 }
 
 void processLedFlash() {
-    if (!s_led.active) {
+    if (!s_led_running) {
         return;
     }
-    if (s_led.waiting_delay) {
-        if ((int32_t)(od_hal_uptime_ms() - s_led.delay_until_ms) < 0) {
-            return;
-        }
-        s_led.waiting_delay = false;
+    /* Wrap-safe: the machine returns the remaining delay on an early call, but skipping the call
+     * entirely is cheaper on a loop task that runs every few milliseconds. */
+    if ((int32_t)(od_hal_uptime_ms() - s_led_due_ms) < 0) {
+        return;
     }
-    led_run_step();
+    led_pump();
 }
 
 od_cmd_result_t handleLedActivate(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
@@ -540,54 +340,61 @@ od_cmd_result_t handleLedActivate(const od_cmd_ctx_t *ctx, uint8_t* data, uint16
         return OD_CMD_NACK;
     }
     uint8_t ledInstance = data[0];
-    if (ledInstance >= globalConfig.led_count) {
+    struct LedConfig* led = led_instance(ledInstance);
+    if (led == nullptr) {
         uint8_t errorResponse[] = {RESP_NACK, RESP_LED_ACTIVATE_ACK, 0x02, 0x00};
         (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
         return OD_CMD_NACK;
     }
-    struct LedConfig* led = &globalConfig.leds[ledInstance];
-    // Payload is [led_instance:1][LedFlashPattern:12]; stash the pattern in reserved[].
-    if (len >= 1 + sizeof(struct LedFlashPattern)) {
-        memcpy(led->reserved, data + 1, sizeof(struct LedFlashPattern));
-    }
-    uint8_t mode = (uint8_t)(led->reserved[0] & 0x0F);
-    if (mode != 1) {
-        led_stop_internal(true);
-        uint8_t successResponse[] = {RESP_ACK, RESP_LED_ACTIVATE_ACK, 0x00, 0x00};
-        (void)od_cmd_reply(ctx, successResponse, sizeof(successResponse));
-        return OD_CMD_OK;
+    if (len >= 1 + OD_LED_PATTERN_LEN) {
+        memcpy(led->reserved, data + 1, OD_LED_PATTERN_LEN);
     }
 
-    led_stop_internal(false);
-    s_led.active = true;
-    s_led.instance = ledInstance;
-    activeLedInstance = ledInstance;
-    led_load_config(led);
-    led_run_step();
+    struct od_led_pins pins;
+    pins.r = led->led_1_r;
+    pins.g = led->led_2_g;
+    pins.b = led->led_3_b;
+    pins.flags = led->led_flags;
 
+    if (od_led_activate(ledInstance, &pins, led->reserved, od_hal_uptime_ms()) != 0) {
+        /* Mode is not "run": the deployed contract answers success with the LEDs off. */
+        (void)od_led_stop(0, false);
+        s_led_running = false;
+        activeLedInstance = 0xFF;
+    } else {
+        s_led_running = true;
+        activeLedInstance = ledInstance;
+        led_pump();
+    }
     uint8_t successResponse[] = {RESP_ACK, RESP_LED_ACTIVATE_ACK, 0x00, 0x00};
     (void)od_cmd_reply(ctx, successResponse, sizeof(successResponse));
     return OD_CMD_OK;
 }
 
 void ledStopForSleep(void) {
-    // Sleep API, not teardown -- see buzzerStopForSleep(). clear_mode=true matches
-    // handleLedStop() below, so the observable result is the same as the client
-    // having sent LED_STOP.
-    led_stop_internal(true);
+    // Sleep API, not teardown -- see buzzerStopForSleep(). The observable result is the same as
+    // the client having sent LED_STOP.
+    (void)od_led_stop(0, false);
+    s_led_running = false;
+    activeLedInstance = 0xFF;
 }
 
 od_cmd_result_t handleLedStop(const od_cmd_ctx_t *ctx, uint8_t* data, uint16_t len) {
-    if (s_led.active && len >= 1 && data[0] != s_led.instance) {
+    const bool instance_given = (len >= 1);
+    const uint8_t instance = instance_given ? data[0] : 0u;
+
+    if (od_led_stop(instance, instance_given) != 0) {
         uint8_t errorResponse[] = {RESP_NACK, RESP_LED_STOP_ACK, 0x02, 0x00};
         (void)od_cmd_reply_plain(ctx, errorResponse, sizeof(errorResponse));
         return OD_CMD_NACK;
     }
-    led_stop_internal(true);
+    s_led_running = false;
+    activeLedInstance = 0xFF;
     uint8_t successResponse[] = {RESP_ACK, RESP_LED_STOP_ACK, 0x00, 0x00};
     (void)od_cmd_reply(ctx, successResponse, sizeof(successResponse));
     return OD_CMD_OK;
 }
+
 
 void processButtonEvents() {
     powerButtonPoll();
@@ -629,12 +436,8 @@ void processButtonEvents() {
     }
 }
 
-static inline void ledFlashWrite(uint8_t pin, bool level) {
-    if (pin != 0xFF) {
-        od_hal_gpio_write(pin, level);
-    }
-}
-
+/* One-shot diagnostic blink on the selected instance -- boot patterns, not a LED_ACTIVATE run.
+ * The ramp is the shared one; only instance selection is ESP32's. */
 void flashLed(uint8_t color, uint8_t brightness) {
     if (activeLedInstance == 0xFF) {
         for (uint8_t i = 0; i < globalConfig.led_count; i++) {
@@ -645,47 +448,15 @@ void flashLed(uint8_t color, uint8_t brightness) {
         }
         if (activeLedInstance == 0xFF) return;
     }
-    struct LedConfig* led = &globalConfig.leds[activeLedInstance];
-    uint8_t ledRedPin = led->led_1_r;
-    uint8_t ledGreenPin = led->led_2_g;
-    uint8_t ledBluePin = led->led_3_b;
-    bool invertRed = (led->led_flags & 0x01) != 0;
-    bool invertGreen = (led->led_flags & 0x02) != 0;
-    bool invertBlue = (led->led_flags & 0x04) != 0;
-    uint8_t colorred = (color >> 5) & 0b00000111;
-    uint8_t colorgreen = (color >> 2) & 0b00000111;
-    uint8_t colorblue = color & 0b00000011;
-    for (uint16_t i = 0; i < brightness; i++) {
-        ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 7) : (colorred >= 7));
-        ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 7) : (colorgreen >= 7));
-        ledFlashWrite(ledBluePin,invertBlue ? !(colorblue >= 3) : (colorblue >= 3));
-        od_hal_delay_us(100);
-        ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 1) : (colorred >= 1));
-        ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 1) : (colorgreen >= 1));
-        od_hal_delay_us(100);
-        ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 6) : (colorred >= 6));
-        ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 6) : (colorgreen >= 6));
-        ledFlashWrite(ledBluePin,invertBlue ? !(colorblue >= 1) : (colorblue >= 1));
-        od_hal_delay_us(100);
-        ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 2) : (colorred >= 2));
-        ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 2) : (colorgreen >= 2));
-        od_hal_delay_us(100);
-        ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 5) : (colorred >= 5));
-        ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 5) : (colorgreen >= 5));
-        od_hal_delay_us(100);
-        ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 3) : (colorred >= 3));
-        ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 3) : (colorgreen >= 3));
-        ledFlashWrite(ledBluePin,invertBlue ? !(colorblue >= 2) : (colorblue >= 2));
-        od_hal_delay_us(100);
-        ledFlashWrite(ledRedPin,invertRed ? !(colorred >= 4) : (colorred >= 4));
-        ledFlashWrite(ledGreenPin,invertGreen ? !(colorgreen >= 4) : (colorgreen >= 4));
-        od_hal_delay_us(100);
-        // ledFlashWrite() takes a bool; HIGH/LOW here were Arduino's 1/0 spelt out, and the
-        // ternaries collapse to the invert flag itself. Same levels driven.
-        ledFlashWrite(ledRedPin, invertRed);
-        ledFlashWrite(ledGreenPin, invertGreen);
-        ledFlashWrite(ledBluePin, invertBlue);
-    }
+    const struct LedConfig* led = led_instance(activeLedInstance);
+    if (led == nullptr) return;
+
+    struct od_led_pins pins;
+    pins.r = led->led_1_r;
+    pins.g = led->led_2_g;
+    pins.b = led->led_3_b;
+    pins.flags = led->led_flags;
+    od_led_flash_once(&pins, color, brightness);
 }
 
 void IRAM_ATTR handleButtonISR(uint8_t buttonIndex) {

@@ -1015,3 +1015,44 @@ order.
 
 Worth checking at the same time whether any stored/deployed configuration blob carries `0xFF` in
 that field; those need rewriting, and only the host can tell.
+
+
+---
+
+## 16. `Firmware_Unified` / nordic-zephyr — the idle loop cannot be woken, so timed work slips up to a second
+
+Found 2026-08-23 during review of the LED runner promotion. **Predates that change and is
+unchanged by it.**
+
+`targets/nordic-zephyr/src/main.c:16-32`:
+
+```c
+od_watchdog_app_service();
+opendisplay_ble_process();
+k_msleep(step);            /* step is up to 1000 ms */
+```
+
+A `k_timer` expiry does not interrupt a thread sitting in `k_msleep()`. Every timed subsystem on
+this target signals by setting a flag that the *next* pass reads, so nothing can shorten the
+current sleep. While disconnected the loop sleeps 500 ms, or `sleep_timeout_ms` in 1 s chunks.
+
+Observed consequence: an LED pattern asking for a 1 ms step gets serviced up to a second later, so
+a fast pattern runs roughly at one step per second. This is the "Nordic 1-step/second stall" the
+2026-08-17 dedup survey reported. Connected operation is fine — that path polls at 10 ms.
+
+**The fix is one mechanism serving several consumers**, which is why it should not be bolted onto
+whichever promotion notices it:
+
+```c
+/* wake on either the deadline or an event */
+(void)k_sem_take(&s_wake, K_MSEC(step));
+elapsed = k_uptime_get_32() - start;    /* accounting must use real elapsed time, not `step` */
+```
+
+Consumers waiting on it: the LED runner (`plans/PLAN_LED_RUNNER_2026-08-23.md` § 4), the button
+port (`plans/PLAN_NORDIC_BUTTONS_2026-08-22.md` B4), and any future timed work.
+
+**Why it is not fixed in passing:** this loop governs advertising restarts, MSD refresh cadence and
+the watchdog feed site. Waking early changes how often all three run, and the naive version --
+subtracting `step` after a short sleep -- silently shortens the total idle period and with it the
+MSD refresh interval. It needs its own change and its own hardware gate.

@@ -9,8 +9,8 @@
 // peripheral (the ESP32 LEDC) so the pitch is rock-steady even while the WiFi
 // stack preempts the CPU.
 //
-// Frequency is passed as centi-Hz (Hz * 100) to match kBuzzerCentiHzTable and
-// keep the math integer on soft-float parts.
+// Frequency is passed as centi-Hz (Hz * 100), matching od_buzzer_index_centihz(), and keeps the
+// hardware adapter's math integer on soft-float parts.
 
 // Start a tone on `pin` at `centihz` centi-Hz with the given duty cycle
 // (percent, 1..100). Returns false if the tone could not be started (bad

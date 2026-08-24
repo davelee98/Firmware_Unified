@@ -1,12 +1,12 @@
 # LED runner promotion — design
 
-**Status:** proposed, 2026-08-23. First item of
+**Status:** software candidate implemented 2026-08-23 on `feat/led-runner-shared`; § 4's hardware
+rows remain open. First item of
 [PLAN_DEDUP_OUTSTANDING_2026-08-22.md](PLAN_DEDUP_OUTSTANDING_2026-08-22.md) § 8 step 5.
-Design only. **This promotion is not implemented here** — see § 6.
 
 Entry conditions from that plan are met: D1's yield floor and the `repeat_forever` sentinel landed
-2026-08-22 with `tests/host/silabs_led_test.c` behind them, so the promotion inherits a proven
-contract instead of re-deriving one.
+2026-08-22 with a production-machine suite behind them. That coverage now lives in
+`tests/host/led_test.c`, so the promotion inherits a proven contract instead of re-deriving one.
 
 ---
 
@@ -104,9 +104,9 @@ the machine treats the instance as an opaque tag it echoes back on `od_led_app_f
 ### L5 — The yield floor and the sentinel are the machine's, and are already specified
 
 `LED_MIN_STEP_DELAY_MS` on every flash and at the group-closing edge, and raw `0xFE`/`0xFF` both
-meaning indefinite (`DIVERGENCE_MATRIX` § 11). `tests/host/silabs_led_test.c` becomes the shared
-machine's suite by repointing it; its 146 checks were written against exactly this contract, and
-the exact-emission-count assertions transfer unchanged.
+meaning indefinite (`DIVERGENCE_MATRIX` § 11). `tests/host/led_test.c` is the shared machine's
+suite; it retains the original exact-emission-count contract and expands it across PWM channels,
+brightness decoding, loop-field identity and displacement.
 
 ### L6 — ESP32 is the authority for the PWM ramp
 
@@ -146,8 +146,18 @@ Per target, and this is user-visible output — a host cannot verify it.
 - [ ] **BG22:** the D1 all-zero-delay case still yields — this is the regression the promotion
       could silently undo, and the host suite only covers the machine, not the scheduling.
 - [ ] **BG22:** RAM unchanged (`heap_size`, `data + bss`).
-- [ ] **Nordic:** no 1-step-per-second stall (the survey reported one; confirm it is gone rather
-      than assuming the promotion fixed it).
+- [ ] **Nordic: the stall is EXPECTED TO REMAIN, and the row records it rather than checking for
+      its absence.** Confirmed 2026-08-23 by review: `main.c:16-32`'s `idle_delay_ms()` sleeps in
+      `k_msleep()` chunks of up to 1 s, and a `k_timer` expiry does not interrupt a sleeping
+      thread — it only sets a flag the next pass reads. So while disconnected, a 1 ms LED step
+      waits up to 500 ms or 1 s depending on whether `sleep_timeout_ms` is configured. Connected
+      operation is unaffected (10 ms cadence).
+      **This predates the promotion and is unchanged by it**; the shared machine asks for the
+      right delay and the adapter arms the right timer. Closing it means making the idle wait
+      interruptible — `k_sem_take(&wake, K_MSEC(step))` with elapsed-time accounting instead of
+      `k_msleep(step)` — which is the same mechanism
+      `plans/PLAN_NORDIC_BUTTONS_2026-08-22.md` B4 needs, governs advertising/MSD/watchdog cadence,
+      and deserves its own change and gate. Measure the slip here; do not fix it here.
 - [ ] **ESP32:** the LED path does not regress the loop-task cadence.
 
 ## 5. Risks

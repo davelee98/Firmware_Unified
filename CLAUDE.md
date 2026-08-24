@@ -79,16 +79,17 @@ looks arbitrary and is not); delete the story.
   --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF.
   `tools/sdkconfig_baseline.sh` is a gate a change must not break.
 - **`shared/` is no longer empty** —
-  `core/od_{adv_control,advert,cmd,color,config,config_asm,config_read,config_tlv,core,dispatch,gate,log,nfc,pipe,reply,rxq,session,txq,watchdog,xfer,xfer_direct,xfer_partial,zlib_inflate,zlib_pump}.c`
+  `core/od_{adv_control,advert,buzzer,cmd,color,config,config_asm,config_read,config_tlv,core,dispatch,gate,led,log,nfc,pipe,reply,rxq,session,txq,watchdog,xfer,xfer_direct,xfer_partial,zlib_inflate,zlib_pump}.c`
   listed in `shared/sources.cmake` (never globbed) in per-HAL tiers, plus the two all-inline
   headers `od_span.h` and `od_nonce_window.h` and pure seam headers including `od_cmd_app.h`,
   `od_session_app.h`, `od_inflate_app.h`, `od_xfer_app.h` and `od_nfc_app.h`, which correctly have no
   entry there. Consumers:
   host tests and `esp32-idf` take the aggregate; `nordic-zephyr` takes PURE + HAL_CRYPTO +
-  HAL_RADIO + HAL_WDT + HAL_LOG + APP_SESSION + APP_RXQ + APP_INFLATE + APP_XFER + APP_NFC;
+  HAL_RADIO + HAL_WDT + HAL_LOG + APP_SESSION + APP_RXQ + APP_INFLATE + APP_XFER + APP_NFC +
+  APP_LED + APP_BUZZER;
   `efr32bg22-slc` takes PURE + HAL_CRYPTO + HAL_RADIO + HAL_LOG + APP_SESSION + APP_INFLATE +
-  APP_XFER + APP_NFC and deliberately compiles HAL_LOG capability-off while declining APP_RXQ,
-  HAL_ADV and HAL_WDT. **APP_NFC is not optional for a consumer that takes `od_core.c`**:
+  APP_XFER + APP_NFC + APP_LED and deliberately compiles HAL_LOG capability-off while declining
+  APP_RXQ, APP_BUZZER, HAL_ADV and HAL_WDT. **APP_NFC is not optional for a consumer that takes `od_core.c`**:
   `od_core_reset()` names `od_nfc_reset()`, whatever the capability setting. APP tiers are named for a **seam** rather than a HAL because they need a target function
   rather than a driver.
 - **THE WHOLE COMMAND PATH IS SHARED ON BOTH TARGETS.** (C8 2026-08-15, C10 2026-08-15,
@@ -417,12 +418,21 @@ looks arbitrary and is not); delete the story.
   No fake ever sees an expected reply: the generated table is included by the runner and nothing
   else, and profiles get semantic knobs instead. That is what stops the corpus becoming its own
   oracle.
+- **Shared buzzer runner software candidate, not hardware-qualified (2026-08-23).**
+  `shared/core/od_buzzer.c` is the only melody parser, owned-payload repeat machine, pitch mapper
+  and duration-cap policy. ESP32 retains LEDC and loop polling behind `od_buzzer_app`; Nordic
+  retains its software square-wave and step timers. The authority decisions are explicit:
+  exponential quarter-tone centi-Hz, octave-fold every nonzero index into 117..234, and the live
+  `Firmware` donor's 30,000 ms threshold instead of Nordic's 5,000 ms. `buzzer_test.c` checks all
+  256 indices against the host formula and pins the clamped 30-second schedule. BG22 declines
+  APP_BUZZER entirely; seven hardware rows remain open in the checklist.
 - **BG22 Gate 2 blockers fixed in software, none hardware-qualified (2026-08-22).** Three defects
   from plans/PLAN_DEDUP_OUTSTANDING_2026-08-22.md § 8 step 1. **`0x0073` could wedge the BG22
   superloop permanently from any connection** — its phase loop re-entered on every zero-delay
   transition, and that target has no watchdog. ESP32 and Nordic already yielded at both the flash
-  and the group-closing edge; BG22 now does too, pinned by `tests/host/silabs_led_test.c` against
-  the production machine. **The `group_repeats` sentinel was inverted on all three targets**: raw
+  and the group-closing edge; BG22 now does too, pinned by `tests/host/led_test.c` against the
+  shared production machine and `silabs_led_adapter_test.c` against the BG22 scheduler. **The
+  `group_repeats` sentinel was inverted on all three targets**: raw
   `0xFE` ran forever and raw `0xFF` — the header's "forever" — stopped immediately. Both now mean
   indefinite, which is what py-opendisplay encodes and decodes (`DIVERGENCE_MATRIX` § 11).
   **`shared/profiles.cmake` is now the single definer of BG22's compile-time profile**: the host

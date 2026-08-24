@@ -526,7 +526,31 @@ changed all three.
 | # | Behaviour | Before | After | Why |
 |---|---|---|---|---|
 | 11.1 | `group_repeats` sentinel | All three runners store `(uint8_t)(raw + 1)` and treat internal 255 as endless. Raw `0xFE` therefore ran **forever** while raw `0xFF` — the value `opendisplay_structs.h:1114` documents as "repeat forever" — wrapped to 0 and stopped **immediately** | Raw `0xFE` **and** `0xFF` are both endless, held in an explicit `repeat_forever` flag rather than inferred from the wrapped count | `py-opendisplay` is the deciding evidence: `led_flash.py:102` encodes indefinite as `0xFE`, `:133` decodes both `0xFE` and `0xFF` as indefinite, and `:52` caps finite counts at 254 so `0xFF` is never a count. Accepting both matches the host exactly and keeps every deployed pattern working. The canonical header's "255" describes neither the host nor any shipped firmware; it is frozen, so the divergence is recorded rather than fixed there |
-| 11.2 | Zero-delay step yield | BG22 alone re-entered its `for (;;)` phase loop on every zero-delay transition and at the group-closing edge, so a pattern with all delays zero and an endless group never returned. Superloop, no watchdog: recovery was removing power. Reachable from any `0x0073` frame | Every flash and the group-closing edge schedule at least `LED_MIN_STEP_DELAY_MS` and return | ESP32 and Nordic already do exactly this, and Nordic's own comment names the group-closing edge as "the only yield when every loop count is zero and no flash ever runs". A port of the authority's shape, not a new design. Pinned by `tests/host/silabs_led_test.c`, which drives the production machine and bounds emissions per service call |
+| 11.2 | Zero-delay step yield | BG22 alone re-entered its `for (;;)` phase loop on every zero-delay transition and at the group-closing edge, so a pattern with all delays zero and an endless group never returned. Superloop, no watchdog: recovery was removing power. Reachable from any `0x0073` frame | Every flash and the group-closing edge schedule at least `LED_MIN_STEP_DELAY_MS` and return | ESP32 and Nordic already do exactly this, and Nordic's own comment names the group-closing edge as "the only yield when every loop count is zero and no flash ever runs". A port of the authority's shape, not a new design. Pinned by `tests/host/led_test.c`, which drives the production machine and bounds emissions per service call, plus `silabs_led_adapter_test.c`, which proves BG22 re-arms the returned delay |
+
+### 11.3 LED_ACTIVATE displacement — the outgoing mode nibble is left alone (2026-08-23)
+
+Recorded with the LED runner promotion (`plans/PLAN_LED_RUNNER_2026-08-23.md`). Software only; the
+rows in that plan's § 4 are open.
+
+When a `0x0073` arrives while another pattern is running, all three donors park the outgoing
+instance's LEDs. They disagree about its persisted mode nibble:
+
+| Donor | On displacement |
+|---|---|
+| `../Firmware` / esp32-idf | `led_stop_internal(**false**)` — parks the pins, **leaves the nibble set** |
+| nordic-zephyr | `opendisplay_led_stop(0,false)` — parks and **clears** the nibble |
+| efr32bg22-slc | same as Nordic — parks and clears |
+
+**Resolved to the authority: park, do not clear.** `CLAUDE.md` makes `../Firmware` the reference
+where donors disagree, and here it also gives the better behaviour — because the adapter writes the
+new payload into `reserved[]` *before* activating, clearing on displacement wipes the byte just
+written whenever the client re-activates the **same** instance. On Nordic and BG22 that made a
+re-sent pattern stop instead of restart; under the shared machine it restarts.
+
+Unchanged, and deliberately so: an explicit `LED_STOP` clears the nibble on every target, natural
+completion clears it, and an externally cleared nibble stops the run without the machine clearing
+anything (there is nothing to clear, and re-clearing would race whoever cleared it).
 
 ---
 
@@ -606,3 +630,21 @@ a failure.
 Not yet fixed. Scheduled with the I2C HAL cutover, whose resolution is the scan —
 `plans/PLAN_SENSOR_SEAM_2026-08-23.md` T1. Related: § 13, the `0xFF` substitution, which affects
 the same call sites.
+
+---
+
+## 15. Buzzer pitch, folding and total duration (resolved 2026-08-23)
+
+Resolved by the shared runner in `plans/PLAN_BUZZER_2026-08-23.md`; hardware rows remain open.
+
+| Behaviour | ESP32 / live `Firmware` | Nordic before promotion | Shared ruling |
+|---|---|---|---|
+| index to pitch | `round(100 * 13.75 * 2^(idx/24))` centi-Hz | linear interpolation from 400 to 12000 Hz | exponential table |
+| indices outside 117..234 | shift by 24 until inside the window | no fold | octave-fold, preserving pitch class |
+| total melody cap | 30,000 ms | 5,000 ms | 30,000 ms; clamp the final step to the remainder |
+| owned payload cap | 256 bytes | 244 bytes | 256 bytes; the host's 120-step maximum is 244 |
+
+This is not authority by name alone. `py-opendisplay` documents the same exponential inverse,
+accepts raw indices 1..255, and says firmware performs the fold. The cap is not host-encoded, so
+the standing live-`Firmware` donor rule decides it. `tests/host/buzzer_test.c` checks all 256
+indices against an independent formula and pins the exact 30,000 ms schedule.
