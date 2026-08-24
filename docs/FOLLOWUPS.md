@@ -1063,3 +1063,43 @@ port (`plans/PLAN_NORDIC_BUTTONS_2026-08-22.md` B4), and any future timed work.
 the watchdog feed site. Waking early changes how often all three run, and the naive version --
 subtracting `step` after a short sleep -- silently shortens the total idle period and with it the
 MSD refresh interval. It needs its own change and its own hardware gate.
+
+---
+
+## 17. `Firmware` / `Firmware_Unified` ESP32 — an over-count GT911 status wedges touch permanently
+
+Found 2026-08-24 while settling the sensor-seam plan's Q7. **Sibling repository, so the `Firmware`
+half is reported, not fixed.**
+
+GT911's status register `0x814E` holds bit 7 (buffer ready) and a contact count in the low nibble.
+The controller keeps that byte until the host writes 0 to acknowledge it. The poll loop reads it,
+and when the count exceeds `GT911_MAX_CONTACTS` (5) it treats the sample as nonsense and skips:
+
+```c
+uint8_t n = st & 0x0Fu;
+if (n > GT911_MAX_CONTACTS) {
+    if (!from_irq && !line_low) { rt->last_poll_ms = now; }
+    continue;                      /* <-- status NOT cleared */
+}
+```
+— `Firmware/src/touch_input.cpp:671`, and identically in
+`Firmware_Unified/targets/esp32-idf/src/touch_input.cpp`.
+
+**Nothing clears it on that path, so the next poll reads the same byte and takes the same branch.**
+Buffer-ready stays set and the count stays out of range, so touch reports nothing further. The
+branch has no self-recovery: it does not increment the I2C failure streak and does not trigger
+reinitialisation, and an IRQ only sets a pending mask that leads back to the same reread.
+
+**It is not literally permanent, and the exact scope matters.** Three lifecycle paths clear the
+status and recover it — light resume (`touch_input.cpp:407`), full reinit (`:383`), and the
+post-EPD retained-runtime path (`:540`), which a later display refresh reaches through
+`touchResumeAfterEpdRefresh()`. So the accurate statement is **persistent until an init, a resume,
+or the next EPD refresh**, not "for ever". On a device that refreshes rarely that is still a long
+dead window, and a single glitched read — the low nibble can be 6..15 — is enough to enter it.
+
+`nordic-zephyr/src/opendisplay_touch.c:533` clears the status in that branch and does not wedge.
+That is the behaviour the shared driver takes.
+
+This is one of the rare cases where the Nordic port is right and the authority is not, so it is
+recorded rather than resolved by the usual "`Firmware` wins" default (CLAUDE.md § Migration
+constraints).

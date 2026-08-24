@@ -259,8 +259,23 @@ GPIO reset and IRQ handling remain behind a touch/GPIO seam. ESP32's
 surface is the starting point for Nordic. The `_arg` variant is required by both multi-button
 events and multiple touch instances.
 
-Q7 remains an entry condition: Nordic clears GT911 status register `0x814E` after consuming a
-sample while ESP32 does not. Decide and record the authority before touch cutover.
+~~Q7 remains an entry condition: Nordic clears GT911 status register `0x814E` after consuming a
+sample while ESP32 does not.~~ **CLOSED 2026-08-24, and the premise was wrong.** All three clear
+`0x814E` after consuming a report, at the same point in the poll loop — `../Firmware:703`,
+`targets/esp32-idf/src/touch_input.cpp:708`, `nordic-zephyr/src/opendisplay_touch.c:559`. There was
+never a divergence there.
+
+**The real divergence is the over-count branch, and Nordic is the one that is right.** When the
+status byte's low nibble exceeds `GT911_MAX_CONTACTS` (5) the sample is nonsense and every port
+skips it — but ESP32 and the authority skip *without clearing the status*, and GT911 holds that
+byte until the host writes 0. So the next poll reads the same byte, takes the same branch, and
+touch never reports again until an init or resume path runs. One glitched read wedges it
+permanently. Nordic clears and does not wedge.
+
+**Ruling: the shared driver clears the status on the over-count branch**, taking Nordic's
+behaviour. This is a deliberate exception to the "`Firmware` is the authority" default, because the
+authority's behaviour is a latent wedge rather than a considered difference. The upstream defect is
+reported in `FOLLOWUPS` § 17.
 
 `TouchController.bus_id == 0xFF` means **not configured**, so Nordic touch's refusal
 (`opendisplay_touch.c:299`, "an explicit data_bus is required") is the behaviour to keep and
@@ -452,8 +467,10 @@ about it.
 
 ## 6. Open questions
 
-1. **Q7 — GT911 status authority.** Decide whether shared touch clears `0x814E` after consuming a
-   report. Required before touch promotion.
+1. ~~**Q7 — GT911 status authority.**~~ **Closed 2026-08-24.** The premise was false — all three
+   clear `0x814E` after consuming a report. The real divergence is the over-count branch, where
+   not clearing wedges touch permanently; the shared driver takes Nordic's clear. See T5 and
+   `FOLLOWUPS` § 17.
 2. **Bus serialization.** Confirm which ESP32 tasks can submit I2C concurrently and put the lock
    below the HAL if more than one can. The contract already requires each operation to be atomic;
    this question chooses the implementation, not the API.

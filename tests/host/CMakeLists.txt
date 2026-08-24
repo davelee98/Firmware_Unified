@@ -223,6 +223,19 @@ add_executable(od_config_store_cap_test config_store_test.c)
 target_link_libraries(od_config_store_cap_test od_shared_silabs)
 add_test(NAME config_store_cap COMMAND od_config_store_cap_test)
 
+# i2c_contract: shared/hal/od_hal_i2c.h as an EXECUTABLE contract. The assertions are about
+# framing and bus selection -- where STOPs fall, and which pins an operation reaches -- because
+# those are what an engine gets wrong while still returning plausible bytes. Bound here to a
+# reference engine; the per-target adapters bind to the same body as their cutovers land
+# (PLAN_SENSOR_SEAM_2026-08-23.md staging steps 4, 5 and 9).
+add_executable(od_i2c_contract_ref_test
+    i2c_contract_ref_test.c
+    fake_i2c/i2c_wire.c
+    fake_i2c/i2c_ref_impl.c)
+target_include_directories(od_i2c_contract_ref_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(od_i2c_contract_ref_test od_shared)
+add_test(NAME i2c_contract_ref COMMAND od_i2c_contract_ref_test)
+
 # silabs_storage: the BG22 overlay, where od_config_asm's reassembly state and the NVM3 record are
 # one object. The two static asserts in the storage file compare LAYOUT; this compares SEQUENCING
 # -- the header is written over the four live assembler state words, so the order of capture,
