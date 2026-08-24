@@ -250,6 +250,7 @@ add_library(slc OBJECT
     "../opendisplay_pipe.c"
     "../od_hal_crypto.c"
     "../od_hal_nvs.c"
+    "../hal/od_hal_i2c.c"
     "../od_hal_radio.c"
     "../od_hal_time.c"
     "../od_session_app.c"

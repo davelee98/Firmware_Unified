@@ -743,6 +743,52 @@ config_store_single_crc32() {
 }
 check "config storage: one CRC-32" config_store_single_crc32
 
+# PERMANENT. ONE I2C ENGINE PER TARGET, and the statement is only true because BG22's NFC
+# transport is inside it: excluding that would have made the rule read as full coverage while a
+# fourth bit-banger sat in opendisplay_ble.c (PLAN_SENSOR_SEAM_2026-08-23.md T6).
+#
+# The sanctioned implementations are one per silicon vendor. Anything else in targets/ that
+# clocks bits or drives the IDF master directly is a second engine.
+I2C_ENGINE_FILES='targets/esp32-idf/hal/od_hal_i2c.c targets/nordic-zephyr/src/opendisplay_i2c.c targets/efr32bg22-slc/hal/od_hal_i2c.c'
+i2c_single_engine_per_target() {
+    local hits rc missing=0 f
+
+    # No leading \b on the primitive names: every engine this rule has had to catch was
+    # PREFIXED -- od_nfc_i2c_start, t_i2c_write_byte -- and a word boundary before "i2c_"
+    # does not match after an underscore, so the first version of this rule missed the very
+    # bit-banger step 9 removed.
+    #
+    # The named implementations must exist: a rule that only forbids duplicates passes happily
+    # when the original is deleted or renamed.
+    for f in $I2C_ENGINE_FILES; do
+        if [ ! -f "$f" ]; then
+            echo "missing sanctioned I2C engine: $f"
+            missing=1
+        fi
+    done
+    [ "$missing" -eq 0 ] || return 1
+
+    hits=$(grep -RInE \
+        'i2c_(start|stop|write_bit|read_bit|write_byte|read_byte)\b|\bI2C_HALF_BIT_US\b|\bi2c_master_(transmit|receive|probe|bus_add_device|transmit_receive)\b' \
+        targets --include='*.c' --include='*.cpp' --include='*.h' --exclude-dir='build*')
+    rc=$?
+    if [ "$rc" -gt 1 ]; then
+        echo "grep could not scan targets/ (status $rc); the absence of a second I2C engine is unproven"
+        return 1
+    fi
+    for f in $I2C_ENGINE_FILES; do
+        hits=$(printf '%s\n' "$hits" | grep -v "^${f}:")
+    done
+    hits=$(printf '%s\n' "$hits" | grep -v '^$')
+    if [ -n "$hits" ]; then
+        printf '%s\n' "$hits"
+        echo "a second I2C engine returned; one per target, and BG22's NFC transport is inside the rule"
+        return 1
+    fi
+    return 0
+}
+check "i2c: one engine per target" i2c_single_engine_per_target
+
 silabs_advertising_ownership() {
     local count close_calls
 

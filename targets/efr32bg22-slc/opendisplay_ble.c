@@ -1,4 +1,5 @@
 #include "opendisplay_ble.h"
+#include "od_hal_i2c.h"
 #include "od_nfc_app.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_display.h"
@@ -202,6 +203,9 @@ static uint8_t s_od_flash_cs_pin = 0u;
 static bool s_od_flash_enabled;
 
 /* NFC / bit-bang I2C lines: initialized only from explicit NFC config packet. */
+/* The DataBus instance the NFC session runs on. The pin statics below stay, because parking SCL
+ * and SDA after a session is adapter policy that the transport does not own. */
+static uint8_t s_od_nfc_bus_instance = 0xFFu;
 static GPIO_Port_TypeDef s_od_nfc_scl_port = gpioPortA;
 static uint8_t s_od_nfc_scl_pin = 0u;
 static GPIO_Port_TypeDef s_od_nfc_sda_port = gpioPortA;
@@ -520,115 +524,15 @@ static void od_buttons_arm_em4_wakeup(void)
   }
 }
 
-static void od_nfc_i2c_start(GPIO_Port_TypeDef scl_port, uint8_t scl_pin,
-                             GPIO_Port_TypeDef sda_port, uint8_t sda_pin)
+static bool od_nfc_type3_paged_block_read16(uint8_t bus_id, uint8_t dev7, uint8_t sub,
+                                            uint8_t *out16)
 {
-  GPIO_PinOutSet(sda_port, sda_pin);
-  GPIO_PinOutSet(scl_port, scl_pin);
-  sl_udelay_wait(2);
-  GPIO_PinOutClear(sda_port, sda_pin);
-  sl_udelay_wait(2);
-  GPIO_PinOutClear(scl_port, scl_pin);
-}
-
-static void od_nfc_i2c_stop(GPIO_Port_TypeDef scl_port, uint8_t scl_pin,
-                            GPIO_Port_TypeDef sda_port, uint8_t sda_pin)
-{
-  GPIO_PinOutClear(sda_port, sda_pin);
-  sl_udelay_wait(2);
-  GPIO_PinOutSet(scl_port, scl_pin);
-  sl_udelay_wait(2);
-  GPIO_PinOutSet(sda_port, sda_pin);
-  sl_udelay_wait(2);
-}
-
-static bool od_nfc_i2c_write_byte(GPIO_Port_TypeDef scl_port, uint8_t scl_pin,
-                                  GPIO_Port_TypeDef sda_port, uint8_t sda_pin,
-                                  uint8_t byte)
-{
-  for (uint8_t i = 0; i < 8u; i++) {
-    if ((byte & 0x80u) != 0u) {
-      GPIO_PinOutSet(sda_port, sda_pin);
-    } else {
-      GPIO_PinOutClear(sda_port, sda_pin);
-    }
-    byte <<= 1;
-    sl_udelay_wait(1);
-    GPIO_PinOutSet(scl_port, scl_pin);
-    sl_udelay_wait(2);
-    GPIO_PinOutClear(scl_port, scl_pin);
-  }
-
-  GPIO_PinModeSet(sda_port, sda_pin, gpioModeInputPull, 1);
-  sl_udelay_wait(1);
-  GPIO_PinOutSet(scl_port, scl_pin);
-  sl_udelay_wait(2);
-  bool ack = (GPIO_PinInGet(sda_port, sda_pin) == 0);
-  GPIO_PinOutClear(scl_port, scl_pin);
-  GPIO_PinModeSet(sda_port, sda_pin, gpioModeWiredAndFilter, 0);
-  return ack;
-}
-
-static uint8_t od_nfc_i2c_read_byte(GPIO_Port_TypeDef scl_port, uint8_t scl_pin,
-                                    GPIO_Port_TypeDef sda_port, uint8_t sda_pin, bool ack)
-{
-  uint8_t value = 0;
-  GPIO_PinModeSet(sda_port, sda_pin, gpioModeInputPull, 1);
-  for (uint8_t i = 0; i < 8u; i++) {
-    value <<= 1;
-    GPIO_PinOutSet(scl_port, scl_pin);
-    sl_udelay_wait(2);
-    if (GPIO_PinInGet(sda_port, sda_pin) != 0) {
-      value |= 1u;
-    }
-    GPIO_PinOutClear(scl_port, scl_pin);
-    sl_udelay_wait(1);
-  }
-
-  GPIO_PinModeSet(sda_port, sda_pin, gpioModeWiredAndFilter, 0);
-  if (ack) {
-    GPIO_PinOutClear(sda_port, sda_pin);
-  } else {
-    GPIO_PinOutSet(sda_port, sda_pin);
-  }
-  sl_udelay_wait(1);
-  GPIO_PinOutSet(scl_port, scl_pin);
-  sl_udelay_wait(2);
-  GPIO_PinOutClear(scl_port, scl_pin);
-  GPIO_PinOutSet(sda_port, sda_pin);
-  return value;
-}
-
-static bool od_nfc_type3_paged_block_read16(GPIO_Port_TypeDef scl_port, uint8_t scl_pin,
-                                            GPIO_Port_TypeDef sda_port, uint8_t sda_pin,
-                                            uint8_t dev7, uint8_t sub, uint8_t *out16)
-{
-  bool a;
   if (out16 == NULL) {
     return false;
   }
-  od_nfc_i2c_start(scl_port, scl_pin, sda_port, sda_pin);
-  a = od_nfc_i2c_write_byte(scl_port, scl_pin, sda_port, sda_pin, (uint8_t)(dev7 << 1));
-  if (!a) {
-    od_nfc_i2c_stop(scl_port, scl_pin, sda_port, sda_pin);
-    return false;
-  }
-  a = od_nfc_i2c_write_byte(scl_port, scl_pin, sda_port, sda_pin, sub);
-  if (!a) {
-    od_nfc_i2c_stop(scl_port, scl_pin, sda_port, sda_pin);
-    return false;
-  }
-  od_nfc_i2c_start(scl_port, scl_pin, sda_port, sda_pin);
-  a = od_nfc_i2c_write_byte(scl_port, scl_pin, sda_port, sda_pin, (uint8_t)((dev7 << 1u) | 1u));
-  if (!a) {
-    od_nfc_i2c_stop(scl_port, scl_pin, sda_port, sda_pin);
-    return false;
-  }
-  for (uint8_t i = 0; i < 16u; i++) {
-    out16[i] = od_nfc_i2c_read_byte(scl_port, scl_pin, sda_port, sda_pin, i < 15u);
-  }
-  od_nfc_i2c_stop(scl_port, scl_pin, sda_port, sda_pin);
-  return true;
+  /* START, addr|W, sub, REPEATED START, addr|R, 16 bytes with the last NACKed -- one
+   * transaction, which is what write_read means. */
+  return od_hal_i2c_write_read(bus_id, dev7, &sub, 1u, out16, 16u) == OD_HAL_I2C_OK;
 }
 
 #if OD_TNB132M_BOOT_PROBE
@@ -648,7 +552,7 @@ static void od_nfc_boot_dump_ndef_t3(GPIO_Port_TypeDef scl_port, uint8_t scl_pin
   uint16_t sum_calc, sum_read;
   unsigned need_blocks;
 
-  if (!od_nfc_type3_paged_block_read16(scl_port, scl_pin, sda_port, sda_pin, 0x48u, 0x00u, ai)) {
+  if (!od_nfc_type3_paged_block_read16(bus_id, 0x48u, 0x00u, ai)) {
     printf("[OD] NFC ndef AI @0x48 sub=0: NACK\r\n");
     return;
   }
@@ -675,10 +579,10 @@ static void od_nfc_boot_dump_ndef_t3(GPIO_Port_TypeDef scl_port, uint8_t scl_pin
   for (unsigned b = 0; b < need_blocks; b++) {
     uint8_t byte_off = (uint8_t)(0x10u + b * 0x10u);
     uint8_t throwaway[16];
-    (void)od_nfc_type3_paged_block_read16(scl_port, scl_pin, sda_port, sda_pin, 0x48u, 0x00u,
+    (void)od_nfc_type3_paged_block_read16(bus_id, 0x48u, 0x00u,
                                           throwaway);
     sl_udelay_wait(500);
-    if (!od_nfc_type3_paged_block_read16(scl_port, scl_pin, sda_port, sda_pin, 0x40u,
+    if (!od_nfc_type3_paged_block_read16(bus_id, 0x40u,
                                          byte_off, &data[b * 16u])) {
       printf("[OD] NFC ndef blk%u @0x40 sub=%02x: NACK\r\n", b + 1u, (unsigned)byte_off);
       return;
@@ -751,34 +655,20 @@ static void od_nfc_boot_dump_ndef_t3(GPIO_Port_TypeDef scl_port, uint8_t scl_pin
 /* Type-3 16-byte block write: START, dev+W, sub, 16 data bytes, STOP. Mirrors the
  * paged read on the write side — AI goes to dev=0x48 sub=0, NDEF data blocks go to
  * dev=0x40 sub=0x10/0x20/... (same byte-offset mapping as the read path). */
-static bool od_nfc_type3_paged_block_write16(GPIO_Port_TypeDef scl_port, uint8_t scl_pin,
-                                             GPIO_Port_TypeDef sda_port, uint8_t sda_pin,
-                                             uint8_t dev7, uint8_t sub, const uint8_t *in16)
+static bool od_nfc_type3_paged_block_write16(uint8_t bus_id, uint8_t dev7, uint8_t sub,
+                                             const uint8_t *in16)
 {
-  bool a;
+  /* Bounded local, not a heap allocation: sub plus one 16-byte block, on a 32 KB part. */
+  uint8_t buf[1u + 16u];
+
   if (in16 == NULL) {
     return false;
   }
-  od_nfc_i2c_start(scl_port, scl_pin, sda_port, sda_pin);
-  a = od_nfc_i2c_write_byte(scl_port, scl_pin, sda_port, sda_pin, (uint8_t)(dev7 << 1));
-  if (!a) {
-    od_nfc_i2c_stop(scl_port, scl_pin, sda_port, sda_pin);
-    return false;
-  }
-  a = od_nfc_i2c_write_byte(scl_port, scl_pin, sda_port, sda_pin, sub);
-  if (!a) {
-    od_nfc_i2c_stop(scl_port, scl_pin, sda_port, sda_pin);
-    return false;
-  }
+  buf[0] = sub;
   for (uint8_t i = 0; i < 16u; i++) {
-    a = od_nfc_i2c_write_byte(scl_port, scl_pin, sda_port, sda_pin, in16[i]);
-    if (!a) {
-      od_nfc_i2c_stop(scl_port, scl_pin, sda_port, sda_pin);
-      return false;
-    }
+    buf[1u + i] = in16[i];
   }
-  od_nfc_i2c_stop(scl_port, scl_pin, sda_port, sda_pin);
-  return true;
+  return od_hal_i2c_write(bus_id, dev7, buf, (uint16_t)sizeof buf) == OD_HAL_I2C_OK;
 }
 
 #if OD_TNB132M_BOOT_PROBE
@@ -827,7 +717,7 @@ static bool od_nfc_write_ndef_text_en(GPIO_Port_TypeDef scl_port, uint8_t scl_pi
   ai[11] = (uint8_t)((recln >> 16) & 0xFFu);
   ai[12] = (uint8_t)((recln >> 8) & 0xFFu);
   ai[13] = (uint8_t)(recln & 0xFFu);
-  if (od_nfc_type3_paged_block_read16(scl_port, scl_pin, sda_port, sda_pin, 0x48u, 0x00u, cur_ai)
+  if (od_nfc_type3_paged_block_read16(bus_id, 0x48u, 0x00u, cur_ai)
       && cur_ai[0] == 0x10u) {
     ai[10] = cur_ai[10];
   }
@@ -841,14 +731,14 @@ static bool od_nfc_write_ndef_text_en(GPIO_Port_TypeDef scl_port, uint8_t scl_pi
   need_blocks = (recln + 15u) / 16u;
   printf("[OD] NFC write: Ln=%u RWFlag=%02x text=\"%s\" (%u blk)\r\n",
          recln, ai[10], text, need_blocks);
-  if (!od_nfc_type3_paged_block_write16(scl_port, scl_pin, sda_port, sda_pin, 0x48u, 0x00u, ai)) {
+  if (!od_nfc_type3_paged_block_write16(bus_id, 0x48u, 0x00u, ai)) {
     printf("[OD] NFC write: AI @0x48 sub=0 NACK\r\n");
     return false;
   }
   sl_udelay_wait(10000);
   for (i = 0; i < need_blocks; i++) {
     uint8_t byte_off = (uint8_t)(0x10u + i * 0x10u);
-    if (!od_nfc_type3_paged_block_write16(scl_port, scl_pin, sda_port, sda_pin, 0x40u, byte_off,
+    if (!od_nfc_type3_paged_block_write16(bus_id, 0x40u, byte_off,
                                           &blocks[i * 16u])) {
       printf("[OD] NFC write: blk%u @0x40 sub=%02x NACK\r\n", i + 1u, (unsigned)byte_off);
       return false;
@@ -865,38 +755,23 @@ static bool od_nfc_write_ndef_text_en(GPIO_Port_TypeDef scl_port, uint8_t scl_pi
  * After EEPROM/block writes via 0x48/0x40, callers must run this again or
  * 0x48 sub=0 still returns updated AI while 0x40 sub=0x10 reads all 0xFF (RF /
  * tag RAM cache repopulates; MCU window must be re-opened). */
-static void od_nfc_tnb132m_prime_type3(GPIO_Port_TypeDef scl_port, uint8_t scl_pin,
-                                      GPIO_Port_TypeDef sda_port, uint8_t sda_pin)
+static void od_nfc_tnb132m_prime_type3(uint8_t bus_id)
 {
-  uint8_t sink = 0;
+  static const uint8_t open_window[2] = { 0x21u, 0x04u };
+  static const uint8_t sel_25[1]      = { 0x25u };
+  static const uint8_t sel_30[1]      = { 0x30u };
+  uint8_t sink1;
+  uint8_t sink16[16];
 
-  od_nfc_i2c_start(scl_port, scl_pin, sda_port, sda_pin);
-  (void)od_nfc_i2c_write_byte(scl_port, scl_pin, sda_port, sda_pin, (uint8_t)(0x30u << 1));
-  (void)od_nfc_i2c_write_byte(scl_port, scl_pin, sda_port, sda_pin, 0x21u);
-  (void)od_nfc_i2c_write_byte(scl_port, scl_pin, sda_port, sda_pin, 0x04u);
-  od_nfc_i2c_stop(scl_port, scl_pin, sda_port, sda_pin);
-
-  od_nfc_i2c_start(scl_port, scl_pin, sda_port, sda_pin);
-  (void)od_nfc_i2c_write_byte(scl_port, scl_pin, sda_port, sda_pin, (uint8_t)(0x30u << 1));
-  (void)od_nfc_i2c_write_byte(scl_port, scl_pin, sda_port, sda_pin, 0x25u);
-  od_nfc_i2c_start(scl_port, scl_pin, sda_port, sda_pin);
-  (void)od_nfc_i2c_write_byte(scl_port, scl_pin, sda_port, sda_pin, (uint8_t)((0x30u << 1) | 1u));
-  sink = od_nfc_i2c_read_byte(scl_port, scl_pin, sda_port, sda_pin, false);
-  (void)sink;
-  od_nfc_i2c_stop(scl_port, scl_pin, sda_port, sda_pin);
+  /* Results are deliberately discarded, as they always were: these are wake/window pokes whose
+   * ACKs the deployed sequence never checked, and starting to check them here would be a
+   * behaviour change on a transport no board in this fleet can exercise. */
+  (void)od_hal_i2c_write(bus_id, 0x30u, open_window, (uint16_t)sizeof open_window);
+  (void)od_hal_i2c_write_read(bus_id, 0x30u, sel_25, 1u, &sink1, 1u);
 
   sl_udelay_wait(20000);
 
-  od_nfc_i2c_start(scl_port, scl_pin, sda_port, sda_pin);
-  (void)od_nfc_i2c_write_byte(scl_port, scl_pin, sda_port, sda_pin, (uint8_t)(0x43u << 1));
-  (void)od_nfc_i2c_write_byte(scl_port, scl_pin, sda_port, sda_pin, 0x30u);
-  od_nfc_i2c_start(scl_port, scl_pin, sda_port, sda_pin);
-  (void)od_nfc_i2c_write_byte(scl_port, scl_pin, sda_port, sda_pin, (uint8_t)((0x43u << 1) | 1u));
-  for (uint8_t i = 0; i < 16u; i++) {
-    sink = od_nfc_i2c_read_byte(scl_port, scl_pin, sda_port, sda_pin, i < 15u);
-  }
-  (void)sink;
-  od_nfc_i2c_stop(scl_port, scl_pin, sda_port, sda_pin);
+  (void)od_hal_i2c_write_read(bus_id, 0x43u, sel_30, 1u, sink16, (uint16_t)sizeof sink16);
 }
 
 static void od_nfc_field_detect_init_from_config(const struct NfcConfig *nfc_cfg)
@@ -1103,6 +978,7 @@ static void od_nfc_autoinit_from_config(const struct GlobalConfig *cfg)
    * corrupted data_bus_count. One policy, so "declared twice" means no bus everywhere rather than
    * an arbitrary one here. */
   bus = od_config_data_bus(cfg, nfc_cfg->bus_instance);
+  s_od_nfc_bus_instance = nfc_cfg->bus_instance;
   if (bus == NULL || bus->bus_type != OD_BUS_TYPE_I2C) {
     printf("[OD][NFC] bus instance=%u missing/non-I2C; NFC init disabled\r\n", (unsigned)nfc_cfg->bus_instance);
     return;
@@ -1142,10 +1018,12 @@ static void od_nfc_autoinit_from_config(const struct GlobalConfig *cfg)
 
 static void od_nfc_init_sequence(void)
 {
+  /* Pin handles for the power/park sequencing this function owns; transactions go by bus. */
   GPIO_Port_TypeDef sp = s_od_nfc_scl_port;
   uint8_t sn = s_od_nfc_scl_pin;
   GPIO_Port_TypeDef dp = s_od_nfc_sda_port;
   uint8_t dn = s_od_nfc_sda_pin;
+  const uint8_t bus_id = s_od_nfc_bus_instance;
 
   if (!s_od_nfc_enabled) {
     return;
@@ -1160,14 +1038,14 @@ static void od_nfc_init_sequence(void)
     sl_udelay_wait(10000);
   }
 
-  od_nfc_tnb132m_prime_type3(sp, sn, dp, dn);
+  od_nfc_tnb132m_prime_type3(bus_id);
 
 #if OD_TNB132M_BOOT_PROBE
   sl_udelay_wait(2000);
 #if OD_TNB132M_WRITE_NDEF
   (void)od_nfc_write_ndef_text_en(sp, sn, dp, dn, OD_TNB132M_NDEF_TEXT);
   sl_udelay_wait(50000);
-  od_nfc_tnb132m_prime_type3(sp, sn, dp, dn);
+  od_nfc_tnb132m_prime_type3(bus_id);
   sl_udelay_wait(2000);
 #endif
   od_nfc_boot_dump_ndef_t3(sp, sn, dp, dn);
@@ -1176,11 +1054,11 @@ static void od_nfc_init_sequence(void)
 
   sl_udelay_wait(20000);
 
-  od_nfc_i2c_start(sp, sn, dp, dn);
-  (void)od_nfc_i2c_write_byte(sp, sn, dp, dn, (uint8_t)(0x30u << 1));
-  (void)od_nfc_i2c_write_byte(sp, sn, dp, dn, 0x21u);
-  (void)od_nfc_i2c_write_byte(sp, sn, dp, dn, 0x01u);
-  od_nfc_i2c_stop(sp, sn, dp, dn);
+  {
+    /* Close the byte-offset window again. Result discarded, as it always was. */
+    static const uint8_t close_window[2] = { 0x21u, 0x01u };
+    (void)od_hal_i2c_write(bus_id, 0x30u, close_window, (uint16_t)sizeof close_window);
+  }
 
   sl_udelay_wait(14000);
   (void)od_nfc_field_detect_refresh(sl_sleeptimer_tick_to_ms(sl_sleeptimer_get_tick_count()), true);
@@ -1220,11 +1098,9 @@ static bool od_nfc_read_record_raw(uint8_t *type_out, uint8_t *out, uint16_t *io
     sl_udelay_wait(10000);
   }
 
-  od_nfc_tnb132m_prime_type3(s_od_nfc_scl_port, s_od_nfc_scl_pin, s_od_nfc_sda_port, s_od_nfc_sda_pin);
+  od_nfc_tnb132m_prime_type3(s_od_nfc_bus_instance);
   sl_udelay_wait(2000);
-  if (!od_nfc_type3_paged_block_read16(s_od_nfc_scl_port, s_od_nfc_scl_pin,
-                                        s_od_nfc_sda_port, s_od_nfc_sda_pin,
-                                        0x48u, 0x00u, ai)) {
+  if (!od_nfc_type3_paged_block_read16(s_od_nfc_bus_instance, 0x48u, 0x00u, ai)) {
     CORE_EXIT_CRITICAL();
     return false;
   }
@@ -1240,13 +1116,9 @@ static bool od_nfc_read_record_raw(uint8_t *type_out, uint8_t *out, uint16_t *io
   }
   for (uint16_t b = 0; b < (uint16_t)((ln + 15u) / 16u); b++) {
     uint8_t byte_off = (uint8_t)(0x10u + b * 0x10u);
-    (void)od_nfc_type3_paged_block_read16(s_od_nfc_scl_port, s_od_nfc_scl_pin,
-                                          s_od_nfc_sda_port, s_od_nfc_sda_pin,
-                                          0x48u, 0x00u, s_od_nfc_read_throwaway);
+    (void)od_nfc_type3_paged_block_read16(s_od_nfc_bus_instance, 0x48u, 0x00u, s_od_nfc_read_throwaway);
     sl_udelay_wait(500);
-    if (!od_nfc_type3_paged_block_read16(s_od_nfc_scl_port, s_od_nfc_scl_pin,
-                                         s_od_nfc_sda_port, s_od_nfc_sda_pin,
-                                         0x40u, byte_off, &data[b * 16u])) {
+    if (!od_nfc_type3_paged_block_read16(s_od_nfc_bus_instance, 0x40u, byte_off, &data[b * 16u])) {
       CORE_EXIT_CRITICAL();
       return false;
     }
@@ -1488,7 +1360,7 @@ static bool od_nfc_write_record_raw(uint8_t rec_type, const uint8_t *data, uint1
     sl_udelay_wait(10000);
   }
 
-  od_nfc_tnb132m_prime_type3(s_od_nfc_scl_port, s_od_nfc_scl_pin, s_od_nfc_sda_port, s_od_nfc_sda_pin);
+  od_nfc_tnb132m_prime_type3(s_od_nfc_bus_instance);
   sl_udelay_wait(2000);
 
   ai[0] = 0x10u;
@@ -1500,8 +1372,7 @@ static bool od_nfc_write_record_raw(uint8_t rec_type, const uint8_t *data, uint1
   ai[12] = (uint8_t)((record_len >> 8) & 0xFFu);
   ai[13] = (uint8_t)(record_len & 0xFFu);
 
-  if (od_nfc_type3_paged_block_read16(s_od_nfc_scl_port, s_od_nfc_scl_pin, s_od_nfc_sda_port,
-                                      s_od_nfc_sda_pin, 0x48u, 0x00u, cur_ai)
+  if (od_nfc_type3_paged_block_read16(s_od_nfc_bus_instance, 0x48u, 0x00u, cur_ai)
       && (cur_ai[0] & 0xF0u) == 0x10u) {
     ai[10] = cur_ai[10];
   }
@@ -1512,8 +1383,7 @@ static bool od_nfc_write_record_raw(uint8_t rec_type, const uint8_t *data, uint1
   ai[14] = (uint8_t)(sum >> 8);
   ai[15] = (uint8_t)(sum & 0xFFu);
 
-  if (!od_nfc_type3_paged_block_write16(s_od_nfc_scl_port, s_od_nfc_scl_pin, s_od_nfc_sda_port,
-                                        s_od_nfc_sda_pin, 0x48u, 0x00u, ai)) {
+  if (!od_nfc_type3_paged_block_write16(s_od_nfc_bus_instance, 0x48u, 0x00u, ai)) {
     CORE_EXIT_CRITICAL();
     return false;
   }
@@ -1521,8 +1391,7 @@ static bool od_nfc_write_record_raw(uint8_t rec_type, const uint8_t *data, uint1
   need_blocks = (uint8_t)((record_len + 15u) / 16u);
   for (i = 0u; i < need_blocks; i++) {
     uint8_t byte_off = (uint8_t)(0x10u + i * 0x10u);
-    if (!od_nfc_type3_paged_block_write16(s_od_nfc_scl_port, s_od_nfc_scl_pin, s_od_nfc_sda_port,
-                                          s_od_nfc_sda_pin, 0x40u, byte_off, &blocks[i * 16u])) {
+    if (!od_nfc_type3_paged_block_write16(s_od_nfc_bus_instance, 0x40u, byte_off, &blocks[i * 16u])) {
       CORE_EXIT_CRITICAL();
       return false;
     }

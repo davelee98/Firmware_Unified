@@ -236,6 +236,21 @@ target_include_directories(od_i2c_contract_ref_test PRIVATE ${CMAKE_CURRENT_LIST
 target_link_libraries(od_i2c_contract_ref_test od_shared)
 add_test(NAME i2c_contract_ref COMMAND od_i2c_contract_ref_test)
 
+# silabs_i2c_trace: the BG22 TNB132M transport at the EDGES. Mandatory per
+# PLAN_SENSOR_SEAM_2026-08-23.md staging step 9b, and NOT covered by the existing BG22 NFC tests,
+# which fake od_nfc_app_read/write -- above the transport -- and so say nothing about START
+# placement, ACK sampling or the NACK on a final read byte. Binds the production hal/od_hal_i2c.c
+# to fake GPIO and delay. It must never assert stuck-bus behaviour: that engine reads SDA only.
+add_executable(od_silabs_i2c_trace_test
+    silabs_i2c_trace_test.c
+    fake_silabs/em_gpio.c
+    ../../targets/efr32bg22-slc/hal/od_hal_i2c.c)
+target_include_directories(od_silabs_i2c_trace_test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/fake_silabs
+    ../../targets/efr32bg22-slc)
+target_link_libraries(od_silabs_i2c_trace_test od_shared_silabs)
+add_test(NAME silabs_i2c_trace COMMAND od_silabs_i2c_trace_test)
+
 # silabs_storage: the BG22 overlay, where od_config_asm's reassembly state and the NVM3 record are
 # one object. The two static asserts in the storage file compare LAYOUT; this compares SEQUENCING
 # -- the header is written over the four live assembler state words, so the order of capture,

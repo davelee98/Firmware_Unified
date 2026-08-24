@@ -691,3 +691,35 @@ Treat the rows below as the only thing standing behind that.
       400 kHz must not change the touch clock.
 - [ ] **A clone that stretches the clock now fails the transfer** rather than sampling garbage,
       and five consecutive failures disable touch. Confirm ordinary hardware never reaches that.
+
+### EFR32BG22 NFC transport — step 9, a software candidate (2026-08-24)
+
+**No board in this fleet carries a TNB132M**, so every row here is open on arrival, exactly as
+Transfer Phase 4's NFC rows were. Merged code is not evidence.
+
+What *is* checked, and what it is worth: `tests/host/silabs_i2c_trace_test.c` binds the production
+`hal/od_hal_i2c.c` to fake GPIO and reads the **edge sequence** back — START and STOP detected as
+SDA transitions while SCL is high, the repeated START in a block read, one clock per bit plus the
+ACK slot, the address-NACK path, and that an unresolvable or ambiguous bus drives no edge at all.
+That is real coverage of framing. It is not coverage of *timing*, of the TNB132M's response to it,
+or of anything above the transaction.
+
+The existing BG22 NFC host tests fake `od_nfc_app_read`/`write`, which sit **above** the transport
+and say nothing about it. They must not be cited for these rows.
+
+- [ ] **A tag reads.** `0x48` sub 0 returns plausible Attribute Information after the prime
+      sequence.
+- [ ] **A tag writes and reads back**, including the re-prime that the byte-offset window needs
+      after an EEPROM write.
+- [ ] **The edge pacing is unchanged.** The `sl_udelay_wait()` counts were extracted verbatim
+      because they are what the deployed sequence was tuned against; a scope trace against the
+      pre-change image is the only thing that shows the extraction preserved them.
+- [ ] **The prime commands still work with their results discarded.** They always were discarded;
+      the transactions now return a status that nothing reads, and that is deliberate — starting
+      to check it would be a behaviour change on a transport nothing here can exercise.
+- [ ] **Power sequencing and SCL/SDA parking still bracket a session.** Those stayed in the NFC
+      adapter; only the transactions moved.
+
+**Explicitly out of scope for any of these rows: stuck-bus behaviour.** This engine drives SCL
+push-pull and only ever reads SDA, so it cannot detect clock stretching, and a held-low SDA reads
+as ACK and as data 0. Do not write a row that asserts otherwise.
