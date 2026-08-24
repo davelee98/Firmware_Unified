@@ -418,6 +418,26 @@ looks arbitrary and is not); delete the story.
   No fake ever sees an expected reply: the generated table is included by the runner and nothing
   else, and profiles get semantic knobs instead. That is what stops the corpus becoming its own
   oracle.
+- **Config-storage seam software candidate, not hardware-qualified (2026-08-24, `490415d`).**
+  `shared/core/od_config_store.c` is the only implementation of the stored record — `0xDEADBEEF`,
+  version 1, a 16-byte little-endian header, CRC-32 over the payload — over `shared/hal/od_hal_nvs.h`,
+  the new HAL_NVS tier, which owns the medium and nothing above it. **The seam reads at an OFFSET
+  because BG22 must**: `nvm3_readPartialData` serves header-then-payload with no staging buffer on a
+  part with ~10.5 KB of heap. Neither other medium can — the Zephyr settings NVS backend registers no
+  `csi_load_one` and `nvs_read()` starts at byte 0; ESP-IDF's `nvs_get_blob()` is whole-blob — so both
+  hold one record copy and serve offsets from it. Write takes ONE contiguous caller-owned workspace,
+  because BG22's single `nvm3_writeData` works only through its assembler/record union.
+  **`version` stays carried and unchecked on purpose**: all three write 1, none reads it back, and
+  enforcing it would strand a device on a record it has been using.
+  Two Nordic acceptance changes are real and recorded in `DIVERGENCE_MATRIX` § 17 — a physically
+  truncated record and one exceeding the caller's buffer are now refused — as is its
+  `clearStoredConfig()` reporting success on a failed delete.
+  **S1a is amended in the plan**: a cache is INVALIDATED on a failed mutation, never cleared, because
+  IDF writes the new blob before erasing the old and Zephyr deletes the name before the value, so no
+  adapter can know which record survived. Ratcheted by "config storage: one record framing" and
+  "config storage: one CRC-32"; `absent_or_fail` now excludes `build*`, having never excluded
+  Nordic's `build-xiao_ble`-style trees. BG22 250,148 → 250,552 B flash, static RAM unchanged at
+  32,284 B. **All rows in docs/HARDWARE_VERIFICATION_CHECKLIST.md § Config storage seam are open.**
 - **Shared buzzer runner software candidate, not hardware-qualified (2026-08-23).**
   `shared/core/od_buzzer.c` is the only melody parser, owned-payload repeat machine, pitch mapper
   and duration-cap policy. ESP32 retains LEDC and loop polling behind `od_buzzer_app`; Nordic

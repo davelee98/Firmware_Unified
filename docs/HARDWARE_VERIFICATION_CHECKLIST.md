@@ -589,3 +589,64 @@ Each row, when run, should record: board id, exact release SHA, bootloader, part
 layout, tool and host versions, raw transcript, device log, per-observation PASS/FAIL — per
 `PLAN_OD_DISPATCH_C12_2026-08-16.md` §7.1's evidence rules (still binding; only the SHA-pinning
 *gate* is dropped, not the record-keeping standard).
+
+---
+
+## Config storage seam — `od_config_store` + `od_hal_nvs` (2026-08-24)
+
+Landed as commit `490415d`; **nothing here is hardware-qualified**. `tools/check.sh --targets`
+passes 40/0/0 and the host suite covers the framing against a fake medium, but a host test cannot
+qualify silicon and **a config a device cannot read back is a bricked configuration** — these rows
+gate the promotion, not the build.
+
+Two behaviour changes make a device REFUSE a record it used to accept
+(`DIVERGENCE_MATRIX` § 17), and both are Nordic-only, so a Nordic board that will not boot on its
+existing config is the expected first symptom rather than a surprise: a physically truncated
+record now fails, and a record larger than the caller's buffer is refused instead of ignored.
+Re-provision rather than debug if that appears.
+
+### Every target
+
+- [ ] **Write, reboot, reload:** write a config over BLE, confirm it takes effect, power-cycle, and
+      confirm the device comes back on the stored config and the panel renders from it.
+- [ ] **Unrecognised version still loads:** rewrite the stored record's `version` field out of band
+      to 2 and confirm the device still boots on it. This is the behaviour § 4 says must NOT
+      change — every target writes 1 and none reads it back, and enforcing it would strand a
+      device on a record it has been using.
+- [ ] **A corrupted record boots on defaults:** flip one payload byte out of band and confirm the
+      CRC rejects it and the device comes up unconfigured rather than on garbage.
+
+### ESP32-S3 (`s3-n16r8-extuart-debug`)
+
+- [ ] **Factory-provisioned config loads at first boot** — the path that passes a flash pointer
+      into `saveConfig`. The core copies it into the workspace; confirm a
+      `OPENDISPLAY_FACTORY_CONFIG_HEX` build comes up configured on a blank NVS.
+- [ ] **Secure erase still wipes:** `secureEraseConfig()` now drops the HAL's cached record
+      unconditionally before touching NVS. Confirm a subsequent read reports an unprovisioned
+      device *without* a reboot — the cache is the only thing that could have hidden that.
+
+### Nordic (`xiao_nrf52840` mandatory)
+
+- [ ] **Write, reload in place, reboot-persist** — the three the 2026-08-19 run covered, re-run
+      against the shared framing.
+- [ ] **A failed clear reports failure.** `clearStoredConfig()` used to discard
+      `settings_delete()`'s result and return true regardless. Inducing a settings delete failure
+      on the bench may not be possible; **if it is not, say so here and move this row to a
+      production-source fault test** rather than leaving it open forever.
+- [ ] **A failed write leaves the previous config readable** (S1a). Same caveat: if a
+      `settings_save_one` failure cannot be induced on hardware, this belongs in a fault test and
+      this row should say that instead of sitting open.
+
+### EFR32BG22 (`efr32bg22-slc`) — needs a J-Link attached
+
+- [ ] **Write, reload, reboot-persist** through the union overlay.
+- [ ] **An over-size declaration is refused at the start frame with nothing stored** — refuse,
+      never truncate, because the 2048-byte cap is one a host cannot interrogate
+      (`MEMORY_CONSTRAINTS.md` item 3).
+- [ ] **An in-flight chunked transfer survives a refused save.** The header write eats the four
+      live assembler state words, so every refusal that can still leave a transfer open has to
+      happen before it. Covered by `tests/host/silabs_storage_test.c` and falsifiable there, but
+      unexercised on silicon.
+- [ ] **RAM unchanged:** `heap_size` and `data + bss` against the pre-change image. Measured at
+      32,284 B static RAM with 480 B headroom (flash 250,148 -> 250,552 B). The overlay existing is
+      what makes this promotion affordable there, and losing it would be invisible except here.
