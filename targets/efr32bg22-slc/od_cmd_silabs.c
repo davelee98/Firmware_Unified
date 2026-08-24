@@ -128,7 +128,7 @@ od_cmd_result_t od_cmd_app_deep_sleep(const od_cmd_ctx_t *ctx, od_span_t body)
 od_cmd_result_t od_cmd_app_config_read(const od_cmd_ctx_t *ctx, od_span_t body)
 {
   uint8_t *buf = opendisplay_config_assembler()->buffer;
-  uint32_t len = MAX_CONFIG_SIZE;
+  uint32_t len = OD_CONFIG_MAX_SIZE;
   od_txq_status_t rc;
 
   (void)body;

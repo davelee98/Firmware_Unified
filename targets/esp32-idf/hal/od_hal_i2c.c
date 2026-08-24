@@ -9,6 +9,7 @@
  */
 
 #include "od_hal_i2c.h"
+#include "od_hal_i2c_esp.h"
 
 #include "driver/i2c_master.h"
 
@@ -68,11 +69,11 @@ static int map_err(esp_err_t err)
         case ESP_OK:              return OD_HAL_I2C_OK;
         case ESP_ERR_NOT_FOUND:   return OD_HAL_I2C_ENODEV;
         case ESP_ERR_INVALID_ARG: return OD_HAL_I2C_EINVAL;
-        default:                  return OD_HAL_I2C_ERR;
+        default:                  return OD_HAL_I2C_EIO;
     }
 }
 
-bool od_hal_i2c_init(uint8_t sda, uint8_t scl, uint32_t hz)
+bool od_hal_i2c_esp_begin(uint8_t sda, uint8_t scl, uint32_t hz)
 {
     if (s_bus) {
         /* Same pins: already up, nothing to do. Different pins: the caller must deinit first
@@ -98,7 +99,7 @@ bool od_hal_i2c_init(uint8_t sda, uint8_t scl, uint32_t hz)
     return true;
 }
 
-void od_hal_i2c_deinit(void)
+void od_hal_i2c_esp_deinit(void)
 {
     release_device();
     if (s_bus) {
@@ -109,56 +110,111 @@ void od_hal_i2c_deinit(void)
     s_scl = -1;
 }
 
-bool od_hal_i2c_is_up(void)
+bool od_hal_i2c_esp_is_up(void)
 {
     return s_bus != NULL;
 }
 
-void od_hal_i2c_set_clock(uint32_t hz)
+void od_hal_i2c_esp_set_clock(uint32_t hz)
 {
     if (hz) {
         s_freq = hz;
     }
 }
 
-int od_hal_i2c_probe(uint8_t addr)
+int od_hal_i2c_esp_probe_current(uint8_t addr)
 {
-    if (!s_bus) {
+    if (addr > 0x7Fu || !s_bus) {
         return OD_HAL_I2C_EINVAL;
     }
     return map_err(i2c_master_probe(s_bus, addr, OD_I2C_TIMEOUT_MS));
 }
 
-int od_hal_i2c_write(uint8_t addr, const uint8_t *buf, uint16_t len)
+int od_hal_i2c_esp_write_current(uint8_t addr, const uint8_t *buf, uint16_t len)
 {
-    if (!s_bus || buf == NULL || len == 0) {
+    if (addr > 0x7Fu || buf == NULL || len == 0u || !s_bus) {
         return OD_HAL_I2C_EINVAL;
     }
     if (!attach(addr)) {
-        return OD_HAL_I2C_ERR;
+        return OD_HAL_I2C_EIO;
     }
     return map_err(i2c_master_transmit(s_dev, buf, len, OD_I2C_TIMEOUT_MS));
 }
 
-int od_hal_i2c_read(uint8_t addr, uint8_t *buf, uint16_t len)
+int od_hal_i2c_esp_read_current(uint8_t addr, uint8_t *buf, uint16_t len)
 {
-    if (!s_bus || buf == NULL || len == 0) {
+    if (addr > 0x7Fu || buf == NULL || len == 0u || !s_bus) {
         return OD_HAL_I2C_EINVAL;
     }
     if (!attach(addr)) {
-        return OD_HAL_I2C_ERR;
+        return OD_HAL_I2C_EIO;
     }
     return map_err(i2c_master_receive(s_dev, buf, len, OD_I2C_TIMEOUT_MS));
 }
 
-int od_hal_i2c_write_read(uint8_t addr, const uint8_t *tx, uint16_t tx_len,
-                          uint8_t *rx, uint16_t rx_len)
+int od_hal_i2c_esp_write_read_current(uint8_t addr, const uint8_t *tx, uint16_t tx_len,
+                                      uint8_t *rx, uint16_t rx_len)
 {
-    if (!s_bus || tx == NULL || tx_len == 0 || rx == NULL || rx_len == 0) {
+    if (addr > 0x7Fu || tx == NULL || tx_len == 0u || rx == NULL || rx_len == 0u || !s_bus) {
         return OD_HAL_I2C_EINVAL;
     }
     if (!attach(addr)) {
-        return OD_HAL_I2C_ERR;
+        return OD_HAL_I2C_EIO;
+    }
+    return map_err(i2c_master_transmit_receive(s_dev, tx, tx_len, rx, rx_len,
+                                               OD_I2C_TIMEOUT_MS));
+}
+
+int od_hal_i2c_probe(uint8_t bus_id, uint8_t addr)
+{
+    if (addr > 0x7Fu) {
+        return OD_HAL_I2C_EINVAL;
+    }
+    if (!od_hal_i2c_esp_select(bus_id) || !s_bus) {
+        return OD_HAL_I2C_EINVAL;
+    }
+    return map_err(i2c_master_probe(s_bus, addr, OD_I2C_TIMEOUT_MS));
+}
+
+int od_hal_i2c_write(uint8_t bus_id, uint8_t addr, const uint8_t *buf, uint16_t len)
+{
+    if (addr > 0x7Fu || buf == NULL || len == 0u) {
+        return OD_HAL_I2C_EINVAL;
+    }
+    if (!od_hal_i2c_esp_select(bus_id) || !s_bus) {
+        return OD_HAL_I2C_EINVAL;
+    }
+    if (!attach(addr)) {
+        return OD_HAL_I2C_EIO;
+    }
+    return map_err(i2c_master_transmit(s_dev, buf, len, OD_I2C_TIMEOUT_MS));
+}
+
+int od_hal_i2c_read(uint8_t bus_id, uint8_t addr, uint8_t *buf, uint16_t len)
+{
+    if (addr > 0x7Fu || buf == NULL || len == 0u) {
+        return OD_HAL_I2C_EINVAL;
+    }
+    if (!od_hal_i2c_esp_select(bus_id) || !s_bus) {
+        return OD_HAL_I2C_EINVAL;
+    }
+    if (!attach(addr)) {
+        return OD_HAL_I2C_EIO;
+    }
+    return map_err(i2c_master_receive(s_dev, buf, len, OD_I2C_TIMEOUT_MS));
+}
+
+int od_hal_i2c_write_read(uint8_t bus_id, uint8_t addr, const uint8_t *tx, uint16_t tx_len,
+                          uint8_t *rx, uint16_t rx_len)
+{
+    if (addr > 0x7Fu || tx == NULL || tx_len == 0u || rx == NULL || rx_len == 0u) {
+        return OD_HAL_I2C_EINVAL;
+    }
+    if (!od_hal_i2c_esp_select(bus_id) || !s_bus) {
+        return OD_HAL_I2C_EINVAL;
+    }
+    if (!attach(addr)) {
+        return OD_HAL_I2C_EIO;
     }
     return map_err(i2c_master_transmit_receive(s_dev, tx, tx_len, rx, rx_len,
                                                OD_I2C_TIMEOUT_MS));

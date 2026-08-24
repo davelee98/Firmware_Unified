@@ -583,29 +583,42 @@ pin should set the mask explicitly rather than rely on zero.
 Project ruling 2026-08-23, reaffirmed: **`0xFF` means unconfigured**, for every `bus_id`-shaped
 field. It is the contract's pervasive absent sentinel (`opendisplay_structs.h:295-298`).
 
-This is a deliberate protocol change with a host dependency, not just a firmware correction. The
-canonical header still documents `TouchController.bus_id == 0xFF` as "bus 0" (`:945`) and is
-frozen — `FOLLOWUPS` § 14. More urgently, `py-opendisplay` **defaults an omitted touch `bus_id` to
-`0xff`** (`config_json.py:643`), so the host change in `FOLLOWUPS` § 15 must land before or with
-the firmware refusal, or touch silently stops being configured for any block relying on that
-default.
+**Ruling extended 2026-08-24: the firmware correction does NOT wait on the host.** A `bus_id` of
+`0xFF` makes the config invalid — the device was never assigned a bus — so refusing it is correct
+on its own terms, and a substituted bus 0 is invalid whatever the host sends. `py-opendisplay`
+defaulting an omitted touch `bus_id` to `0xff` (`config_json.py:643`) is a **host defect**
+(`FOLLOWUPS` § 15), not a schedule constraint on this repo.
 
-| Site | Behaviour |
-|---|---|
-| `esp32-idf/src/display_service.cpp:726` | substitutes bus 0, then validates |
-| `esp32-idf/src/sensor_sht40.cpp:52` | substitutes bus 0 |
-| `esp32-idf/src/sensor_bq27220.cpp:43` | substitutes bus 0 |
-| `nordic-zephyr/src/opendisplay_sensor_common.h:22` | substitutes bus 0, then validates |
-| `nordic-zephyr/src/opendisplay_touch.c:299` | **refuses** — the correct behaviour |
+What that costs, stated plainly rather than discovered: a config that omits `bus_id` stops
+configuring touch. That is the intended outcome — the alternative is probing an unassigned device
+on somebody else's bus, where an address collision yields plausible-but-wrong readings instead of
+a failure. **Configs already stored on devices that carry `0xFF` in that field need re-provisioning**,
+and only the host can identify them.
+
+The canonical header still documents `TouchController.bus_id == 0xFF` as "bus 0" (`:945`) and is
+frozen — `FOLLOWUPS` § 14.
+
+**Resolved 2026-08-24** by sensor-seam staging step 1. Every site below now refuses, matching what
+Nordic touch always did. **There were five substituting sites, not four** — `touch_input.cpp` was
+missed by the original survey and is the one that mattered most, because it also returned "bus ok"
+when *no* `DataBus` record existed at all.
+
+| Site | Behaviour before | Now |
+|---|---|---|
+| `esp32-idf/src/display_service.cpp:726` | substitutes bus 0, then validates | refuses |
+| `esp32-idf/src/sensor_sht40.cpp:52` | substitutes bus 0 | refuses |
+| `esp32-idf/src/sensor_bq27220.cpp:43` | substitutes bus 0 | refuses |
+| `esp32-idf/src/touch_input.cpp:274` | substitutes bus 0 **and** accepts any bus when `data_bus_count == 0` | refuses `0xFF`; the no-records default-pin path is unchanged |
+| `nordic-zephyr/src/opendisplay_sensor_common.h:22` | substitutes bus 0, then validates | refuses |
+| `nordic-zephyr/src/opendisplay_touch.c:299` | **refuses** — the reference | unchanged |
 
 Because all four validate afterwards, the misbehaviour requires a valid `data_buses[0]` *and* a
 device that was never assigned a bus: that device is then probed on an unrelated bus, where an
 address collision yields plausible-but-wrong readings rather than a clean failure.
 
 Same defect class as § 11.2 (`pwr_pin == 0xFF` driving pad `0x00` on BG22), fixed 2026-08-22 by
-refusing. Correcting these four is scheduled with the I2C HAL cutover —
-`plans/PLAN_SENSOR_SEAM_2026-08-23.md` staging step 1 — or earlier if a sensor is ever seen
-reporting from a bus it was not assigned to.
+refusing. Correcting these four is `plans/PLAN_SENSOR_SEAM_2026-08-23.md` staging step 1, which no
+longer waits on anything outside this repo.
 
 ---
 
@@ -615,11 +628,21 @@ The canonical header defines the key: `DataBus.instance_number` is *"0-based bus
 referenced by SensorData.bus_id, TouchController.bus_id, etc."* (`opendisplay_structs.h:802`). So
 a consumer's `bus_id` names an **instance_number**, not a position in `data_buses[]`.
 
-| Site | Resolution |
-|---|---|
-| `efr32bg22-slc/opendisplay_ble.c:1101-1103` (NFC) | **scans for a matching `instance_number`** — correct |
-| `esp32-idf/src/display_service.cpp:729` | indexes `data_buses[bus_id]` |
-| `nordic-zephyr/src/opendisplay_sensor_common.h:28` | indexes `data_buses[bus_id]` |
+**Resolved 2026-08-24** by sensor-seam staging step 1, alongside § 13 — the two defects shared
+every call site, and correcting the sentinel alone would have left a refusal that still resolved to
+the wrong bus. `shared/core/od_config.c`'s `od_config_data_bus()` is now the one resolution policy:
+exactly one match, **NULL on no match and on ambiguity**. Refusing a duplicated `instance_number`
+is a decision — nothing rejects a config declaring one twice, so "first match wins" would have
+resolved by packet order, the same accident one layer up.
+
+| Site | Before | Now |
+|---|---|---|
+| `efr32bg22-slc/opendisplay_ble.c:1101` (NFC) | scanned by `instance_number` — right key, but took the first duplicate and had no bound against a corrupted count | uses the shared resolver |
+| `esp32-idf/src/display_service.cpp:729` | indexed `data_buses[bus_id]` | resolved |
+| `esp32-idf/src/display_service.cpp:938` (AXP2101) | bounds-checked and indexed, so its prechecks could pass on one record while the bus call selected another | resolved |
+| `esp32-idf/src/touch_input.cpp:282` | indexed | resolved |
+| `nordic-zephyr/src/opendisplay_sensor_common.h:28` | indexed | resolved |
+| `nordic-zephyr/src/opendisplay_touch.c:302` | refused `0xFF` correctly, but range-checked and indexed — so it rejected a sparse instance and picked the wrong record for out-of-order ones | resolved |
 
 Index and instance agree only when records arrive in ascending order with no gaps, which is the
 common case and why this has never been seen. A host that sends `instance_number` 1 before 0, or
@@ -627,9 +650,10 @@ that omits an instance, binds every indexing consumer to the **wrong bus** — a
 on another device's pins, and an address collision yields plausible-but-wrong readings rather than
 a failure.
 
-Not yet fixed. Scheduled with the I2C HAL cutover, whose resolution is the scan —
-`plans/PLAN_SENSOR_SEAM_2026-08-23.md` T1. Related: § 13, the `0xFF` substitution, which affects
-the same call sites.
+`tests/host/config_test.c`'s `test_data_bus_lookup()` pins the decision table and is
+mutation-checked: restoring the indexing implementation fails 11 assertions. **No hardware gate has
+run** — `plans/PLAN_SENSOR_SEAM_2026-08-23.md` § 5's "unconfigured bus" row is open on both
+targets.
 
 ---
 
@@ -675,3 +699,156 @@ which is why the map check is part of it.
 `uint32_t` pitch table (1 KB of flash) plus runner state on a part with 480 B of RAM headroom, and
 the config struct's layout would change — which is an ABI break against every host test compiled
 for that profile.
+
+---
+
+## 17. Stored config record — three loaders that disagreed about malformed input (2026-08-24)
+
+Resolved by `shared/core/od_config_store.c`, which is now the only implementation of the record's
+framing and validation. The record itself is unchanged and stays unchanged: `0xDEADBEEF`,
+version 1, a 16-byte little-endian header, CRC-32 over the payload. What differed was **which
+malformed records each target accepted**, and the shared loader is stricter than the loosest of
+them. Written down because that is an observable acceptance change, not a refactor.
+
+| Check | ESP32 | nordic-zephyr | efr32bg22-slc | Shared |
+|---|---|---|---|---|
+| `magic == 0xDEADBEEF` | yes | yes | yes | yes |
+| `version` | **not checked** | **not checked** | **not checked** | **not checked** — see below |
+| `data_len` against the build's cap | yes | yes | yes | yes |
+| `data_len` against the **caller's** buffer | yes | **no** | yes | yes |
+| declared payload actually present | yes | **no** | yes | yes |
+| stored span not longer than a legal record | in its HAL | in its HAL | yes, before the header | **in the core** |
+| CRC-32 over the payload | yes | yes | yes | yes |
+
+Three consequences worth stating:
+
+1. **Nordic accepted a physically truncated record.** It zeroes its whole 4 KB staging struct
+   before loading and never compares the bytes it got against the header's `data_len`, so a
+   short record whose CRC happens to cover the implicit zero tail passed. It now fails.
+2. **Nordic ignored the caller's capacity.** The shared loader refuses rather than relying on
+   every caller having passed a buffer of exactly `MAX_CONFIG_SIZE`.
+3. **The over-long-span check moved into the core.** ESP32 and Nordic reject one inside their
+   caching HALs as a side effect of buffer size; BG22 rejects it explicitly because NVM3 objects
+   go to 2112 bytes against a 2064-byte record cap, so the window is physically reachable there
+   and a device provisioned by a larger-cap build is how one arrives. Leaving it to the medium
+   made the core's acceptance target-dependent, which is the thing this promotion removes.
+
+**Nordic's failed clear used to report success.** `clearStoredConfig()` discarded
+`settings_delete()`'s result and returned `true` regardless, so a device that could not erase its
+config told the caller it had. It now reports what the medium did. ESP32 and BG22 already
+reported it.
+
+**`version` stays carried and unchecked, deliberately.** All three targets write 1 and none has
+ever read it back. Enforcing it would be a new rejection introduced under a refactor: a device
+holding a record this firmware did not write would stop booting on its stored config. Pinned by
+`tests/host/config_store_test.c`, which loads records carrying version 2 and `0xFFFFFFFF`.
+
+Validation **order** follows ESP32, the authority per CLAUDE.md: magic, then the cap checks, then
+truncation, then CRC. BG22 tested truncation before the caller's capacity, so a record that is
+both truncated and too large for the caller now reports the cap where BG22 would have reported
+truncation. Every caller collapses the result to a refusal, so this is visible only through the
+shared result enum — pinned so it stays a decision.
+
+---
+
+## 18. Nordic had two bit-banged I2C engines, and they disagreed (2026-08-24)
+
+Resolved by sensor-seam staging step 2: `opendisplay_touch.c`'s private bit-banger is gone and
+GT911 uses `opendisplay_i2c.c`, the same engine the sensors use. The framing is identical — both
+did a repeated START for a register read — so the divergence was entirely in **edge timing and in
+what each engine did about a clock stretch**.
+
+| | Private touch engine | Shared engine |
+|---|---|---|
+| Half-bit period | fixed 5 µs | `500000 / bus_speed_hz` |
+| Clock stretch during a **read** bit | result **discarded** — a timeout produced garbage data | fails the transfer |
+| Clock stretch on a **slave ACK** | result **discarded** | fails the transfer |
+| Clock stretch on the master ACK/NACK | result **discarded** | fails the transfer |
+| `tLOW` before a repeated START | 5 µs | **none** — see below |
+
+**Two things changed, and both are behaviour, not tidying.**
+
+**A stretch timeout now fails the transfer.** The old touch engine ignored `scl_release_wait()`
+everywhere, so a clone stretching past the 1 ms bound carried on and sampled whatever was on the
+wire. GT911 reads now fail instead, which feeds the existing retry and the five-failure disable
+latch. Failing is right — a plausible-but-wrong coordinate is worse than a dropped sample — but a
+clone that legitimately stretches long will now disable touch where it previously produced
+garbage.
+
+**The shared engine had no low period before a repeated START, and that was a live defect in the
+sensors, not something touch introduced.** `od_i2c_write(stop=false)` ends with SCL driven low and
+`od_i2c_start()` released it again immediately, so the only thing between the two edges was GPIO
+reconfiguration time — against a 4.7 µs `tLOW` minimum at 100 kHz. **BQ27220 and nPM1300 have
+always read that way**, so this was affecting deployed sensor reads on Nordic before touch was
+folded in. `od_i2c_start()` now opens with a half-period delay, which is harmless on a first START
+and restores `tLOW` on a repeated one.
+
+**Touch pinned 100 kHz at first, and no longer does.** The private engine's fixed 5 µs half-period
+is 100 kHz, so step 2 reproduced it rather than change timing inside a mechanical fold. The
+reconciliation happened at step 5, and the authority settles it: **there is no "touch rate"**.
+`../Firmware` brings a bus up at `bus_speed_hz ? bus_speed_hz : 100000`
+(`display_service.cpp:946`) and `touch_input.cpp` never names a clock. The private bit-banger
+hardcoded a number instead of reading config, which is the divergence — not the shared engine.
+
+Project ruling 2026-08-24: **GT911 follows `bus_speed_hz`**, like every other device on its bus.
+A board declaring 400 kHz now clocks touch five times faster than the private engine did, and that
+is a hardware row rather than an assumption.
+
+`opendisplay_touch.c` went 710 → 589 lines; `xiao_ble` flash 332,444 → 332,004 B (−440), `bss`
+140,477 → 140,509 (+32, four `struct od_i2c_bus` against four 2-byte `struct TouchBus`).
+
+**NOT HARDWARE-QUALIFIED**, and this is the step where that matters most:
+`plans/PLAN_SENSOR_SEAM_2026-08-23.md` § 3 step 2 requires a touch hardware check before the
+cutover proceeds, and § 5's "Nordic touch cleanup" row is open.
+
+---
+
+## 19. SHT40 — the Nordic port had dropped the retry pass (2026-08-24)
+
+Resolved by sensor-seam staging step 6: `shared/core/od_sensor_sht40.c` is the only SHT40 driver,
+and it takes the authority's behaviour where the two ports disagreed.
+
+| Behaviour | `../Firmware` / ESP32 | nordic-zephyr before | Shared |
+|---|---|---|---|
+| Address candidates | configured, then 0x44, then 0x45 | same | same |
+| Retry | **two passes**, with a bus recovery between | **one pass** | two passes |
+| CRC-8 words | checked **separately**, distinct error codes | checked together in one `if` | separately |
+| Failure diagnosis | logged with cause, bus and pins | logged with no cause | logged with cause and bus |
+| Conversion, clamps, TTL, MSD packing | identical | identical | unchanged |
+
+**The retry is the one that matters.** `Firmware/src/sensor_sht40.cpp:128` runs the candidate
+sweep twice, tearing the bus down and bringing it back up before the second attempt. The Nordic
+port swept once, so a sensor that needed a bus recovery never got one — and on a target that
+re-initialises per operation the difference is invisible in code review, because "retry" there
+looks like it already re-opens the bus. It does not: the recovery is the point, not the re-open.
+
+Recovery is a seam (`od_sensor_app_bus_recover`), because it means different things per target.
+ESP32 caches one live IDF bus, so it tears down and re-selects — without that, its "retry" is a
+repeat. Nordic re-initialises inside every operation and has nothing to tear down, so its
+implementation is the settle alone.
+
+**Checking both CRC words separately is not cosmetic.** A part answering with one good word and
+one bad is reporting a real fault, and a combined test cannot say which.
+
+**The error code is a LOG code, not a wire byte** — this row said otherwise in its first form and
+that was wrong. Neither donor ever put it in the MSD: both failure writers emit `FF FF FF` and
+clear `start + 3`, and the code (`0xFB` no bus, `0xFC` humidity CRC, `0xFD` temperature CRC,
+`0xFE` read) only ever reached a warning line. The first version of the shared driver dropped that
+line entirely and left the code computed and unused, so the real unrecorded change was the loss of
+SHT40 failure diagnostics on both targets. The log is restored, once per failure run and reset on
+the next success, as ESP32 had it.
+
+`sht40_probe_bus_once()` is restored too — the address-only sweep of 0x44/0x45/0x51/0x55/0x6A that
+the authority runs at init. It is diagnostic and never changes sensor state, but "nothing answered
+anywhere on this bus" is the most useful line when a board comes up mute.
+
+`tests/host/sensor_sht40_test.c` pins all of it — 54 checks — and is mutation-checked. Dropping
+the second CRC word, collapsing the two transactions into a repeated START, reducing to one pass,
+polling only the first configured sensor, reversing the address candidates, removing the
+`start + 3 > 11` bound, dropping a temperature clamp, hardcoding bus 0, or comparing the TTL with
+a signed-style test that breaks at the 32-bit wrap all fail it. The bus instance in every fixture
+is deliberately **not** 0, because a driver that ignored `bus_id` passed the first version of this
+suite.
+
+**NOT HARDWARE-QUALIFIED.** Both targets' SHT40 rows are open in
+docs/HARDWARE_VERIFICATION_CHECKLIST.md, and this change deletes both ports' driver policy.

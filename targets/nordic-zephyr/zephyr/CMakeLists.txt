@@ -220,6 +220,9 @@ target_sources(app PRIVATE
   ${SRC_DIR}/od_zephyr_time.c
   ${SRC_DIR}/newlib_stubs.c
   ${SRC_DIR}/od_hal_log.c
+  ${SRC_DIR}/od_hal_nvs.c
+  ${SRC_DIR}/od_hal_i2c.c
+  ${SRC_DIR}/od_sensor_app.c
   ${SRC_DIR}/od_hal_wdt.c
   ${SRC_DIR}/od_hal_crypto.c
   ${SRC_DIR}/od_watchdog_app.c
@@ -277,12 +280,14 @@ endif()
 # and the od_session_app seam (src/od_session_app.c), so it takes the shared egress, gate,
 # dispatcher and config-read producer rather than its own copies.
 target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE} ${OD_SHARED_SOURCES_HAL_CRYPTO}
+                           ${OD_SHARED_SOURCES_HAL_NVS}
                            ${OD_SHARED_SOURCES_HAL_WDT} ${OD_SHARED_SOURCES_APP_RXQ}
                            ${OD_SHARED_SOURCES_HAL_RADIO} ${OD_SHARED_SOURCES_APP_SESSION}
                            ${OD_SHARED_SOURCES_HAL_ADV} ${OD_SHARED_SOURCES_APP_BOOT}
                            ${OD_SHARED_SOURCES_APP_INFLATE} ${OD_SHARED_SOURCES_APP_XFER}
                            ${OD_SHARED_SOURCES_APP_NFC} ${OD_SHARED_SOURCES_APP_LED}
                            ${OD_SHARED_SOURCES_APP_BUZZER}
+                           ${OD_SHARED_SOURCES_APP_SENSOR}
                            ${OD_SHARED_SOURCES_HAL_LOG})
 
 # The per-source INCLUDE_DIRECTORIES property that used to sit here is GONE, and its removal is

@@ -207,6 +207,80 @@ add_executable(od_config_asm_cap_test config_asm_cap_test.c)
 target_link_libraries(od_config_asm_cap_test od_shared_silabs)
 add_test(NAME config_asm_cap COMMAND od_config_asm_cap_test)
 
+# config_store: the stored record's framing, CRC and bounds over a fake MEDIUM -- one that holds
+# bytes and injects failures, and knows nothing about magic, versions or checksums. The record
+# shape is asserted as literal little-endian bytes rather than by re-encoding it, so a change
+# made in both the writer and the reader still fails here.
+#
+# Built against both caps, because OD_CONFIG_MAX_SIZE is the one thing that differs per target
+# and it decides what is refused -- and because it changes the ABI of the structs this module
+# static-asserts against (CLAUDE.md decision 12).
+add_executable(od_config_store_test config_store_test.c)
+target_link_libraries(od_config_store_test od_shared)
+add_test(NAME config_store COMMAND od_config_store_test)
+
+add_executable(od_config_store_cap_test config_store_test.c)
+target_link_libraries(od_config_store_cap_test od_shared_silabs)
+add_test(NAME config_store_cap COMMAND od_config_store_cap_test)
+
+# i2c_contract: shared/hal/od_hal_i2c.h as an EXECUTABLE contract. The assertions are about
+# framing and bus selection -- where STOPs fall, and which pins an operation reaches -- because
+# those are what an engine gets wrong while still returning plausible bytes. Bound here to a
+# reference engine; the per-target adapters bind to the same body as their cutovers land
+# (PLAN_SENSOR_SEAM_2026-08-23.md staging steps 4, 5 and 9).
+add_executable(od_i2c_contract_ref_test
+    i2c_contract_ref_test.c
+    fake_i2c/i2c_wire.c
+    fake_i2c/i2c_ref_impl.c)
+target_include_directories(od_i2c_contract_ref_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(od_i2c_contract_ref_test od_shared)
+add_test(NAME i2c_contract_ref COMMAND od_i2c_contract_ref_test)
+
+# silabs_i2c_trace: the BG22 TNB132M transport at the EDGES. Mandatory per
+# PLAN_SENSOR_SEAM_2026-08-23.md staging step 9b, and NOT covered by the existing BG22 NFC tests,
+# which fake od_nfc_app_read/write -- above the transport -- and so say nothing about START
+# placement, ACK sampling or the NACK on a final read byte. Binds the production hal/od_hal_i2c.c
+# to fake GPIO and delay. It must never assert stuck-bus behaviour: that engine reads SDA only.
+add_executable(od_silabs_i2c_trace_test
+    silabs_i2c_trace_test.c
+    fake_silabs/em_gpio.c
+    ../../targets/efr32bg22-slc/hal/od_hal_i2c.c)
+target_include_directories(od_silabs_i2c_trace_test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/fake_silabs
+    ../../targets/efr32bg22-slc)
+target_link_libraries(od_silabs_i2c_trace_test od_shared_silabs)
+add_test(NAME silabs_i2c_trace COMMAND od_silabs_i2c_trace_test)
+
+# nordic_i2c_trace: the PREREQUISITE the plan gained after step 4's review. An adapter that hands
+# pins to an engine can transpose SCL and SDA, and that compiles, links and passes everything else
+# here -- it is exactly what shipped in b5bdffe. The trace is labelled by pin CONFIG BYTE, the two
+# the DataBus record carries, so a swap moves every clock edge onto the data line and fails.
+# Binds the production od_hal_i2c.c and opendisplay_i2c.c.
+add_executable(od_nordic_i2c_trace_test
+    nordic_i2c_trace_test.c
+    fake_nordic_i2c/od_gpio_trace.c
+    ../../targets/nordic-zephyr/src/od_hal_i2c.c
+    ../../targets/nordic-zephyr/src/opendisplay_i2c.c)
+target_include_directories(od_nordic_i2c_trace_test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/fake_nordic_i2c
+    ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr
+    ../../targets/nordic-zephyr/src)
+target_link_libraries(od_nordic_i2c_trace_test od_shared)
+add_test(NAME nordic_i2c_trace COMMAND od_nordic_i2c_trace_test)
+
+# sensor_sht40: the shared driver's DEVICE POLICY over the fake wire -- reset and fallback
+# addresses, the write/delay/read ordering (two transactions, not a repeated START), both CRC-8
+# words independently, conversion and clamping, the poll TTL, the invalid-sample marker, and the
+# two-pass retry the Nordic port had dropped.
+add_executable(od_sensor_sht40_test
+    sensor_sht40_test.c
+    od_log_test_stub.c
+    fake_i2c/i2c_wire.c
+    fake_i2c/i2c_ref_impl.c)
+target_include_directories(od_sensor_sht40_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(od_sensor_sht40_test od_shared)
+add_test(NAME sensor_sht40 COMMAND od_sensor_sht40_test)
+
 # silabs_storage: the BG22 overlay, where od_config_asm's reassembly state and the NVM3 record are
 # one object. The two static asserts in the storage file compare LAYOUT; this compares SEQUENCING
 # -- the header is written over the four live assembler state words, so the order of capture,
@@ -215,6 +289,7 @@ add_test(NAME config_asm_cap COMMAND od_config_asm_cap_test)
 add_executable(od_silabs_storage_test
     silabs_storage_test.c
     fake_silabs/nvm3_fake.c
+    ../../targets/efr32bg22-slc/od_hal_nvs.c
     ../../targets/efr32bg22-slc/opendisplay_config_storage.c)
 target_include_directories(od_silabs_storage_test PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/fake_silabs

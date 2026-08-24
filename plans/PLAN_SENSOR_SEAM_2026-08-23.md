@@ -145,7 +145,7 @@ Semantics:
   | Consequence | Where |
   |---|---|
   | `opendisplay_structs.h:945` documents `TouchController.bus_id == 0xFF` as "bus 0". It contradicts the ruling and the header is frozen | `FOLLOWUPS` § 14 |
-  | `py-opendisplay` defaults an **omitted** touch `bus_id` to `0xff` (`config_json.py:643`) and its model comments it as "default bus 0" (`config.py:886`). Under this ruling the host must default to `0` instead, or touch stops being configured for any block that omits the field | `FOLLOWUPS` § 15 — **must land before or with the firmware change** |
+  | `py-opendisplay` defaults an **omitted** touch `bus_id` to `0xff` (`config_json.py:643`) and its model comments it as "default bus 0" (`config.py:886`). Under this ruling the host must default to `0` instead, or it emits configs the device rejects and touch stops being configured for any block that omits the field | `FOLLOWUPS` § 15 — a host defect, and **NOT a gate on the firmware change** (project ruling 2026-08-24): `0xFF` makes the config invalid, so refusing it stands on its own |
 
   Four firmware sites currently substitute bus 0 and are corrected to refuse
   (`DIVERGENCE_MATRIX` § 13); Nordic touch (`opendisplay_touch.c:299`) already behaves this way.
@@ -234,13 +234,21 @@ ownership explicit:
 
 ```c
 void od_sensor_sht40_init(const struct od_config *cfg);
-void od_sensor_sht40_poll(const struct od_config *cfg);
+void od_sensor_sht40_poll(const struct od_config *cfg, uint32_t now_ms);   /* clock: see below */
 
 void od_sensor_bq27220_init(const struct od_config *cfg);
 void od_sensor_bq27220_poll(const struct od_config *cfg);
 bool od_sensor_bq27220_is_configured(const struct od_config *cfg);
 float od_sensor_bq27220_voltage_volts(void);
 ```
+
+**`poll` takes the clock explicitly (amended 2026-08-24, during step 6).** The sketch above had
+no `now_ms`, and the first implementation called `od_hal_uptime_ms()` — which `tools/check.sh`
+rejects: `shared/core` does not sample the ambient time HAL, and only `od_log.c` is exempt. The
+rule is the same discipline that makes `od_led` and `od_buzzer` return a delay instead of
+sleeping. Policy that reads a clock it does not own cannot be tested against a 32-bit wrap and
+cannot be driven by a target that schedules differently. The ratchet caught it; the signature
+changed rather than the rule.
 
 The functions do not retain `cfg` after return. Both current ports keep their TTL/cache statics
 across an init call, so the shared version preserves that behavior rather than silently making
@@ -259,8 +267,23 @@ GPIO reset and IRQ handling remain behind a touch/GPIO seam. ESP32's
 surface is the starting point for Nordic. The `_arg` variant is required by both multi-button
 events and multiple touch instances.
 
-Q7 remains an entry condition: Nordic clears GT911 status register `0x814E` after consuming a
-sample while ESP32 does not. Decide and record the authority before touch cutover.
+~~Q7 remains an entry condition: Nordic clears GT911 status register `0x814E` after consuming a
+sample while ESP32 does not.~~ **CLOSED 2026-08-24, and the premise was wrong.** All three clear
+`0x814E` after consuming a report, at the same point in the poll loop — `../Firmware:703`,
+`targets/esp32-idf/src/touch_input.cpp:708`, `nordic-zephyr/src/opendisplay_touch.c:559`. There was
+never a divergence there.
+
+**The real divergence is the over-count branch, and Nordic is the one that is right.** When the
+status byte's low nibble exceeds `GT911_MAX_CONTACTS` (5) the sample is nonsense and every port
+skips it — but ESP32 and the authority skip *without clearing the status*, and GT911 holds that
+byte until the host writes 0. So the next poll reads the same byte, takes the same branch, and
+touch never reports again until an init or resume path runs. One glitched read wedges it
+permanently. Nordic clears and does not wedge.
+
+**Ruling: the shared driver clears the status on the over-count branch**, taking Nordic's
+behaviour. This is a deliberate exception to the "`Firmware` is the authority" default, because the
+authority's behaviour is a latent wedge rather than a considered difference. The upstream defect is
+reported in `FOLLOWUPS` § 17.
 
 `TouchController.bus_id == 0xFF` means **not configured**, so Nordic touch's refusal
 (`opendisplay_touch.c:299`, "an explicit data_bus is required") is the behaviour to keep and
@@ -328,11 +351,25 @@ next subsystem promotion. **Steps that touch silicon this fleet has also receive
 step 9 does not, and says so** — no board here carries a TNB132M, so that cutover ships as a
 software candidate with its rows open.
 
-1. **Record the bus-default divergence, in the correct direction:** `0xFF` means *not
-   configured*. Nordic touch already refuses it; four sites substitute bus 0 (T5). Record in
-   `DIVERGENCE_MATRIX`, report the canonical header line via `FOLLOWUPS` § 14, and decide whether
-   the four substitutions are corrected in this promotion or before it — a sensor with no bus
-   assigned should not be probed on somebody else's.
+1. **Correct the bus-default divergence:** `0xFF` means *not configured*, so the four sites that
+   substitute bus 0 (T5) refuse instead. Nordic touch (`opendisplay_touch.c:299`) already does and
+   is the reference. Recorded in `DIVERGENCE_MATRIX` § 13; the canonical header line is reported
+   via `FOLLOWUPS` § 14.
+
+   **Project ruling 2026-08-24: this does NOT wait on `py-opendisplay`.** A `bus_id` of `0xFF`
+   makes the config invalid and a substituted bus 0 is invalid whatever the host sends, so
+   `FOLLOWUPS` § 15 is a host defect on its own schedule rather than a precondition. The cost is
+   stated rather than discovered: a config omitting `bus_id` stops configuring touch, which is the
+   point — the alternative is probing an unassigned device on another bus, where an address
+   collision gives plausible-but-wrong readings instead of a failure. Devices already holding
+   `0xFF` in that field need re-provisioning.
+
+   **Fix § 14's array-index defect in the same step.** `bus_id` names a `DataBus.instance_number`,
+   but `display_service.cpp:729` and `opendisplay_sensor_common.h:28` index `data_buses[bus_id]`,
+   and `od_config.c`'s `store_repeatable()` appends in arrival order without ever reading
+   `instance_number`. So slot 0 is "the first `0x24` packet that arrived", not instance 0. The two
+   defects share all four call sites, and correcting only the sentinel would leave a refusal that
+   still resolves to the wrong bus.
 2. **Nordic-local cleanup:** fold `opendisplay_touch.c`'s private bit-banger into
    `opendisplay_i2c.c`. Preserve its current repeated-START behavior exactly; do not add the
    donor's STOP-separated fallback in this mechanical step. Hardware-check touch before proceeding.
@@ -345,8 +382,53 @@ software candidate with its rows open.
    tier; the target implementations remain in their target builds. No shared device driver yet.
 4. **ESP32 HAL cutover:** add `bus_id` to the four operations, move bus selection beneath them,
    and repoint the existing SHT40, BQ27220, GT911 and AXP2101 callers. Hardware gate.
+   **PREREQUISITE ADDED 2026-08-24, after step 4's review: bind the production adapter to
+   `tests/host/i2c_contract.inc` before repeating this on Nordic.** Step 4 shipped a swapped
+   SDA/SCL pin order — the caller passed `(sda, scl)` and the function was redefined as
+   `(scl, sda)` — which would have crossed the lines on **every configured ESP32 bus**, and it
+   passed the whole gate: two same-typed parameters reorder silently and nothing on the host
+   drives them. Review caught it; no automated check could have. The same review found the
+   transport refusing a literal `0xFF` instance, contradicting T1 and the contract's own case.
+
+   Both live in the *resolution* half (`display_service.cpp`), which is C++ and reads
+   `globalConfig`, so it is not host-bindable as written. Binding it means moving bus resolution
+   into a translation unit a host test can link — a design change, not a fix, and the reason it
+   is written down here rather than done inside step 4. **Until it is done, the pin order and the
+   sentinel policy on both targets are protected by the hardware gate alone.**
+
 5. **Nordic HAL cutover:** implement the same four operations over `opendisplay_i2c.c`, then
    repoint SHT40, BQ27220, GT911 and nPM1300. Hardware gate.
+
+   **GT911 IS repointed, and the rate question is settled: follow `bus_speed_hz`** (project
+   ruling 2026-08-24). **There is no "touch rate" in the authority.** `../Firmware` brings a bus
+   up at `bus_speed_hz ? bus_speed_hz : 100000` (`display_service.cpp:946`) and
+   `touch_input.cpp` never names a clock — every device on the bus, GT911 included, runs at the
+   configured rate. Nordic's private bit-banger hardcoded a 5 µs half-period, which is 100 kHz;
+   it ignored config rather than deciding anything, and *that* was the divergence.
+
+   So routing GT911 through `od_hal_i2c` is not a rate change smuggled into a refactor — it is
+   the correction. Step 2's caution ("a timing difference may be why the fork exists") is
+   answered by the authority: the fork predates the shared engine and hardcoded a number.
+
+   **The bench condition this creates:** a Nordic board declaring `bus_speed_hz = 400000` now
+   clocks GT911 five times faster than the private engine did. That row is in the hardware
+   checklist. If touch fails at 400 kHz on real clones, the answer becomes a documented clamp
+   with measured evidence — not a hardcoded 5.
+
+   ~~**GT911 was NOT repointed here, because this step and step 2 contradict each other.**~~
+   Superseded by the ruling above. The original reasoning was: Step 2 pinned touch at 100 kHz to
+   reproduce the private bit-banger's fixed 5 µs, and said to change the rate only as a separate
+   measured step. The shared seam has **no speed argument** — `od_hal_i2c_*` derives the rate from
+   `DataBus.bus_speed_hz` — so routing GT911 through it hands the touch clock to whatever the
+   config declares, quintupling it on a 400 kHz entry. That is precisely the change step 2
+   forbade, and there is no way to have both through a seam with no rate.
+
+   T5 already places GT911's shared driver in **step 8**, after the sensor promotions, so the
+   touch repoint belongs there — with the rate decision made explicitly and measured, rather than
+   arriving as a side effect of a cutover. Until then Nordic touch keeps calling
+   `opendisplay_i2c.c` directly at its pinned rate, which is one consumer of that engine not
+   going through the HAL. The "one engine per target" ratchet is unaffected: it forbids a second
+   engine, not a second caller of the one engine.
 6. **SHT40 promotion:** add `shared/core/od_sensor_sht40.{c,h}` and the `APP_SENSOR` tier,
    whose linkage contract requires both `od_hal_i2c` and the delay/MSD APP seams. Delete both
    target policy copies after their last callers move. Hardware gate.
@@ -438,8 +520,10 @@ about it.
 
 ## 6. Open questions
 
-1. **Q7 — GT911 status authority.** Decide whether shared touch clears `0x814E` after consuming a
-   report. Required before touch promotion.
+1. ~~**Q7 — GT911 status authority.**~~ **Closed 2026-08-24.** The premise was false — all three
+   clear `0x814E` after consuming a report. The real divergence is the over-count branch, where
+   not clearing wedges touch permanently; the shared driver takes Nordic's clear. See T5 and
+   `FOLLOWUPS` § 17.
 2. **Bus serialization.** Confirm which ESP32 tasks can submit I2C concurrently and put the lock
    below the HAL if more than one can. The contract already requires each operation to be atomic;
    this question chooses the implementation, not the API.
@@ -449,8 +533,11 @@ about it.
    open on arrival, not pending an inventory.
 4. ~~**Which key does the HAL take?**~~ **Answered by the contract**: `DataBus.instance_number`
    (`opendisplay_structs.h:802`). BG22's NFC scan is right and the sensors' array indexing is the
-   defect (`DIVERGENCE_MATRIX` § 14). Open only in *when* the four sensor sites are corrected —
-   with the HAL cutover, or before it.
+   defect (`DIVERGENCE_MATRIX` § 14). ~~Open only in *when*~~ **Closed 2026-08-24**: corrected in
+   staging step 1, alongside the `0xFF` refusal, since both defects live at the same four sites.
+
+5. ~~**Does the host change gate this?**~~ **Closed by project ruling 2026-08-24**: it does not.
+   See staging step 1.
 
 ---
 

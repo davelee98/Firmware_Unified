@@ -1,6 +1,7 @@
 #include "opendisplay_sensor_npm1300.h"
 #include "od_log.h"
 #include "opendisplay_sensor_common.h"
+#include "od_hal_i2c.h"
 /* OD_SENSOR_TYPE_NPM1300 (6) is not in the canonical contract yet -- see the header. */
 #include "protocol_pending.h"
 #include "opendisplay_ble.h"
@@ -62,10 +63,9 @@ static uint8_t npm1300_addr_7bit(const struct SensorData *s)
 static bool npm1300_reg_write(const struct SensorData *s, uint8_t base, uint8_t offset,
 			      const uint8_t *data, size_t len)
 {
-	struct od_i2c_bus bus;
 	uint8_t buf[8];
 
-	if (len + 2u > sizeof(buf) || !od_sensor_bus_for(s->bus_id, &bus)) {
+	if (len + 2u > sizeof(buf) || s->bus_id == 0xFFu) {
 		return false;
 	}
 	buf[0] = base;
@@ -73,7 +73,8 @@ static bool npm1300_reg_write(const struct SensorData *s, uint8_t base, uint8_t 
 	if (len > 0u) {
 		memcpy(&buf[2], data, len);
 	}
-	return od_i2c_write(&bus, npm1300_addr_7bit(s), buf, (size_t)(2u + len), true);
+	return od_hal_i2c_write(s->bus_id, npm1300_addr_7bit(s), buf,
+				(uint16_t)(2u + len)) == OD_HAL_I2C_OK;
 }
 
 static bool npm1300_reg_write_u8(const struct SensorData *s, uint8_t base, uint8_t offset,
@@ -85,16 +86,14 @@ static bool npm1300_reg_write_u8(const struct SensorData *s, uint8_t base, uint8
 static bool npm1300_reg_read(const struct SensorData *s, uint8_t base, uint8_t offset,
 			     uint8_t *data, size_t len)
 {
-	struct od_i2c_bus bus;
 	uint8_t hdr[2] = {base, offset};
 
-	if (!od_sensor_bus_for(s->bus_id, &bus)) {
+	if (s->bus_id == 0xFFu) {
 		return false;
 	}
-	if (!od_i2c_write(&bus, npm1300_addr_7bit(s), hdr, sizeof(hdr), false)) {
-		return false;
-	}
-	return od_i2c_read(&bus, npm1300_addr_7bit(s), data, len);
+	/* Repeated START: the register pointer and the read are one transaction. */
+	return od_hal_i2c_write_read(s->bus_id, npm1300_addr_7bit(s), hdr, sizeof(hdr),
+				     data, (uint16_t)len) == OD_HAL_I2C_OK;
 }
 
 static uint8_t soc_from_voltage(float volts)
@@ -118,17 +117,15 @@ static bool npm1300_sample(const struct SensorData *s)
 	const uint8_t tasks[3] = {1u, 1u, 1u};
 	uint8_t results[11];
 	uint8_t chg_stat = 0u;
-	struct od_i2c_bus bus;
 
-	if (!od_sensor_bus_for(s->bus_id, &bus)) {
-		od_log_info("nPM1300: bad data_bus (id=%u)", (unsigned)s->bus_id);
+	if (s->bus_id == 0xFFu) {
+		od_log_info("nPM1300: no data_bus assigned (bus_id 0xFF); not probed");
 		return false;
 	}
 
 	if (!npm1300_reg_write(s, NPM1300_ADC_BASE, NPM1300_ADC_TASK_VBAT, tasks, sizeof(tasks))) {
-		od_log_info("nPM1300: ADC task NACK (addr=0x%02X scl=0x%02X sda=0x%02X)",
-		       (unsigned)npm1300_addr_7bit(s), (unsigned)bus.scl_cfg,
-		       (unsigned)bus.sda_cfg);
+		od_log_info("nPM1300: ADC task NACK (addr=0x%02X bus=%u)",
+		       (unsigned)npm1300_addr_7bit(s), (unsigned)s->bus_id);
 		return false;
 	}
 
@@ -170,9 +167,13 @@ static bool npm1300_sample_retries(const struct SensorData *s, unsigned attempts
 bool opendisplay_sensor_npm1300_is_available(void)
 {
 	const struct SensorData *s = npm1300_config();
-	struct od_i2c_bus bus;
 
-	return s != NULL && od_sensor_bus_for(s->bus_id, &bus);
+	/* A CONFIG question, not a transaction. The helper this replaced built a bus object and
+	 * answered "did that resolve"; probing instead would put an address byte on the wire and
+	 * could spend a stretch timeout, which is not what a caller asking "is one configured" is
+	 * asking for. */
+	return s != NULL && s->bus_id != 0xFFu &&
+	       od_config_data_bus(opendisplay_get_global_config(), s->bus_id) != NULL;
 }
 
 bool opendisplay_sensor_npm1300_is_configured(void)

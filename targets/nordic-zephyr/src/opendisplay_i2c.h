@@ -32,6 +32,21 @@ struct od_i2c_bus {
 bool od_i2c_init(struct od_i2c_bus *bus, uint8_t scl_cfg, uint8_t sda_cfg,
 		 uint32_t speed_hz, bool scl_pullup, bool sda_pullup);
 
+/* Where a transfer failed. The bool entry points below cannot express this, and the shared
+ * od_hal_i2c contract needs it: an address NACK is ENODEV ("nothing there") and everything else
+ * is EIO ("the bus or the peer misbehaved"), and a caller that cannot tell them apart reports a
+ * missing device as a bus fault. */
+enum od_i2c_result {
+	OD_I2C_RES_OK = 0,
+	OD_I2C_RES_NACK_ADDR,   /* nobody acknowledged the address byte */
+	OD_I2C_RES_ERR          /* data NACK, or a bounded clock-stretch timeout */
+};
+
+enum od_i2c_result od_i2c_write_ex(struct od_i2c_bus *bus, uint8_t addr7, const uint8_t *data,
+				   size_t len, bool stop);
+enum od_i2c_result od_i2c_read_ex(struct od_i2c_bus *bus, uint8_t addr7, uint8_t *data,
+				  size_t len);
+
 /* Write len bytes to addr7. If stop is false a repeated-start is expected next
  * (bus left with SCL low, no STOP). Returns true on full ACKed transfer. */
 bool od_i2c_write(struct od_i2c_bus *bus, uint8_t addr7, const uint8_t *data,

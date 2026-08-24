@@ -168,7 +168,7 @@ static void test_boundary_totals(void)
         }
     }
 
-    CASE("the transferable ceiling is 4000, not MAX_CONFIG_SIZE");
+    CASE("the transferable ceiling is 4000, not OD_CONFIG_MAX_SIZE");
     CHECK(OD_CONFIG_ASM_MAX_TRANSFERABLE == 4000u);
     CHECK(OD_CONFIG_MAX_SIZE == 4096u);
 }

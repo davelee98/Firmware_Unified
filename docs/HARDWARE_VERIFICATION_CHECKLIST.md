@@ -589,3 +589,143 @@ Each row, when run, should record: board id, exact release SHA, bootloader, part
 layout, tool and host versions, raw transcript, device log, per-observation PASS/FAIL — per
 `PLAN_OD_DISPATCH_C12_2026-08-16.md` §7.1's evidence rules (still binding; only the SHA-pinning
 *gate* is dropped, not the record-keeping standard).
+
+---
+
+## Config storage seam — `od_config_store` + `od_hal_nvs` (2026-08-24)
+
+Landed as commit `490415d`; **nothing here is hardware-qualified**. `tools/check.sh --targets`
+passes 40/0/0 and the host suite covers the framing against a fake medium, but a host test cannot
+qualify silicon and **a config a device cannot read back is a bricked configuration** — these rows
+gate the promotion, not the build.
+
+Two behaviour changes make a device REFUSE a record it used to accept
+(`DIVERGENCE_MATRIX` § 17), and both are Nordic-only, so a Nordic board that will not boot on its
+existing config is the expected first symptom rather than a surprise: a physically truncated
+record now fails, and a record larger than the caller's buffer is refused instead of ignored.
+Re-provision rather than debug if that appears.
+
+### Every target
+
+- [ ] **Write, reboot, reload:** write a config over BLE, confirm it takes effect, power-cycle, and
+      confirm the device comes back on the stored config and the panel renders from it.
+- [ ] **Unrecognised version still loads:** rewrite the stored record's `version` field out of band
+      to 2 and confirm the device still boots on it. This is the behaviour § 4 says must NOT
+      change — every target writes 1 and none reads it back, and enforcing it would strand a
+      device on a record it has been using.
+- [ ] **A corrupted record boots on defaults:** flip one payload byte out of band and confirm the
+      CRC rejects it and the device comes up unconfigured rather than on garbage.
+
+### ESP32-S3 (`s3-n16r8-extuart-debug`)
+
+- [ ] **Factory-provisioned config loads at first boot** — the path that passes a flash pointer
+      into `saveConfig`. The core copies it into the workspace; confirm a
+      `OPENDISPLAY_FACTORY_CONFIG_HEX` build comes up configured on a blank NVS.
+- [ ] **Secure erase still wipes:** `secureEraseConfig()` now drops the HAL's cached record
+      unconditionally before touching NVS. Confirm a subsequent read reports an unprovisioned
+      device *without* a reboot — the cache is the only thing that could have hidden that.
+
+### Nordic (`xiao_nrf52840` mandatory)
+
+- [ ] **Write, reload in place, reboot-persist** — the three the 2026-08-19 run covered, re-run
+      against the shared framing.
+- [ ] **A failed clear reports failure.** `clearStoredConfig()` used to discard
+      `settings_delete()`'s result and return true regardless. Inducing a settings delete failure
+      on the bench may not be possible; **if it is not, say so here and move this row to a
+      production-source fault test** rather than leaving it open forever.
+- [ ] **A failed write leaves the previous config readable** (S1a). Same caveat: if a
+      `settings_save_one` failure cannot be induced on hardware, this belongs in a fault test and
+      this row should say that instead of sitting open.
+
+### EFR32BG22 (`efr32bg22-slc`) — needs a J-Link attached
+
+- [ ] **Write, reload, reboot-persist** through the union overlay.
+- [ ] **An over-size declaration is refused at the start frame with nothing stored** — refuse,
+      never truncate, because the 2048-byte cap is one a host cannot interrogate
+      (`MEMORY_CONSTRAINTS.md` item 3).
+- [ ] **An in-flight chunked transfer survives a refused save.** The header write eats the four
+      live assembler state words, so every refusal that can still leave a transfer open has to
+      happen before it. Covered by `tests/host/silabs_storage_test.c` and falsifiable there, but
+      unexercised on silicon.
+- [ ] **RAM unchanged:** `heap_size` and `data + bss` against the pre-change image. Measured at
+      32,284 B static RAM with 480 B headroom (flash 250,148 -> 250,552 B). The overlay existing is
+      what makes this promotion affordable there, and losing it would be invisible except here.
+
+
+---
+
+## Sensor/I2C seam — steps 1-4 (2026-08-24)
+
+Nothing here is hardware-qualified. `tools/check.sh --targets` passes 40/0/0 and the shared
+resolver and I2C contract are host-tested and mutation-checked, but **the gate cannot see pin
+order or bus selection**: step 4 shipped, and review caught, a swapped SDA/SCL argument order that
+would have crossed the lines on every configured ESP32 bus while passing every automated check.
+Treat the rows below as the only thing standing behind that.
+
+### ESP32-S3 (`s3-n16r8-extuart-debug`)
+
+- [ ] **SDA and SCL are the right way round.** Scope or logic-analyse one transaction, or simply
+      confirm any I2C device answers at all — SHT40, BQ27220, GT911 or the AXP2101 probe. A
+      crossed pair fails every device on the bus, so one working device clears this row.
+- [ ] **SHT40, BQ27220, GT911 and AXP2101 all behave as before** the operations gained a bus
+      argument.
+- [ ] **Bus switching:** two configured `DataBus` entries selected in sequence, and returning to
+      the first restores its pins **and its speed** — the speed half is newly part of the
+      selection identity and was previously ignored on a same-pins switch.
+- [ ] **A sensor or touch entry with `bus_id == 0xFF` is not probed**, and is not attached to
+      bus 0.
+- [ ] **Out-of-order `DataBus` records bind correctly**: declare instance 1 before instance 0 and
+      confirm each device talks on its own pins. This is the § 14 defect the shared resolver
+      fixes, and it is invisible on an in-order config.
+- [ ] **A duplicated `instance_number` yields no device** rather than an arbitrary one.
+
+### Nordic (`xiao_nrf52840`)
+
+- [ ] **Touch still reports contacts** after its private bit-banger was folded into
+      `opendisplay_i2c.c` — the plan requires this before the cutover proceeds past step 2.
+- [ ] **BQ27220 and nPM1300 reads still return plausible values.** Their repeated START gained a
+      half-period `tLOW` that it never had; the change is meant to be an improvement, and this
+      row is what shows it is not a regression.
+- [ ] **GT911 at the configured bus rate.** Touch now follows `bus_speed_hz` (project ruling
+      2026-08-24; the authority has no touch-specific clock). With `bus_speed_hz` unset or
+      100000 this reproduces the private engine's 5 µs half-period exactly, so that case is a
+      regression check.
+- [ ] **GT911 at 400 kHz.** Set a board's `bus_speed_hz = 400000` and confirm touch still reports
+      contacts, and that sensors sharing that bus still read. This is the one case the private
+      engine could never reach, and the ruling's only real risk. **If touch fails here, that is
+      the measured evidence for a clamp** — record it and clamp with a reason, rather than
+      restoring a hardcoded 5 µs.
+- [ ] **A clone that stretches the clock now fails the transfer** rather than sampling garbage,
+      and five consecutive failures disable touch. Confirm ordinary hardware never reaches that.
+
+### EFR32BG22 NFC transport — step 9, a software candidate (2026-08-24)
+
+**No board in this fleet carries a TNB132M**, so every row here is open on arrival, exactly as
+Transfer Phase 4's NFC rows were. Merged code is not evidence.
+
+What *is* checked, and what it is worth: `tests/host/silabs_i2c_trace_test.c` binds the production
+`hal/od_hal_i2c.c` to fake GPIO and reads the **edge sequence** back — START and STOP detected as
+SDA transitions while SCL is high, the repeated START in a block read, one clock per bit plus the
+ACK slot, the address-NACK path, and that an unresolvable or ambiguous bus drives no edge at all.
+That is real coverage of framing. It is not coverage of *timing*, of the TNB132M's response to it,
+or of anything above the transaction.
+
+The existing BG22 NFC host tests fake `od_nfc_app_read`/`write`, which sit **above** the transport
+and say nothing about it. They must not be cited for these rows.
+
+- [ ] **A tag reads.** `0x48` sub 0 returns plausible Attribute Information after the prime
+      sequence.
+- [ ] **A tag writes and reads back**, including the re-prime that the byte-offset window needs
+      after an EEPROM write.
+- [ ] **The edge pacing is unchanged.** The `sl_udelay_wait()` counts were extracted verbatim
+      because they are what the deployed sequence was tuned against; a scope trace against the
+      pre-change image is the only thing that shows the extraction preserved them.
+- [ ] **The prime commands still work with their results discarded.** They always were discarded;
+      the transactions now return a status that nothing reads, and that is deliberate — starting
+      to check it would be a behaviour change on a transport nothing here can exercise.
+- [ ] **Power sequencing and SCL/SDA parking still bracket a session.** Those stayed in the NFC
+      adapter; only the transactions moved.
+
+**Explicitly out of scope for any of these rows: stuck-bus behaviour.** This engine drives SCL
+push-pull and only ever reads SDA, so it cannot detect clock stretching, and a held-low SDA reads
+as ACK and as data 0. Do not write a row that asserts otherwise.

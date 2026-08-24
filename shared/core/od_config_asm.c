@@ -91,7 +91,7 @@ enum od_config_asm_result od_config_asm_chunk(struct od_config_asm *s, od_span_t
     const size_t remaining = (size_t)(s->total_size - s->received);
 
     /* Bounded against the DECLARED TOTAL, not merely against the buffer. Bounding on
-     * MAX_CONFIG_SIZE alone is what let 400 bytes be committed against a declared 201. */
+     * OD_CONFIG_MAX_SIZE alone is what let 400 bytes be committed against a declared 201. */
     if (payload.n > remaining) {
         od_config_asm_reset(s);
         return OD_CONFIG_ASM_REJECTED;

@@ -33,6 +33,7 @@ list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../vendor/fastepd/fastepd_a
 # od_hal_gpio and od_hal_time are the third (2026-08-04, phase C step 3): the pin/clock seam
 # the power-latch, buzzer and button files share. Signatures are SHARED_API_DESIGN.md's.
 list(APPEND OD_APP_SOURCES ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_nvs.c
+                           ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_nvs_secure.c
                            ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_log.c
                            ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_gpio.c
                            ${CMAKE_CURRENT_LIST_DIR}/../hal/od_hal_time.c

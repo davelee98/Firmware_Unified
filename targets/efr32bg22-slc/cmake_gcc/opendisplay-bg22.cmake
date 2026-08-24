@@ -249,6 +249,8 @@ add_library(slc OBJECT
     "../opendisplay_ble.c"
     "../opendisplay_pipe.c"
     "../od_hal_crypto.c"
+    "../od_hal_nvs.c"
+    "../hal/od_hal_i2c.c"
     "../od_hal_radio.c"
     "../od_hal_time.c"
     "../od_session_app.c"
@@ -275,6 +277,7 @@ add_library(slc OBJECT
     # APP_BOOT remain absent. APP_XFER is production code: direct and capability-off partial route
     # through it, with panel and transport behavior supplied by od_xfer_app in target sources.
     ${OD_SHARED_SOURCES_PURE}
+    ${OD_SHARED_SOURCES_HAL_NVS}
     ${OD_SHARED_SOURCES_HAL_CRYPTO}
     ${OD_SHARED_SOURCES_HAL_RADIO}
     ${OD_SHARED_SOURCES_APP_SESSION}

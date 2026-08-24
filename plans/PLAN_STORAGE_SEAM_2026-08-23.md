@@ -97,6 +97,36 @@ disagree — Nordic ignores `settings_delete()`'s result, clears its cache and r
 Nordic's current erase behaviour is a **divergence to fix**, not to preserve: it is the one target
 where a failed clear reports success. Record it in `DIVERGENCE_MATRIX` with the cutover.
 
+#### S1a amended 2026-08-24, during step 1 — invalidate, do not retain
+
+The table above says a failed write leaves "the previous record" readable and that a cache "must
+not be cleared" on a failed erase. **Neither is implementable over the media**, and step 1 found
+out why by reading them:
+
+- ESP-IDF's `nvs_set_blob()` writes the NEW entry and only then erases the previous one
+  (`Storage::writeItem`, returning `ESP_ERR_NVS_REMOVE_FAILED`), so a failed write can leave the
+  new record on the medium.
+- Zephyr's `settings_nvs_save()` delete path calls `nvs_delete(name_id)` **before**
+  `nvs_delete(name_id + NVS_NAME_ID_OFFSET)`, so a failed erase can leave the setting
+  unreachable — erased in effect — while reporting an error.
+
+So an adapter cannot know which record survived, and a cache that *retains* on failure serves a
+config the medium may no longer hold. The rule becomes:
+
+- **A failed mutation leaves a WHOLE record** — the complete old one, the complete new one, or
+  nothing on a device that had none. Never a partial write. Which of the three is the medium's
+  business.
+- **A cache is INVALIDATED on failure, never cleared to empty.** Invalidating forces a re-read,
+  so a config that survived is still served — which is what this row's rationale actually
+  demanded. Clearing to empty is the failure it names: a device reporting itself unconfigured
+  while the medium still holds its config, and coming back configured on the next boot.
+
+Retaining a stale copy as a last-known-good fallback is a *policy*, and if it is ever wanted it
+belongs above the HAL where it can be stated, not as an accident of cache lifetime.
+
+The canonical statement is `shared/hal/od_hal_nvs.h` (decision 14: headers beat design docs).
+Nordic's "failed clear reports success" is still a divergence to fix, unchanged.
+
 ### S2 — `shared/` owns framing and CRC; the HAL owns bytes
 
 Magic, length bounds, CRC-32 computation and verification, and the ordering rules move to
@@ -162,6 +192,11 @@ points both at its union, and the other two point them wherever they already do.
 
 This is the same shape as the transfer promotions: shared state machine, target-owned buffer.
 
+**Corrected 2026-08-24, during step 4.** The sentence above described the shared save path as
+taking "a caller-supplied header struct and a payload span". It does not, and S1 already said why:
+it takes a **contiguous workspace** plus a payload pointer, and fills the header in place. Two
+pointers would have advertised an input BG22 cannot serve.
+
 ## 4. What the promotion must not change
 
 - The **on-medium record**: `0xDEADBEEF`, version 1, 16-byte header, CRC-32 over the payload,
@@ -171,7 +206,9 @@ This is the same shape as the transfer promotions: shared state machine, target-
 - **BG22 refuses rather than truncates** an over-size config (`OD_CONFIG_MAX_SIZE` = 2048 there).
   A cap a host cannot query has to be loud; that is `MEMORY_CONSTRAINTS.md` item 3.
 - **Nordic's commit-after-write ordering** (S3).
-- **ESP32's two-write staging** producing byte-identical bytes to the old single write.
+- **ESP32's stored bytes**, unchanged. (The bullet used to say "two-write staging"; ESP32 does
+  not write twice — it assembles one contiguous record and issues one HAL write, both before and
+  after the promotion. Byte-identical persistence is the requirement, and it holds.)
 
 ## 5. Staging
 

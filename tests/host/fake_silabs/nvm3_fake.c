@@ -4,8 +4,9 @@
 
 #include <string.h>
 
-static struct nvm3_Handle { int unused; } s_handle;
+static nvm3_Handle_t s_handle;
 nvm3_Handle_t *nvm3_defaultHandle = &s_handle;
+static bool s_mountable = true;
 
 sl_status_t nvm3_fake_write_status;
 sl_status_t nvm3_fake_read_status;
@@ -23,6 +24,8 @@ size_t nvm3_fake_object_len;
 void nvm3_fake_reset(void)
 {
     nvm3_defaultHandle = &s_handle;
+    s_mountable = true;
+    s_handle.hasBeenOpened = true;
     nvm3_fake_write_status = SL_STATUS_OK;
     nvm3_fake_read_status = SL_STATUS_OK;
     nvm3_fake_delete_status = SL_STATUS_OK;
@@ -37,14 +40,39 @@ void nvm3_fake_reset(void)
 
 void nvm3_fake_set_mounted(bool mounted)
 {
-    nvm3_defaultHandle = mounted ? &s_handle : NULL;
+    s_mountable = mounted;
+    s_handle.hasBeenOpened = mounted;
+}
+
+void nvm3_fake_set_opened(bool opened)
+{
+    s_handle.hasBeenOpened = opened;
+}
+
+/* The SDK refuses every operation on a handle that was never opened. Modelled so that an adapter
+ * which stopped initialising on demand fails here instead of silently working. */
+static bool handle_usable(const nvm3_Handle_t *h)
+{
+    return h != NULL && h->hasBeenOpened;
+}
+
+sl_status_t nvm3_initDefault(void)
+{
+    if (!s_mountable) {
+        return SL_STATUS_FAIL;
+    }
+    s_handle.hasBeenOpened = true;
+    return SL_STATUS_OK;
 }
 
 sl_status_t nvm3_writeData(nvm3_Handle_t *h, nvm3_ObjectKey_t key,
                            const void *value, size_t len)
 {
     (void)key;
-    if (h == NULL || value == NULL || len > NVM3_FAKE_MAX_OBJECT) {
+    if (!handle_usable(h)) {
+        return SL_STATUS_NOT_INITIALIZED;
+    }
+    if (value == NULL || len > NVM3_FAKE_MAX_OBJECT) {
         return SL_STATUS_INVALID_PARAMETER;
     }
     ++nvm3_fake_writes;
@@ -65,7 +93,10 @@ sl_status_t nvm3_getObjectInfo(nvm3_Handle_t *h, nvm3_ObjectKey_t key,
                                uint32_t *type, size_t *len)
 {
     (void)key;
-    if (h == NULL || type == NULL || len == NULL) {
+    if (!handle_usable(h)) {
+        return SL_STATUS_NOT_INITIALIZED;
+    }
+    if (type == NULL || len == NULL) {
         return SL_STATUS_INVALID_PARAMETER;
     }
     if (!nvm3_fake_present) {
@@ -80,7 +111,10 @@ sl_status_t nvm3_readPartialData(nvm3_Handle_t *h, nvm3_ObjectKey_t key,
                                  void *value, size_t offset, size_t len)
 {
     (void)key;
-    if (h == NULL || value == NULL) {
+    if (!handle_usable(h)) {
+        return SL_STATUS_NOT_INITIALIZED;
+    }
+    if (value == NULL) {
         return SL_STATUS_INVALID_PARAMETER;
     }
     if (!nvm3_fake_present) {
@@ -99,8 +133,8 @@ sl_status_t nvm3_readPartialData(nvm3_Handle_t *h, nvm3_ObjectKey_t key,
 sl_status_t nvm3_deleteObject(nvm3_Handle_t *h, nvm3_ObjectKey_t key)
 {
     (void)key;
-    if (h == NULL) {
-        return SL_STATUS_INVALID_PARAMETER;
+    if (!handle_usable(h)) {
+        return SL_STATUS_NOT_INITIALIZED;
     }
     ++nvm3_fake_deletes;
     if (nvm3_fake_delete_status != SL_STATUS_OK) {

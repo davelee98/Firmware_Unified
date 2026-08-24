@@ -30,7 +30,7 @@
 #define SHA_STRING XSTRINGIFY(SHA)
 
 
-/* OD: config storage is NVS (hal/od_hal_nvs.h); LittleFS is gone from this target. */
+/* OD: config storage is NVS (shared/hal/od_hal_nvs.h); LittleFS is gone from this target. */
 
 
 #define MAX_BLOCKS 64

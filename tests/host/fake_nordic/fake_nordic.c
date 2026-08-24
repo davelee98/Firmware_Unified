@@ -260,7 +260,6 @@ bool clearStoredConfig(void)
     return true;
 }
 
-uint32_t calculateConfigCRC(uint8_t *data, uint32_t len) { (void)data; (void)len; return 0u; }
 
 /* --------------------------------------------------------------------------- BLE and friends --- */
 

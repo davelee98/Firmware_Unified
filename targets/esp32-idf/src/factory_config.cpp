@@ -20,7 +20,7 @@ static uint16_t toolboxOuterCrc(const uint8_t* data, uint32_t bodyLen) {
 }
 
 static bool factoryPacketValid(const uint8_t* data, uint32_t len) {
-    if (len < 4 || len > MAX_CONFIG_SIZE) {
+    if (len < 4 || len > OD_CONFIG_MAX_SIZE) {
         return false;
     }
     const uint16_t declared = (uint16_t)data[0] | ((uint16_t)data[1] << 8);
@@ -36,7 +36,7 @@ static bool factoryEmbedPresent(const factory_flash_cfg_t* fc) {
     if (!fc || fc->magic != FACTORY_CFG_MAGIC) {
         return false;
     }
-    if (fc->len < 4 || fc->len > MAX_CONFIG_SIZE) {
+    if (fc->len < 4 || fc->len > OD_CONFIG_MAX_SIZE) {
         return false;
     }
     return factoryPacketValid(fc->data, fc->len);

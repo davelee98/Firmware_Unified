@@ -9,7 +9,7 @@
  *   - a start frame longer than 202 bytes silently discarded the excess;
  *   - a declared total of 201 followed by a 200-byte continuation committed 400 bytes,
  *     because the chunk count reached the expected two; and
- *   - a declared total above MAX_CONFIG_SIZE was not rejected at the start, so the transfer
+ *   - a declared total above OD_CONFIG_MAX_SIZE was not rejected at the start, so the transfer
  *     failed later for an indirect reason.
  *
  * The third is the one that matters: a byte sequence inconsistent with its own declared length
@@ -43,28 +43,29 @@ extern "C" {
 #endif
 
 /* THE TRANSFERABLE CEILING IS 4,000 BYTES, NOT 4,096, and that is a live inconsistency rather
- * than a design choice. MAX_CONFIG_SIZE is 4096 on every target, but MAX_CONFIG_CHUNKS is 20
- * and 20 x 200 = 4000, so the last 96 bytes cannot be transferred. The decision (2026-08-05,
+ * than a design choice. Where OD_CONFIG_MAX_SIZE is 4096, MAX_CONFIG_CHUNKS is 20 and
+ * 20 x 200 = 4000, so the last 96 bytes cannot be transferred. (It does not arise on the 2048
+ * profile, whose whole cap is below the transferable ceiling.) The decision (2026-08-05,
  * NEXT_STEPS_2026-08-05.md D4) is to raise the chunk count to 21; the canonical header is
  * frozen, so until it changes this is the honest limit and the tests assert it. Do not paper
  * over it by relaxing the check here -- a device that accepts 21 chunks while the canonical
  * header says 20 is a wire divergence a host cannot discover. */
 #define OD_CONFIG_ASM_MAX_TRANSFERABLE ((uint32_t)MAX_CONFIG_CHUNKS * CONFIG_CHUNK_SIZE)
 
-/* THE STORED-CONFIG CAP, AND A GAP FOUND BY BEING THE FIRST SHARED CONSUMER OF IT.
+/* THE STORED-CONFIG CAP. This is its only definition, and the `#ifndef` is how a target
+ * overrides it: shared/profiles.cmake sets 2048 for the EFR32BG22, where 4096 would cost +2 KB
+ * of NVM3 record against a ~10.5 KB heap. Everything else takes the 4096 default.
  *
- * CLAUDE.md calls MAX_CONFIG_SIZE "the exception: 4096 on EVERY target ... a global cap, not a
- * per-target macro", decided 2026-07-25 -- but it is NOT in the canonical wire header. It is a
- * plain `#define MAX_CONFIG_SIZE 4096` inside targets/esp32-idf/src/config_parser.h, i.e. a
- * per-target macro that every target happens to spell the same way. A value described as
- * global that lives in four target headers is one edit away from not being global, and nothing
- * would detect the divergence.
+ * IT BELONGS IN shared/protocol/opendisplay_protocol.h and is not there, because that header is
+ * frozen and is a byte-for-byte copy of ../opendisplay-protocol. Flagged rather than quietly
+ * duplicated -- a second spelling of this number in a target header is exactly the divergence
+ * nothing would detect.
  *
- * It belongs in shared/protocol/opendisplay_protocol.h. Adding it is blocked on the header
- * freeze, so it is FLAGGED here rather than quietly duplicated: this header defines its own
- * name, and each target asserts the two agree at the point where both are visible (see
- * targets/esp32-idf/src/config_parser.h). A mismatch is then a compile error in the target
- * that introduced it, not a silently smaller buffer.
+ * The value changes the ABI of struct od_config_asm below and of the stored record that
+ * overlays it on BG22, so a host archive compiled with a different cap is a different layout
+ * (see tests/host/CMakeLists.txt's separate od_shared_silabs). It is a per-target cap that a
+ * host cannot interrogate, which is why od_config_asm_start() REFUSES an over-size declaration
+ * rather than truncating it: silent truncation is invisible to the client.
  */
 #ifndef OD_CONFIG_MAX_SIZE
 #define OD_CONFIG_MAX_SIZE 4096u
@@ -98,7 +99,7 @@ struct od_config_asm {
 /* Abandon any transfer in progress. Idempotent; safe from a teardown path.
  *
  * The buffer is deliberately not zeroed: `active = false` makes it unreachable and clearing
- * MAX_CONFIG_SIZE on every disconnect is pointless work on a battery device. */
+ * OD_CONFIG_MAX_SIZE on every disconnect is pointless work on a battery device. */
 void od_config_asm_reset(struct od_config_asm *s);
 
 /* Feed a CMD_CONFIG_WRITE (0x0041) payload -- the bytes AFTER the two opcode bytes.
