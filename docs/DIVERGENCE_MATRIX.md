@@ -852,3 +852,49 @@ suite.
 
 **NOT HARDWARE-QUALIFIED.** Both targets' SHT40 rows are open in
 docs/HARDWARE_VERIFICATION_CHECKLIST.md, and this change deletes both ports' driver policy.
+
+---
+
+## 20. GT911 register address byte order — the donor probes the undocumented order first (2026-08-24)
+
+**Ruled 2026-08-24; implementation pending sensor-seam step 8.** Recorded now so the shared
+driver's order reads as a decision rather than as a transcription slip.
+
+GT911 register addresses are 16-bit and sent as two bytes before the data phase. GOODIX's
+*GT911 Programming Guide* Rev.10 § 2.1 p.3 specifies the write frame as
+`S | Address_W | ACK | Register_H | ACK | Register_L | ACK | Data...`, and § 2.2 p.4 sets the read
+pointer the same way: **high byte first, unambiguously, in both directions.**
+
+Both ports nevertheless try **low byte first** first:
+
+```c
+if (gt911_read_reg(bus, cur, addr7, GT911_REG_PID, id, 4, /*reg_high_first=*/false) && ...)
+    *reg_high_first = 0;                      /* labelled "common" at touch_input.cpp:49 */
+else if (gt911_read_reg(bus, cur, addr7, GT911_REG_PID, id, 4, /*reg_high_first=*/true) && ...)
+    *reg_high_first = 1;                      /* labelled "some GT911 / docs" */
+```
+— `Firmware/src/touch_input.cpp`, and identically in the ESP32 snapshot here.
+
+| | `../Firmware` / ESP32 | nordic-zephyr | Shared (step 8) |
+|---|---|---|---|
+| First probe | low byte first | low byte first | **high byte first** |
+| Fallback | high byte first | high byte first | low byte first |
+| Bindable parts | both orders | both orders | both orders — unchanged |
+
+**No source documents a low-byte-first GT911.** A targeted survey of the Goodix guides, the Linux
+`goodix.c` driver and the ESP-BSP driver found the documented order in every one and no evidence,
+authoritative or secondary, of a variant using the other. The donor's "common" annotation is
+unsourced.
+
+**Cost of the donor order on a conformant part:** the low-byte-first probe sets the pointer to a
+byte-swapped address, reads four bytes that cannot match `"911"`, and fails — through three
+attempts × two bus framings with 500 µs spacing — before the documented order is tried, per
+candidate address, on every boot and every re-resolve.
+
+**The fallback is retained, and that is the point of the ruling.** This is a reordering, not a
+removal: a part answering only the undocumented form still binds, one probe later. Dropping the
+fallback would be the change the evidence does not support — the survey establishes that nobody
+has *documented* such a part, not that none exists, and no board in this fleet can settle it.
+
+**NOT HARDWARE-QUALIFIED.** ESP32 is the only target that can qualify any GT911 behaviour; the
+row is open in docs/HARDWARE_VERIFICATION_CHECKLIST.md.
