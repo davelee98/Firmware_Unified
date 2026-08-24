@@ -49,6 +49,14 @@ static bool scl_release(const struct od_i2c_bus *bus)
 
 static void od_i2c_start(const struct od_i2c_bus *bus)
 {
+	/* A REPEATED start arrives here with SCL already low from the previous ACK, and the I2C
+	 * low period (tLOW, 4.7 us at 100 kHz) has to be honoured before SCL rises again -- without
+	 * this, the only thing separating the two edges is GPIO reconfiguration time. Harmless on a
+	 * first START, where both lines are already idle.
+	 *
+	 * This is not new to touch: od_i2c_write(stop=false) + od_i2c_read() is how BQ27220 and
+	 * nPM1300 have always read, so their repeated STARTs were short too. */
+	od_delay(bus);
 	/* Both lines high, then SDA falls while SCL high. */
 	sda_release(bus);
 	(void)scl_release(bus);
@@ -199,7 +207,13 @@ bool od_i2c_write(struct od_i2c_bus *bus, uint8_t addr7, const uint8_t *data,
 
 bool od_i2c_read(struct od_i2c_bus *bus, uint8_t addr7, uint8_t *data, size_t len)
 {
-	if (!bus->ready || len == 0u) {
+	if (!bus->ready) {
+		return false;
+	}
+	if (len == 0u) {
+		/* Refused, but not while holding the bus: a caller reaching here after a
+		 * stop=false write would otherwise leave SCL low with no STOP for ever. */
+		od_i2c_stop(bus);
 		return false;
 	}
 	od_i2c_start(bus);

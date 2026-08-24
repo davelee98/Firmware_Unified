@@ -748,3 +748,49 @@ truncation, then CRC. BG22 tested truncation before the caller's capacity, so a 
 both truncated and too large for the caller now reports the cap where BG22 would have reported
 truncation. Every caller collapses the result to a refusal, so this is visible only through the
 shared result enum — pinned so it stays a decision.
+
+---
+
+## 18. Nordic had two bit-banged I2C engines, and they disagreed (2026-08-24)
+
+Resolved by sensor-seam staging step 2: `opendisplay_touch.c`'s private bit-banger is gone and
+GT911 uses `opendisplay_i2c.c`, the same engine the sensors use. The framing is identical — both
+did a repeated START for a register read — so the divergence was entirely in **edge timing and in
+what each engine did about a clock stretch**.
+
+| | Private touch engine | Shared engine |
+|---|---|---|
+| Half-bit period | fixed 5 µs | `500000 / bus_speed_hz` |
+| Clock stretch during a **read** bit | result **discarded** — a timeout produced garbage data | fails the transfer |
+| Clock stretch on a **slave ACK** | result **discarded** | fails the transfer |
+| Clock stretch on the master ACK/NACK | result **discarded** | fails the transfer |
+| `tLOW` before a repeated START | 5 µs | **none** — see below |
+
+**Two things changed, and both are behaviour, not tidying.**
+
+**A stretch timeout now fails the transfer.** The old touch engine ignored `scl_release_wait()`
+everywhere, so a clone stretching past the 1 ms bound carried on and sampled whatever was on the
+wire. GT911 reads now fail instead, which feeds the existing retry and the five-failure disable
+latch. Failing is right — a plausible-but-wrong coordinate is worse than a dropped sample — but a
+clone that legitimately stretches long will now disable touch where it previously produced
+garbage.
+
+**The shared engine had no low period before a repeated START, and that was a live defect in the
+sensors, not something touch introduced.** `od_i2c_write(stop=false)` ends with SCL driven low and
+`od_i2c_start()` released it again immediately, so the only thing between the two edges was GPIO
+reconfiguration time — against a 4.7 µs `tLOW` minimum at 100 kHz. **BQ27220 and nPM1300 have
+always read that way**, so this was affecting deployed sensor reads on Nordic before touch was
+folded in. `od_i2c_start()` now opens with a half-period delay, which is harmless on a first START
+and restores `tLOW` on a repeated one.
+
+**Touch does not pass `bus_speed_hz`.** It pins 100 kHz, which is the 5 µs the private engine used.
+A `DataBus` declaring 400 kHz would otherwise have quintupled the GT911 clock as a side effect of
+this cutover, and a timing difference is a plausible reason the fork existed. Reconciling the two
+is a separate, measured change.
+
+`opendisplay_touch.c` went 710 → 589 lines; `xiao_ble` flash 332,444 → 332,004 B (−440), `bss`
+140,477 → 140,509 (+32, four `struct od_i2c_bus` against four 2-byte `struct TouchBus`).
+
+**NOT HARDWARE-QUALIFIED**, and this is the step where that matters most:
+`plans/PLAN_SENSOR_SEAM_2026-08-23.md` § 3 step 2 requires a touch hardware check before the
+cutover proceeds, and § 5's "Nordic touch cleanup" row is open.
