@@ -38,25 +38,18 @@ static uint8_t bq27220_addr_7bit(const SensorData* s) {
     return a;
 }
 
-// 0xFF means this gauge was never assigned a bus. Refused, not resolved to bus 0 -- see
-// DIVERGENCE_MATRIX 13; a colliding address returns a plausible-but-wrong voltage.
-static bool bq27220_ensure_bus(const SensorData* s) {
-    if (s->bus_id == 0xFF) {
-        return false;
-    }
-    return initOrRestoreWireForBus(s->bus_id);
-}
-
 static bool bq27220_read_block(const SensorData* s, uint8_t cmd, uint8_t* buf, uint8_t len) {
     uint8_t addr = bq27220_addr_7bit(s);
-    if (!bq27220_ensure_bus(s)) {
+    // 0xFF means this gauge was never assigned a bus. Refused, not resolved to bus 0 -- see
+    // DIVERGENCE_MATRIX 13; a colliding address returns a plausible-but-wrong voltage.
+    if (s->bus_id == 0xFF) {
         return false;
     }
     // ONE transaction: selector write, repeated START, read -- no STOP between. The BQ27220
     // does not accept STOP + fresh START for a register read; it answers as if unaddressed, so
     // splitting this produces plausible garbage rather than an error. Under Wire this was the
     // endTransmission(false) idiom, and the flag being honoured was the whole point.
-    return od_hal_i2c_write_read(addr, &cmd, 1, buf, len) == OD_HAL_I2C_OK;
+    return od_hal_i2c_write_read(s->bus_id, addr, &cmd, 1, buf, len) == OD_HAL_I2C_OK;
 }
 
 static const SensorData* bq27220_config(void) {
@@ -117,8 +110,8 @@ void initBq27220Sensors(void) {
     if (!s) {
         return;
     }
-    if (!bq27220_ensure_bus(s)) {
-        od_log_warn("BQ27220: bus init failed");
+    if (s->bus_id == 0xFF) {
+        od_log_warn("BQ27220: no data_bus assigned (bus_id 0xFF); not probed");
         return;
     }
     const uint8_t addr = bq27220_addr_7bit(s);

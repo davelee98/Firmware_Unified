@@ -25,6 +25,7 @@
  * target's stack re-arms advertising itself and has no equivalent seam yet. */
 #include "od_ble.h"
 #include "od_hal_i2c.h"
+#include "od_hal_i2c_esp.h"
 #include "od_hal_gpio.h"
 #include "od_hal_time.h"
 #include "od_hal_sleep.h"
@@ -1246,7 +1247,7 @@ void pwrmgm(bool onoff){
         else{
             od_log_info("Powering down AXP2101 PMIC...");
             powerDownAXP2101();
-            od_hal_i2c_deinit();
+            od_hal_i2c_esp_deinit();
             invalidateOpenDisplayWire();
             od_hal_gpio_config_output(47, true);
             od_hal_gpio_config_output(48, true);
@@ -1296,7 +1297,7 @@ void pwrmgm(bool onoff){
         displayReleaseSpiBus();
         // Keep I2C alive when sensors/touch use data_bus[0] (e.g. reTerminal MISC_I2C on GPIO0/1).
         if (!openDisplayI2cBusConfigured()) {
-            od_hal_i2c_deinit();
+            od_hal_i2c_esp_deinit();
             invalidateOpenDisplayWire();
         }
         if (globalConfig.system_config.pwr_pin != 0xFF) {

@@ -47,31 +47,21 @@ static uint8_t sht40_msd_start(const SensorData* s) {
     return st;
 }
 
-// 0xFF means this sensor was never assigned a bus. Refused, not resolved to bus 0: probing it on
-// another device's pins risks an address collision returning a plausible-but-wrong temperature
-// (DIVERGENCE_MATRIX 13).
-static bool sht40_ensure_bus(const SensorData* s) {
-    if (s->bus_id == 0xFF) {
-        return false;
-    }
-    return initOrRestoreWireForBus(s->bus_id);
-}
-
 // err_out keeps Arduino's endTransmission() encoding (0 ok, 2 address NACK, 4 other) because
 // it is reported straight into a log line and, on the failure path, into the sensor's error
 // byte -- a value a host may already be matching on. Translating at this one site rather than
 // letting od_hal_i2c's codes leak into the wire-visible byte.
-static bool sht40_write_cmd(uint8_t addr7, uint8_t cmd, uint8_t* err_out) {
-    const int rc = od_hal_i2c_write(addr7, &cmd, 1);
+static bool sht40_write_cmd(uint8_t bus_id, uint8_t addr7, uint8_t cmd, uint8_t* err_out) {
+    const int rc = od_hal_i2c_write(bus_id, addr7, &cmd, 1);
     if (err_out) {
         *err_out = (rc == OD_HAL_I2C_OK) ? 0u : ((rc == OD_HAL_I2C_EINVAL) ? 4u : 2u);
     }
     return rc == OD_HAL_I2C_OK;
 }
 
-static bool sht40_read_measurement(uint8_t addr7, int16_t* temp_centi, uint16_t* rh_centi, uint8_t* err_out) {
+static bool sht40_read_measurement(uint8_t bus_id, uint8_t addr7, int16_t* temp_centi, uint16_t* rh_centi, uint8_t* err_out) {
     uint8_t err = 0;
-    if (!sht40_write_cmd(addr7, SHT40_CMD_MEASURE_HIGH, &err)) {
+    if (!sht40_write_cmd(bus_id, addr7, SHT40_CMD_MEASURE_HIGH, &err)) {
         if (err_out) {
             *err_out = err;
         }
@@ -83,7 +73,7 @@ static bool sht40_read_measurement(uint8_t addr7, int16_t* temp_centi, uint16_t*
     // register-shaped call (see od_hal_i2c.h).
     od_hal_delay_ms(SHT40_MEASURE_DELAY_MS);
     uint8_t b[6];
-    if (od_hal_i2c_read(addr7, b, sizeof(b)) != OD_HAL_I2C_OK) {
+    if (od_hal_i2c_read(bus_id, addr7, b, sizeof(b)) != OD_HAL_I2C_OK) {
         if (err_out) {
             // 0xFE was the "requestFrom returned negative" code; a short read cannot happen
             // through the HAL, which is all-or-nothing, so the partial-count values that used
@@ -121,7 +111,12 @@ static bool sht40_read_measurement(uint8_t addr7, int16_t* temp_centi, uint16_t*
 
 static bool read_sht40_sample(const SensorData* sensor, int16_t* temp_centi, uint16_t* rh_centi, uint8_t* last_err) {
     uint8_t preferred_addr = sht40_addr_7bit(sensor);
-    if (!sht40_ensure_bus(sensor)) {
+    const uint8_t bus_id = sensor->bus_id;
+
+    // 0xFF means this sensor was never assigned a bus. Refused, not resolved to bus 0: probing
+    // it on another device's pins risks an address collision returning a plausible-but-wrong
+    // temperature (DIVERGENCE_MATRIX 13).
+    if (bus_id == 0xFF) {
         if (last_err) {
             *last_err = 0xFB;
         }
@@ -131,8 +126,8 @@ static bool read_sht40_sample(const SensorData* sensor, int16_t* temp_centi, uin
     const uint8_t candidates[] = {preferred_addr, 0x44u, 0x45u};
     for (uint8_t pass = 0; pass < 2; pass++) {
         if (pass > 0) {
+            // The next transaction re-selects the bus; nothing needs to re-open it here.
             invalidateOpenDisplayWire();
-            sht40_ensure_bus(sensor);
             od_hal_delay_ms(2);
         }
         for (uint8_t i = 0; i < sizeof(candidates); i++) {
@@ -148,7 +143,7 @@ static bool read_sht40_sample(const SensorData* sensor, int16_t* temp_centi, uin
                 continue;
             }
             uint8_t err = 0;
-            if (sht40_read_measurement(addr, temp_centi, rh_centi, &err)) {
+            if (sht40_read_measurement(bus_id, addr, temp_centi, rh_centi, &err)) {
                 return true;
             }
             if (last_err) {
@@ -174,7 +169,7 @@ static void sht40_probe_bus_once(uint8_t bus_id) {
         // outright -- nothing reached the bus and every address reported absent whether or not
         // hardware was there, which made a connected SHT40 undetectable. od_hal_i2c_probe() is
         // the address-only primitive; see od_hal_i2c.h.
-        const int rc = od_hal_i2c_probe(addrs[i]);
+        const int rc = od_hal_i2c_probe(bus_id, addrs[i]);
         od_log_debug("I2C bus %u probe 0x%02X rc=%d%s", bus_id, addrs[i], rc,
                      rc == OD_HAL_I2C_OK ? " (present)" : "");
     }
@@ -226,12 +221,14 @@ void initSht40Sensors(void) {
         if (s->sensor_type != OD_SENSOR_TYPE_SHT40) {
             continue;
         }
+        if (s->bus_id == 0xFF) {
+            continue;   /* unassigned: not probed (DIVERGENCE_MATRIX 13) */
+        }
         uint8_t addr = sht40_addr_7bit(s);
-        sht40_ensure_bus(s);
         uint8_t err = 0;
-        if (!sht40_write_cmd(addr, SHT40_CMD_SOFT_RESET, &err)) {
-            sht40_write_cmd(0x44, SHT40_CMD_SOFT_RESET, nullptr);
-            sht40_write_cmd(0x45, SHT40_CMD_SOFT_RESET, nullptr);
+        if (!sht40_write_cmd(s->bus_id, addr, SHT40_CMD_SOFT_RESET, &err)) {
+            sht40_write_cmd(s->bus_id, 0x44, SHT40_CMD_SOFT_RESET, nullptr);
+            sht40_write_cmd(s->bus_id, 0x45, SHT40_CMD_SOFT_RESET, nullptr);
         }
         od_hal_delay_ms(2);
     }
