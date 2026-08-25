@@ -54,6 +54,14 @@ void od_touch_app_gpio_detach_int(uint8_t pin);
  * Nordic re-initialises inside every operation and returns true. False refuses the poll. */
 bool od_touch_app_bus_prepare(uint8_t bus_id);
 
+/* Drop any cached bus state, before the driver re-establishes controllers after a panel refresh.
+ *
+ * BEHIND THE SEAM RATHER THAN IN THE CALLER, because only the driver knows whether a resume will
+ * actually act -- it is nestable, and an unmatched resume must leave everything alone. A caller
+ * that invalidated first would tear down a live bus on every no-op teardown. Nordic re-initialises
+ * per operation and implements this empty. */
+void od_touch_app_bus_invalidate(void);
+
 /* One byte of the advertisement's dynamic block. Bounds are the driver's. */
 void od_touch_app_msd_write(uint8_t index, uint8_t value);
 

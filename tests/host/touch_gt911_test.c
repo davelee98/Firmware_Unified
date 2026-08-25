@@ -43,12 +43,18 @@ static const char *g_case = "";
 
 /* ------------------------------------------------------------------ the fake GT911 */
 
+#define BUS_INSTANCE 3u
+#define PIN_RST 20u
+#define PIN_INT 21u
+#define PIN_EN  22u
+
 #define GT911_REG_BASE 0x8140u
 #define GT911_REG_SPAN 0x60u
 
 struct fake_part {
     bool     present;
-    uint8_t  addr7;
+    uint8_t  addr7;            /* the address the part currently ANSWERS on */
+    uint8_t  strap_addr7;      /* what the last reset selected, per INT's level at RST's edge */
     bool     answers_high_first;   /* which pointer byte order this part accepts */
     bool     answers_low_first;
     uint8_t  regs[GT911_REG_SPAN];
@@ -60,9 +66,23 @@ struct fake_part {
 
 static struct fake_part g_part;
 static uint8_t  g_bus_ready_id = 0xFFu;   /* which bus od_touch_app_bus_prepare accepts */
+static uint8_t  g_bus_wired_id = 0xFFu;   /* the bus the part is physically ON */
+
+/* THE PART IS ON A BUS, and answers nothing on any other. Without this the fake ignored bus_id
+ * entirely, so a driver that prepared the right bus and then transacted on the wrong one passed. */
+static bool part_on_bus(uint8_t bus_id)
+{
+    return bus_id == g_bus_wired_id;
+}
+
+/* Pin state, so the reset dance can actually select an address the way silicon does. */
+static bool g_pin_int_high;
+static bool g_pin_rst_high;
+static bool g_saw_rst_rise;
+static bool g_int_driven_since_rst_low;
 
 /* Ordered log of what the driver asked the part, so ORDER is assertable and not inferred. */
-#define TRACE_MAX 64
+#define TRACE_MAX 512
 static char     g_trace[TRACE_MAX][32];
 static unsigned g_trace_len;
 
@@ -131,8 +151,7 @@ static bool set_pointer(uint8_t addr7, const uint8_t *sel, uint16_t n)
 
 int od_hal_i2c_write(uint8_t bus_id, uint8_t addr7, const uint8_t *data, uint16_t len)
 {
-    (void)bus_id;
-    if (!g_part.present || g_part.fail_all || addr7 != g_part.addr7) {
+    if (!part_on_bus(bus_id) || !g_part.present || g_part.fail_all || addr7 != g_part.addr7) {
         return OD_HAL_I2C_ENODEV;
     }
     if (len == 3u) {                      /* pointer + one payload byte: a register write */
@@ -153,8 +172,7 @@ int od_hal_i2c_read(uint8_t bus_id, uint8_t addr7, uint8_t *data, uint16_t len)
 {
     uint16_t i;
 
-    (void)bus_id;
-    if (!g_part.present || g_part.fail_all || addr7 != g_part.addr7) {
+    if (!part_on_bus(bus_id) || !g_part.present || g_part.fail_all || addr7 != g_part.addr7) {
         return OD_HAL_I2C_ENODEV;
     }
     if (g_part.pointer == 0xFFFFu) {
@@ -171,9 +189,13 @@ int od_hal_i2c_read(uint8_t bus_id, uint8_t addr7, uint8_t *data, uint16_t len)
     return OD_HAL_I2C_OK;
 }
 
+/* RECORDED SEPARATELY, because the two framings are two different HAL calls and a driver that
+ * used the wrong one would otherwise pass -- the fake would produce identical bytes. This is the
+ * repeated-START form (no STOP between the phases). */
 int od_hal_i2c_write_read(uint8_t bus_id, uint8_t addr7, const uint8_t *tx, uint16_t tn,
                           uint8_t *rx, uint16_t rn)
 {
+    trace("framing:rstart", 0, 0);
     if (od_hal_i2c_write(bus_id, addr7, tx, tn) != OD_HAL_I2C_OK) {
         return OD_HAL_I2C_EIO;
     }
@@ -202,7 +224,34 @@ void od_touch_app_delay_us(uint32_t us) { (void)us; }
 
 void od_touch_app_gpio_set_mode_output(uint8_t pin) { trace("out:%u", pin, 0); }
 void od_touch_app_gpio_config_input(uint8_t pin, bool pull_up) { (void)pull_up; trace("in:%u", pin, 0); }
-void od_touch_app_gpio_write(uint8_t pin, bool level_high) { trace("w:%u:%u", pin, level_high ? 1u : 0u); }
+/* INT's LEVEL AT RST'S RISING EDGE SELECTS THE ADDRESS, exactly as Rev.10 4.2 describes: high
+ * selects 7-bit 0x14, low selects 0x5D. Modelling it is what makes the auto-detect tests real --
+ * before this the fake answered on a fixed address and a driver that skipped the reset dance
+ * entirely, or drove the pins in the wrong order, passed both cascade cases. */
+void od_touch_app_gpio_write(uint8_t pin, bool level_high)
+{
+    trace("w:%u:%u", pin, level_high ? 1u : 0u);
+    if (pin == PIN_INT) {
+        g_pin_int_high = level_high;
+        g_int_driven_since_rst_low = true;
+    }
+    if (pin == PIN_RST) {
+        if (!level_high) {
+            g_int_driven_since_rst_low = false;
+        } else if (!g_pin_rst_high) {
+            /* Only a host that DROVE INT can select an address. With no INT pin the strap does
+             * not move and the part keeps whatever it had -- so a config with rst but no int
+             * cannot reach 0x14 by resetting, and auto-detect has to find the part where it is. */
+            if (g_int_driven_since_rst_low) {
+                g_part.strap_addr7 = g_pin_int_high ? 0x14u : 0x5Du;
+                g_part.addr7 = g_part.strap_addr7;
+                trace("strap:%02X", g_part.strap_addr7, 0);
+            }
+            g_saw_rst_rise = true;
+        }
+        g_pin_rst_high = level_high;
+    }
+}
 int  od_touch_app_gpio_read(uint8_t pin) { (void)pin; return g_int_level; }
 
 bool od_touch_app_gpio_attach_int(uint8_t idx, uint8_t pin)
@@ -229,22 +278,23 @@ void od_touch_app_msd_write(uint8_t index, uint8_t value)
     }
 }
 void od_touch_app_msd_publish(void) { g_publishes++; trace("publish", 0, 0); }
+void od_touch_app_bus_invalidate(void) { trace("bus:invalidate", 0, 0); }
 void od_adv_app_boost(void) { g_boosts++; trace("boost", 0, 0); }
 
 /* ------------------------------------------------------------------ fixtures */
 
 static struct od_config g_cfg;
 
-#define BUS_INSTANCE 3u
-#define PIN_RST 20u
-#define PIN_INT 21u
-#define PIN_EN  22u
-
 static void part_reset(uint8_t addr7)
 {
     memset(&g_part, 0, sizeof g_part);
     g_part.present = true;
     g_part.addr7 = addr7;
+    g_part.strap_addr7 = addr7;
+    g_bus_wired_id = BUS_INSTANCE;
+    g_pin_int_high = false;
+    g_pin_rst_high = false;
+    g_saw_rst_rise = false;
     g_part.answers_high_first = true;
     g_part.regs[0x8140u - GT911_REG_BASE] = '9';
     g_part.regs[0x8141u - GT911_REG_BASE] = '1';
@@ -297,6 +347,13 @@ static void setup(uint8_t start_byte, uint8_t flags, uint8_t addr, uint8_t int_p
     g_cfg.touch_controllers[0].flags = flags;
     g_cfg.touch_controllers[0].touch_data_start_byte = start_byte;
     g_cfg.touch_controllers[0].poll_interval_ms = 0u;
+
+    /* CLEAR THE DRIVER'S OWN STATE. s_rt is a file static that outlives one test, and since the
+     * retained-runtime path landed a stale `ok` from the previous case makes the next init keep a
+     * controller instead of bringing it up -- which silently skips the enable pin, the reset dance
+     * and the probe. init(NULL) is the documented way to say "forget everything". */
+    (void)od_touch_gt911_init(NULL, 0u);
+    g_trace_len = 0;
 }
 
 /* ------------------------------------------------------------------ the packing contract */
@@ -567,7 +624,11 @@ static void test_cadence(void)
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     g_part.reads = 0;
-    CHECK(od_touch_gt911_service(&g_cfg, 1010u, 0u, NULL) == 40u);
+    /* THE REMAINDER, not the whole interval. Asking for a full 40 ms again 10 ms in pushes the
+     * deadline out every time this controller is polled early for another reason; with two
+     * controllers at 99 and 100 ms the slower one drifts to ~198 ms. The first version of this
+     * test asserted 40 and so PINNED the defect. */
+    CHECK(od_touch_gt911_service(&g_cfg, 1010u, 0u, NULL) == 30u);
     CHECK(g_part.reads == 0u);                       /* too soon */
     (void)od_touch_gt911_service(&g_cfg, 1050u, 0u, NULL);
     CHECK(g_part.reads > 0u);
@@ -712,6 +773,68 @@ static void test_suspend_resume(void)
 
 /* ------------------------------------------------------------------ int-pin query */
 
+/* Both of these pin fixes made in review, and both were initially untested -- the mutants that
+ * undid them survived a 76-check suite. */
+static void test_no_change_and_retry_latency(void)
+{
+    /* abortToKnownState() force-resumes on EVERY teardown, including ordinary disconnects with
+     * nothing suspended. If that reported a delay, a caller installing it would postpone actively
+     * polling touch by a second each time. Doing nothing has to be reportable as doing nothing. */
+    CASE("an unmatched resume reports NO_CHANGE, not an idle delay");
+    setup(0u, 0u, 0x5Du, 0xFFu);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    CHECK(od_touch_gt911_force_resume(&g_cfg, 2000u) == OD_TOUCH_NO_CHANGE);
+    CHECK(od_touch_gt911_resume(&g_cfg, 2000u) == OD_TOUCH_NO_CHANGE);
+
+    CASE("a nested resume that is still suspended also reports NO_CHANGE");
+    od_touch_gt911_suspend();
+    od_touch_gt911_suspend();
+    CHECK(od_touch_gt911_resume(&g_cfg, 3000u) == OD_TOUCH_NO_CHANGE);
+    CHECK(od_touch_gt911_resume(&g_cfg, 3000u) != OD_TOUCH_NO_CHANGE);   /* the last one acts */
+
+    /* Stamping the poll clock for a poll that never happened makes a controller whose bus was
+     * briefly unavailable wait its whole interval again instead of retrying next pass. */
+    CASE("a failed bus prepare does not consume the polling slot");
+    setup(0u, 0u, 0x5Du, 0xFFu);
+    g_cfg.touch_controllers[0].poll_interval_ms = 200u;
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    part_set_contact(1u, 0u, 5u, 6u);
+    g_bus_ready_id = 0xFEu;                      /* prepare fails */
+    (void)od_touch_gt911_service(&g_cfg, 1300u, 0u, NULL);
+    CHECK(g_msd[0] == 0xA5u);                    /* nothing read */
+    g_bus_ready_id = BUS_INSTANCE;               /* bus is back, well inside the interval */
+    (void)od_touch_gt911_service(&g_cfg, 1350u, 0u, NULL);
+    CHECK((g_msd[0] & 0x0Fu) == 1u);             /* retried at once, not 200 ms later */
+}
+
+/* The donor's post-refresh "kept" path, restored after review found it dropped. Re-running the
+ * reset dance on a live part costs ~500 ms per controller and re-selects an address that was
+ * already right, so a second init must NOT do it. */
+static void test_retained_runtime_reinit(void)
+{
+    CASE("a second init KEEPS a controller that is already up");
+    setup(0u, 0u, 0x5Du, 0xFFu);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    CHECK(od_touch_gt911_address(0) == 0x5Du);
+    g_trace_len = 0;
+    g_saw_rst_rise = false;
+    (void)od_touch_gt911_init(&g_cfg, 2000u);
+    CHECK(od_touch_gt911_address(0) == 0x5Du);
+    CHECK(!g_saw_rst_rise);                 /* no reset dance */
+    CHECK(trace_has("clear:status"));       /* but the part IS re-acknowledged */
+
+    CASE("if the bus will not come back, it falls through to a full bring-up");
+    g_trace_len = 0;
+    g_saw_rst_rise = false;
+    g_bus_ready_id = 0xFEu;                 /* prepare fails for every bus */
+    (void)od_touch_gt911_init(&g_cfg, 3000u);
+    CHECK(od_touch_gt911_address(0) == 0u);
+    CHECK(trace_has("bus:3"));              /* it tried */
+}
+
 static void test_int_pin_query(void)
 {
     CASE("a configured INT pin is recognised");
@@ -738,6 +861,8 @@ int main(void)
     test_failure_backoff_and_disable();
     test_bus_admission();
     test_suspend_resume();
+    test_no_change_and_retry_latency();
+    test_retained_runtime_reinit();
     test_int_pin_query();
 
     printf("touch_gt911: %u checks, %u failures\n", g_checks, g_fails);

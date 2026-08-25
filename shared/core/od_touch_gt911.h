@@ -37,6 +37,10 @@ extern "C" {
 /* One bit per controller in the IRQ mask; bounded by the config's own touch array. */
 #define OD_TOUCH_MAX_CONTROLLERS OD_CONFIG_MAX_TOUCH
 
+/* "Nothing changed; do not touch the schedule." Distinct from a delay because an unmatched
+ * resume must not be able to postpone a controller that is actively polling. */
+#define OD_TOUCH_NO_CHANGE 0u
+
 /* What a fully idle machine asks for. Not "never": a controller can come back through the timed
  * poll after a failure streak, so the machine must keep breathing. */
 #define OD_TOUCH_IDLE_MS 1000u
@@ -51,6 +55,13 @@ uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms);
  * them. `*consumed_out` receives the bits this call acted on, so the TARGET clears them under its
  * own interrupt lock -- shared/ has no lock to take and must not invent one. Pass 0 and NULL on a
  * target with no interrupt wiring.
+ *
+ * WHAT THE CONSUMED MASK DOES AND DOES NOT BUY. A bit set for a controller this call did not
+ * reach is left alone, so that edge survives. An edge from a controller it DID service, arriving
+ * after the snapshot, does not: the bit was already 1, the ISR's OR adds nothing, and the clear
+ * removes both. That sample is recovered by the held-low line check or the next timed poll rather
+ * than by the mask -- the same property the donors have. Distinguishing the two would need a
+ * per-controller generation counter, which is not worth an ISR-side write on this path.
  *
  * Returns the delay until the next call is wanted. */
 uint32_t od_touch_gt911_service(const struct od_config *cfg, uint32_t now_ms,

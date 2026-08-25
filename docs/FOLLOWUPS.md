@@ -1266,3 +1266,40 @@ it has proven no newer request replaced.
 Low severity: one dropped boost degrades latency, not correctness of any wire content, and the
 window is three seconds wide so a repeat event recovers it. Fix when the boost gains a second
 implementation, since a correct pattern should be established before it is copied.
+
+---
+
+## 21. `Firmware` / `Firmware_Unified` — a GT911 whose point block never answers retries for ever
+
+Found 2026-08-25 in review of the shared touch promotion. **Sibling defect, inherited deliberately
+rather than fixed**, so the promotion is behaviour-preserving; recorded so it reads as a decision.
+
+The poll reads the status register, then reads the 8-byte point block only when the status says a
+contact is present. A successful status read resets the failure streak:
+
+```c
+rt->fail_streak = 0u;                       /* status read succeeded */
+...
+if (!gt911_read(..., GT911_REG_POINT1, p, sizeof p, high_first)) {
+    rt->fail_streak++;                      /* point read failed: streak is now 1 */
+```
+
+So a part whose status register answers and whose point block does not increments the streak to
+one, and has it reset to zero by the next pass's successful status read. **The five-failure
+disable threshold is unreachable on that path**, and the controller retries indefinitely at the
+100 ms backoff. Only a failing *status* read can ever disable a controller.
+
+A second, narrower case: `gt911_clear_status()` discards its write result, so a part that reads
+but cannot be written keeps its buffer-ready bit set and — per the GT911 Programming Guide Rev.10
+§ 5 p.28 — keeps pulsing INT, again without contributing to the disable state.
+
+**Why it is not fixed here.** Both are the authority's behaviour (`Firmware/src/touch_input.cpp`),
+and the promotion's contract is to preserve it. Making the point-read path count toward the
+threshold would disable controllers that the field currently tolerates — a partial read failure is
+recoverable and common on a marginal bus, where a status failure is not. Changing it is a product
+decision about whether a half-working touch panel should go quiet, and it needs a board to
+evaluate, which this fleet does not have.
+
+Neither case is reachable in the host suite: the fault injection fails the status read first, so it
+exercises the path that *does* disable. A test for this would have to fail one register and not the
+other, which is worth adding whenever the behaviour is revisited.

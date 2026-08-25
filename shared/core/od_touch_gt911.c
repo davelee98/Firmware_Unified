@@ -479,8 +479,23 @@ static bool touch_bring_up(uint8_t idx, const struct od_config *cfg,
         gt911_int_wake(t);
         touch_attach_int(idx, t, rt);
     }
-    od_log_info("Touch[%u]: GT911 @0x%02X %s%s", idx, addr,
-                rt->reg_high_first ? "BE" : "LE", rt->int_attached ? " INT+poll" : " poll");
+    {
+        /* The donor reads 12 bytes from 0x8140 and logs the resolution the part reports.
+         * Observability only -- nothing decodes it -- but it is the one line that tells a bench
+         * operator the part is answering with sane data rather than merely ACKing its address. */
+        uint8_t  info[12];
+        uint16_t xres = 0;
+        uint16_t yres = 0;
+
+        if (gt911_read(rt->bus_id, addr, GT911_REG_PID, info, sizeof info,
+                       rt->reg_high_first != 0u)) {
+            xres = (uint16_t)((uint16_t)info[6] | ((uint16_t)info[7] << 8));
+            yres = (uint16_t)((uint16_t)info[8] | ((uint16_t)info[9] << 8));
+        }
+        od_log_info("Touch[%u]: GT911 @0x%02X %s %ux%u%s", idx, addr,
+                    rt->reg_high_first ? "BE" : "LE", xres, yres,
+                    rt->int_attached ? " INT+poll" : " poll");
+    }
     return true;
 }
 
@@ -529,6 +544,7 @@ static uint32_t touch_service_one(uint8_t idx, const struct od_config *cfg,
 {
     const uint8_t interval = touch_interval(t);
     const bool    high_first = rt->reg_high_first != 0u;
+    uint32_t elapsed;
     bool     line_low = false;
     bool     timed = false;
     uint8_t  status = 0;
@@ -551,16 +567,22 @@ static uint32_t touch_service_one(uint8_t idx, const struct od_config *cfg,
             line_low = false;
         }
     }
-    timed = (uint32_t)(now_ms - rt->last_poll_ms) >= interval;
+    elapsed = (uint32_t)(now_ms - rt->last_poll_ms);
+    timed = elapsed >= interval;
     if (!edge && !timed && !line_low) {
-        return interval;
+        /* REMAINING, not the whole interval. Returning `interval` from a controller that is
+         * partway through one pushes its own deadline out on every pass it is polled early for
+         * another reason, so two controllers at 99 and 100 ms settle into ~198 ms polling. */
+        return (uint32_t)(interval - elapsed);
     }
     if (edge) {
         *consumed_edge = true;
     }
     if (!od_touch_app_bus_prepare(rt->bus_id)) {
-        rt->last_poll_ms = now_ms;
-        return interval;
+        /* last_poll_ms is NOT stamped: nothing was polled. Stamping it would make a controller
+         * whose bus is briefly unavailable wait its whole interval again instead of retrying on
+         * the next pass, which is what the authority does. */
+        return TOUCH_I2C_FAIL_BACKOFF_MS;
     }
     if (!gt911_read(rt->bus_id, rt->addr7, GT911_REG_STATUS, &status, 1u, high_first)) {
         if (rt->fail_streak < 255u) {
@@ -611,6 +633,11 @@ static uint32_t touch_service_one(uint8_t idx, const struct od_config *cfg,
                 rt->fail_streak++;
             }
             rt->last_fail_ms = now_ms;
+            /* THIS THRESHOLD IS UNREACHABLE FROM HERE, and that is inherited, not intended: the
+             * successful status read above resets the streak every pass, so a part whose status
+             * register answers and whose point block never does retries for ever. Kept because
+             * the authority does it and changing it would disable controllers the field currently
+             * tolerates; recorded in FOLLOWUPS 21. */
             if (rt->fail_streak >= TOUCH_I2C_FAIL_DISABLE_THRESHOLD) {
                 touch_disable(idx, t, rt, "too many I2C read failures");
                 return OD_TOUCH_IDLE_MS;
@@ -654,8 +681,11 @@ static uint32_t touch_service_one(uint8_t idx, const struct od_config *cfg,
 
 uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms)
 {
+    struct touch_runtime prior[OD_TOUCH_MAX_CONTROLLERS];
     uint8_t i;
     uint8_t up = 0;
+
+    memcpy(prior, s_rt, sizeof prior);
 
     for (i = 0; i < OD_TOUCH_MAX_CONTROLLERS; i++) {
         const struct TouchController *t = touch_cfg(cfg, i);
@@ -664,8 +694,10 @@ uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms)
             od_touch_app_gpio_detach_int(t->int_pin);
         }
     }
+    /* s_suspend IS DELIBERATELY NOT CLEARED. The donor's init does not touch its suspend counter
+     * either: a re-init that ran inside a refresh bracket would otherwise drop the outstanding
+     * suspend and let the next poll contend with the panel for the bus. */
     memset(s_rt, 0, sizeof s_rt);
-    s_suspend = 0u;
     if (cfg == NULL || cfg->touch_controller_count == 0u) {
         return OD_TOUCH_IDLE_MS;
     }
@@ -674,6 +706,29 @@ uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms)
 
         if (t == NULL) {
             continue;
+        }
+        /* A CONTROLLER THAT WAS ALREADY UP IS KEPT, not re-resolved. The donor does this and it
+         * is not an optimisation: the reset dance drives RST and INT, costs ~500 ms per
+         * controller, and re-selects an address that was already correct. Restored after review
+         * found it dropped. The IRQ is re-attached because the detach above removed it. */
+        if (prior[i].ok && prior[i].addr7 != 0u) {
+            s_rt[i] = prior[i];
+            s_rt[i].int_attached = 0u;
+            s_rt[i].disabled = 0u;
+            s_rt[i].fail_streak = 0u;
+            if (touch_bus_ok(cfg, t) && od_touch_app_bus_prepare(s_rt[i].bus_id)) {
+                gt911_clear_status(&s_rt[i]);
+                if (t->int_pin != 0xFFu) {
+                    gt911_int_wake(t);
+                    touch_attach_int(i, t, &s_rt[i]);
+                }
+                s_rt[i].last_poll_ms = now_ms;
+                od_log_info("Touch[%u]: kept GT911 @0x%02X", i, s_rt[i].addr7);
+                up++;
+                continue;
+            }
+            od_log_warn("Touch[%u]: bus restore failed; falling back to full bring-up", i);
+            memset(&s_rt[i], 0, sizeof s_rt[i]);
         }
         if (touch_bring_up(i, cfg, t, &s_rt[i], now_ms)) {
             up++;
@@ -731,16 +786,24 @@ uint32_t od_touch_gt911_resume(const struct od_config *cfg, uint32_t now_ms)
 {
     uint8_t i;
 
+    /* OD_TOUCH_NO_CHANGE, not an idle delay. A caller that installs a returned delay would
+     * otherwise push touch out a full second every time an unmatched resume ran -- and ESP32's
+     * abortToKnownState() force-resumes on EVERY teardown, including ordinary disconnects with
+     * nothing suspended. Doing nothing has to be reportable as doing nothing. */
     if (s_suspend == 0u) {
-        return OD_TOUCH_IDLE_MS;
+        return OD_TOUCH_NO_CHANGE;
     }
     s_suspend--;
     if (s_suspend != 0u) {
-        return OD_TOUCH_IDLE_MS;
+        return OD_TOUCH_NO_CHANGE;      /* still suspended: the schedule is not ours to move */
     }
     if (cfg == NULL || cfg->touch_controller_count == 0u) {
         return OD_TOUCH_IDLE_MS;
     }
+    /* The panel had the bus; anything the target cached about it is stale. Dropped here, inside
+     * the branch that is actually going to resume, so an unmatched resume cannot tear down a live
+     * bus -- and before the settle, so the wait happens on a bus that is coming back up. */
+    od_touch_app_bus_invalidate();
     od_touch_app_delay_ms(GT911_POST_RESET_SETTLE_MS);
     for (i = 0; i < OD_TOUCH_MAX_CONTROLLERS; i++) {
         const struct TouchController *t = touch_cfg(cfg, i);
@@ -764,7 +827,7 @@ uint32_t od_touch_gt911_resume(const struct od_config *cfg, uint32_t now_ms)
 uint32_t od_touch_gt911_force_resume(const struct od_config *cfg, uint32_t now_ms)
 {
     if (s_suspend == 0u) {
-        return OD_TOUCH_IDLE_MS;   /* idempotent by contract */
+        return OD_TOUCH_NO_CHANGE;   /* idempotent by contract, and silent about it */
     }
     /* Collapse and let the normal path do the work, so the re-establish sequence has one home. */
     s_suspend = 1u;

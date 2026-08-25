@@ -83,6 +83,11 @@ void od_touch_app_gpio_detach_int(uint8_t pin)
     od_hal_gpio_clear_irq(pin);
 }
 
+void od_touch_app_bus_invalidate(void)
+{
+    invalidateOpenDisplayWire();
+}
+
 bool od_touch_app_bus_prepare(uint8_t bus_id)
 {
     // This target caches one live IDF bus, so a transaction for another device's bus has to
@@ -126,18 +131,23 @@ void processTouchInput(void)
     if (transferActive()) {
         return;
     }
-    now = od_hal_uptime_ms();
-    if ((int32_t)(now - s_next_due_ms) < 0) {
-        return;
-    }
-
-    // Snapshot under the lock, service outside it: the shared machine reports which bits it acted
-    // on and this clears exactly those, so an edge that arrives mid-service survives to the next
-    // pass instead of being swallowed by a blanket clear.
+    // AN EDGE PULLS SERVICE FORWARD. Checking the deadline first would mean a controller
+    // scheduled 255 ms out could not be serviced by an interrupt until that expired -- the
+    // authority looks at pending interrupts every 100 ms, so gating on the deadline alone
+    // REGRESSES interrupt latency for any configured interval above it.
     od_hal_gpio_irq_lock();
     mask = s_irq_mask;
     od_hal_gpio_irq_unlock();
 
+    now = od_hal_uptime_ms();
+    if (mask == 0u && (int32_t)(now - s_next_due_ms) < 0) {
+        return;
+    }
+
+    // The shared machine reports which bits it acted on and this clears exactly those, so a bit
+    // for a controller it did not reach survives. A second edge from a controller it DID service
+    // does not -- the bit was already set, so the ISR's OR adds nothing -- and is recovered by
+    // the held-low check or the next timed poll, as on the donors.
     s_next_due_ms = now + od_touch_gt911_service(&globalConfig, now, mask, &consumed);
 
     if (consumed != 0u) {
@@ -152,20 +162,30 @@ void touchSuspendForEpdRefresh(void)
     od_touch_gt911_suspend();
 }
 
+// A RESUME THAT DID NOTHING MUST CHANGE NOTHING. OD_TOUCH_NO_CHANGE means the machine was not
+// suspended, or is still nested -- and abortToKnownState() force-resumes on EVERY teardown,
+// including ordinary disconnects with nothing suspended. Invalidating the bus and installing a
+// delay there would postpone actively polling touch by up to a second on each one.
+static void touch_apply_resume(uint32_t delay_ms, uint32_t now)
+{
+    if (delay_ms == OD_TOUCH_NO_CHANGE) {
+        return;
+    }
+    s_next_due_ms = now + delay_ms;
+}
+
 void touchResumeAfterEpdRefresh(void)
 {
     const uint32_t now = od_hal_uptime_ms();
 
-    invalidateOpenDisplayWire();
-    s_next_due_ms = now + od_touch_gt911_resume(&globalConfig, now);
+    touch_apply_resume(od_touch_gt911_resume(&globalConfig, now), now);
 }
 
 void touchForceResume(void)
 {
     const uint32_t now = od_hal_uptime_ms();
 
-    invalidateOpenDisplayWire();
-    s_next_due_ms = now + od_touch_gt911_force_resume(&globalConfig, now);
+    touch_apply_resume(od_touch_gt911_force_resume(&globalConfig, now), now);
 }
 
 bool touch_input_gpio_is_touch_int(uint8_t pin)

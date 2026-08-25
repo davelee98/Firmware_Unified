@@ -297,9 +297,10 @@ add_test(NAME sensor_bq27220 COMMAND od_sensor_bq27220_test)
 # written from the donor's format comment BEFORE the packing code, because that comment is the only
 # normative description of the layout that exists and three independent hosts implement it.
 #
-# The map cases are the ones worth reading: a driver that applies the coordinate transform at pack
-# time instead of before caching passes every live-contact case and fails the latched release,
-# which is exactly the defect that got the first attempt rejected.
+# The map cases are the ones worth reading, and the obvious probe does NOT work: a driver that
+# caches raw and maps at pack time re-maps the cached value to the same pixel, so the latched
+# release agrees byte for byte. What separates them is change detection -- two raw coordinates that
+# CLIP to the same pixel are one sample with the map before the cache and two after it.
 add_executable(od_touch_gt911_test
     touch_gt911_test.c
     od_log_test_stub.c)
