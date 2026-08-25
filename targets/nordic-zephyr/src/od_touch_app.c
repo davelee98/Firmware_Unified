@@ -60,10 +60,12 @@ int od_touch_app_gpio_read(uint8_t pin)
 	uint8_t port;
 	uint8_t p;
 
-	/* ASK BEFORE READING. od_gpio_read() folds every failure to 0 by design -- callers test it
-	 * as a boolean and an errno would read as HIGH -- so "unreadable" and LOW are the same value
-	 * there. The driver treats < 0 as "no level"; the charger seam is the standing example of
-	 * what conflating the two costs (DIVERGENCE_MATRIX 21). */
+	/* ASK BEFORE READING -- but only about the pin ENCODING, which is all this can answer.
+	 * od_gpio_read() folds every failure to 0 by design (callers test it as a boolean, and an
+	 * errno would read as HIGH), so a gpio_pin_get() that fails on a pin which DOES decode is
+	 * still indistinguishable from LOW here. On the shipped nRF driver that is latent --
+	 * gpio_nrfx_port_get_raw() always succeeds -- but it is a real limit of this seam, not a
+	 * distinction it makes. Compare DIVERGENCE_MATRIX 21, where the same fold was live. */
 	if (!od_pin_decode(pin, &port, &p)) {
 		return -1;
 	}
@@ -152,13 +154,12 @@ void opendisplay_touch_process(void)
 void opendisplay_touch_resume_after_refresh(void)
 {
 	const uint32_t now = k_uptime_get_32();
-	const uint32_t delay = od_touch_gt911_resume(opendisplay_get_global_config(), now);
 
-	/* OD_TOUCH_NO_CHANGE means the machine was not suspended, or is still nested. Installing a
-	 * delay there would postpone a controller that is actively polling. */
-	if (delay != OD_TOUCH_NO_CHANGE) {
-		s_next_due_ms = now + delay;
-	}
+	/* REESTABLISH, NOT RESUME. This target's refresh hook is unpaired -- there is one call site
+	 * (opendisplay_display.cpp) and no suspend anywhere -- so the suspend-counted resume() would
+	 * do nothing at all here. The deleted implementation probed the retained PID unconditionally
+	 * and fell back to a full reset, which is what this restores. */
+	s_next_due_ms = now + od_touch_gt911_reestablish(opendisplay_get_global_config(), now);
 }
 
 bool opendisplay_touch_gpio_is_touch_int(uint8_t pin)

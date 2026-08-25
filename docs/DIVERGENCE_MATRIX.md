@@ -997,3 +997,69 @@ returned level for an error code is dead code on both targets; the adapters ask 
 
 **Not hardware-qualified.** No board has confirmed the corrected reading; the row is open in
 docs/HARDWARE_VERIFICATION_CHECKLIST.md.
+
+---
+
+## 23. GT911 — waking INT destroyed the interrupt, and both donors re-attached only if they thought it was gone (fixed 2026-08-25)
+
+Found in review of the shared touch promotion. **A deliberate departure from both donors**, and
+the only behaviour change the promotion makes to a working controller.
+
+Every resume path wakes the interrupt line before re-attaching:
+
+```c
+gt911_int_wake(t);                       /* drive INT high, delay, reconfigure as input */
+if (!rt->int_irq_attached) {             /* <-- still 1, so the attach is SKIPPED */
+    attach_touch_int(idx, t->int_pin);
+}
+```
+— `Firmware/src/touch_input.cpp`, and identically in both ports before this promotion.
+
+**Reconfiguring the pad destroys the trigger on both stacks.** Zephyr's `gpio_pin_configure()`
+removes the existing trigger and frees the GPIOTE channel; ESP-IDF's `gpio_config()` here sets
+`intr_type = GPIO_INTR_DISABLE`. So after the wake the hardware has no interrupt, while
+`int_irq_attached` still says it has one — and the guard then declines to restore it.
+
+| | Both donors | Shared |
+|---|---|---|
+| After a resume's INT wake | flag says attached, hardware trigger gone | re-attached |
+| Edges advance service | no | yes |
+| Recovery | timed poll and held-low check only | interrupt-driven again |
+
+**It is a latency regression, not a loss of function**, which is why it survived: the timed poll
+and the held-low check still deliver every sample, so touch keeps working and simply stops being
+interrupt-driven after the first panel refresh. Nothing in a log distinguishes that from a quiet
+panel.
+
+The fix puts the clear where the damage is done — `gt911_int_wake()` takes the runtime and clears
+`int_attached` itself, because the function that reconfigures the pad is the one that knows the
+trigger is gone. `tests/host/touch_gt911_test.c` models the destruction in its GPIO fake, so a
+driver that reverts to the donor form fails.
+
+**Not hardware-qualified.** ESP32 is the only target that can exercise it.
+
+---
+
+## 24. GT911 post-refresh recovery — ESP32 brackets it, Nordic does not (recorded 2026-08-25)
+
+The two ports drive the same recovery from different shapes, which the promotion had to serve
+without picking one.
+
+| | `esp32-idf` | `nordic-zephyr` |
+|---|---|---|
+| Before a refresh | `touchSuspendForEpdRefresh()`, nestable | nothing |
+| After a refresh | `touchResumeAfterEpdRefresh()`, balanced | one unconditional call |
+| Teardown | `touchForceResume()` collapses any depth | nothing |
+
+The first cut of the shared machine offered only a suspend-counted `resume()`, which fits ESP32
+and makes Nordic's recovery a **silent no-op** — its hook would return without probing anything,
+so a controller disturbed by the panel stayed disturbed until enough status reads failed to
+disable it. Review caught it before any board ran the code.
+
+`od_touch_gt911_reestablish()` is therefore a separate entry point: unconditional, with no
+reference to the suspend count. ESP32 keeps the counted `resume()`/`force_resume()` pair because
+its brackets are real and its teardown force-resumes on paths that may not have suspended.
+
+**Neither shape was normalised**, deliberately. Making Nordic suspend before a refresh would be a
+behaviour change on a target where the refresh path was never audited for pairing — an unbalanced
+suspend wedges touch for the rest of the boot, which is a worse failure than the one being fixed.

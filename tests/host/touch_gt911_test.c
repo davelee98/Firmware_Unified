@@ -219,11 +219,23 @@ static bool     g_attach_ok = true;
 static unsigned g_attached;
 static unsigned g_detached;
 
+/* Reconfiguring a pad as an input destroys its interrupt on BOTH stacks -- Zephyr frees the
+ * GPIOTE channel, IDF sets intr_type = DISABLE. The fake models that, so a driver that fails to
+ * re-attach after waking INT is visible here rather than only on a bench. */
+static bool     g_int_trigger_armed;
+
 void od_touch_app_delay_ms(uint16_t ms) { (void)ms; }
 void od_touch_app_delay_us(uint32_t us) { (void)us; }
 
 void od_touch_app_gpio_set_mode_output(uint8_t pin) { trace("out:%u", pin, 0); }
-void od_touch_app_gpio_config_input(uint8_t pin, bool pull_up) { (void)pull_up; trace("in:%u", pin, 0); }
+void od_touch_app_gpio_config_input(uint8_t pin, bool pull_up)
+{
+    (void)pull_up;
+    trace("in:%u", pin, 0);
+    if (pin == PIN_INT) {
+        g_int_trigger_armed = false;      /* the reconfigure ate the trigger */
+    }
+}
 /* INT's LEVEL AT RST'S RISING EDGE SELECTS THE ADDRESS, exactly as Rev.10 4.2 describes: high
  * selects 7-bit 0x14, low selects 0x5D. Modelling it is what makes the auto-detect tests real --
  * before this the fake answered on a fixed address and a driver that skipped the reset dance
@@ -261,6 +273,7 @@ bool od_touch_app_gpio_attach_int(uint8_t idx, uint8_t pin)
         return false;
     }
     g_attached++;
+    g_int_trigger_armed = true;
     return true;
 }
 void od_touch_app_gpio_detach_int(uint8_t pin) { (void)pin; g_detached++; }
@@ -835,6 +848,50 @@ static void test_retained_runtime_reinit(void)
     CHECK(trace_has("bus:3"));              /* it tried */
 }
 
+/* Both found by review of the Nordic half, and neither was covered by the 88 checks that
+ * preceded them -- the mutants undoing them passed. */
+static void test_reestablish_and_int_rearm(void)
+{
+    /* Nordic's post-refresh hook is UNPAIRED: one call site, no suspend anywhere. Gating recovery
+     * on the suspend count made it a silent no-op there, so the controller was never re-probed
+     * after the panel took the bus. */
+    CASE("reestablish works with nothing suspended");
+    setup(0u, 0u, 0x5Du, 0xFFu);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    g_trace_len = 0;
+    CHECK(od_touch_gt911_reestablish(&g_cfg, 2000u) != OD_TOUCH_NO_CHANGE);
+    CHECK(trace_has("bus:invalidate"));
+    CHECK(trace_has("clear:status"));            /* the part WAS re-acknowledged */
+    CHECK(od_touch_gt911_address(0) == 0x5Du);
+
+    CASE("reestablish falls back to a full reset when the part stops answering");
+    g_part.regs[0x8140u - GT911_REG_BASE] = 'X';
+    g_saw_rst_rise = false;
+    (void)od_touch_gt911_reestablish(&g_cfg, 3000u);
+    CHECK(g_saw_rst_rise);
+
+    /* Waking INT reconfigures the pad, which destroys the interrupt on both stacks. Re-attaching
+     * only `if (!int_attached)` left the flag saying attached while the hardware trigger was
+     * gone: edges stopped advancing service and only the timed poll survived. */
+    CASE("the interrupt is RE-ARMED after a resume, not assumed still attached");
+    setup(0u, 0u, 0x5Du, PIN_INT);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    CHECK(g_int_trigger_armed);
+    (void)od_touch_gt911_reestablish(&g_cfg, 2000u);
+    CHECK(g_int_trigger_armed);
+
+    CASE("and an edge still reaches the machine afterwards");
+    {
+        uint8_t consumed = 0u;
+
+        part_set_contact(1u, 0u, 9u, 9u);
+        (void)od_touch_gt911_service(&g_cfg, 2005u, 0x01u, &consumed);
+        CHECK(consumed == 0x01u);
+    }
+}
+
 static void test_int_pin_query(void)
 {
     CASE("a configured INT pin is recognised");
@@ -863,6 +920,7 @@ int main(void)
     test_suspend_resume();
     test_no_change_and_retry_latency();
     test_retained_runtime_reinit();
+    test_reestablish_and_int_rearm();
     test_int_pin_query();
 
     printf("touch_gt911: %u checks, %u failures\n", g_checks, g_fails);

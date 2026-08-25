@@ -269,7 +269,15 @@ static void gt911_hw_reset(const struct TouchController *t, bool int_low_for_5d)
     od_touch_app_gpio_config_input(t->int_pin, true);
 }
 
-static void gt911_int_wake(const struct TouchController *t)
+/* RECONFIGURING THE PIN DESTROYS ITS INTERRUPT, so this clears the runtime's record of one.
+ *
+ * Both stacks do it: Zephyr's gpio_pin_configure() removes the existing trigger and frees the
+ * GPIOTE channel, and IDF's gpio_config() here sets intr_type = DISABLE. Both donors nevertheless
+ * re-attach only `if (!int_irq_attached)`, so after a panel refresh the flag still said attached
+ * while the hardware trigger was gone -- edges stopped advancing service, leaving only the timed
+ * poll and the held-low check, which is a latency regression nobody would attribute to the wake.
+ * DIVERGENCE_MATRIX 23. */
+static void gt911_int_wake(const struct TouchController *t, struct touch_runtime *rt)
 {
     if (t->int_pin == 0xFFu) {
         return;
@@ -278,6 +286,7 @@ static void gt911_int_wake(const struct TouchController *t)
     od_touch_app_gpio_write(t->int_pin, true);
     od_touch_app_delay_ms(10u);
     od_touch_app_gpio_config_input(t->int_pin, true);
+    rt->int_attached = 0u;
 }
 
 static void touch_apply_enable_pin(const struct TouchController *t)
@@ -476,7 +485,7 @@ static bool touch_bring_up(uint8_t idx, const struct od_config *cfg,
     rt->last_poll_ms = now_ms;
     gt911_clear_status(rt);
     if (t->int_pin != 0xFFu) {
-        gt911_int_wake(t);
+        gt911_int_wake(t, rt);
         touch_attach_int(idx, t, rt);
     }
     {
@@ -521,7 +530,7 @@ static bool touch_light_resume(uint8_t idx, const struct TouchController *t,
     rt->latched = 0u;
     gt911_clear_status(rt);
     if (t->int_pin != 0xFFu) {
-        gt911_int_wake(t);
+        gt911_int_wake(t, rt);
         touch_attach_int(idx, t, rt);
     }
     return true;
@@ -719,7 +728,7 @@ uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms)
             if (touch_bus_ok(cfg, t) && od_touch_app_bus_prepare(s_rt[i].bus_id)) {
                 gt911_clear_status(&s_rt[i]);
                 if (t->int_pin != 0xFFu) {
-                    gt911_int_wake(t);
+                    gt911_int_wake(t, &s_rt[i]);
                     touch_attach_int(i, t, &s_rt[i]);
                 }
                 s_rt[i].last_poll_ms = now_ms;
@@ -784,8 +793,6 @@ void od_touch_gt911_suspend(void)
 
 uint32_t od_touch_gt911_resume(const struct od_config *cfg, uint32_t now_ms)
 {
-    uint8_t i;
-
     /* OD_TOUCH_NO_CHANGE, not an idle delay. A caller that installs a returned delay would
      * otherwise push touch out a full second every time an unmatched resume ran -- and ESP32's
      * abortToKnownState() force-resumes on EVERY teardown, including ordinary disconnects with
@@ -800,9 +807,19 @@ uint32_t od_touch_gt911_resume(const struct od_config *cfg, uint32_t now_ms)
     if (cfg == NULL || cfg->touch_controller_count == 0u) {
         return OD_TOUCH_IDLE_MS;
     }
-    /* The panel had the bus; anything the target cached about it is stale. Dropped here, inside
-     * the branch that is actually going to resume, so an unmatched resume cannot tear down a live
-     * bus -- and before the settle, so the wait happens on a bus that is coming back up. */
+    return od_touch_gt911_reestablish(cfg, now_ms);
+}
+
+uint32_t od_touch_gt911_reestablish(const struct od_config *cfg, uint32_t now_ms)
+{
+    uint8_t i;
+
+    if (cfg == NULL || cfg->touch_controller_count == 0u) {
+        return OD_TOUCH_IDLE_MS;
+    }
+    /* The panel had the bus; anything the target cached about it is stale. Dropped here rather
+     * than in the caller, because only this function knows a re-establish is actually happening --
+     * and before the settle, so the wait happens on a bus that is coming back up. */
     od_touch_app_bus_invalidate();
     od_touch_app_delay_ms(GT911_POST_RESET_SETTLE_MS);
     for (i = 0; i < OD_TOUCH_MAX_CONTROLLERS; i++) {

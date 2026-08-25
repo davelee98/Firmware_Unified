@@ -423,15 +423,18 @@ adv_boost_one_entry_point() {
 }
 check "advertising: one boost entry point" adv_boost_one_entry_point
 
-# PERMANENT. One GT911 driver. Derived from targets/ rather than a fixed file list, so a fourth
-# target cannot arrive with its own parser -- which is exactly how this one ended up implemented
-# twice, once per port, with the two disagreeing about the over-count wedge and the read framings.
+# PERMANENT, AND IT CATCHES A TRANSCRIPTION, NOT A REIMPLEMENTATION. Derived from targets/ rather
+# than a fixed file list so a fourth target is in scope from the day it arrives -- which matters,
+# because this driver reached two ports by being copied, and the copies then disagreed about the
+# over-count wedge and the read framings.
 #
-# Register constants are the tell: a target that decodes 0x814E, walks the 8-byte point block or
-# maps coordinates is doing the driver's job. od_touch_app.c is the seam and holds none of it.
+# What it actually detects is the constants and helper names a copy carries over. A determined
+# reimplementation using lowercase 0x814e, computed register addresses, renamed helpers or a bare
+# `status & 0x80` passes. Do not read this as proof that only one parser exists; it is a tripwire
+# on the cheapest way to grow a second one. od_touch_app.c is the seam and holds none of it.
 touch_one_gt911_driver() {
     absent_or_fail "target-side GT911 register policy returned; shared od_touch_gt911 owns it" \
-        '(0x814[EF]|GT911_REG_|GT911_MAX_CONTACTS|gt911_hw_reset|apply_touch_map)' \
+        '(0[xX]814[EeFf]|GT911_REG_|GT911_MAX_CONTACTS|gt911_hw_reset|apply_touch_map)' \
         targets
 }
 check "touch: one GT911 driver" touch_one_gt911_driver

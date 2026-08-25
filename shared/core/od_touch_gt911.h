@@ -76,8 +76,18 @@ void od_touch_gt911_suspend(void);
  * working controller does not need its address re-selected. Returns the next-service delay. */
 uint32_t od_touch_gt911_resume(const struct od_config *cfg, uint32_t now_ms);
 
-/* Collapse the suspend count and resume now, whatever its depth. Idempotent. */
+/* Collapse the suspend count and resume now, whatever its depth. Idempotent: returns
+ * OD_TOUCH_NO_CHANGE and does nothing when nothing was suspended. */
 uint32_t od_touch_gt911_force_resume(const struct od_config *cfg, uint32_t now_ms);
+
+/* Re-establish every controller NOW, with no reference to the suspend count.
+ *
+ * FOR A TARGET WHOSE REFRESH HOOK IS UNPAIRED. ESP32 brackets a panel refresh with
+ * suspend()/resume() and its teardown path force-resumes, so the count is the right gate there.
+ * Nordic has a single post-refresh call and no suspend at all, so gating on the count makes its
+ * recovery a silent no-op -- which is what happened when this driver was promoted, and is why
+ * this entry point exists rather than the two targets sharing one that fits neither. */
+uint32_t od_touch_gt911_reestablish(const struct od_config *cfg, uint32_t now_ms);
 
 /* True when `pin` is a configured controller's interrupt pin, so a target's ISR plumbing can ask
  * whether an edge belongs to touch without duplicating the config walk. */
