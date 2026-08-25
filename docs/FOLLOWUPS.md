@@ -1066,7 +1066,7 @@ MSD refresh interval. It needs its own change and its own hardware gate.
 
 ---
 
-## 17. `Firmware` / `Firmware_Unified` ESP32 — an over-count GT911 status wedges touch permanently
+## 17. `Firmware` / `Firmware_Unified` ESP32 — an over-count GT911 status wedges touch until a lifecycle event
 
 Found 2026-08-24 while settling the sensor-seam plan's Q7. **Sibling repository, so the `Firmware`
 half is reported, not fixed.**
@@ -1177,7 +1177,7 @@ Every implementation reads it the other way round:
 return activeLow ? (level == HIGH) : (level == LOW);
 ```
 — `Firmware/src/sensor_bq27220.cpp:120`, and identically in both `Firmware_Unified` ports before
-this promotion, now preserved in both `od_sensor_app` charger seams.
+this promotion. **Removed from both ports on 2026-08-24** — see § 19.1; `../Firmware` keeps it.
 
 **Both branches are backwards.** With the flag set, the contract says charging is LOW and the code
 reports charging on HIGH. With the flag clear — active-high, so charging is HIGH — the code reports
@@ -1210,10 +1210,19 @@ not one, because a plain inversion passes any test that checks a single flag val
 this survived a suite of 56 checks. Re-introducing the original operator fails 4 assertions;
 ignoring the flag fails 4; inverting the *enable* polarity fails 3.
 
-**One host-visible behaviour change beyond the polarity:** a state-pin read that fails now reports
-UNKNOWN rather than a level. Both ports previously compared the raw `int` against `0` or `1`, so a
-negative error code silently became "not charging". The MSD byte is unchanged either way — unknown
-packs as not-charging — so this is a clarity fix, not a wire change.
+**An unreadable state pin reports UNKNOWN, and getting there needed more than testing the read.**
+The first cut of this change tested the returned level for a negative error code, which **cannot
+fire on either target**: Nordic's `od_gpio_read()` deliberately converts every failure to `0`
+(callers test it as a boolean, so an errno would read as HIGH), and ESP32's returns `0` for a pin
+it rejects. So a failed read is indistinguishable from LOW at this seam — and once the polarity is
+correct, **LOW is charging on an active-low board**. The dead check would have left an unusable
+charge-state pin advertising the charger as connected, which is worse than the bug being fixed.
+
+Both adapters now ASK before reading — `od_pin_decode()` on Nordic, and a newly exported
+`od_hal_gpio_pin_valid()` on ESP32 — and return UNKNOWN when the pin cannot produce a level. A
+runtime `gpio_pin_get()` failure on a *decodable* pin remains undetectable at this seam and still
+presents as LOW; closing that needs a HAL read that can report failure, which is a contract change
+for every caller of those readers and is not made here.
 
 **STILL OUTSTANDING, and the code change does not close it:** the config audit. A board whose
 `charger_flags` was set by observation rather than from the BQ25616 datasheet was compensating for
@@ -1221,3 +1230,39 @@ the inverted code, and **that board now reads backwards**. Enumerate provisioned
 bit 1 on any that were tuned against the old firmware. `py-opendisplay` needs no change — it
 carries `charger_flags` through its parser, serializer and model but never interprets bit 1, so the
 host reports whatever the MSD says.
+
+---
+
+## 20. `Firmware_Unified` / nordic-zephyr — the advertising-boost request is published as a data race
+
+Found 2026-08-24 in review of the `od_adv_app_boost()` seam. **Pre-existing: the seam renamed the
+function, it did not change the body or add a caller context.** Recorded because the new shared
+header states an ISR-safety contract, and this implementation does not meet the strict form of it.
+
+`od_adv_app_boost()` writes two ordinary objects from ISR and callback context
+(`opendisplay_ble.c:962`):
+
+```c
+s_adv_boost_start_ms = k_uptime_get_32();
+s_adv_boost_on = true;
+```
+
+The loop thread reads both in `adv_boost_active()` and **also writes** `s_adv_boost_on = false`
+when it applies a non-boost interval (`:752`). Neither side is atomic and neither carries an
+ordering constraint, so this is a C data race and formally undefined behaviour.
+
+**The practical failure is a lost renewal, not a torn word.** An aligned 32-bit load will not tear
+on these cores, but the two fields are not published together: the loop can observe `on == true`
+alongside a stale timestamp, decide the window has expired, and clear the flag over a request that
+arrived microseconds earlier. The symptom is one missed boost — a button or touch event that does
+not get its fast-advertising window — which is exactly the failure the boost exists to prevent, and
+is indistinguishable from the event simply not having been noticed.
+
+**`volatile` does not fix it.** It removes the compiler's licence to cache but supplies no
+atomicity across the pair and no ordering. What is needed is a single coherent publication — a
+generation counter or a deadline written as one atomic word — with the loop clearing only a value
+it has proven no newer request replaced.
+
+Low severity: one dropped boost degrades latency, not correctness of any wire content, and the
+window is three seconds wide so a repeat event recovers it. Fix when the boost gains a second
+implementation, since a correct pattern should be established before it is copied.

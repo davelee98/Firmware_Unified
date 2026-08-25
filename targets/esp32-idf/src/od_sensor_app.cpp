@@ -66,11 +66,13 @@ bool od_sensor_app_bq_state_level(bool *level_high)
     if (!validPin(st) || level_high == nullptr) {
         return false;      // no state pin: UNKNOWN, not "not charging"
     }
-    const int level = od_hal_gpio_read(st);
-
-    if (level < 0) {
-        return false;      // a failed read is unknown too, not a level
+    // ASK BEFORE READING. od_hal_gpio_read() returns 0 for a pin it cannot read, so a failure is
+    // indistinguishable from LOW at this call site -- and LOW is CHARGING on an active-low board,
+    // so an unusable pin would advertise the charger as connected. Testing the read's result
+    // cannot catch that; only asking first can.
+    if (!od_hal_gpio_pin_valid(st)) {
+        return false;      // unreadable: UNKNOWN, not a level
     }
-    *level_high = (level != 0);
+    *level_high = (od_hal_gpio_read(st) != 0);
     return true;
 }

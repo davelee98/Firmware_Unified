@@ -57,7 +57,8 @@ bool od_sensor_app_bq_state_level(bool *level_high)
 {
 	const struct od_config *cfg = opendisplay_get_global_config();
 	uint8_t st;
-	int level;
+	uint8_t port;
+	uint8_t pin;
 
 	if (cfg == NULL || level_high == NULL) {
 		return false;
@@ -66,10 +67,14 @@ bool od_sensor_app_bq_state_level(bool *level_high)
 	if (!valid_pin(st)) {
 		return false;      /* no state pin: UNKNOWN, not "not charging" */
 	}
-	level = od_gpio_read(st);
-	if (level < 0) {
-		return false;      /* a failed read is unknown too, not a level */
+	/* ASK BEFORE READING. od_gpio_read() returns 0 for a pin it cannot decode or get -- its own
+	 * comment defends that, because callers test the result as a boolean and an errno would read
+	 * as HIGH. So a failure is indistinguishable from LOW here, and LOW is CHARGING on an
+	 * active-low board: an undecodable pin would advertise the charger as connected. Testing the
+	 * result cannot catch that; only asking first can. */
+	if (!od_pin_decode(st, &port, &pin)) {
+		return false;      /* unreadable: UNKNOWN, not a level */
 	}
-	*level_high = (level != 0);
+	*level_high = (od_gpio_read(st) != 0);
 	return true;
 }

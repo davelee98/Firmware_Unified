@@ -56,6 +56,15 @@ void od_hal_gpio_write(uint8_t cfg, bool level_high);
  * Arduino-ESP32 gives, so no call site's sense of "not pressed" changes. */
 int od_hal_gpio_read(uint8_t cfg);
 
+/* Whether od_hal_gpio_read() can produce a LEVEL for this pin at all.
+ *
+ * Exported because od_hal_gpio_read() returns 0 for an unusable pin, deliberately -- callers test
+ * its result as a boolean, so surfacing an error code there would read as HIGH. That makes "read
+ * failed" indistinguishable from LOW at the call site, and a caller for which those two mean
+ * OPPOSITE things (see od_sensor_app_bq_state_level: LOW is charging on an active-low board) has
+ * to ask first. */
+bool od_hal_gpio_pin_valid(uint8_t cfg);
+
 /* Edge to interrupt on. NAMED, unlike docs/SHARED_API_DESIGN.md's config_irq(), which is
  * specified as edge-both with no mode argument. That is too narrow for the first real caller:
  * the GT911 touch controller asserts INT active-low and is attached FALLING, and an edge-both

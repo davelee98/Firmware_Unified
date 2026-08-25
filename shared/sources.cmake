@@ -229,17 +229,17 @@ set(OD_SHARED_SOURCES_APP_SENSOR
     "${CMAKE_CURRENT_LIST_DIR}/core/od_sensor_bq27220.c"
 )
 
-# APP_TOUCH IS DELIBERATELY EMPTY AND NOT IN THE AGGREGATE.
+# APP_TOUCH IS DECLARED, EMPTY, AND NOT IN THE AGGREGATE.
 #
-# shared/core/od_touch_gt911.c exists but is a REJECTED DRAFT (its own header says so). Listing it
-# here put it in the aggregate, which targets/esp32-idf consumes -- so a file marked DO NOT MERGE
-# was being compiled into every ESP32 build, surviving only because --gc-sections discarded it and
-# because nothing implements the od_touch_app seam it references.
+# The first shared GT911 driver failed review and was deleted rather than parked here: while it was
+# listed it built into every ESP32 image, surviving only on --gc-sections, and once delisted it
+# became a shared/ source belonging to no list -- the exact thing the one-list rule above exists to
+# prevent. Its review findings are the specification for the next attempt
+# (plans/PLAN_SENSOR_SEAM_2026-08-23.md step 8) and git holds the code.
 #
-# That is not a safe place to leave a draft: the day someone implements the seam, an unreviewed
-# driver that publishes RAW GT911 coordinates instead of mapped, clipped panel pixels starts
-# linking. The tier stays declared so the next attempt has somewhere to land, and stays empty and
-# out of the aggregate until a driver passes review.
+# The tier stays declared and empty so the next driver has somewhere to land, and so a consumer
+# naming it does not fail on an undefined variable.
+set(OD_SHARED_SOURCES_APP_TOUCH)
 
 # HAL_LOG owns portable record formatting. Enabled targets must implement od_hal_log and
 # od_hal_time; OD_CAP_LOG=0 compiles explicit no-op entry points with no HAL references or state.

@@ -2,8 +2,14 @@
  *
  * ONE SEAM FOR EVERY EVENT SOURCE. Buttons, touch, NFC and connection-lifecycle edges all want
  * the same thing and used to say it in per-target words -- Nordic had a private BLE-module name
- * called from four places, ESP32 an empty BleTransport method called from one, and shared code
- * could not say it at all. Both names are retired; git holds them.
+ * called from five places, BG22 a static one called from its button publish, ESP32 an empty
+ * BleTransport method called from one, and shared code could not say it at all. All three names
+ * are retired; git holds them.
+ *
+ * BG22's existence is the reason the ratchet matches a SHAPE rather than a list of names: the
+ * first version of this seam missed it entirely, because the ESP32 comment it was written against
+ * claimed the fast-advertising window was nRF-only. It is not -- BG22 boosts 20-30 ms against a
+ * 1000 ms idle, as Nordic does.
  *
  * WHY IT IS NOT IN od_hal_adv.h. That header's contract is "called from the application loop,
  * never from a stack callback" -- od_adv_control is single-owner by design and its HAL ops
@@ -11,10 +17,15 @@
  * NFC callback, GPIO edges) and MUST stay safe there. Putting the two contracts in one header is
  * how someone ends up calling od_hal_adv_start() from an ISR.
  *
- * THE IMPLEMENTATION CONTRACT IS THEREFORE NARROW: set a plain flag or a timestamp and return.
- * Do not call into od_adv_control, do not touch the stack, do not take a lock, do not log. The
- * loop notices on its next pass. Nordic's implementation is the reference for how little this is
- * allowed to do.
+ * THE IMPLEMENTATION CONTRACT IS THEREFORE NARROW: publish a request and return. Do not call into
+ * od_adv_control, do not touch the stack, do not take a lock, do not log. The loop notices on its
+ * next pass.
+ *
+ * "PUBLISH", NOT "SET A FLAG" -- the distinction is not pedantry. Nordic's implementation writes
+ * two plain objects that the loop thread reads and also clears, which is a data race the seam
+ * inherited rather than introduced, and it can lose a renewal that arrives as the loop expires the
+ * window. It is the existing implementation, not the reference for a new one; docs/FOLLOWUPS.md
+ * § 20 carries the fix. A target adding an implementation should publish atomically.
  *
  * A NO-OP IS A CORRECT IMPLEMENTATION, not a stub. A target already advertising fast enough for
  * an event to be seen has nothing to boost -- see the ESP32 implementation, which explains why

@@ -424,11 +424,12 @@ void processButtonEvents() {
             }
         }
         // ORDER IS LOAD-BEARING on a target with advertising-interval states: the publish
-        // chooses the interval, so a boost requested after it lands too late to affect the
-        // packet it exists for -- the press goes out slow and only the release goes out
-        // boosted, so a host sees "not pressed" reliably and "pressed" almost never. That is
-        // an nRF failure; ESP32's od_adv_app_boost() is a no-op and the order costs nothing
-        // here. Kept so the sequence is right wherever this code is read.
+        // chooses the interval there, so a boost requested after it lands too late to affect the
+        // packet it exists for -- the press goes out slow and only the release goes out boosted,
+        // so a host sees "not pressed" reliably and "pressed" almost never. THAT IS AN nRF
+        // FAILURE, not this target's: nothing here selects among interval states, and
+        // od_adv_app_boost() is a no-op. The order costs nothing and is kept so the sequence
+        // reads correctly wherever this code is.
         od_adv_app_boost();
         updatemsdata();
     }

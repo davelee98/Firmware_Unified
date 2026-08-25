@@ -217,17 +217,21 @@ shared `od_config` and passes explicit `bus_id` and address values to the HAL.
 The remaining target functions are:
 
 ```c
-/* od_sensor_app.h */
+/* od_sensor_app.h -- as landed. The two charger entries were designed as
+ * bq_enable(bool on) / bq_charging(bool *charging), taking and returning MEANINGS; step 7's
+ * review found both ports resolving OD_CHARGER_FLAG_* themselves and both getting the state
+ * flag backwards, so they now carry LEVELS and the shared driver owns the policy.
+ * DIVERGENCE_MATRIX 21. */
 void od_sensor_app_delay_ms(uint16_t delay_ms);
-bool od_sensor_app_bq_enable(bool on);
-bool od_sensor_app_bq_charging(bool *charging);
+bool od_sensor_app_bq_enable_drive(bool level_high);
+bool od_sensor_app_bq_state_level(bool *level_high);
 void od_sensor_app_msd_write(uint8_t index, uint8_t value);
 ```
 
-`od_sensor_app_bq_enable()` preserves the existing GPIO ordering: configure the output and then
-establish the active level. These are GPIO operations, not BQ register writes. An absent enable
-pin is a successful no-op. `od_sensor_app_bq_charging()` returns false when no state pin exists,
-so “unknown” remains distinct from “not charging”.
+`od_sensor_app_bq_enable_drive()` preserves the existing GPIO ordering: configure the output and
+then establish the level. These are GPIO operations, not BQ register writes. An absent enable pin
+is a successful no-op. `od_sensor_app_bq_state_level()` returns false when no state pin exists or
+the pin cannot produce a level, so “unknown” remains distinct from “not charging”.
 
 The shared public surface preserves the callers both targets have today while making config
 ownership explicit:
@@ -507,15 +511,20 @@ software candidate with its rows open.
       `opendisplay_ble_boost_advertising()` is called from touch only in `Firmware_NRF54`
       (`opendisplay_touch.c:698`) and in the port that inherited it here
       (`nordic-zephyr/src/opendisplay_touch.c:586`, on the `changed` edge). **`../Firmware` — the
-      authority — never calls it from touch on either transport.** Both repos call it from the
-      *button* path only.
+      authority — never calls it from touch on either transport**, though both it and
+      `Firmware_NRF54` call it from the *button* path. So the touch call exists in
+      `Firmware_NRF54` and here, and nowhere in the authority.
 
-      **And ESP32 cannot deliver it at all.** `BleTransport::boostAdvertising()` is an empty
-      no-op on ESP32 in both repos (`ble_transport_esp32.cpp:549` here, `:586` upstream); the real
-      implementation is nRF-only (`Firmware/src/ble_transport_nrf.cpp:412`, a `s_advBoostUntil`
-      deadline restored in `tick()`). There is no `s_advBoostUntil` and no `applyAdvInterval()`
-      anywhere in the ESP32 tree — those names appear only inside `device_control.cpp`'s comment,
-      which is describing the **nRF** transport's state to explain an ordering bug found there.
+      **And ESP32 does not implement one.** `BleTransport::boostAdvertising()` is an empty no-op
+      on ESP32 in both repos (`ble_transport_esp32.cpp:549` here, `:586` upstream). There is no
+      `s_advBoostUntil` and no `applyAdvInterval()` anywhere in the ESP32 tree — those names appear
+      only inside `device_control.cpp`'s comment, which describes the **nRF** transport's state to
+      explain an ordering bug found there.
+
+      **It is not "nRF-only", though, and an earlier form of this paragraph said so.** Review found
+      `efr32bg22-slc/opendisplay_ble.c` carrying a third, never-mentioned implementation —
+      `od_boost_advertising()`, a 20-30 ms window against a 1000 ms idle, called from its button
+      MSD publish. Two of the three targets this repo builds already boost; only ESP32 does not.
 
       So this is not "ESP32 is missing a feature the shared driver should carry down". It is a
       divergence the promotion has to resolve, and the CLAUDE.md default (`Firmware` wins over
@@ -528,18 +537,30 @@ software candidate with its rows open.
       **And ESP32 does not need one.** `od_ble_start_now()` leaves `itvl_min`/`itvl_max` at zero,
       so NimBLE substitutes `BLE_GAP_ADV_FAST_INTERVAL1_MIN`/`MAX` for connectable undirected
       advertising — **30 ms and 60 ms**, because `CONFIG_BT_NIMBLE_HIGH_DUTY_ADV_ITVL` is unset in
-      all 11 board baselines. That is permanently faster than the 20 ms window nRF opens for three
-      seconds after an event, so the failure the boost exists to fix is an nRF condition this
-      target structurally does not have.
+      all 11 board baselines. **The comparison is against the other targets' IDLE rate, not their
+      boosted one** — an earlier form of this paragraph got that backwards. `nordic-zephyr` idles
+      at 1000 ms and boosts to 20-30 ms; the Bluefruit nRF build in `../Firmware` idles at
+      160-1000 ms. ESP32's permanent 30-60 ms is within a factor of two of their *boosted* rate
+      and 17-33x their *idle* rate, so the failure the boost exists to fix — a slow idle state
+      that an event has to interrupt — is a condition this target does not have.
 
-      **RULING 2026-08-24: unify the seam; ESP32 keeps implementing it as a no-op.**
+      **RULING 2026-08-24: unify the seam; ESP32 keeps implementing it as a no-op.** This
+      REVERSES the reading recorded a few hours earlier in this same section, which had the
+      CLAUDE.md authority default pointing at *not* boosting from touch. Two facts moved it: the
+      interval arithmetic above (ESP32 has no slow state the boost would rescue, so "don't boost"
+      costs it nothing and gains it nothing), and BG22 — found in review to have a **third**
+      private boost, 20-30 ms against a 1000 ms idle. With two of three targets already boosting,
+      the question stopped being whether to adopt a Zephyr addition and became whether three
+      targets should keep spelling the same request three ways.
       `shared/core/od_adv_app.h` declares `od_adv_app_boost()`, and buttons, touch, NFC and
       connection edges all call that one name. Nordic forwards to its boost window; ESP32 defines
       it empty with the interval arithmetic above as the stated reason. The no-op is a per-target
       answer rather than an unimplemented stub — which is the point of routing it through a seam
       every linking target must define, instead of a shared caller silently doing nothing. Landed
-      ahead of the driver; the shared GT911 calls it on the `changed` edge. Ratcheted by
-      "advertising: one boost seam".
+      ahead of the driver, which has no caller yet: **the shared GT911 is to call it on the
+      `changed` edge** when it is written. The retired names are ratcheted by "advertising:
+      retired boost names stay retired" — which catches those two names returning and nothing
+      more, so the one-seam invariant is carried by review.
    9. **`py-opendisplay` drops `TouchController.enable_pin`** into its reserved blob, so a config
       JSON round trip zeroes it and disables the panel's power-enable GPIO. External follow-up,
       and it compounds defect 3.
@@ -550,12 +571,18 @@ software candidate with its rows open.
 
    ### 8.1 The touch wire format is frozen by convention, not by contract
 
-   `../opendisplay-protocol` defines `MsdAdvertisement.dynamic[11]` and says **nothing** about the
-   5-byte touch block inside it — no struct, no macro, no statement of the count nibble, the `6`
-   release sentinel, the track-id nibble or the endianness. The only normative description of the
-   format anywhere is **a comment in the donor firmware** (`touch_input.cpp:33`), and
-   `py-opendisplay`, the JavaScript decoder and the iOS app each independently implement that
-   comment. There is no version field.
+   **Corrected 2026-08-24 in review — the earlier form of this paragraph overstated it.** The
+   canonical header does name the block: `TouchController`'s own doc says the controller
+   "Publishes the first contact (5 bytes) into MSD dynamic data", and `touch_data_start_byte` is
+   `@min 0 @max 6` with the note "start index in dynamicreturndata for the 5-byte touch block
+   (avoid overlap with binary_inputs)" (`opendisplay_structs.h:952`). So the block's existence,
+   its width and where it may start ARE contract.
+
+   What the header does not define is **the layout inside those five bytes** — no struct, no
+   macro, no statement of the count nibble, the `6` release sentinel, the track-id nibble or the
+   coordinate endianness. The only normative description of *that* is **a comment in the donor
+   firmware** (`touch_input.cpp:33`), which `py-opendisplay`, the JavaScript decoder and the iOS
+   app each independently implement. There is no version field.
 
    So the packing is frozen in practice: any change breaks every deployed host at once, silently,
    with no way for a host to detect it. The draft's packing was byte-equivalent and that is the
@@ -587,8 +614,13 @@ software candidate with its rows open.
    little-endian first.** § 2.1 p.3 specifies `Register_H` then `Register_L`; the survey searched
    specifically for a clone using the other order and found no evidence in any source, Goodix or
    otherwise. `gt911_probe_product()` nevertheless tries low-byte-first first and calls it
-   "common". On a conformant part every boot therefore burns a full three-attempt × two-framing
-   failed cascade per candidate address before reaching the documented order. **RULING 2026-08-24: follow the
+   "common". **The cost is one wasted transaction per candidate address, not a retry cascade** —
+   an earlier form of this paragraph claimed the latter and was wrong. `gt911_read_reg()` returns
+   on the first successful *bus* transaction and the `"911"` comparison happens above it in
+   `gt911_probe_product()`, so a byte-swapped pointer write that the part ACKs succeeds, returns
+   bytes that cannot match, and falls straight through to the documented order. The full
+   three-attempt × two-framing cascade runs only when the wrong-order transaction fails at the bus
+   level. **RULING 2026-08-24: follow the
    specification.** The shared driver probes **high byte first**, and keeps low-byte-first as the
    fallback behind it. Both orders survive, so a part that only answers the undocumented form
    still binds — it is simply tried second, which is the correct priority for an order that no
