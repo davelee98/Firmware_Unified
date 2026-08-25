@@ -224,8 +224,10 @@ static unsigned g_detached;
  * re-attach after waking INT is visible here rather than only on a bench. */
 static bool     g_int_trigger_armed;
 
-void od_touch_app_delay_ms(uint16_t ms) { (void)ms; }
-void od_touch_app_delay_us(uint32_t us) { (void)us; }
+/* TRACED, because the reset timings are the datasheet's minima and the driver's comment says not
+ * to tidy them. Only their ORDER was asserted before; nothing pinned the values. */
+void od_touch_app_delay_ms(uint16_t ms) { trace("ms:%u", ms, 0); }
+void od_touch_app_delay_us(uint32_t us) { trace("us:%u", (unsigned)us, 0); }
 
 void od_touch_app_gpio_set_mode_output(uint8_t pin) { trace("out:%u", pin, 0); }
 void od_touch_app_gpio_config_input(uint8_t pin, bool pull_up)
@@ -264,7 +266,16 @@ void od_touch_app_gpio_write(uint8_t pin, bool level_high)
         g_pin_rst_high = level_high;
     }
 }
-int  od_touch_app_gpio_read(uint8_t pin) { (void)pin; return g_int_level; }
+/* HONOURS THE PIN. Ignoring it is the same over-forgiving shape that hid a wrong-bus driver
+ * before the bus_id fix: a driver reading another controller's INT line would have passed. */
+static uint8_t g_int_level_pin = PIN_INT;
+int od_touch_app_gpio_read(uint8_t pin)
+{
+    if (pin != g_int_level_pin) {
+        return 1;                     /* not the line under test: idle high */
+    }
+    return g_int_level;
+}
 
 bool od_touch_app_gpio_attach_int(uint8_t idx, uint8_t pin)
 {
@@ -364,7 +375,15 @@ static void setup(uint8_t start_byte, uint8_t flags, uint8_t addr, uint8_t int_p
     /* CLEAR THE DRIVER'S OWN STATE. s_rt is a file static that outlives one test, and since the
      * retained-runtime path landed a stale `ok` from the previous case makes the next init keep a
      * controller instead of bringing it up -- which silently skips the enable pin, the reset dance
-     * and the probe. init(NULL) is the documented way to say "forget everything". */
+     * and the probe.
+     *
+     * THE SUSPEND DEPTH NEEDS ITS OWN CALL, and that is not an oversight in init(): it deliberately
+     * does NOT clear the counter, because a re-init inside a refresh bracket must not drop an
+     * outstanding suspend. The cost is that a test which leaves the machine suspended silently
+     * suspends the next one -- which is exactly what happened, and it presented as a held-low line
+     * that would not trigger a read. */
+    while (od_touch_gt911_force_resume(&g_cfg, 0u) != OD_TOUCH_NO_CHANGE) {
+    }
     (void)od_touch_gt911_init(NULL, 0u);
     g_trace_len = 0;
 }
@@ -892,6 +911,163 @@ static void test_reestablish_and_int_rearm(void)
     }
 }
 
+/* THE SUBJECT OF 6bfa613 WAS UNPINNED. Every fixture had one controller, so the remainder-vs-
+ * interval contract, the min() aggregation across controllers and the bit-to-index mapping of the
+ * IRQ mask were all untested -- a driver that returned the whole interval again, or that indexed
+ * the runtime by one number and the mask by another, passed all 88 checks. */
+static void setup_two(uint8_t interval_a, uint8_t interval_b)
+{
+    setup(0u, 0u, 0x5Du, 0xFFu);
+    g_cfg.touch_controller_count = 2u;
+    g_cfg.touch_controllers[1] = g_cfg.touch_controllers[0];
+    g_cfg.touch_controllers[0].poll_interval_ms = interval_a;
+    g_cfg.touch_controllers[1].poll_interval_ms = interval_b;
+    g_cfg.touch_controllers[1].touch_data_start_byte = 5u;
+}
+
+static void test_multi_controller(void)
+{
+    CASE("the machine asks for the SOONEST deadline across controllers");
+    setup_two(40u, 100u);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    CHECK(od_touch_gt911_service(&g_cfg, 1000u, 0u, NULL) == 40u);
+
+    /* The concrete drift 6bfa613 describes: at 99/100 ms, returning the whole interval instead of
+     * the remainder pushes the slower controller out on every pass the faster one causes. */
+    CASE("a controller polled early for its neighbour keeps its own deadline");
+    setup_two(99u, 100u);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    (void)od_touch_gt911_service(&g_cfg, 1099u, 0u, NULL);      /* A is due, B is not */
+    CHECK(od_touch_gt911_service(&g_cfg, 1099u, 0u, NULL) == 1u); /* B wants 1 ms, not 100 */
+
+    /* Both controllers are scripted at one address on one bus, so they ARE one fake part: the
+     * first to poll acknowledges the status and the second correctly sees not-ready. Give each
+     * its own pass with the sample re-armed, which is what two real parts would present. */
+    /* Only the SECOND controller is due, so it polls alone. Both are scripted at one address on
+     * one bus and are therefore one fake part -- whichever polls first acknowledges the status and
+     * the other correctly sees not-ready, so a shared-sample assertion would be testing the
+     * fixture. Isolating controller 1 tests what actually matters: that it writes its OWN block
+     * and touches nobody else's. */
+    CASE("a controller writes its own block at its own start byte, and no other");
+    setup_two(255u, 10u);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    memset(g_msd, 0xA5, sizeof g_msd);
+    part_set_contact(1u, 0u, 0x0102u, 0x0304u);
+    (void)od_touch_gt911_service(&g_cfg, 1200u, 0u, NULL);      /* A not due, B due */
+    CHECK(g_msd[5] == (uint8_t)1u && g_msd[6] == 0x02u && g_msd[7] == 0x01u);
+    CHECK(g_msd[0] == 0xA5u && g_msd[4] == 0xA5u);              /* A's block untouched */
+    CHECK(g_msd[10] == 0xA5u);                                  /* nothing past B's block */
+
+    CASE("an edge for controller 1 is reported against BIT 1, not bit 0");
+    setup_two(200u, 200u);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    {
+        uint8_t consumed = 0u;
+
+        part_set_contact(1u, 0u, 1u, 1u);
+        (void)od_touch_gt911_service(&g_cfg, 1005u, 0x02u, &consumed);
+        CHECK(consumed == 0x02u);
+    }
+}
+
+/* A set bit that the machine will never act on has to be DISCARDED. Both wrappers gate their whole
+ * early return on `mask == 0`, so one stuck bit means the service walk runs on every loop pass for
+ * ever and the deadline is never consulted again. */
+static void test_stuck_irq_bits(void)
+{
+    uint8_t consumed;
+
+    CASE("an edge for a controller that is not configured is discarded");
+    setup(0u, 0u, 0x5Du, PIN_INT);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    consumed = 0u;
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0x08u, &consumed);   /* index 3: absent */
+    CHECK((consumed & 0x08u) != 0u);
+
+    CASE("an edge for a DISABLED controller is discarded");
+    setup(0u, 0u, 0x5Du, PIN_INT);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    g_part.fail_all = true;
+    {
+        uint32_t t;
+
+        for (t = 2000u; t <= 7000u; t += 1000u) {
+            (void)od_touch_gt911_service(&g_cfg, t, 0u, NULL);
+        }
+    }
+    CHECK(od_touch_gt911_address(0) == 0u);                          /* disabled */
+    consumed = 0u;
+    (void)od_touch_gt911_service(&g_cfg, 8000u, 0x01u, &consumed);
+    CHECK((consumed & 0x01u) != 0u);
+
+    CASE("edges raised while suspended are discarded, not held for the whole refresh");
+    setup(0u, 0u, 0x5Du, PIN_INT);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    od_touch_gt911_suspend();
+    consumed = 0u;
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0x01u, &consumed);
+    CHECK(consumed == 0x01u);
+}
+
+/* The per-poll bound the authority checks on EVERY poll, not only at bring-up: a config write can
+ * move touch_data_start_byte while a controller is up, and the retained branch keeps it. */
+static void test_msd_bound_on_every_poll(void)
+{
+    CASE("a controller kept across init cannot scribble past the dynamic block");
+    setup(0u, 0u, 0x5Du, 0xFFu);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    CHECK(od_touch_gt911_address(0) == 0x5Du);
+    g_cfg.touch_controllers[0].touch_data_start_byte = 8u;   /* config moved under a live one */
+    (void)od_touch_gt911_init(&g_cfg, 2000u);
+    memset(g_msd, 0xA5, sizeof g_msd);
+    part_set_contact(1u, 0u, 1u, 2u);
+    (void)od_touch_gt911_service(&g_cfg, 3000u, 0u, NULL);
+    CHECK(g_msd[8] == 0xA5u && g_msd[9] == 0xA5u && g_msd[10] == 0xA5u);
+
+    /* THE ABOVE ONLY PROVES THE RETAINED-BRANCH GUARD. Removing the bound inside touch_pack_msd()
+     * still passed it, because bring-up refuses an out-of-range start and the retained branch now
+     * declines to keep one -- so the controller never comes up and nothing is written either way.
+     *
+     * The pack-time bound defends a different path, and it is the one the authority checks on
+     * EVERY poll: `cfg` is passed to service() afresh each call, so a config that changes while a
+     * controller is up reaches the packer without any init in between. */
+    CASE("a start byte that moves out of range with no re-init is still refused at pack time");
+    setup(0u, 0u, 0x5Du, 0xFFu);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    CHECK(od_touch_gt911_address(0) == 0x5Du);
+    memset(g_msd, 0xA5, sizeof g_msd);
+    g_cfg.touch_controllers[0].touch_data_start_byte = 8u;   /* no init follows */
+    part_set_contact(1u, 0u, 1u, 2u);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    CHECK(g_msd[8] == 0xA5u && g_msd[9] == 0xA5u && g_msd[10] == 0xA5u);
+}
+
+/* The held-low line: a report waiting whose edge was missed. Never exercised before -- g_int_level
+ * was set to 1 by every fixture and never cleared. */
+static void test_held_low_line(void)
+{
+    CASE("a held-low INT line triggers a read with no edge and nothing due");
+    setup(0u, 0u, 0x5Du, PIN_INT);
+    g_cfg.touch_controllers[0].poll_interval_ms = 200u;
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    g_part.reads = 0;
+    part_set_contact(1u, 0u, 3u, 4u);
+    g_int_level = 0;                                  /* asserted */
+    (void)od_touch_gt911_service(&g_cfg, 1005u, 0u, NULL);
+    CHECK(g_part.reads > 0u);
+    CHECK((g_msd[0] & 0x0Fu) == 1u);
+}
+
 static void test_int_pin_query(void)
 {
     CASE("a configured INT pin is recognised");
@@ -921,6 +1097,10 @@ int main(void)
     test_no_change_and_retry_latency();
     test_retained_runtime_reinit();
     test_reestablish_and_int_rearm();
+    test_multi_controller();
+    test_stuck_irq_bits();
+    test_msd_bound_on_every_poll();
+    test_held_low_line();
     test_int_pin_query();
 
     printf("touch_gt911: %u checks, %u failures\n", g_checks, g_fails);

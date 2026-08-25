@@ -1000,6 +1000,32 @@ docs/HARDWARE_VERIFICATION_CHECKLIST.md.
 
 ---
 
+## 22. GT911 `poll_interval_ms == 0` — the header says 25 ms, every firmware uses 100 (recorded 2026-08-25)
+
+Cited by `shared/core/od_touch_gt911.c` and, until this entry, **cited at a section that did not
+exist** — found in review of the promotion.
+
+The canonical header documents the field as *"minimum time between polls; 0 = default 25 ms"*
+(`opendisplay_structs.h:951`). No firmware has ever used 25.
+
+| | `../Firmware` | `Firmware_NRF54` | Shared |
+|---|---|---|---|
+| `poll_interval_ms == 0` | 100 ms | 100 ms | 100 ms |
+| Source of the number | `TOUCH_PROCESS_MIN_INTERVAL_MS`, the process-loop floor | same | same |
+
+Both donors substitute their process-loop floor, not the documented default, and they do it for a
+structural reason: the whole touch pass was rate-limited to 100 ms, so a 25 ms request could not
+have been honoured even if the constant had said so. The shared machine returns a real delay and
+could serve 25 ms now — but changing it would speed up every deployed board that left the field at
+zero, which is a power change nobody asked for and which no board here can measure.
+
+**Recorded, not resolved.** The host is the party that should move: `py-opendisplay` writing an
+explicit `100` where it now writes `0` would make the config say what the firmware does. Until
+then a config read shows `0` and the device polls at 100 ms, and the header's sentence is wrong
+about every shipped device.
+
+---
+
 ## 23. GT911 — waking INT destroyed the interrupt, and both donors re-attached only if they thought it was gone (fixed 2026-08-25)
 
 Found in review of the shared touch promotion. **A deliberate departure from both donors**, and
@@ -1063,3 +1089,33 @@ its brackets are real and its teardown force-resumes on paths that may not have 
 **Neither shape was normalised**, deliberately. Making Nordic suspend before a refresh would be a
 behaviour change on a target where the refresh path was never audited for pairing — an unbalanced
 suspend wedges touch for the rest of the boot, which is a worse failure than the one being fixed.
+
+---
+
+## 25. Touch advertising boost — adopted from the non-authority port, and reordered (2026-08-25)
+
+Two changes the promotion makes to the touch publish path. Neither is visible on any board today,
+which is exactly why they are written down.
+
+**The boost on a touch edge is Nordic's, and the authority has no such call.** Neither
+`../Firmware/src/touch_input.cpp` nor the ESP32 port it fed calls the boost from touch at all —
+their touch path ends in `updatemsdata()`. `Firmware_NRF54` boosts, and the shared driver adopts
+that. This is the **non-authority** side of a disagreement, taken deliberately: § 20 of the plan
+records the reasoning, and the short form is that ESP32 advertises at 30-60 ms permanently and so
+has no slow state a boost would rescue, while Nordic idles at 1000 ms and does.
+
+Consequence to be aware of: on ESP32 `od_adv_app_boost()` is an empty function, so this is
+behaviourally nil there **today**. It stops being nil the moment that target grows an
+advertising-interval policy, which its own implementation comment anticipates.
+
+**The order is boost-then-publish; the Nordic donor was publish-then-boost.** No target in this
+repo can tell the difference: ESP32's boost is empty, and Nordic's publish only sets a pending flag
+with the payload and the interval both applied later in the same loop pass. The order was chosen
+because it is the one that stays correct if a target ever selects its interval *during* the
+publish — the nRF/Bluefruit shape, where doing it the other way round produced a real defect
+(a press advertised at the slow interval and only the release at the boosted one, so a host saw
+"not pressed" reliably and "pressed" almost never; `device_control.cpp` carries the write-up).
+
+An earlier form of the driver's comment asserted the order was load-bearing *here*. It is not, on
+any target in this repo, and saying so invited a future reader to trust a mechanism that does not
+exist.

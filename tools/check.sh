@@ -435,7 +435,7 @@ check "advertising: one boost entry point" adv_boost_one_entry_point
 touch_one_gt911_driver() {
     absent_or_fail "target-side GT911 register policy returned; shared od_touch_gt911 owns it" \
         '(0[xX]814[EeFf]|GT911_REG_|GT911_MAX_CONTACTS|gt911_hw_reset|apply_touch_map)' \
-        targets
+        targets $(find shared -name '*.c' -o -name '*.h' | grep -v 'od_touch_gt911')
 }
 check "touch: one GT911 driver" touch_one_gt911_driver
 
@@ -986,7 +986,7 @@ log_hal_structure() {
     # awk removes double-quoted spans per line before matching, and keeps file:line so a real hit
     # still points at itself.
     hits=$(find shared/core -name '*.c' ! -name 'od_log.c' -print0 \
-           | xargs -0 awk '{ line=$0; gsub(/"[^"]*"/, "", line);
+           | xargs -0 -r awk '{ line=$0; gsub(/"[^"]*"/, "", line);
                              if (line ~ /od_log_(error|warn|info|debug|raw)[[:space:]]*\([^;]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/)
                                  print FILENAME ":" FNR ": " $0 }' 2>/dev/null || true)
     if [ -n "$hits" ]; then

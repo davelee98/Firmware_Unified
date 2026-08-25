@@ -78,6 +78,14 @@ struct touch_runtime {
 static struct touch_runtime s_rt[OD_TOUCH_MAX_CONTROLLERS];
 static uint8_t s_suspend;
 
+/* THE IRQ MASK IS A uint8_t AND EVERY ADAPTER HARDCODES FOUR ISRs. Raising OD_CONFIG_MAX_TOUCH
+ * without touching those would silently NULL-fill the ISR tables, and past eight would silently
+ * truncate the mask. CLAUDE.md decision 1 asks for exactly this kind of assert. */
+_Static_assert(OD_TOUCH_MAX_CONTROLLERS <= 8u,
+               "the IRQ mask is 8 bits wide; widen od_touch_gt911_service() first");
+_Static_assert(OD_TOUCH_MAX_CONTROLLERS == 4u,
+               "both adapters define exactly four ISRs; add them before raising this");
+
 /* --------------------------------------------------------------------- config helpers */
 
 static const struct TouchController *touch_cfg(const struct od_config *cfg, uint8_t i)
@@ -89,6 +97,19 @@ static const struct TouchController *touch_cfg(const struct od_config *cfg, uint
         return NULL;
     }
     return &cfg->touch_controllers[i];
+}
+
+/* A CONFIGURED IC THIS FIRMWARE DOES NOT IMPLEMENT IS NOT THE SAME AS NO TOUCH, and both donors
+ * say so once at init. Folding the two into a silent skip leaves a board provisioned with a future
+ * touch_ic_type booting with touch dead and nothing in the log to explain it -- on the one target
+ * anyone can put on a bench. */
+static void touch_log_unsupported(const struct od_config *cfg, uint8_t i)
+{
+    const uint16_t ic = cfg->touch_controllers[i].touch_ic_type;
+
+    if (ic != OD_TOUCH_IC_NONE && ic != OD_TOUCH_IC_GT911) {
+        od_log_warn("Touch[%u]: skipped (only GT911=1 implemented, got %u)", i, (unsigned)ic);
+    }
 }
 
 static bool valid_pin(uint8_t pin)
@@ -403,6 +424,16 @@ static void apply_touch_map(const struct od_config *cfg, const struct TouchContr
 static void touch_pack_msd(uint8_t start, uint8_t count, uint8_t track_id, uint16_t x, uint16_t y,
                            bool latched)
 {
+    /* BOUNDED HERE, EVERY POLL, not only at bring-up. The authority checks `s + 5 > 11` on each
+     * poll as well as before its retained-runtime branch, and that second check is the one that
+     * matters: a config write can move touch_data_start_byte while a controller is UP, and the
+     * retained branch keeps that controller without re-probing. Without this the block would
+     * write over whatever binary_inputs, a sensor or NFC owns at those indices and silently drop
+     * the bytes past the end -- the adapters clamp, which turns a refusal into wire corruption
+     * nothing reports. */
+    if ((uint16_t)start + TOUCH_MSD_BLOCK > OD_MSD_DYNAMIC_LEN) {
+        return;
+    }
     if (count == 0u && !latched) {
         uint8_t i;
 
@@ -677,9 +708,13 @@ static uint32_t touch_service_one(uint8_t idx, const struct od_config *cfg,
     touch_pack_msd(t->touch_data_start_byte, count, track_id, x, y, rt->latched != 0u);
 
     if (changed) {
-        /* PUBLISH ONLY ON CHANGE, and boost BEFORE publishing: the publish is what selects the
-         * advertising interval on a target that has interval states, so a boost afterwards lands
-         * too late for the packet it exists for. */
+        /* PUBLISH ONLY ON CHANGE. The boost goes first, but not because any target here requires
+         * it: ESP32's is an empty function and Nordic's publish only sets a pending flag, with the
+         * payload and the interval both applied later in the same loop pass. It is ordered this
+         * way because it is the order that stays correct if a target ever selects its interval
+         * during the publish -- which is the nRF/Bluefruit shape, and the bug that shape produced
+         * is written up in device_control.cpp. The Nordic donor published first; that is the
+         * change, and it is behaviourally nil today. DIVERGENCE_MATRIX 25. */
         od_adv_app_boost();
         od_touch_app_msd_publish();
     }
@@ -714,13 +749,15 @@ uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms)
         const struct TouchController *t = touch_cfg(cfg, i);
 
         if (t == NULL) {
+            touch_log_unsupported(cfg, i);
             continue;
         }
         /* A CONTROLLER THAT WAS ALREADY UP IS KEPT, not re-resolved. The donor does this and it
          * is not an optimisation: the reset dance drives RST and INT, costs ~500 ms per
          * controller, and re-selects an address that was already correct. Restored after review
          * found it dropped. The IRQ is re-attached because the detach above removed it. */
-        if (prior[i].ok && prior[i].addr7 != 0u) {
+        if (prior[i].ok && prior[i].addr7 != 0u &&
+            t->touch_data_start_byte <= TOUCH_MSD_MAX_START) {
             s_rt[i] = prior[i];
             s_rt[i].int_attached = 0u;
             s_rt[i].disabled = 0u;
@@ -759,6 +796,12 @@ uint32_t od_touch_gt911_service(const struct od_config *cfg, uint32_t now_ms,
         *consumed_out = 0u;
     }
     if (cfg == NULL || s_suspend > 0u) {
+        /* Edges raised while the panel had the bus are stale by the time it gives it back, and
+         * the resume re-acknowledges the part anyway. Discard them, or the wrapper busy-polls for
+         * the whole refresh. */
+        if (consumed_out != NULL) {
+            *consumed_out = irq_mask;
+        }
         return OD_TOUCH_IDLE_MS;
     }
     for (i = 0; i < OD_TOUCH_MAX_CONTROLLERS; i++) {
@@ -767,7 +810,21 @@ uint32_t od_touch_gt911_service(const struct od_config *cfg, uint32_t now_ms,
         bool     took = false;
         uint32_t want;
 
+        /* A BIT THIS MACHINE WILL NEVER ACT ON IS DISCARDED, NOT LEFT SET. There is no controller
+         * here -- the index is past the count, the type is not GT911, or a config reload dropped
+         * it -- and its ISR may still be attached to the old pin and re-setting the bit. The
+         * authority clears the mask itself under the interrupt lock inside its disable path;
+         * shared/ has no lock, so reporting the bit as consumed is how it says "drop this".
+         *
+         * Leaving it set is not merely untidy: both wrappers gate their whole early return on
+         * `mask == 0`, so one stuck bit makes the full service walk run on every loop pass for
+         * ever and the deadline is never consulted again. */
         if (t == NULL) {
+            consumed |= (uint8_t)(irq_mask & (uint8_t)(1u << i));
+            continue;
+        }
+        if (s_rt[i].disabled || !s_rt[i].ok) {
+            consumed |= (uint8_t)(irq_mask & (uint8_t)(1u << i));
             continue;
         }
         want = touch_service_one(i, cfg, t, &s_rt[i], now_ms, edge, &took);
@@ -901,14 +958,23 @@ void od_touch_gt911_suspend(void)
 {
 }
 
+/* NO_CHANGE, matching the capability-on arm: "nothing was suspended, so nothing moved" is the
+ * same answer here, and a caller must not install a delay for a resume that did nothing. */
 uint32_t od_touch_gt911_resume(const struct od_config *cfg, uint32_t now_ms)
 {
     (void)cfg;
     (void)now_ms;
-    return OD_TOUCH_IDLE_MS;
+    return OD_TOUCH_NO_CHANGE;
 }
 
 uint32_t od_touch_gt911_force_resume(const struct od_config *cfg, uint32_t now_ms)
+{
+    (void)cfg;
+    (void)now_ms;
+    return OD_TOUCH_NO_CHANGE;
+}
+
+uint32_t od_touch_gt911_reestablish(const struct od_config *cfg, uint32_t now_ms)
 {
     (void)cfg;
     (void)now_ms;
