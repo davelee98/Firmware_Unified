@@ -963,8 +963,16 @@ log_hal_structure() {
         rc=1
     fi
 
-    hits=$(grep -rInE '\bod_log_(error|warn|info|debug|raw)[[:space:]]*\([^;]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(' \
-           shared/core --include='*.c' --exclude='od_log.c' 2>/dev/null || true)
+    # STRING LITERALS ARE STRIPPED FIRST, and that is not a nicety. The rule is about ARGUMENTS,
+    # but a message whose own text reads "disabled (%s)" or "(check wiring, pull-ups)" puts an
+    # identifier immediately before a '(' inside the quotes -- so the unstripped form flags correct
+    # code for the wording of its message, and the only way to pass is to write worse messages.
+    # awk removes double-quoted spans per line before matching, and keeps file:line so a real hit
+    # still points at itself.
+    hits=$(find shared/core -name '*.c' ! -name 'od_log.c' -print0 \
+           | xargs -0 awk '{ line=$0; gsub(/"[^"]*"/, "", line);
+                             if (line ~ /od_log_(error|warn|info|debug|raw)[[:space:]]*\([^;]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/)
+                                 print FILENAME ":" FNR ": " $0 }' 2>/dev/null || true)
     if [ -n "$hits" ]; then
         echo "$hits"
         echo "shared log argument contains a nested function call; capability-off must not hide side effects"
