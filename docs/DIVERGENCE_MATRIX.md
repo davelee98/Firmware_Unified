@@ -578,7 +578,7 @@ pin should set the mask explicitly rather than rely on zero.
 
 ---
 
-## 13. `bus_id == 0xFF` — four sites substitute bus 0 for "not configured" (recorded 2026-08-23)
+## 13. `bus_id == 0xFF` — five sites substituted bus 0 for "not configured" (recorded 2026-08-23)
 
 Project ruling 2026-08-23, reaffirmed: **`0xFF` means unconfigured**, for every `bus_id`-shaped
 field. It is the contract's pervasive absent sentinel (`opendisplay_structs.h:295-298`).
@@ -612,17 +612,18 @@ when *no* `DataBus` record existed at all.
 | `nordic-zephyr/src/opendisplay_sensor_common.h:22` | substitutes bus 0, then validates | refuses |
 | `nordic-zephyr/src/opendisplay_touch.c:299` | **refuses** — the reference | unchanged |
 
-Because all four validate afterwards, the misbehaviour requires a valid `data_buses[0]` *and* a
-device that was never assigned a bus: that device is then probed on an unrelated bus, where an
-address collision yields plausible-but-wrong readings rather than a clean failure.
+Because the four substituting sites all validate afterwards, the misbehaviour requires a valid
+`data_buses[0]` *and* a device that was never assigned a bus: that device is then probed on an
+unrelated bus, where an address collision yields plausible-but-wrong readings rather than a clean
+failure. `touch_input.cpp` is the fifth and does not fit that shape, which is why it was worse.
 
 Same defect class as § 11.2 (`pwr_pin == 0xFF` driving pad `0x00` on BG22), fixed 2026-08-22 by
-refusing. Correcting these four is `plans/PLAN_SENSOR_SEAM_2026-08-23.md` staging step 1, which no
+refusing. Correcting all five is `plans/PLAN_SENSOR_SEAM_2026-08-23.md` staging step 1, which no
 longer waits on anything outside this repo.
 
 ### 13.1 The same defect wearing a different constant: ESP32's no-`DataBus` default-pin path
 
-**Ruled 2026-08-24; implementation pending sensor-seam step 8.** Distinct from the four sites
+**Ruled 2026-08-24; implementation pending sensor-seam step 8.** Distinct from the five sites
 above because the `bus_id` is *not* `0xFF`. ESP32 touch accepts `data_bus_count == 0` with a
 declared, non-sentinel `bus_id` and transacts anyway, on whichever bus the board last selected.
 

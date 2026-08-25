@@ -348,9 +348,10 @@ looks arbitrary and is not); delete the story.
   narrowing. Before sleeptimer initialization, or on another SDK conversion failure, that adapter
   returns the boot-domain origin (`0`) rather than asserting or logging. Its production-source host
   test crosses the underlying 32-bit tick rollover, pins the `uint32_t` millisecond wrap and checks
-  the pre-init result. BG22 has no production caller yet, so the linker discards both functions;
-  the image remaining at the `e965dd9` baseline of 250,196 B flash / 32,284 B static RAM proves
-  zero dormant footprint, not on-device execution. `tools/check.sh --targets` passes 27/0/0.
+  the pre-init result. **BG22 now has production callers** — `opendisplay_led.c` twice and, since
+  the boost seam, `opendisplay_ble.c` — so the "linker discards both functions, zero dormant
+  footprint" reading recorded here on 2026-08-19 no longer holds and must not be cited as evidence
+  of anything. `tools/check.sh --targets` passed 27/0/0 when this was written.
   **Not hardware-qualified:** ESP32 D-FF timing, Nordic panel timing and an instrumented BG22
   known-interval check remain open. Ten existing BG22 raw 32-bit tick conversions are deliberately
   not swept into this promotion and are tracked in `docs/FOLLOWUPS.md` § 7.
