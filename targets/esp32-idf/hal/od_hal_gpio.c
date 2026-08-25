@@ -77,6 +77,11 @@ void od_hal_gpio_write(uint8_t cfg, bool level_high)
     gpio_set_level((gpio_num_t)cfg, level_high ? 1 : 0);
 }
 
+bool od_hal_gpio_pin_valid(uint8_t cfg)
+{
+    return od_pin_valid(cfg);
+}
+
 int od_hal_gpio_read(uint8_t cfg)
 {
     if (!od_pin_valid(cfg)) {

@@ -25,6 +25,47 @@ void od_gpio_write(uint8_t cfg, bool level_high);
 int od_gpio_read(uint8_t cfg);
 void od_gpio_park(uint8_t cfg);
 
+/* ---- pin interrupts ----
+ *
+ * Modelled on ESP32's od_hal_gpio surface so a shared consumer sees one shape. This target had
+ * NO GPIO interrupts at all before; the driver for adding them is the button work
+ * (plans/PLAN_NORDIC_BUTTONS_2026-08-22.md B1/B2/B5 -- the ISR records the transition, per-button
+ * state, and debounce moves into the ISR), which is why the `_arg` variant exists: four buttons
+ * sharing one handler need their own index, and the alternative is four near-identical ISRs.
+ *
+ * ISR CONTEXT: THE HANDLER MAY SET A FLAG ONLY. It runs from Zephyr's GPIO callback, so it must
+ * not log, take a lock, touch I2C, or call anything that can block.
+ *
+ * Re-attaching a pin REPLACES its handler rather than failing. The pin's input mode and pull are
+ * not touched here -- configure them with od_gpio_configure_input() first.
+ *
+ * Return 0 on success, negative on failure. */
+typedef enum {
+	OD_GPIO_EDGE_RISING = 0,
+	OD_GPIO_EDGE_FALLING,
+	OD_GPIO_EDGE_BOTH,
+} od_gpio_edge_t;
+
+typedef void (*od_gpio_irq_fn)(void);
+typedef void (*od_gpio_irq_arg_fn)(void *arg);
+
+int od_gpio_config_irq(uint8_t cfg, od_gpio_edge_t edge, od_gpio_irq_fn handler);
+int od_gpio_config_irq_arg(uint8_t cfg, od_gpio_edge_t edge,
+			   od_gpio_irq_arg_fn handler, void *arg);
+
+/* Detaches and disables. Safe on a pin that was never attached. */
+void od_gpio_clear_irq(uint8_t cfg);
+
+/* Mask and unmask WITHOUT detaching, so a caller that re-baselines several pins does not have to
+ * re-attach handlers -- re-attaching is where a wrong index lands one button's events on its
+ * neighbour. */
+void od_gpio_irq_enable(uint8_t cfg);
+void od_gpio_irq_disable(uint8_t cfg);
+
+/* Global interrupt lock, for a caller that must read several pins as one snapshot. */
+void od_gpio_irq_lock(void);
+void od_gpio_irq_unlock(void);
+
 #ifdef __cplusplus
 }
 #endif

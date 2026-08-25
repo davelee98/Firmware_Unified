@@ -21,6 +21,7 @@
 /* od_hal_uptime_ms(), for the advertising stall report below. */
 #include "od_hal_time.h"
 #include "od_adv_control.h"
+#include "od_adv_app.h"
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -676,6 +677,25 @@ static int od_ble_start_now(void)
     return rc;
 }
 
+
+/* The shared boost seam (shared/core/od_adv_app.h).
+ *
+ * A NO-OP, AND THAT IS THE CORRECT ANSWER HERE, not an unimplemented one. od_ble_start_now()
+ * leaves ble_gap_adv_params::itvl_min/itvl_max at zero, so NimBLE substitutes its own defaults
+ * for connectable undirected advertising -- BLE_GAP_ADV_FAST_INTERVAL1_MIN/MAX, which are 30 ms
+ * and 60 ms because CONFIG_BT_NIMBLE_HIGH_DUTY_ADV_ITVL is unset in every board baseline. This
+ * THE COMPARISON THAT MATTERS IS AGAINST THE OTHER TARGETS' *IDLE* RATE, not their boosted one.
+ * nordic-zephyr idles at 1000 ms and drops to 20-30 ms for three seconds after an event; the
+ * Bluefruit nRF build in ../Firmware idles at 160-1000 ms. This target's permanent 30-60 ms is
+ * within a factor of two of their BOOSTED rate and 17-33x their idle rate, so a ~230 ms button
+ * press or touch contact already yields several advertisements here.
+ *
+ * The boost exists to rescue a target that idles slow. There is no slow state here to rescue. If
+ * this target ever grows an advertising-interval policy, this is where the boost attaches.
+ */
+extern "C" void od_adv_app_boost(void)
+{
+}
 
 /* ------------------------------------------------------------------ host lifecycle */
 

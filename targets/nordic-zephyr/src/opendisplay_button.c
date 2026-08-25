@@ -1,6 +1,7 @@
 #include "opendisplay_button.h"
 #include "od_log.h"
 #include "opendisplay_ble.h"
+#include "od_adv_app.h"
 #include "opendisplay_config_parser.h"
 #include "od_runtime_types.h"
 #include "opendisplay_touch.h"
@@ -124,7 +125,7 @@ void opendisplay_button_process(void)
                             ((btn->current_state & 0x01u) << 7));
     opendisplay_ble_set_dynamic_byte(btn->byte_index, button_data);
     opendisplay_ble_update_msd(true);
-    opendisplay_ble_boost_advertising();
+    od_adv_app_boost();
     od_log_info("button id=%u state=%u count=%u", (unsigned)btn->button_id,
            (unsigned)btn->current_state, (unsigned)btn->press_count);
   }

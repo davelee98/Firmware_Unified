@@ -135,7 +135,6 @@ public:
 
     // --- link policy (no-op where the stack does not support it) ---
     void requestFastLink();        // nRF: 2M PHY + 251-octet DLE on the live link
-    void boostAdvertising();       // nRF: temporary fast advertising interval
     void tick();                   // periodic housekeeping (advertising interval restore)
 
     // --- events: polled from loop(), consumed once by the take*() pair below.

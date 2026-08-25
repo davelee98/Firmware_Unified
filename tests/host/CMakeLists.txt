@@ -281,6 +281,18 @@ target_include_directories(od_sensor_sht40_test PRIVATE ${CMAKE_CURRENT_LIST_DIR
 target_link_libraries(od_sensor_sht40_test od_shared)
 add_test(NAME sensor_sht40 COMMAND od_sensor_sht40_test)
 
+# sensor_bq27220: first-match-only walk, two-byte voltage / one-byte SOC widths, the repeated
+# START each register read needs, the charging TRI-STATE (unknown is not "not charging"), cache
+# invalidation on a failed read, the SOC clamp and the TTL across a 32-bit wrap.
+add_executable(od_sensor_bq27220_test
+    sensor_bq27220_test.c
+    od_log_test_stub.c
+    fake_i2c/i2c_wire.c
+    fake_i2c/i2c_ref_impl.c)
+target_include_directories(od_sensor_bq27220_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(od_sensor_bq27220_test od_shared)
+add_test(NAME sensor_bq27220 COMMAND od_sensor_bq27220_test)
+
 # silabs_storage: the BG22 overlay, where od_config_asm's reassembly state and the NVM3 record are
 # one object. The two static asserts in the storage file compare LAYOUT; this compares SEQUENCING
 # -- the header is written over the four live assembler state words, so the order of capture,

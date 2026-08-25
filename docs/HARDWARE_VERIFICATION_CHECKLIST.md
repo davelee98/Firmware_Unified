@@ -688,6 +688,25 @@ Treat the rows below as the only thing standing behind that.
       gained the authority's second retry pass.
 - [ ] **A sensor with `bus_id == 0xFF` is not probed**, and is not attached to bus 0.
 
+### Charge-state polarity — a WIRE-VISIBLE correction (2026-08-24)
+
+`DIVERGENCE_MATRIX` § 21 / `FOLLOWUPS` § 19. Bit 7 of the BQ27220 MSD byte now reports the
+opposite of what every previous image reported on a board that wires STAT. Needs a board with a
+charge-state pin, and a charger that can be plugged and unplugged — which is the whole test.
+
+- [ ] **Charging reads as charging.** Plug the charger; a host sees bit 7 set. Unplug it; bit 7
+      clears. This is the row the fix exists for, and no host test substitutes for it: the
+      polarity is now provably self-consistent against the header, but only a board says whether
+      the header describes the hardware.
+- [ ] **Both flag settings, on one board.** Write a config with `OD_CHARGER_FLAG_STATE_ACTIVE_LOW`
+      set, then clear, reading bit 7 under charge each time. Exactly one setting should be right,
+      and it should be the one matching how STAT is wired — if *both* look right, or neither, the
+      state pin is not being read at all.
+- [ ] **The enable pin still charges.** The seam changed shape for the enable pin too. Confirm a
+      board with software charge control still actually charges after `od_sensor_bq27220_init()`.
+- [ ] **A board with no state pin still advertises a sane SOC** with bit 7 clear, rather than a
+      garbage byte, now that a failed read reports UNKNOWN instead of a level.
+
 ### Nordic touch — NO BOARD IN THIS FLEET HAS A TOUCH CONTROLLER (2026-08-24)
 
 **Stated by project direction.** These rows are open **release debt awaiting hardware that does not

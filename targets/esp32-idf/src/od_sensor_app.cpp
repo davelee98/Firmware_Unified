@@ -9,6 +9,10 @@
 
 #include "display_service.h"
 #include "od_hal_sleep.h"
+#include "od_hal_gpio.h"
+#include "structs.h"
+
+extern struct od_config globalConfig;
 
 extern uint8_t dynamicreturndata[11];
 
@@ -33,4 +37,42 @@ void od_sensor_app_bus_recover(uint8_t bus_id)
     invalidateOpenDisplayWire();
     (void)initOrRestoreWireForBus(bus_id);
     od_hal_delay_ms(2);
+}
+
+static bool validPin(uint8_t pin) { return pin != 0 && pin != 0xFF; }
+
+bool od_sensor_app_bq_enable_drive(bool level_high)
+{
+    const uint8_t en = globalConfig.power_option.charge_enable_pin;
+    const uint8_t st = globalConfig.power_option.charge_state_pin;
+
+    if (validPin(en)) {
+        // Configure the output and establish the level in one call -- gpio_config() then
+        // gpio_set_level(), the same two register writes in the same order the port used.
+        od_hal_gpio_config_output(en, level_high);
+    }
+    if (validPin(st)) {
+        od_hal_gpio_config_input(st, /*pull_up=*/true, /*pull_down=*/false);
+    }
+    // An absent enable pin is a successful no-op: plenty of boards have no software charge
+    // control, and reporting failure would make a normal board look broken.
+    return true;
+}
+
+bool od_sensor_app_bq_state_level(bool *level_high)
+{
+    const uint8_t st = globalConfig.power_option.charge_state_pin;
+
+    if (!validPin(st) || level_high == nullptr) {
+        return false;      // no state pin: UNKNOWN, not "not charging"
+    }
+    // ASK BEFORE READING. od_hal_gpio_read() returns 0 for a pin it cannot read, so a failure is
+    // indistinguishable from LOW at this call site -- and LOW is CHARGING on an active-low board,
+    // so an unusable pin would advertise the charger as connected. Testing the read's result
+    // cannot catch that; only asking first can.
+    if (!od_hal_gpio_pin_valid(st)) {
+        return false;      // unreadable: UNKNOWN, not a level
+    }
+    *level_high = (od_hal_gpio_read(st) != 0);
+    return true;
 }

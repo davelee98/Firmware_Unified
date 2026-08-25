@@ -67,7 +67,7 @@ mistaken for complete when only the ISR lands:
 
 The port keeps ESP32's split exactly. Anything that touches BLE, logging or I2C stays on the main
 loop: `opendisplay_ble_set_dynamic_byte()`, `opendisplay_ble_update_msd()`,
-`opendisplay_ble_boost_advertising()` and `od_log_*` are **not** ISR-safe and must not move.
+`od_adv_app_boost()` and `od_log_*` are **not** ISR-safe and must not move.
 
 ### B2 — Per-button state, not a global "something happened"
 

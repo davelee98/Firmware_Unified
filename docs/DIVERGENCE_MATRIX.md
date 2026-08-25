@@ -578,7 +578,7 @@ pin should set the mask explicitly rather than rely on zero.
 
 ---
 
-## 13. `bus_id == 0xFF` — four sites substitute bus 0 for "not configured" (recorded 2026-08-23)
+## 13. `bus_id == 0xFF` — five sites substituted bus 0 for "not configured" (recorded 2026-08-23)
 
 Project ruling 2026-08-23, reaffirmed: **`0xFF` means unconfigured**, for every `bus_id`-shaped
 field. It is the contract's pervasive absent sentinel (`opendisplay_structs.h:295-298`).
@@ -612,13 +612,38 @@ when *no* `DataBus` record existed at all.
 | `nordic-zephyr/src/opendisplay_sensor_common.h:22` | substitutes bus 0, then validates | refuses |
 | `nordic-zephyr/src/opendisplay_touch.c:299` | **refuses** — the reference | unchanged |
 
-Because all four validate afterwards, the misbehaviour requires a valid `data_buses[0]` *and* a
-device that was never assigned a bus: that device is then probed on an unrelated bus, where an
-address collision yields plausible-but-wrong readings rather than a clean failure.
+Because the four substituting sites all validate afterwards, the misbehaviour requires a valid
+`data_buses[0]` *and* a device that was never assigned a bus: that device is then probed on an
+unrelated bus, where an address collision yields plausible-but-wrong readings rather than a clean
+failure. `touch_input.cpp` is the fifth and does not fit that shape, which is why it was worse.
 
 Same defect class as § 11.2 (`pwr_pin == 0xFF` driving pad `0x00` on BG22), fixed 2026-08-22 by
-refusing. Correcting these four is `plans/PLAN_SENSOR_SEAM_2026-08-23.md` staging step 1, which no
+refusing. Correcting all five is `plans/PLAN_SENSOR_SEAM_2026-08-23.md` staging step 1, which no
 longer waits on anything outside this repo.
+
+### 13.1 The same defect wearing a different constant: ESP32's no-`DataBus` default-pin path
+
+**Ruled 2026-08-24; implementation pending sensor-seam step 8.** Distinct from the five sites
+above because the `bus_id` is *not* `0xFF`. ESP32 touch accepts `data_bus_count == 0` with a
+declared, non-sentinel `bus_id` and transacts anyway, on whichever bus the board last selected.
+
+| | `../Firmware` (donor) | `targets/esp32-idf` today | nordic-zephyr | Shared (step 8) |
+|---|---|---|---|---|
+| `bus_id == 0xFF` | substitutes bus 0 | **refuses** (step-1 fix, `touch_input.cpp:304`) | **refuses** | refuses |
+| declared `bus_id`, `data_bus_count == 0` | transacts on the board-default bus | transacts on the board-default bus | refuses | **refuses** |
+
+The first row is already resolved in this repo; only the second is outstanding, and it is the one
+this ruling closes.
+
+The shared HAL is keyed by `DataBus.instance_number` (§ 14), so a bus that appears in no
+`data_buses` entry **has no identity the seam can name** — there is no argument the shared driver
+could pass to reach it. Preserving the behaviour would mean a second, unkeyed transaction path
+existing solely for configs that decline to describe their own hardware.
+
+And the failure mode is § 13's exactly: a device probed on a bus nobody assigned it answers if
+some other part happens to sit at that address, so the result is a plausible-but-wrong reading
+rather than an error. A config that declares a touch controller without declaring its bus is
+invalid; the shared driver refuses it, matching Nordic.
 
 ---
 
@@ -852,3 +877,123 @@ suite.
 
 **NOT HARDWARE-QUALIFIED.** Both targets' SHT40 rows are open in
 docs/HARDWARE_VERIFICATION_CHECKLIST.md, and this change deletes both ports' driver policy.
+
+---
+
+## 20. GT911 register address byte order — the donor probes the undocumented order first (2026-08-24)
+
+**Ruled 2026-08-24; implementation pending sensor-seam step 8.** Recorded now so the shared
+driver's order reads as a decision rather than as a transcription slip.
+
+GT911 register addresses are 16-bit and sent as two bytes before the data phase. GOODIX's
+*GT911 Programming Guide* Rev.10 § 2.1 p.3 specifies the write frame as
+`S | Address_W | ACK | Register_H | ACK | Register_L | ACK | Data...`, and § 2.2 p.4 sets the read
+pointer the same way: **high byte first, unambiguously, in both directions.**
+
+Both ports nevertheless try **low byte first** first. In the authority
+(`../Firmware/src/touch_input.cpp:220-236`) that is two `if`s with early returns:
+
+```c
+if (gt911_read_reg(addr7, GT911_REG_PID, id, 4, /*reg_high_first=*/false) && match(id)) {
+    *reg_high_first = 0;                      /* labelled "common" at touch_input.cpp:47 */
+    return true;
+}
+if (gt911_read_reg(addr7, GT911_REG_PID, id, 4, /*reg_high_first=*/true) && match(id)) {
+    *reg_high_first = 1;                      /* labelled "some GT911 / docs" */
+    return true;
+}
+```
+
+The in-tree ESP32 snapshot is the same logic with a bus argument added
+(`targets/esp32-idf/src/touch_input.cpp:241`, label at `:49`). An earlier form of this entry
+quoted the snapshot's signature and line numbers **as** the authority's, which inverts the rule
+that the snapshot drifts and `../Firmware` decides.
+
+| | `../Firmware` / ESP32 | nordic-zephyr | Shared (step 8) |
+|---|---|---|---|
+| First probe | low byte first | low byte first | **high byte first** |
+| Fallback | high byte first | high byte first | low byte first |
+| Bindable parts | both orders | both orders | both orders — unchanged |
+
+**No source documents a low-byte-first GT911.** A targeted survey of the Goodix guides, the Linux
+`goodix.c` driver and the ESP-BSP driver found the documented order in every one and no evidence,
+authoritative or secondary, of a variant using the other. The donor's "common" annotation is
+unsourced.
+
+**Cost of the donor order on a conformant part: one wasted transaction per candidate address**, on
+every boot and every re-resolve. `gt911_read_reg()` returns on the first successful *bus*
+transaction and the `"911"` comparison happens above it in `gt911_probe_product()`, so a
+byte-swapped pointer write that the part ACKs succeeds, returns four bytes that cannot match, and
+falls through to the documented order. The three-attempt retry with its 500 µs spacing runs
+only when the wrong-order transaction fails at the bus level — the uncommon case, not the ordinary
+one. (An earlier form of this entry claimed the cascade ran every time; it does not, and the ruling
+does not depend on it. **The saving is latency-shaped and small** — roughly one I2C transaction per
+candidate address inside a reset path that already spends hundreds of milliseconds. The ruling
+rests on following the documented order, not on the saving.)
+
+**The two framings are ESP32's, not both donors'.** `Firmware_NRF54/src/opendisplay_touch.c:248`
+retries three times with a **single** framing — its `gt911_read_reg_once()` always issues a
+repeated START and has no STOP-separated alternative, which the in-tree Nordic port states outright
+(`targets/nordic-zephyr/src/opendisplay_touch.c:112`). So the shared driver's framing fallback is
+adopted from ESP32 alone, and the Nordic column below describes the byte order only.
+
+**The fallback is retained, and that is the point of the ruling.** This is a reordering, not a
+removal: a part answering only the undocumented form still binds, one probe later. Dropping the
+fallback would be the change the evidence does not support — the survey establishes that nobody
+has *documented* such a part, not that none exists, and no board in this fleet can settle it.
+
+**NOT HARDWARE-QUALIFIED, and there is no row for it yet.** ESP32 is the only target that can
+qualify any GT911 behaviour, and the checklist's GT911 rows today cover the bus rate, not the
+probe. A row belongs with the step 8 driver that implements this, not with the ruling.
+
+---
+
+## 21. Charge-state polarity — every port read the flag backwards (fixed 2026-08-24)
+
+**Fixed by project ruling.** `FOLLOWUPS` § 19 has the discovery and the outstanding config audit;
+this records the resolution and the shape it took.
+
+The canonical header defines the flag (`opendisplay_structs.h:482`):
+
+> `OD_CHARGER_FLAG_STATE_ACTIVE_LOW` — *"charge-state (BQ25616 STAT) is active-low: charging when
+> LOW"*
+
+| `charger_flags` bit 1 | Header says charging when | Every port reported charging when |
+|---|---|---|
+| set (active-low) | pin LOW | pin **HIGH** |
+| clear (active-high) | pin HIGH | pin **LOW** |
+
+Both branches inverted, so the code was `!contract` for every input — not a mis-set flag, and not
+a convention either. **The neighbouring flag settles that:** in the function immediately above it —
+`initChargerGpio()` against `charger_gpio_charging()` in the authority, and
+`od_sensor_app_bq_enable()` against `od_sensor_app_bq_charging()` in both ports —
+`OD_CHARGER_FLAG_ENABLE_ACTIVE_LOW` was handled correctly everywhere. Nobody adopts an inverted
+polarity convention for one charger pin and the datasheet's for the pin beside it; one operator was
+simply wrong.
+
+**The fix is an ownership change, not an operator flip.** Interpreting a config flag is policy, and
+policy belongs in the shared driver — the two adapters each answering it is why one copy could
+drift from the other, and why no test could see either. So the seam now carries levels:
+
+| | Before | After |
+|---|---|---|
+| Enable | `od_sensor_app_bq_enable(bool on)` — target resolves polarity | `od_sensor_app_bq_enable_drive(bool level_high)` — target drives a level |
+| State | `od_sensor_app_bq_charging(bool *charging)` — target resolves polarity | `od_sensor_app_bq_state_level(bool *level_high)` — target reports a level |
+| `OD_CHARGER_FLAG_*` readers | both adapters | `shared/core/od_sensor_bq27220.c`, once |
+
+`../Firmware` keeps the defect: sibling repo, reported not fixed.
+
+**Wire-visible, deliberately.** Bit 7 of the BQ27220 MSD byte is the charging indicator, so any
+board wiring STAT now advertises the opposite of what it did. That is the point — but a board whose
+config was tuned by observation against the old firmware was double-inverted and correct, and is
+now wrong. The config audit in `FOLLOWUPS` § 19.1 is the other half of this change and is not done.
+
+**An unreadable state pin is UNKNOWN, and reaching that needed a pre-check rather than an error
+test.** Both GPIO readers deliberately return `0` for a pin they cannot read, so a failure is
+indistinguishable from LOW at the seam — and LOW is *charging* on an active-low board. Testing the
+returned level for an error code is dead code on both targets; the adapters ask first instead
+(`od_pin_decode()` on Nordic, a newly exported `od_hal_gpio_pin_valid()` on ESP32). `FOLLOWUPS`
+§ 19.1 has the residue this does not close.
+
+**Not hardware-qualified.** No board has confirmed the corrected reading; the row is open in
+docs/HARDWARE_VERIFICATION_CHECKLIST.md.

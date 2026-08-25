@@ -9,6 +9,7 @@
 #ifndef OD_SENSOR_APP_H
 #define OD_SENSOR_APP_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -32,6 +33,25 @@ void od_sensor_app_msd_write(uint8_t index, uint8_t value);
  * re-initialises per operation and has nothing to tear down, so its implementation is the
  * settle alone. Called only on the retry path, never in the ordinary case. */
 void od_sensor_app_bus_recover(uint8_t bus_id);
+
+/* THESE TWO TAKE AND RETURN ELECTRICAL LEVELS, NOT MEANINGS. Deciding what a level means is
+ * config policy -- it reads OD_CHARGER_FLAG_* out of struct od_config -- and policy belongs in
+ * the shared driver. Both ports previously interpreted the flags themselves, and both got the
+ * charge-state one backwards while getting the charge-enable one right; a duplicated decision is
+ * how one copy drifts from its neighbour. See DIVERGENCE_MATRIX 21. */
+
+/* Establish the charger GPIOs, driving the enable pin at the given LEVEL.
+ *
+ * Also configures the charge-state pin as an input, which is why this runs even on a board with
+ * no enable pin. Configure the output and THEN drive the level, the order both ports used;
+ * reversing it glitches the rail. An absent enable pin is a successful no-op, not a failure --
+ * plenty of boards have no software charge control. */
+bool od_sensor_app_bq_enable_drive(bool level_high);
+
+/* Raw charge-state pin level, TRI-STATE by return value: false means "no state pin, or the read
+ * failed, so unknown", and only then is *level_high untouched. A board with no state pin is not
+ * "not charging", and collapsing the two would advertise a definite answer nobody measured. */
+bool od_sensor_app_bq_state_level(bool *level_high);
 
 #ifdef __cplusplus
 }

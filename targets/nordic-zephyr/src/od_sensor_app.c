@@ -3,6 +3,8 @@
 #include "od_sensor_app.h"
 
 #include "opendisplay_ble.h"
+#include "od_gpio.h"
+#include "od_runtime_types.h"
 
 #include <zephyr/kernel.h>
 
@@ -22,4 +24,57 @@ void od_sensor_app_bus_recover(uint8_t bus_id)
 	 * retry already gets a fresh bus. What is left is the settle the authority waits out. */
 	(void)bus_id;
 	k_msleep(2);
+}
+
+static bool valid_pin(uint8_t pin)
+{
+	return pin != 0u && pin != 0xFFu;
+}
+
+bool od_sensor_app_bq_enable_drive(bool level_high)
+{
+	const struct od_config *cfg = opendisplay_get_global_config();
+	uint8_t en;
+	uint8_t st;
+
+	if (cfg == NULL) {
+		return false;
+	}
+	en = cfg->power_option.charge_enable_pin;
+	st = cfg->power_option.charge_state_pin;
+
+	if (valid_pin(en)) {
+		od_gpio_configure_output(en, level_high);
+	}
+	if (valid_pin(st)) {
+		od_gpio_configure_input(st, true, false);
+	}
+	/* An absent enable pin is a successful no-op. */
+	return true;
+}
+
+bool od_sensor_app_bq_state_level(bool *level_high)
+{
+	const struct od_config *cfg = opendisplay_get_global_config();
+	uint8_t st;
+	uint8_t port;
+	uint8_t pin;
+
+	if (cfg == NULL || level_high == NULL) {
+		return false;
+	}
+	st = cfg->power_option.charge_state_pin;
+	if (!valid_pin(st)) {
+		return false;      /* no state pin: UNKNOWN, not "not charging" */
+	}
+	/* ASK BEFORE READING. od_gpio_read() returns 0 for a pin it cannot decode or get -- its own
+	 * comment defends that, because callers test the result as a boolean and an errno would read
+	 * as HIGH. So a failure is indistinguishable from LOW here, and LOW is CHARGING on an
+	 * active-low board: an undecodable pin would advertise the charger as connected. Testing the
+	 * result cannot catch that; only asking first can. */
+	if (!od_pin_decode(st, &port, &pin)) {
+		return false;      /* unreadable: UNKNOWN, not a level */
+	}
+	*level_high = (od_gpio_read(st) != 0);
+	return true;
 }

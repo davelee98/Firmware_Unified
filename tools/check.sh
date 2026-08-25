@@ -398,6 +398,30 @@ bg22_has_no_buzzer_runner() {
     fi
 }
 check "silabs: BG22 has no buzzer runner" bg22_has_no_buzzer_runner
+# PERMANENT. One entry point for "advertise sooner, something happened".
+#
+# THE FIRST VERSION OF THIS RULE LISTED TWO RETIRED NAMES AND PASSED WHILE A THIRD SURVIVED --
+# BG22's static od_boost_advertising(), which no one had noticed because the ESP32 comment it was
+# checked against said the fast-advertising window was "nRF-only". A ratchet that enumerates the
+# names you already know about proves nothing about the one you do not.
+#
+# So this matches the SHAPE instead: any identifier combining boost with advertising, in call or
+# definition syntax, that is not the seam. Nordic's and BG22's legitimate window internals
+# (s_adv_boost_until_ms, adv_boost_active, OD_ADV_BOOST_MS, od_advertising_boost_tick) are state
+# and policy below the seam, not entry points. BG22's loop reconciler was renamed to
+# od_advertising_interval_tick() rather than exempted, because it reconciles an interval and the
+# old name made a policy function look like a second way to ask for a boost.
+#
+# NO LEADING \b, DELIBERATELY. The name that escaped was od_boost_advertising, where 'boost' is
+# preceded by a word character -- so \bboost cannot match it. This repo has made that exact
+# mistake before (od_nfc_i2c_start vs \bi2c_start). A prefix anchor on a rule about identifiers
+# that carry prefixes is a rule that reads as coverage and is not.
+adv_boost_one_entry_point() {
+    absent_or_fail "a private advertising-boost entry point returned; od_adv_app_boost() is the seam" \
+        '(boost_?[Aa]dvertis|[Aa]dvertis[a-z]*_?[Bb]oost)[a-zA-Z_]*[[:space:]]*\(' \
+        targets shared
+}
+check "advertising: one boost entry point" adv_boost_one_entry_point
 
 # PERMANENT. A promoted opcode answers from shared code; a target assembling its own reply bytes
 # for one is invisible until a wire capture disagrees with the corpus.

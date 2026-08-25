@@ -1066,7 +1066,7 @@ MSD refresh interval. It needs its own change and its own hardware gate.
 
 ---
 
-## 17. `Firmware` / `Firmware_Unified` ESP32 — an over-count GT911 status wedges touch permanently
+## 17. `Firmware` / `Firmware_Unified` ESP32 — an over-count GT911 status wedges touch until a lifecycle event
 
 Found 2026-08-24 while settling the sensor-seam plan's Q7. **Sibling repository, so the `Firmware`
 half is reported, not fixed.**
@@ -1103,3 +1103,166 @@ That is the behaviour the shared driver takes.
 This is one of the rare cases where the Nordic port is right and the authority is not, so it is
 recorded rather than resolved by the usual "`Firmware` wins" default (CLAUDE.md § Migration
 constraints).
+
+**The vendor documentation makes the consequence worse than a dead window.** GOODIX's *GT911
+Programming Guide* Rev.10 § 5 p.28 states that if the host does not clear `0x814E` within one
+refresh period the part "will output an INT pulse again **instead of update coordinates** even if
+it detects new coordinate", and that if the host still does not read, it "will keep outputting INT
+pulse". So the wedged state is not quiet: the controller holds a stale sample *and* asserts its
+interrupt line every 5..20 ms indefinitely, waking the host each time to re-read the same
+unusable byte. On an interrupt-driven board that is a power cost on top of the lost input.
+
+Two related facts from the same document, for whoever picks this up: the 1..5 contact bound is the
+*configuration* register `0x804C`, not a property of `0x814E` — Rev.10's own map enumerates six
+point blocks through `0x817F`, and HotKnot proximity detection adds a phantom contact with track id
+32 aliased onto point 1's address. So `n > 5` is a sound defensive rule for this fleet but is not
+the specification saying the sample is invalid, which is a further reason to clear and continue
+rather than to skip.
+
+---
+
+## 18. `Firmware_Unified` / both targets — a dead BQ27220 keeps advertising its last state of charge
+
+Found 2026-08-24 while promoting the driver (sensor-seam step 7).
+**PROJECT RULING 2026-08-24: leave it.** Recorded so the behaviour reads as a decision rather than
+an oversight, and so nobody "fixes" it later on the grounds that SHT40 does the opposite.
+
+On a failed voltage read the BQ27220 poll invalidates its cached voltage and returns — **before the
+MSD write**:
+
+```c
+if (!bq27220_read_block(s, BQ27220_CMD_VOLTAGE, raw, 2)) {
+    s_gauge_ok = false; s_batt_v = -1.0f; s_soc = 0xFF;
+    return;                       /* <-- the MSD byte is never touched */
+}
+```
+
+So a gauge that stops answering — disconnected, failed, or on a bus that has gone quiet — leaves
+its last good SOC byte in the advertisement indefinitely. A host sees a battery frozen at whatever
+it last read, not an absent one. `od_sensor_bq27220_voltage_volts()` correctly returns -1, so the
+inconsistency is only in the advertised byte.
+
+**The two DEVICE DRIVERS disagree, not the two targets.** SHT40's poll writes an explicit invalid
+marker (`FF FF FF`) when it cannot read and BQ27220's does not — consistently, in `../Firmware` and
+in both ports. There is no evident reason for the difference beyond the drivers having been written
+separately.
+
+The fix would be one line — write `0xFF` to `msd_data_start_byte` on the failure path, matching
+SHT40 — and it is **not being made**. It changes what a deployed host sees for a failing gauge, and
+the ruling is that the existing behaviour stands.
+
+`tests/host/sensor_bq27220_test.c` pins it: a failed read leaves the previous byte and a
+subsequent poll does not overwrite it. Anyone changing this has to change that assertion, which is
+the point — it cannot drift silently in either direction.
+
+---
+
+## 19. `Firmware` / `Firmware_Unified` — the charge-state polarity is inverted against the contract
+
+Found 2026-08-24 during sensor-seam step 7's review.
+
+**FIXED IN THIS REPO 2026-08-24 by project ruling** (`DIVERGENCE_MATRIX` § 21). This section stays
+open because `../Firmware` is a sibling and keeps the defect — that half is reported, not fixed —
+and because the config audit below is outstanding release work that the code change does not
+discharge.
+
+The canonical header is explicit (`opendisplay_structs.h:482`):
+
+> `OD_CHARGER_FLAG_STATE_ACTIVE_LOW` — *"charge-state (BQ25616 STAT) is active-low: **charging when
+> LOW**"*
+
+Every implementation reads it the other way round:
+
+```c
+return activeLow ? (level == HIGH) : (level == LOW);
+```
+— `Firmware/src/sensor_bq27220.cpp:120`, and identically in both `Firmware_Unified` ports before
+this promotion. **Removed from both ports on 2026-08-24** — see § 19.1; `../Firmware` keeps it.
+
+**Both branches are backwards.** With the flag set, the contract says charging is LOW and the code
+reports charging on HIGH. With the flag clear — active-high, so charging is HIGH — the code reports
+charging on LOW. There is no reading of the header under which this is right.
+
+**What it costs:** bit 7 of the BQ27220 MSD byte is the charging indicator, so a host sees
+"charging" exactly when the battery is not, and vice versa, on any board that wires STAT. Boards
+with no state pin are unaffected — the seam returns "unknown" and the driver packs not-charging.
+
+**Why it has survived:** a board whose flag is *also* set backwards in its config reads correctly,
+because two inversions cancel. Any deployed config that was tuned by observation rather than from
+the datasheet is therefore compensating for this, and **fixing the code alone would break those
+boards**. That is the real reason this is a decision rather than a patch: it needs an audit of
+which deployed configs set `OD_CHARGER_FLAG_STATE_ACTIVE_LOW`, and probably a coordinated change
+with the host.
+
+Correcting it is one operator per target seam. Doing so without the config audit is not advised.
+
+### 19.1 What the fix did, and what it did not
+
+The polarity moved into the shared driver rather than being flipped in place. `od_sensor_app`'s
+charger seam now carries **levels**, not meanings — `od_sensor_app_bq_enable_drive(bool
+level_high)` and `od_sensor_app_bq_state_level(bool *level_high)` — and
+`shared/core/od_sensor_bq27220.c` is the only code that reads `OD_CHARGER_FLAG_*`. A duplicated
+decision is how one copy drifted from its neighbour in the first place, and while it stayed in the
+adapters no host test could reach it: `sensor_bq27220_test.c` faked the whole question.
+
+All four flag × level combinations are now pinned there against the header's own words. Four rows,
+not one, because a plain inversion passes any test that checks a single flag value — which is why
+this survived a suite of 56 checks. Re-introducing the original operator fails 4 assertions;
+ignoring the flag fails 4; inverting the *enable* polarity fails 3.
+
+**An unreadable state pin reports UNKNOWN, and getting there needed more than testing the read.**
+The first cut of this change tested the returned level for a negative error code, which **cannot
+fire on either target**: Nordic's `od_gpio_read()` deliberately converts every failure to `0`
+(callers test it as a boolean, so an errno would read as HIGH), and ESP32's returns `0` for a pin
+it rejects. So a failed read is indistinguishable from LOW at this seam — and once the polarity is
+correct, **LOW is charging on an active-low board**. The dead check would have left an unusable
+charge-state pin advertising the charger as connected, which is worse than the bug being fixed.
+
+Both adapters now ASK before reading — `od_pin_decode()` on Nordic, and a newly exported
+`od_hal_gpio_pin_valid()` on ESP32 — and return UNKNOWN when the pin cannot produce a level. A
+runtime `gpio_pin_get()` failure on a *decodable* pin remains undetectable at this seam and still
+presents as LOW; closing that needs a HAL read that can report failure, which is a contract change
+for every caller of those readers and is not made here.
+
+**STILL OUTSTANDING, and the code change does not close it:** the config audit. A board whose
+`charger_flags` was set by observation rather than from the BQ25616 datasheet was compensating for
+the inverted code, and **that board now reads backwards**. Enumerate provisioned configs, and flip
+bit 1 on any that were tuned against the old firmware. `py-opendisplay` needs no change — it
+carries `charger_flags` through its parser, serializer and model but never interprets bit 1, so the
+host reports whatever the MSD says.
+
+---
+
+## 20. `Firmware_Unified` / nordic-zephyr — the advertising-boost request is published as a data race
+
+Found 2026-08-24 in review of the `od_adv_app_boost()` seam. **Pre-existing: the seam renamed the
+function, it did not change the body or add a caller context.** Recorded because the new shared
+header states an ISR-safety contract, and this implementation does not meet the strict form of it.
+
+`od_adv_app_boost()` writes two ordinary objects from ISR and callback context
+(`opendisplay_ble.c:962`):
+
+```c
+s_adv_boost_start_ms = k_uptime_get_32();
+s_adv_boost_on = true;
+```
+
+The loop thread reads both in `adv_boost_active()` and **also writes** `s_adv_boost_on = false`
+when it applies a non-boost interval (`:752`). Neither side is atomic and neither carries an
+ordering constraint, so this is a C data race and formally undefined behaviour.
+
+**The practical failure is a lost renewal, not a torn word.** An aligned 32-bit load will not tear
+on these cores, but the two fields are not published together: the loop can observe `on == true`
+alongside a stale timestamp, decide the window has expired, and clear the flag over a request that
+arrived microseconds earlier. The symptom is one missed boost — a button or touch event that does
+not get its fast-advertising window — which is exactly the failure the boost exists to prevent, and
+is indistinguishable from the event simply not having been noticed.
+
+**`volatile` does not fix it.** It removes the compiler's licence to cache but supplies no
+atomicity across the pair and no ordering. What is needed is a single coherent publication — a
+generation counter or a deadline written as one atomic word — with the loop clearing only a value
+it has proven no newer request replaced.
+
+Low severity: one dropped boost degrades latency, not correctness of any wire content, and the
+window is three seconds wide so a repeat event recovers it. Fix when the boost gains a second
+implementation, since a correct pattern should be established before it is copied.

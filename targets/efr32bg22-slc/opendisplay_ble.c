@@ -7,6 +7,8 @@
 #include "opendisplay_pipe.h"
 #include "opendisplay_constants.h"
 #include "od_advert.h"
+#include "od_adv_app.h"
+#include "od_hal_time.h"
 #include "app.h"
 #include "app_assert.h"
 #include "gatt_db.h"
@@ -254,7 +256,6 @@ static uint8_t s_button_count;
 static volatile bool s_button_msd_dirty;
 
 static sl_status_t build_and_apply_adv(uint8_t adv_set, const char *name, bool quick);
-static void od_boost_advertising(uint32_t now_ms);
 static sl_status_t od_apply_advertising_timing(uint8_t adv_handle, uint32_t now_ms);
 
 #if defined(__GNUC__)
@@ -477,7 +478,7 @@ static void od_publish_button_msd(uint8_t adv_handle, uint32_t now_ms)
     return;
   }
   s_button_msd_dirty = false;
-  od_boost_advertising(now_ms);
+  od_adv_app_boost();
   (void)sl_bt_advertiser_stop(adv_handle);
   if (!od_advertising_api_ok(build_and_apply_adv(adv_handle, s_dev_name, true),
                              "button advertising data update") ||
@@ -1521,12 +1522,21 @@ static sl_status_t od_apply_advertising_timing(uint8_t adv_handle, uint32_t now_
   return sc;
 }
 
-static void od_boost_advertising(uint32_t now_ms)
+/* The shared boost seam (shared/core/od_adv_app.h). This target DOES have a fast-advertising
+ * window -- 20-30 ms against a 1000 ms idle -- so unlike ESP32 it is not a no-op.
+ *
+ * Samples the clock itself rather than taking it, because the seam is context-free by contract:
+ * a caller reached from an interrupt has no now_ms to pass. */
+void od_adv_app_boost(void)
 {
-  s_adv_boost_until_ms = now_ms + OD_ADV_BOOST_MS;
+  s_adv_boost_until_ms = od_hal_uptime_ms() + OD_ADV_BOOST_MS;
 }
 
-static void od_advertising_boost_tick(uint8_t adv_handle, uint32_t now_ms)
+/* Loop-side half of the boost: restores the idle interval once the window closes. Named for the
+ * interval it reconciles rather than for the boost, matching Nordic's
+ * opendisplay_ble_advertising_tick() -- and so that "one boost ENTRY POINT" stays a rule about
+ * entry points, which a loop reconciler is not. */
+static void od_advertising_interval_tick(uint8_t adv_handle, uint32_t now_ms)
 {
   static bool was_boosted = false;
   bool boosting = (s_adv_boost_until_ms != 0u && now_ms < s_adv_boost_until_ms);
@@ -1919,7 +1929,7 @@ void opendisplay_ble_process(void)
   uint32_t now_ms = sl_sleeptimer_tick_to_ms(sl_sleeptimer_get_tick_count());
   od_publish_button_msd(s_adv_handle, now_ms);
   if (s_adv_handle != 0xFFu) {
-    od_advertising_boost_tick(s_adv_handle, now_ms);
+    od_advertising_interval_tick(s_adv_handle, now_ms);
   }
   if (od_nfc_field_detect_process(now_ms) && s_adv_handle != 0xFFu) {
     if (!od_advertising_api_ok(build_and_apply_adv(s_adv_handle, s_dev_name, false),

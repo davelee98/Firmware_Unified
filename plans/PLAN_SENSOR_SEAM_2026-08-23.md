@@ -217,17 +217,21 @@ shared `od_config` and passes explicit `bus_id` and address values to the HAL.
 The remaining target functions are:
 
 ```c
-/* od_sensor_app.h */
+/* od_sensor_app.h -- as landed. The two charger entries were designed as
+ * bq_enable(bool on) / bq_charging(bool *charging), taking and returning MEANINGS; step 7's
+ * review found both ports resolving OD_CHARGER_FLAG_* themselves and both getting the state
+ * flag backwards, so they now carry LEVELS and the shared driver owns the policy.
+ * DIVERGENCE_MATRIX 21. */
 void od_sensor_app_delay_ms(uint16_t delay_ms);
-bool od_sensor_app_bq_enable(bool on);
-bool od_sensor_app_bq_charging(bool *charging);
+bool od_sensor_app_bq_enable_drive(bool level_high);
+bool od_sensor_app_bq_state_level(bool *level_high);
 void od_sensor_app_msd_write(uint8_t index, uint8_t value);
 ```
 
-`od_sensor_app_bq_enable()` preserves the existing GPIO ordering: configure the output and then
-establish the active level. These are GPIO operations, not BQ register writes. An absent enable
-pin is a successful no-op. `od_sensor_app_bq_charging()` returns false when no state pin exists,
-so “unknown” remains distinct from “not charging”.
+`od_sensor_app_bq_enable_drive()` preserves the existing GPIO ordering: configure the output and
+then establish the level. These are GPIO operations, not BQ register writes. An absent enable pin
+is a successful no-op. `od_sensor_app_bq_state_level()` returns false when no state pin exists or
+the pin cannot produce a level, so “unknown” remains distinct from “not charging”.
 
 The shared public surface preserves the callers both targets have today while making config
 ownership explicit:
@@ -453,6 +457,214 @@ software candidate with its rows open.
 
    Q7 is closed (clear the status on the over-count branch; `FOLLOWUPS` § 17) and the rate is
    settled (follow `bus_speed_hz`), so those are no longer entry conditions.
+
+   **FIRST ATTEMPT AT THE DRIVER FAILED REVIEW, 2026-08-24. Its findings are the specification
+   for the next one.** `shared/core/od_touch_gt911.c` exists on `feat/sensor-drivers-and-touch`
+   marked DRAFT — DO NOT MERGE. Three of the six are API-shape problems, not bugs, which is why
+   patching the draft is the wrong move:
+
+   1. **The coordinate map cannot live in an adapter.** Both donors apply
+      `apply_touch_map()` — swap, invert, clip to display size — **before caching and before
+      packing** (`touch_input.cpp:743`). By the time a byte-write seam sees the MSD the sample and
+      its `TouchController` are gone, so the transform has to be inside the shared driver. Every
+      config using those flags gets wrong coordinates without it, for both live contacts and the
+      latched release.
+   2. **Cadence and publication cannot be split out either.** The donors carry per-controller
+      `poll_interval_ms`, poll only the controller an IRQ or held-low line selected, back off
+      100 ms after an I2C failure using private failure state, detach the IRQ when a controller is
+      disabled, and publish the MSD **only when a decoded sample changed**. A `poll(cfg, now_ms)`
+      that walks every controller and writes bytes cannot express any of it. The core needs to
+      expose per-controller control and a changed/commit signal.
+   3. **`enable_pin` is never asserted.** The donors drive it before the bus check
+      (`touch_input.cpp:548`); a controller behind that enable never probes at all.
+   4. **The address cascade is wrong.** After an explicitly configured address fails the donors
+      `return 0` (`touch_input.cpp:355`); the draft falls through to auto-detection, which can
+      bind a *different* controller. Its auto-detect also probes both addresses after each reset
+      where the donors do reset-low → probe 0x5D, reset-high → probe 0x14.
+   5. **Resume was gutted.** The donors probe the PID at the retained address, clear and wake INT
+      on success, do a full reset and re-resolve on failure, and recover a controller whose `ok`
+      is false but which is not disabled. The draft clears two fields and the status.
+   6. **ESP32's no-DataBus default-pin path is dropped.** That target accepts `data_bus_count == 0`
+      with a non-`0xFF` `bus_id` and transacts on the already-selected board-default bus. The step-1
+      ruling retired the literal `0xFF` case, **not** this one, and the shared HAL cannot name that
+      bus.
+
+      **RULING 2026-08-24: retire it.** A config declaring a touch controller on a bus it never
+      declares is invalid, exactly as the step-1 ruling held for the `0xFF` form of the same
+      shape. The shared HAL is keyed by `DataBus.instance_number`, so a bus appearing in no
+      `data_buses` entry has no identity the seam can name, and transacting on "whichever bus was
+      selected last" is the bus-0 substitution failure wearing a different constant — plausible
+      readings from whatever answers that address, rather than an error. The shared driver
+      requires a declared bus and refuses otherwise, matching Nordic's existing refusal. Record it
+      in `DIVERGENCE_MATRIX` § 13 beside the four substitution sites.
+
+   Correct in the draft and worth keeping: the reset edge order, the three-attempt
+   repeated-START-then-STOP-separated retry with its 500 µs spacing, the register byte-order
+   fallback, the MSD packing cases and bound, the failure-streak reset point, and Q7's clears.
+
+   Four more defects, from the MSD/host survey rather than from the code review:
+
+   7. **No host test anywhere covers touch MSD packing.** `tools/check.sh` would not catch an
+      encoder regression, which matters more than usual given § 8.1.
+   8. **The touch advertising boost is a Zephyr-port addition, and the authority does not have
+      it.** Verified 2026-08-24 by reading all four trees rather than by report.
+      `opendisplay_ble_boost_advertising()` is called from touch only in `Firmware_NRF54`
+      (`opendisplay_touch.c:698`) and in the port that inherited it here
+      (`nordic-zephyr/src/opendisplay_touch.c:586`, on the `changed` edge). **`../Firmware` — the
+      authority — never calls it from touch on either transport**, though both it and
+      `Firmware_NRF54` call it from the *button* path. So the touch call exists in
+      `Firmware_NRF54` and here, and nowhere in the authority.
+
+      **And ESP32 does not implement one.** `BleTransport::boostAdvertising()` is an empty no-op
+      on ESP32 in both repos (`ble_transport_esp32.cpp:549` here, `:586` upstream). There is no
+      `s_advBoostUntil` and no `applyAdvInterval()` anywhere in the ESP32 tree — those names appear
+      only inside `device_control.cpp`'s comment, which describes the **nRF** transport's state to
+      explain an ordering bug found there.
+
+      **It is not "nRF-only", though, and an earlier form of this paragraph said so.** Review found
+      `efr32bg22-slc/opendisplay_ble.c` carrying a third, never-mentioned implementation —
+      `od_boost_advertising()`, a 20-30 ms window against a 1000 ms idle, called from its button
+      MSD publish. Two of the three targets this repo builds already boost; only ESP32 does not.
+
+      So this is not "ESP32 is missing a feature the shared driver should carry down". It is a
+      divergence the promotion has to resolve, and the CLAUDE.md default (`Firmware` wins over
+      `Firmware_NRF54`) points at **not** boosting. The Zephyr addition has a real argument —
+      the button comment's own reasoning, a ~230 ms event against a 160 ms slow advertising
+      interval, applies at least as strongly to a touch contact — but honouring it on ESP32 means
+      **building a fast-advertising window that target has never had**, which is far larger than
+      this promotion.
+
+      **And ESP32 does not need one.** `od_ble_start_now()` leaves `itvl_min`/`itvl_max` at zero,
+      so NimBLE substitutes `BLE_GAP_ADV_FAST_INTERVAL1_MIN`/`MAX` for connectable undirected
+      advertising — **30 ms and 60 ms**, because `CONFIG_BT_NIMBLE_HIGH_DUTY_ADV_ITVL` is unset in
+      all 11 board baselines. **The comparison is against the other targets' IDLE rate, not their
+      boosted one** — an earlier form of this paragraph got that backwards. `nordic-zephyr` idles
+      at 1000 ms and boosts to 20-30 ms; the Bluefruit nRF build in `../Firmware` idles at
+      160-1000 ms. ESP32's permanent 30-60 ms is within a factor of two of their *boosted* rate
+      and 17-33x their *idle* rate, so the failure the boost exists to fix — a slow idle state
+      that an event has to interrupt — is a condition this target does not have.
+
+      **RULING 2026-08-24: unify the seam; ESP32 keeps implementing it as a no-op.** This
+      REVERSES the reading recorded a few hours earlier in this same section, which had the
+      CLAUDE.md authority default pointing at *not* boosting from touch. Two facts moved it: the
+      interval arithmetic above (ESP32 has no slow state the boost would rescue, so "don't boost"
+      costs it nothing and gains it nothing), and BG22 — found in review to have a **third**
+      private boost, 20-30 ms against a 1000 ms idle. With two of three targets already boosting,
+      the question stopped being whether to adopt a Zephyr addition and became whether three
+      targets should keep spelling the same request three ways.
+      `shared/core/od_adv_app.h` declares `od_adv_app_boost()`, and buttons, touch, NFC and
+      connection edges all call that one name. Nordic forwards to its boost window; ESP32 defines
+      it empty with the interval arithmetic above as the stated reason. The no-op is a per-target
+      answer rather than an unimplemented stub — which is the point of routing it through a seam
+      every linking target must define, instead of a shared caller silently doing nothing. Landed
+      ahead of the driver, which has no caller yet: **the shared GT911 is to call it on the
+      `changed` edge** when it is written. The retired names are ratcheted by "advertising:
+      retired boost names stay retired" — which catches those two names returning and nothing
+      more, so the one-seam invariant is carried by review.
+   9. **`py-opendisplay` drops `TouchController.enable_pin`** into its reserved blob, so a config
+      JSON round trip zeroes it and disables the panel's power-enable GPIO. External follow-up,
+      and it compounds defect 3.
+   10. **Nothing validates dynamic-region overlap** — not firmware, not the host, not the config
+      tools. Touch at `touch_data_start_byte = 6` spans bytes 6..10 and the SHT40 *default* slot
+      is 7..9, so a config that sets touch to 6 and leaves the sensor default has two writers
+      fighting every poll. Detect and refuse, or detect and log; do not silently interleave.
+
+   ### 8.1 The touch wire format is frozen by convention, not by contract
+
+   **Corrected 2026-08-24 in review — the earlier form of this paragraph overstated it.** The
+   canonical header does name the block: `TouchController`'s own doc says the controller
+   "Publishes the first contact (5 bytes) into MSD dynamic data", and `touch_data_start_byte` is
+   `@min 0 @max 6` with the note "start index in dynamicreturndata for the 5-byte touch block
+   (avoid overlap with binary_inputs)" (`opendisplay_structs.h:952`). So the block's existence,
+   its width and where it may start ARE contract.
+
+   What the header does not define is **the layout inside those five bytes** — no struct, no
+   macro, no statement of the count nibble, the `6` release sentinel, the track-id nibble or the
+   coordinate endianness. The only normative description of *that* is **a comment in the donor
+   firmware** (`touch_input.cpp:33`), which `py-opendisplay`, the JavaScript decoder and the iOS
+   app each independently implement. There is no version field.
+
+   So the packing is frozen in practice: any change breaks every deployed host at once, silently,
+   with no way for a host to detect it. The draft's packing was byte-equivalent and that is the
+   one part of it that was safe to keep.
+
+   This is also what makes review finding 1 wire-visible rather than cosmetic. A driver that skips
+   `apply_touch_map()` emits perfectly well-formed bytes carrying **raw controller coordinates**
+   where every host expects mapped, clipped panel pixels. Nothing in the frame is malformed, so
+   nothing anywhere reports an error.
+
+   ### 8.2 What the GT911 programming guide settles
+
+   Source: **GOODIX "GT911 Programming Guide", Rev.10, 2017-07-26**, applicable to firmware V1040+.
+   All timing values live in the document's embedded figures rather than its text. Where the guide
+   and the authority disagree, this section records which is which; it does not license a change.
+
+   **The reset dance's magic numbers are the documented minima, and the donor is spec-conformant.**
+   `gt911_hw_reset()`'s 110 µs, 6 ms and 51 ms are T2 > 100 µs (INT at the address-select level
+   before RST's rising edge), T3 > 5 ms (INT held after it) and T4 > 50 ms (INT driven low before
+   the host floats it); the 11 ms RST-low clears T1 > 100 µs with room. The donor performs the
+   INT-low-for-50 ms step that ESP-BSP's widely deployed driver omits. **Do not tidy any of these
+   constants** — they are the datasheet with a margin, not arbitrary.
+
+   **One donor divergence from the guide, recorded and not changed:** the reset releases INT as
+   `INPUT_PULLUP`, and § 1 p.3 requires it be left floating with no internal pull-up or pull-down.
+   It is field-proven this way. Changing it needs a board, not an argument.
+
+   **The register-address byte order is unambiguously big-endian, and the donor probes
+   little-endian first.** § 2.1 p.3 specifies `Register_H` then `Register_L`; the survey searched
+   specifically for a clone using the other order and found no evidence in any source, Goodix or
+   otherwise. `gt911_probe_product()` nevertheless tries low-byte-first first and calls it
+   "common". **The cost is one wasted transaction per candidate address, not a retry cascade** —
+   an earlier form of this paragraph claimed the latter and was wrong. `gt911_read_reg()` returns
+   on the first successful *bus* transaction and the `"911"` comparison happens above it in
+   `gt911_probe_product()`, so a byte-swapped pointer write that the part ACKs succeeds, returns
+   bytes that cannot match, and falls straight through to the documented order. The full
+   three-attempt × two-framing cascade runs only when the wrong-order transaction fails at the bus
+   level. **RULING 2026-08-24: follow the
+   specification.** The shared driver probes **high byte first**, and keeps low-byte-first as the
+   fallback behind it. Both orders survive, so a part that only answers the undocumented form
+   still binds — it is simply tried second, which is the correct priority for an order that no
+   source documents and that the survey could not evidence. Every conformant part saves a failed
+   cascade per candidate address at boot.
+
+   A deliberate departure from the authority, recorded in `DIVERGENCE_MATRIX` § 20. It is a
+   **reordering, not a removal**: do not delete the fallback on the grounds that the guide
+   describes only one order. The donor author wrote "common" about something, and no board here
+   can prove what.
+
+   **Both read framings are spec-legal, and the draft's stated reason for keeping them is not.**
+   § 2.2 p.4: "The Stop condition ... after setting the address pointer is optional. However, the
+   repeated Start condition has to be sent." Both forms are permitted; what is mandatory is that a
+   START precede the read addressing. The survey found no evidence for the "real clones require
+   different forms" claim in the draft's header. Keep the fallback — it is donor behaviour and it
+   is cheap — and correct the comment to say what is actually known.
+
+   **`"911"` is not a documented product ID.** § 3.3 p.14 says only "ASCII". The donor's
+   three-byte prefix compare is exactly the right shape and is better than the four-byte
+   `"911\0"` compare most drivers use; GT9110/GT9147-class parts report different bytes. Keep it,
+   and say why in the code.
+
+   **Q7's ruling is now backed by the guide, and the consequence is worse than a wedge.** § 5 p.28:
+   if the host does not clear `0x814E` within one refresh period, GT911 "will output an INT pulse
+   again instead of update coordinates", and "will keep outputting INT pulse". So the over-count
+   branch that `continue`s without clearing leaves a permanently stale sample **and an interrupt
+   storm**, not silence. Strengthen `FOLLOWUPS` § 17 with this citation.
+
+   **The `n > 5` discard is a reasonable rule, not a spec rule.** Nothing bounds the count field at
+   `0x814E`; the 1..5 limit is the *configuration* register `0x804C`. Rev.10's own map enumerates
+   **six** point blocks through `0x817F`, and HotKnot proximity detection adds a phantom contact
+   with track id 32 aliased onto point 1's address. Keep the discard — HotKnot is not enabled here
+   — and record that it is derived, so a future 6-contact panel has a place to look.
+
+   **INT polarity is a configuration value, not a chip property.** `0x804D` bits 1..0 select rising
+   edge, falling edge, low level or high level. The donor attaches FALLING unconditionally; that is
+   an assumption about the loaded config, and a panel configured for rising or for a level mode
+   will work in polling and fail in interrupt mode. Comment it; do not change it without a board.
+
+   **Decode geometry confirmed against the guide:** 8-byte stride from `0x814F`, track id at +0,
+   X little-endian at +1/+2, Y little-endian at +3/+4, 16-bit size at +5/+6, +7 reserved. Note the
+   inversion — the register *address* is big-endian while the register *contents* are
+   little-endian. The donor's decode is correct on both counts.
 9. **BG22 NFC transport cutover — a software candidate, explicitly NOT hardware-qualified.**
    Separate from every sensor step, because BG22 takes no sensor code and because no board in this
    fleet carries a TNB132M.
