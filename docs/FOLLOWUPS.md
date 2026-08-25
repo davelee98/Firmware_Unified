@@ -1159,9 +1159,12 @@ the point — it cannot drift silently in either direction.
 
 ## 19. `Firmware` / `Firmware_Unified` — the charge-state polarity is inverted against the contract
 
-Found 2026-08-24 during sensor-seam step 7's review. **Preserved, not fixed** — it is faithful to
-the authority and to both ports, and correcting it flips a wire-visible bit on every board that has
-a charge-state pin. Reported so the decision is deliberate.
+Found 2026-08-24 during sensor-seam step 7's review.
+
+**FIXED IN THIS REPO 2026-08-24 by project ruling** (`DIVERGENCE_MATRIX` § 21). This section stays
+open because `../Firmware` is a sibling and keeps the defect — that half is reported, not fixed —
+and because the config audit below is outstanding release work that the code change does not
+discharge.
 
 The canonical header is explicit (`opendisplay_structs.h:482`):
 
@@ -1192,3 +1195,29 @@ which deployed configs set `OD_CHARGER_FLAG_STATE_ACTIVE_LOW`, and probably a co
 with the host.
 
 Correcting it is one operator per target seam. Doing so without the config audit is not advised.
+
+### 19.1 What the fix did, and what it did not
+
+The polarity moved into the shared driver rather than being flipped in place. `od_sensor_app`'s
+charger seam now carries **levels**, not meanings — `od_sensor_app_bq_enable_drive(bool
+level_high)` and `od_sensor_app_bq_state_level(bool *level_high)` — and
+`shared/core/od_sensor_bq27220.c` is the only code that reads `OD_CHARGER_FLAG_*`. A duplicated
+decision is how one copy drifted from its neighbour in the first place, and while it stayed in the
+adapters no host test could reach it: `sensor_bq27220_test.c` faked the whole question.
+
+All four flag × level combinations are now pinned there against the header's own words. Four rows,
+not one, because a plain inversion passes any test that checks a single flag value — which is why
+this survived a suite of 56 checks. Re-introducing the original operator fails 4 assertions;
+ignoring the flag fails 4; inverting the *enable* polarity fails 3.
+
+**One host-visible behaviour change beyond the polarity:** a state-pin read that fails now reports
+UNKNOWN rather than a level. Both ports previously compared the raw `int` against `0` or `1`, so a
+negative error code silently became "not charging". The MSD byte is unchanged either way — unknown
+packs as not-charging — so this is a clarity fix, not a wire change.
+
+**STILL OUTSTANDING, and the code change does not close it:** the config audit. A board whose
+`charger_flags` was set by observation rather than from the BQ25616 datasheet was compensating for
+the inverted code, and **that board now reads backwards**. Enumerate provisioned configs, and flip
+bit 1 on any that were tuned against the old firmware. `py-opendisplay` needs no change — it
+carries `charger_flags` through its parser, serializer and model but never interprets bit 1, so the
+host reports whatever the MSD says.

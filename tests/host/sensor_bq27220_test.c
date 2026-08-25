@@ -24,17 +24,25 @@ static uint8_t  g_msd[11];
 static uint32_t g_now_ms;
 static unsigned g_enable_calls;
 static bool     g_enable_last;
-static bool     g_charging_known;
-static bool     g_charging_value;
+static bool     g_state_known;
+static bool     g_state_level_high;
 
 void od_sensor_app_delay_ms(uint16_t ms) { (void)ms; }
 void od_sensor_app_msd_write(uint8_t i, uint8_t v) { if (i < 11u) { g_msd[i] = v; } }
 void od_sensor_app_bus_recover(uint8_t b) { (void)b; }
-bool od_sensor_app_bq_enable(bool on) { g_enable_calls++; g_enable_last = on; return true; }
-bool od_sensor_app_bq_charging(bool *charging)
+
+/* The seam carries LEVELS now, so these fakes supply pin electricity and nothing else. A fake
+ * that answered "charging" would be answering the question under test. */
+bool od_sensor_app_bq_enable_drive(bool level_high)
 {
-    if (!g_charging_known) { return false; }
-    *charging = g_charging_value;
+    g_enable_calls++;
+    g_enable_last = level_high;
+    return true;
+}
+bool od_sensor_app_bq_state_level(bool *level_high)
+{
+    if (!g_state_known) { return false; }
+    *level_high = g_state_level_high;
     return true;
 }
 
@@ -46,8 +54,8 @@ static void setup(uint8_t msd_start)
     memset(&g_cfg, 0, sizeof g_cfg);
     memset(g_msd, 0xA5, sizeof g_msd);
     g_enable_calls = 0;
-    g_charging_known = false;
-    g_charging_value = false;
+    g_state_known = false;
+    g_state_level_high = false;
     g_cfg.data_bus_count = 1u;
     g_cfg.data_buses[0].instance_number = BUS_INSTANCE;
     g_cfg.data_buses[0].bus_type = 0x01u;
@@ -110,28 +118,64 @@ static void test_voltage_and_soc_widths(void)
     CHECK(i2c_wire_count(I2C_EV_RX) == 3u);
 }
 
+/* One poll with a scripted gauge, a known STAT level and a charger_flags value. */
+static uint8_t poll_with_state(uint8_t flags, bool level_high)
+{
+    setup(4u);
+    script(3700u, 50u);
+    g_cfg.power_option.charger_flags = flags;
+    g_state_known = true;
+    g_state_level_high = level_high;
+    od_sensor_bq27220_poll(&g_cfg, g_now_ms);
+    return g_msd[4];
+}
+
+/* THE POLARITY IS THE CANONICAL HEADER'S, IN ALL FOUR COMBINATIONS.
+ *
+ * opendisplay_structs.h:482 -- OD_CHARGER_FLAG_STATE_ACTIVE_LOW is "charge-state (BQ25616 STAT)
+ * is active-low: charging when LOW"; with the flag clear the pin is active-high. Every port used
+ * to answer this backwards in BOTH branches, which is a plain inversion and therefore invisible
+ * to any test that only checks one flag value. All four rows are here for that reason: flipping
+ * the operator fails two of them, and swapping the flag's sense fails the other two.
+ *
+ * DIVERGENCE_MATRIX 21, FOLLOWUPS 19. */
+static void test_charge_state_polarity(void)
+{
+    CASE("active-low flag set: LOW is charging");
+    CHECK(poll_with_state(OD_CHARGER_FLAG_STATE_ACTIVE_LOW, false) == (50u | 0x80u));
+
+    CASE("active-low flag set: HIGH is not charging");
+    CHECK(poll_with_state(OD_CHARGER_FLAG_STATE_ACTIVE_LOW, true) == 50u);
+
+    CASE("active-low flag clear: HIGH is charging");
+    CHECK(poll_with_state(0u, true) == (50u | 0x80u));
+
+    CASE("active-low flag clear: LOW is not charging");
+    CHECK(poll_with_state(0u, false) == 50u);
+
+    /* The enable flag is the neighbour that was always right; pinned so a shared owner cannot
+     * regress it while fixing its sibling. */
+    CASE("enable active-low asserts the enable pin LOW");
+    setup(4u);
+    g_cfg.power_option.charger_flags = OD_CHARGER_FLAG_ENABLE_ACTIVE_LOW;
+    od_sensor_bq27220_init(&g_cfg);
+    CHECK(g_enable_calls == 1u);
+    CHECK(g_enable_last == false);
+
+    CASE("enable active-high asserts the enable pin HIGH");
+    setup(4u);
+    g_cfg.power_option.charger_flags = 0u;
+    od_sensor_bq27220_init(&g_cfg);
+    CHECK(g_enable_calls == 1u);
+    CHECK(g_enable_last == true);
+}
+
 static void test_charging_tristate(void)
 {
-    CASE("charging sets the top bit");
-    setup(4u);
-    script(3700u, 50u);
-    g_charging_known = true;
-    g_charging_value = true;
-    od_sensor_bq27220_poll(&g_cfg, g_now_ms);
-    CHECK(g_msd[4] == (50u | 0x80u));
-
-    CASE("not charging clears it");
-    setup(4u);
-    script(3700u, 50u);
-    g_charging_known = true;
-    g_charging_value = false;
-    od_sensor_bq27220_poll(&g_cfg, g_now_ms);
-    CHECK(g_msd[4] == 50u);
-
     CASE("UNKNOWN packs as not-charging, because the MSD has no third state");
     setup(4u);
     script(3700u, 50u);
-    g_charging_known = false;          /* no state pin */
+    g_state_known = false;             /* no state pin */
     od_sensor_bq27220_poll(&g_cfg, g_now_ms);
     CHECK(g_msd[4] == 50u);
 }
@@ -322,6 +366,7 @@ int main(void)
     test_more_edges();
     test_voltage_and_soc_widths();
     test_charging_tristate();
+    test_charge_state_polarity();
     test_failure_invalidates_the_cache();
     test_soc_clamp_and_bad_soc();
     test_ttl();

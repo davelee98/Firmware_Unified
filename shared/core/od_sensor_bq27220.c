@@ -62,6 +62,29 @@ float od_sensor_bq27220_voltage_volts(void)
     return s_gauge_ok ? s_batt_v : -1.0f;
 }
 
+/* THE ONE PLACE A CHARGER FLAG IS INTERPRETED.
+ *
+ * Both are read straight from the canonical header's own words (opendisplay_structs.h:481-482):
+ * ENABLE_ACTIVE_LOW means charge-enable (/CE) asserts LOW, STATE_ACTIVE_LOW means the BQ25616
+ * STAT pin reads LOW while charging. The targets used to answer these themselves and the
+ * state one came out inverted in both branches on every port -- see DIVERGENCE_MATRIX 21. */
+static bool charger_flag_set(const struct od_config *cfg, uint8_t mask)
+{
+    return cfg != NULL && (cfg->power_option.charger_flags & mask) != 0u;
+}
+
+/* The level that ASSERTS charge-enable. Active-low asserts at 0, active-high at 1. */
+static bool bq27220_enable_level(const struct od_config *cfg)
+{
+    return !charger_flag_set(cfg, OD_CHARGER_FLAG_ENABLE_ACTIVE_LOW);
+}
+
+/* What a STAT reading means. Active-low is charging at 0, active-high is charging at 1. */
+static bool bq27220_level_is_charging(const struct od_config *cfg, bool level_high)
+{
+    return charger_flag_set(cfg, OD_CHARGER_FLAG_STATE_ACTIVE_LOW) ? !level_high : level_high;
+}
+
 void od_sensor_bq27220_init(const struct od_config *cfg)
 {
     const struct SensorData *s = bq27220_config(cfg);
@@ -70,7 +93,7 @@ void od_sensor_bq27220_init(const struct od_config *cfg)
 
     /* The charger GPIO is established whether or not a gauge is configured: the enable pin is a
      * board property, and a board that charges without a gauge still needs its rail driven. */
-    (void)od_sensor_app_bq_enable(true);
+    (void)od_sensor_app_bq_enable_drive(bq27220_enable_level(cfg));
 
     if (s == NULL) {
         return;
@@ -137,8 +160,11 @@ void od_sensor_bq27220_poll(const struct od_config *cfg, uint32_t now_ms)
     /* Tri-state: no state pin means unknown, and unknown packs as not-charging because the MSD
      * has one bit and no way to say "do not know". The distinction is preserved at the seam so
      * a caller that can act on it still may. */
-    if (!od_sensor_app_bq_charging(&charging)) {
-        charging = false;
+    {
+        bool level_high = false;
+
+        charging = od_sensor_app_bq_state_level(&level_high) &&
+                   bq27220_level_is_charging(cfg, level_high);
     }
 
     msd_idx = s->msd_data_start_byte;

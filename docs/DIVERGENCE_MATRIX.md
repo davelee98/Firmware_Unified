@@ -919,3 +919,46 @@ has *documented* such a part, not that none exists, and no board in this fleet c
 
 **NOT HARDWARE-QUALIFIED.** ESP32 is the only target that can qualify any GT911 behaviour; the
 row is open in docs/HARDWARE_VERIFICATION_CHECKLIST.md.
+
+---
+
+## 21. Charge-state polarity — every port read the flag backwards (fixed 2026-08-24)
+
+**Fixed by project ruling.** `FOLLOWUPS` § 19 has the discovery and the outstanding config audit;
+this records the resolution and the shape it took.
+
+The canonical header defines the flag (`opendisplay_structs.h:482`):
+
+> `OD_CHARGER_FLAG_STATE_ACTIVE_LOW` — *"charge-state (BQ25616 STAT) is active-low: charging when
+> LOW"*
+
+| `charger_flags` bit 1 | Header says charging when | Every port reported charging when |
+|---|---|---|
+| set (active-low) | pin LOW | pin **HIGH** |
+| clear (active-high) | pin HIGH | pin **LOW** |
+
+Both branches inverted, so the code was `!contract` for every input — not a mis-set flag, and not
+a convention either. **The neighbouring flag settles that:** ten lines above, `charge_enable_pin`
+handled `OD_CHARGER_FLAG_ENABLE_ACTIVE_LOW` correctly in the same function on both targets. Nobody
+adopts an inverted polarity convention for one charger pin and the datasheet's for the pin beside
+it; one operator was simply wrong.
+
+**The fix is an ownership change, not an operator flip.** Interpreting a config flag is policy, and
+policy belongs in the shared driver — the two adapters each answering it is why one copy could
+drift from the other, and why no test could see either. So the seam now carries levels:
+
+| | Before | After |
+|---|---|---|
+| Enable | `od_sensor_app_bq_enable(bool on)` — target resolves polarity | `od_sensor_app_bq_enable_drive(bool level_high)` — target drives a level |
+| State | `od_sensor_app_bq_charging(bool *charging)` — target resolves polarity | `od_sensor_app_bq_state_level(bool *level_high)` — target reports a level |
+| `OD_CHARGER_FLAG_*` readers | both adapters | `shared/core/od_sensor_bq27220.c`, once |
+
+`../Firmware` keeps the defect: sibling repo, reported not fixed.
+
+**Wire-visible, deliberately.** Bit 7 of the BQ27220 MSD byte is the charging indicator, so any
+board wiring STAT now advertises the opposite of what it did. That is the point — but a board whose
+config was tuned by observation against the old firmware was double-inverted and correct, and is
+now wrong. The config audit in `FOLLOWUPS` § 19.1 is the other half of this change and is not done.
+
+**Not hardware-qualified.** No board has confirmed the corrected reading; the row is open in
+docs/HARDWARE_VERIFICATION_CHECKLIST.md.
