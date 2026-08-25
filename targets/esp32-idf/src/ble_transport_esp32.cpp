@@ -546,12 +546,9 @@ void BleTransport::requestFastLink() {
     // above, so no delayed one-shot is needed to see what the peer agreed to.
 }
 
-void BleTransport::boostAdvertising() {
-    // No-op: the temporary fast-advertising interval is nRF-only today.
-}
-
 void BleTransport::tick() {
-    // No-op: nothing periodic to restore, since boostAdvertising() is a no-op.
+    // No-op: nothing periodic to restore. This target has no advertising-interval states --
+    // see od_adv_app_boost() in ble/od_ble_nimble.cpp.
 }
 
 bool BleTransport::eventPending() const {

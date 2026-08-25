@@ -1,4 +1,5 @@
 #include "device_control.h"
+#include "od_adv_app.h"
 #include "structs.h"
 #include "touch_input.h"
 #include "power_latch.h"
@@ -422,16 +423,13 @@ void processButtonEvents() {
                 dynamicreturndata[btn->byte_index] = buttonData;
             }
         }
-        // ORDER IS LOAD-BEARING: boost first, publish second. updatemsdata() ends in
-        // setManufacturerData(), which calls applyAdvInterval() and then restarts
-        // advertising -- so the interval is chosen DURING the publish. Boosting
-        // afterwards set the deadline too late to affect the packet it exists for:
-        // the press went out at the 160 ms slow interval (~1 advertisement in a
-        // typical 230 ms press window, which a passive scanner routinely misses)
-        // while the release 230 ms later got the 20 ms boosted interval, because by
-        // then s_advBoostUntil was set. Net effect: a host saw "not pressed"
-        // reliably and "pressed" almost never.
-        ble.boostAdvertising();   // no-op where the stack has no fast-adv window
+        // ORDER IS LOAD-BEARING on a target with advertising-interval states: the publish
+        // chooses the interval, so a boost requested after it lands too late to affect the
+        // packet it exists for -- the press goes out slow and only the release goes out
+        // boosted, so a host sees "not pressed" reliably and "pressed" almost never. That is
+        // an nRF failure; ESP32's od_adv_app_boost() is a no-op and the order costs nothing
+        // here. Kept so the sequence is right wherever this code is read.
+        od_adv_app_boost();
         updatemsdata();
     }
 }

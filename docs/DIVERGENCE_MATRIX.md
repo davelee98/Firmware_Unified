@@ -620,6 +620,27 @@ Same defect class as § 11.2 (`pwr_pin == 0xFF` driving pad `0x00` on BG22), fix
 refusing. Correcting these four is `plans/PLAN_SENSOR_SEAM_2026-08-23.md` staging step 1, which no
 longer waits on anything outside this repo.
 
+### 13.1 The same defect wearing a different constant: ESP32's no-`DataBus` default-pin path
+
+**Ruled 2026-08-24; implementation pending sensor-seam step 8.** Distinct from the four sites
+above because the `bus_id` is *not* `0xFF`. ESP32 touch accepts `data_bus_count == 0` with a
+declared, non-sentinel `bus_id` and transacts anyway, on whichever bus the board last selected.
+
+| | `../Firmware` / ESP32 | nordic-zephyr | Shared (step 8) |
+|---|---|---|---|
+| `bus_id == 0xFF` | substitutes bus 0 | **refuses** — "an explicit data_bus is required" | refuses |
+| declared `bus_id`, `data_bus_count == 0` | transacts on the board-default bus | refuses | **refuses** |
+
+The shared HAL is keyed by `DataBus.instance_number` (§ 14), so a bus that appears in no
+`data_buses` entry **has no identity the seam can name** — there is no argument the shared driver
+could pass to reach it. Preserving the behaviour would mean a second, unkeyed transaction path
+existing solely for configs that decline to describe their own hardware.
+
+And the failure mode is § 13's exactly: a device probed on a bus nobody assigned it answers if
+some other part happens to sit at that address, so the result is a plausible-but-wrong reading
+rather than an error. A config that declares a touch controller without declaring its bus is
+invalid; the shared driver refuses it, matching Nordic.
+
 ---
 
 ## 14. `DataBus` reference: instance_number vs array index (recorded 2026-08-23)

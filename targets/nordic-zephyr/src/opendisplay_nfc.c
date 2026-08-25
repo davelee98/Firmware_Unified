@@ -1,6 +1,7 @@
 #include "opendisplay_nfc.h"
 #include "od_log.h"
 #include "opendisplay_ble.h"
+#include "od_adv_app.h"
 #include "od_nfc_app.h"
 #include "opendisplay_constants.h"
 /* OD_NFC_IC_SOC_NFCT (2) is not in the canonical contract yet -- see the header. */
@@ -57,7 +58,7 @@ static void nfc_apply_field_state(uint8_t logical_on)
 		s_field_state = 1u;
 		nfc_publish_field_msd();
 		opendisplay_ble_update_msd(true);
-		opendisplay_ble_boost_advertising();
+		od_adv_app_boost();
 	} else {
 		s_field_state = 0u;
 		nfc_publish_field_msd();

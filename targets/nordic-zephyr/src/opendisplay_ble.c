@@ -18,6 +18,7 @@
 #include "opendisplay_nfc.h"
 #include "od_board.h"
 #include "od_advert.h"
+#include "od_adv_app.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -214,7 +215,7 @@ static bool s_ota_unlocked;
 /* ---- advertising ownership (F4): loop-thread-only state, touched from exactly one context
  * (opendisplay_ble_process(), called only from main.c's superloop). Nothing below this point
  * may be touched from BT_CONN_CB_DEFINE callbacks (BT RX thread) or from the NFC driver's
- * callback (HAL_NFC/ISR context) -- see opendisplay_ble_boost_advertising() for why that
+ * callback (HAL_NFC/ISR context) -- see od_adv_app_boost() for why that
  * constraint is load-bearing here and not just a style preference. */
 static struct od_adv_control s_adv;
 static bool s_adv_interval_is_boost;   /* which interval was last SUCCESSFULLY applied */
@@ -558,7 +559,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 	if (err != 0) {
 		od_log_info("connect failed: %u", (unsigned)err);
-		opendisplay_ble_boost_advertising();
+		od_adv_app_boost();
 		return;
 	}
 	s_conn = bt_conn_ref(conn);
@@ -593,7 +594,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	 * opendisplay_ble_process() pass. Replaces the blind 150ms k_work_schedule() that was
 	 * the reported bug -- see docs on od_adv_control.h / shared/hal/od_hal_adv.h for the
 	 * reconcile-every-pass design this now follows. */
-	opendisplay_ble_boost_advertising();
+	od_adv_app_boost();
 }
 
 /* .recycled is gone -- it was structurally dead code (scheduling an already-pending work item
@@ -954,11 +955,11 @@ void opendisplay_ble_reload_config_from_nvm(void)
 	}
 }
 
-/* ISR-SAFE, unchanged in spirit from before -- reachable from opendisplay_nfc.c's
- * nfc_callback() (HAL_NFC callback context, confirmed) as well as the main loop
- * (button/touch). MUST NOT touch s_adv or call any bt_le_adv_ or od_adv_ function -- those
+/* The shared boost seam (shared/core/od_adv_app.h). ISR-SAFE -- reachable from
+ * opendisplay_nfc.c's nfc_callback() (HAL_NFC callback context, confirmed) as well as the main
+ * loop (button/touch). MUST NOT touch s_adv or call any bt_le_adv_ or od_adv_ function -- those
  * are loop-thread-only by od_adv_control's single-owner contract. May only set plain flags. */
-void opendisplay_ble_boost_advertising(void)
+void od_adv_app_boost(void)
 {
 	s_adv_boost_start_ms = k_uptime_get_32();
 	s_adv_boost_on = true;

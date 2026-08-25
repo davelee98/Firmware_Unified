@@ -21,6 +21,7 @@
 /* od_hal_uptime_ms(), for the advertising stall report below. */
 #include "od_hal_time.h"
 #include "od_adv_control.h"
+#include "od_adv_app.h"
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -676,6 +677,23 @@ static int od_ble_start_now(void)
     return rc;
 }
 
+
+/* The shared boost seam (shared/core/od_adv_app.h).
+ *
+ * A NO-OP, AND THAT IS THE CORRECT ANSWER HERE, not an unimplemented one. od_ble_start_now()
+ * leaves ble_gap_adv_params::itvl_min/itvl_max at zero, so NimBLE substitutes its own defaults
+ * for connectable undirected advertising -- BLE_GAP_ADV_FAST_INTERVAL1_MIN/MAX, which are 30 ms
+ * and 60 ms because CONFIG_BT_NIMBLE_HIGH_DUTY_ADV_ITVL is unset in every board baseline. This
+ * target therefore advertises permanently at a rate faster than the boost window other stacks
+ * open on demand; a ~230 ms button press or touch contact already yields several advertisements.
+ *
+ * The boost exists to rescue a target that idles SLOW (nRF sits at 160 ms and drops to 20 ms for
+ * three seconds after an event). There is no slow state here to rescue. If this target ever
+ * grows an advertising-interval policy, this is where the boost attaches.
+ */
+extern "C" void od_adv_app_boost(void)
+{
+}
 
 /* ------------------------------------------------------------------ host lifecycle */
 

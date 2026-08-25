@@ -1,6 +1,7 @@
 #include "opendisplay_touch.h"
 #include "od_log.h"
 #include "opendisplay_ble.h"
+#include "od_adv_app.h"
 #include "opendisplay_constants.h"
 #include "od_runtime_types.h"
 #include "od_gpio.h"
@@ -583,7 +584,7 @@ void opendisplay_touch_process(void)
 
     if (changed) {
       opendisplay_ble_update_msd(true);
-      opendisplay_ble_boost_advertising();
+      od_adv_app_boost();
       od_log_info("touch[%u]: n=%u id=%u (%u,%u)", (unsigned)i, (unsigned)n, (unsigned)tid,
              (unsigned)x, (unsigned)y);
     }

@@ -12,7 +12,6 @@ struct od_config;
 
 void opendisplay_ble_init(void);
 void opendisplay_ble_process(void);
-void opendisplay_ble_boost_advertising(void);
 void opendisplay_ble_advertising_tick(void);
 bool opendisplay_ble_is_connected(void);
 bool opendisplay_ble_advertising_active(void);

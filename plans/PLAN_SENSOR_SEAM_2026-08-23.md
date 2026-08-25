@@ -483,7 +483,16 @@ software candidate with its rows open.
    6. **ESP32's no-DataBus default-pin path is dropped.** That target accepts `data_bus_count == 0`
       with a non-`0xFF` `bus_id` and transacts on the already-selected board-default bus. The step-1
       ruling retired the literal `0xFF` case, **not** this one, and the shared HAL cannot name that
-      bus — so preserving it needs its own decision.
+      bus.
+
+      **RULING 2026-08-24: retire it.** A config declaring a touch controller on a bus it never
+      declares is invalid, exactly as the step-1 ruling held for the `0xFF` form of the same
+      shape. The shared HAL is keyed by `DataBus.instance_number`, so a bus appearing in no
+      `data_buses` entry has no identity the seam can name, and transacting on "whichever bus was
+      selected last" is the bus-0 substitution failure wearing a different constant — plausible
+      readings from whatever answers that address, rather than an error. The shared driver
+      requires a declared bus and refuses otherwise, matching Nordic's existing refusal. Record it
+      in `DIVERGENCE_MATRIX` § 13 beside the four substitution sites.
 
    Correct in the draft and worth keeping: the reset edge order, the three-attempt
    repeated-START-then-STOP-separated retry with its 500 µs spacing, the register byte-order
@@ -514,16 +523,81 @@ software candidate with its rows open.
       the button comment's own reasoning, a ~230 ms event against a 160 ms slow advertising
       interval, applies at least as strongly to a touch contact — but honouring it on ESP32 means
       **building a fast-advertising window that target has never had**, which is far larger than
+      this promotion.
 
-   **RULING 2026-08-24: follow the specification.** The shared driver probes **high byte first**,
-   and keeps low-byte-first as the fallback behind it. Both orders survive, so a part that only
-   answers the undocumented form still binds — it is simply tried second, which is the correct
-   priority for an order that no source documents and that the survey could not evidence. Every
-   conformant part saves a failed cascade per candidate address at boot.
+      **And ESP32 does not need one.** `od_ble_start_now()` leaves `itvl_min`/`itvl_max` at zero,
+      so NimBLE substitutes `BLE_GAP_ADV_FAST_INTERVAL1_MIN`/`MAX` for connectable undirected
+      advertising — **30 ms and 60 ms**, because `CONFIG_BT_NIMBLE_HIGH_DUTY_ADV_ITVL` is unset in
+      all 11 board baselines. That is permanently faster than the 20 ms window nRF opens for three
+      seconds after an event, so the failure the boost exists to fix is an nRF condition this
+      target structurally does not have.
 
-   This is a deliberate departure from the authority and is recorded in `DIVERGENCE_MATRIX` § 20.
-   It is a **reordering, not a removal**: do not delete the fallback on the grounds that the guide
-   only describes one order. The donor author wrote "common" about something, and no board here
+      **RULING 2026-08-24: unify the seam; ESP32 keeps implementing it as a no-op.**
+      `shared/core/od_adv_app.h` declares `od_adv_app_boost()`, and buttons, touch, NFC and
+      connection edges all call that one name. Nordic forwards to its boost window; ESP32 defines
+      it empty with the interval arithmetic above as the stated reason. The no-op is a per-target
+      answer rather than an unimplemented stub — which is the point of routing it through a seam
+      every linking target must define, instead of a shared caller silently doing nothing. Landed
+      ahead of the driver; the shared GT911 calls it on the `changed` edge. Ratcheted by
+      "advertising: one boost seam".
+   9. **`py-opendisplay` drops `TouchController.enable_pin`** into its reserved blob, so a config
+      JSON round trip zeroes it and disables the panel's power-enable GPIO. External follow-up,
+      and it compounds defect 3.
+   10. **Nothing validates dynamic-region overlap** — not firmware, not the host, not the config
+      tools. Touch at `touch_data_start_byte = 6` spans bytes 6..10 and the SHT40 *default* slot
+      is 7..9, so a config that sets touch to 6 and leaves the sensor default has two writers
+      fighting every poll. Detect and refuse, or detect and log; do not silently interleave.
+
+   ### 8.1 The touch wire format is frozen by convention, not by contract
+
+   `../opendisplay-protocol` defines `MsdAdvertisement.dynamic[11]` and says **nothing** about the
+   5-byte touch block inside it — no struct, no macro, no statement of the count nibble, the `6`
+   release sentinel, the track-id nibble or the endianness. The only normative description of the
+   format anywhere is **a comment in the donor firmware** (`touch_input.cpp:33`), and
+   `py-opendisplay`, the JavaScript decoder and the iOS app each independently implement that
+   comment. There is no version field.
+
+   So the packing is frozen in practice: any change breaks every deployed host at once, silently,
+   with no way for a host to detect it. The draft's packing was byte-equivalent and that is the
+   one part of it that was safe to keep.
+
+   This is also what makes review finding 1 wire-visible rather than cosmetic. A driver that skips
+   `apply_touch_map()` emits perfectly well-formed bytes carrying **raw controller coordinates**
+   where every host expects mapped, clipped panel pixels. Nothing in the frame is malformed, so
+   nothing anywhere reports an error.
+
+   ### 8.2 What the GT911 programming guide settles
+
+   Source: **GOODIX "GT911 Programming Guide", Rev.10, 2017-07-26**, applicable to firmware V1040+.
+   All timing values live in the document's embedded figures rather than its text. Where the guide
+   and the authority disagree, this section records which is which; it does not license a change.
+
+   **The reset dance's magic numbers are the documented minima, and the donor is spec-conformant.**
+   `gt911_hw_reset()`'s 110 µs, 6 ms and 51 ms are T2 > 100 µs (INT at the address-select level
+   before RST's rising edge), T3 > 5 ms (INT held after it) and T4 > 50 ms (INT driven low before
+   the host floats it); the 11 ms RST-low clears T1 > 100 µs with room. The donor performs the
+   INT-low-for-50 ms step that ESP-BSP's widely deployed driver omits. **Do not tidy any of these
+   constants** — they are the datasheet with a margin, not arbitrary.
+
+   **One donor divergence from the guide, recorded and not changed:** the reset releases INT as
+   `INPUT_PULLUP`, and § 1 p.3 requires it be left floating with no internal pull-up or pull-down.
+   It is field-proven this way. Changing it needs a board, not an argument.
+
+   **The register-address byte order is unambiguously big-endian, and the donor probes
+   little-endian first.** § 2.1 p.3 specifies `Register_H` then `Register_L`; the survey searched
+   specifically for a clone using the other order and found no evidence in any source, Goodix or
+   otherwise. `gt911_probe_product()` nevertheless tries low-byte-first first and calls it
+   "common". On a conformant part every boot therefore burns a full three-attempt × two-framing
+   failed cascade per candidate address before reaching the documented order. **RULING 2026-08-24: follow the
+   specification.** The shared driver probes **high byte first**, and keeps low-byte-first as the
+   fallback behind it. Both orders survive, so a part that only answers the undocumented form
+   still binds — it is simply tried second, which is the correct priority for an order that no
+   source documents and that the survey could not evidence. Every conformant part saves a failed
+   cascade per candidate address at boot.
+
+   A deliberate departure from the authority, recorded in `DIVERGENCE_MATRIX` § 20. It is a
+   **reordering, not a removal**: do not delete the fallback on the grounds that the guide
+   describes only one order. The donor author wrote "common" about something, and no board here
    can prove what.
 
    **Both read framings are spec-legal, and the draft's stated reason for keeping them is not.**

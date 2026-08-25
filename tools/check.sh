@@ -399,6 +399,20 @@ bg22_has_no_buzzer_runner() {
 }
 check "silabs: BG22 has no buzzer runner" bg22_has_no_buzzer_runner
 
+# PERMANENT. One name for "advertise sooner, something happened". Buttons, touch, NFC and
+# connection edges all want it, and before od_adv_app.h each target spelled it privately -- so
+# shared code could not request it at all and the two targets' answers were invisible to each
+# other. A target reintroducing a private name splits the seam again without breaking any build.
+#
+# The pattern requires call/definition syntax -- the trailing '(' -- so prose naming the retired
+# forms is fine and no file needs a path exclusion. Both a call and a definition carry it.
+adv_boost_seam_single() {
+    absent_or_fail "target-private advertising-boost name returned; od_adv_app_boost() is the seam" \
+        '\b(opendisplay_ble_boost_advertising|boostAdvertising)[[:space:]]*\(' \
+        targets shared
+}
+check "advertising: one boost seam" adv_boost_seam_single
+
 # PERMANENT. A promoted opcode answers from shared code; a target assembling its own reply bytes
 # for one is invisible until a wire capture disagrees with the corpus.
 #
