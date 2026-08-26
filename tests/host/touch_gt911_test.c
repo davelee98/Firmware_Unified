@@ -281,7 +281,10 @@ int od_touch_app_gpio_read(uint8_t pin)
  * defect lives: Nordic has eight callback slots, and an ISR left on a pin the config moved away
  * from consumes one for the rest of the boot. A fake that only counts attaches cannot see it. */
 #define FAKE_IRQ_SLOTS 8u
-static uint8_t  g_irq_pins[FAKE_IRQ_SLOTS];   /* 0 = free */
+/* 0xFF = free, NOT 0 -- pin 0 is a legal interrupt pin (ESP32 GPIO0, Nordic P0.00 encoded 0x00),
+ * and a fake that used 0 as its free marker could not represent one. That is the same sentinel
+ * collision the driver had, and a fake carrying it cannot test the fix. */
+static uint8_t  g_irq_pins[FAKE_IRQ_SLOTS];
 
 static unsigned irq_slots_used(void)
 {
@@ -289,7 +292,7 @@ static unsigned irq_slots_used(void)
     unsigned n = 0;
 
     for (i = 0; i < FAKE_IRQ_SLOTS; i++) {
-        if (g_irq_pins[i] != 0u) {
+        if (g_irq_pins[i] != 0xFFu) {
             n++;
         }
     }
@@ -317,7 +320,7 @@ bool od_touch_app_gpio_attach_int(uint8_t idx, uint8_t pin)
         return false;
     }
     for (i = 0; i < FAKE_IRQ_SLOTS; i++) {
-        if (g_irq_pins[i] == 0u) {
+        if (g_irq_pins[i] == 0xFFu) {
             g_irq_pins[i] = pin;
             g_attached++;
             g_int_trigger_armed = true;
@@ -334,7 +337,7 @@ void od_touch_app_gpio_detach_int(uint8_t pin)
 
     for (i = 0; i < FAKE_IRQ_SLOTS; i++) {
         if (g_irq_pins[i] == pin) {
-            g_irq_pins[i] = 0u;
+            g_irq_pins[i] = 0xFFu;
             g_detached++;
             trace("irq-:%u", pin, 0);
             return;
@@ -354,6 +357,18 @@ void od_touch_app_msd_write(uint8_t index, uint8_t value)
         g_msd[index] = value;
     }
 }
+/* The fake owns a latched mask so the driver's clear TIMING is visible: an edge is recorded as
+ * consumed at a traced point, and the I2C trace shows whether it happened before the reads. */
+static uint8_t g_latched_mask;
+void od_touch_app_irq_consume(uint8_t bits)
+{
+    if (bits == 0u) {
+        return;
+    }
+    g_latched_mask = (uint8_t)(g_latched_mask & ~bits);
+    trace("consume:%02X", bits, 0);
+}
+
 void od_touch_app_msd_publish(void) { g_publishes++; trace("publish", 0, 0); }
 void od_touch_app_bus_invalidate(void) { trace("bus:invalidate", 0, 0); }
 void od_adv_app_boost(void) { g_boosts++; trace("boost", 0, 0); }
@@ -399,7 +414,8 @@ static void setup(uint8_t start_byte, uint8_t flags, uint8_t addr, uint8_t int_p
     g_attached = 0;
     g_detached = 0;
     g_attach_ok = true;
-    memset(g_irq_pins, 0, sizeof g_irq_pins);
+    g_latched_mask = 0u;
+    memset(g_irq_pins, 0xFF, sizeof g_irq_pins);
     g_int_level = 1;
     g_enable_asserted_at = 0;
     g_bus_ready_id = BUS_INSTANCE;
@@ -451,7 +467,7 @@ static void test_msd_packing(void)
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     g_part.regs[0x814Eu - GT911_REG_BASE] = 0x80u;       /* ready, zero contacts */
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u);
     CHECK(g_msd[0] == 0u && g_msd[1] == 0u && g_msd[2] == 0u && g_msd[3] == 0u && g_msd[4] == 0u);
 
     CASE("one contact: count in the low nibble, id in the high, x and y little-endian");
@@ -459,7 +475,7 @@ static void test_msd_packing(void)
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     part_set_contact(1u, 2u, 0x0123u, 0x00ABu);
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u);
     CHECK(g_msd[0] == (uint8_t)(1u | (2u << 4)));
     CHECK(g_msd[1] == 0x23u);
     CHECK(g_msd[2] == 0x01u);
@@ -471,7 +487,7 @@ static void test_msd_packing(void)
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     part_set_contact(5u, 0u, 10u, 20u);
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u);
     CHECK((g_msd[0] & 0x0Fu) == 5u);
 
     CASE("release packs 6 and RETAINS the last coordinates");
@@ -479,9 +495,9 @@ static void test_msd_packing(void)
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     part_set_contact(1u, 3u, 100u, 200u);
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u);
     g_part.regs[0x814Eu - GT911_REG_BASE] = 0x80u;       /* ready, released */
-    (void)od_touch_gt911_service(&g_cfg, 3000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 3000u, 0u);
     CHECK((g_msd[0] & 0x0Fu) == 6u);
     CHECK((g_msd[0] >> 4) == 3u);
     CHECK(g_msd[1] == 100u && g_msd[2] == 0u);
@@ -492,7 +508,7 @@ static void test_msd_packing(void)
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     part_set_contact(1u, 0u, 1u, 2u);
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u);
     CHECK(g_msd[6] == 1u && g_msd[7] == 1u && g_msd[9] == 2u);
     CHECK(g_msd[5] == 0xA5u);                            /* the byte below is untouched */
 
@@ -513,7 +529,7 @@ static void test_coordinate_map(void)
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     part_set_contact(1u, 0u, 999u, 999u);
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u);
     CHECK(((uint16_t)g_msd[1] | ((uint16_t)g_msd[2] << 8)) == 319u);
     CHECK(((uint16_t)g_msd[3] | ((uint16_t)g_msd[4] << 8)) == 239u);
 
@@ -522,7 +538,7 @@ static void test_coordinate_map(void)
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     part_set_contact(1u, 0u, 100u, 50u);
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u);
     CHECK(((uint16_t)g_msd[1] | ((uint16_t)g_msd[2] << 8)) == 219u);   /* 320-1-100 */
     CHECK(((uint16_t)g_msd[3] | ((uint16_t)g_msd[4] << 8)) == 50u);
 
@@ -531,7 +547,7 @@ static void test_coordinate_map(void)
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     part_set_contact(1u, 0u, 30u, 100u);      /* swap -> (100,30), invert x -> (219,30) */
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u);
     CHECK(((uint16_t)g_msd[1] | ((uint16_t)g_msd[2] << 8)) == 219u);
     CHECK(((uint16_t)g_msd[3] | ((uint16_t)g_msd[4] << 8)) == 30u);
 
@@ -549,10 +565,10 @@ static void test_coordinate_map(void)
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     part_set_contact(1u, 0u, 900u, 50u);            /* clips to x=319 */
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u);
     g_publishes = 0;
     part_set_contact(1u, 0u, 950u, 50u);            /* also clips to x=319 */
-    (void)od_touch_gt911_service(&g_cfg, 3000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 3000u, 0u);
     CHECK(g_publishes == 0u);
     CHECK(((uint16_t)g_msd[1] | ((uint16_t)g_msd[2] << 8)) == 319u);
 
@@ -561,9 +577,9 @@ static void test_coordinate_map(void)
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     part_set_contact(1u, 0u, 100u, 50u);
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u);
     g_part.regs[0x814Eu - GT911_REG_BASE] = 0x80u;
-    (void)od_touch_gt911_service(&g_cfg, 3000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 3000u, 0u);
     CHECK((g_msd[0] & 0x0Fu) == 6u);
     CHECK(((uint16_t)g_msd[1] | ((uint16_t)g_msd[2] << 8)) == 219u);
 }
@@ -636,12 +652,12 @@ static void test_status_handling(void)
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     g_part.status_clears = 0;
     g_part.regs[0x814Eu - GT911_REG_BASE] = (uint8_t)(0x80u | 9u);   /* 9 > 5: nonsense */
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u);
     CHECK(g_part.status_clears == 1u);
 
     CASE("and having cleared it, the next poll is not stuck on the same branch");
     part_set_contact(1u, 0u, 5u, 6u);
-    (void)od_touch_gt911_service(&g_cfg, 3000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 3000u, 0u);
     CHECK((g_msd[0] & 0x0Fu) == 1u);
 
     CASE("buffer-not-ready must NOT be acknowledged");
@@ -650,7 +666,7 @@ static void test_status_handling(void)
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     g_part.status_clears = 0;
     g_part.regs[0x814Eu - GT911_REG_BASE] = 0x00u;      /* bit 7 clear */
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u);
     CHECK(g_part.status_clears == 0u);
 
     CASE("a consumed sample IS acknowledged");
@@ -659,7 +675,7 @@ static void test_status_handling(void)
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     g_part.status_clears = 0;
     part_set_contact(1u, 0u, 1u, 1u);
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u);
     CHECK(g_part.status_clears == 1u);
 }
 
@@ -675,7 +691,7 @@ static void test_publish_on_change(void)
     g_boosts = 0;
     g_trace_len = 0;
     part_set_contact(1u, 0u, 40u, 50u);
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u);
     CHECK(g_publishes == 1u);
     CHECK(g_boosts == 1u);
     CHECK(trace_index("boost") >= 0 && trace_index("publish") >= 0);
@@ -685,13 +701,13 @@ static void test_publish_on_change(void)
     g_publishes = 0;
     g_boosts = 0;
     part_set_contact(1u, 0u, 40u, 50u);
-    (void)od_touch_gt911_service(&g_cfg, 3000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 3000u, 0u);
     CHECK(g_publishes == 0u);
     CHECK(g_boosts == 0u);
 
     CASE("a moved contact publishes again");
     part_set_contact(1u, 0u, 41u, 50u);
-    (void)od_touch_gt911_service(&g_cfg, 4000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 4000u, 0u);
     CHECK(g_publishes == 1u);
 }
 
@@ -714,33 +730,34 @@ static void test_cadence(void)
      * deadline out every time this controller is polled early for another reason; with two
      * controllers at 99 and 100 ms the slower one drifts to ~198 ms. The first version of this
      * test asserted 40 and so PINNED the defect. */
-    CHECK(od_touch_gt911_service(&g_cfg, 1010u, 0u, NULL) == 30u);
+    CHECK(od_touch_gt911_service(&g_cfg, 1010u, 0u) == 30u);
     CHECK(g_part.reads == 0u);                       /* too soon */
-    (void)od_touch_gt911_service(&g_cfg, 1050u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 1050u, 0u);
     CHECK(g_part.reads > 0u);
 
-    CASE("an IRQ edge reads early and is reported as consumed");
+    CASE("an IRQ edge reads early, and the bit is cleared BEFORE the I2C");
     setup(0u, 0u, 0x5Du, PIN_INT);
     g_cfg.touch_controllers[0].poll_interval_ms = 200u;
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
-    {
-        uint8_t consumed = 0xFFu;
+    g_part.reads = 0;
+    g_latched_mask = 0x01u;
+    g_trace_len = 0;
+    part_set_contact(1u, 0u, 7u, 8u);
+    (void)od_touch_gt911_service(&g_cfg, 1005u, 0x01u);
+    CHECK(g_latched_mask == 0x00u);
+    CHECK(g_part.reads > 0u);
+    /* THE TIMING IS THE POINT. The authority clears under its interrupt lock at the instant it
+     * decides to read; clearing after the service walk instead leaves a millisecond-wide window
+     * -- three retries x two framings x two register reads, plus 500 us between retries -- in
+     * which an arriving edge is thrown away. */
+    CHECK(trace_index("consume:01") >= 0);
+    CHECK(trace_index("consume:01") < trace_index("read:814E:1"));
 
-        g_part.reads = 0;
-        part_set_contact(1u, 0u, 7u, 8u);
-        (void)od_touch_gt911_service(&g_cfg, 1005u, 0x01u, &consumed);
-        CHECK(consumed == 0x01u);
-        CHECK(g_part.reads > 0u);
-    }
-
-    CASE("no edge and nothing due consumes nothing");
-    {
-        uint8_t consumed = 0xFFu;
-
-        (void)od_touch_gt911_service(&g_cfg, 1006u, 0x00u, &consumed);
-        CHECK(consumed == 0x00u);
-    }
+    CASE("no edge and nothing due clears nothing");
+    g_latched_mask = 0x00u;
+    (void)od_touch_gt911_service(&g_cfg, 1006u, 0x00u);
+    CHECK(g_latched_mask == 0x00u);
 }
 
 static void test_failure_backoff_and_disable(void)
@@ -751,20 +768,20 @@ static void test_failure_backoff_and_disable(void)
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     g_part.fail_all = true;
-    CHECK(od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL) == 100u);
+    CHECK(od_touch_gt911_service(&g_cfg, 2000u, 0u) == 100u);
 
     CASE("five consecutive failures disable the controller");
-    (void)od_touch_gt911_service(&g_cfg, 3000u, 0u, NULL);
-    (void)od_touch_gt911_service(&g_cfg, 4000u, 0u, NULL);
-    (void)od_touch_gt911_service(&g_cfg, 5000u, 0u, NULL);
-    CHECK(od_touch_gt911_service(&g_cfg, 6000u, 0u, NULL) == OD_TOUCH_IDLE_MS);
+    (void)od_touch_gt911_service(&g_cfg, 3000u, 0u);
+    (void)od_touch_gt911_service(&g_cfg, 4000u, 0u);
+    (void)od_touch_gt911_service(&g_cfg, 5000u, 0u);
+    CHECK(od_touch_gt911_service(&g_cfg, 6000u, 0u) == OD_TOUCH_IDLE_MS);
     CHECK(od_touch_gt911_address(0) == 0u);
 
     CASE("a recovered bus does not resurrect a disabled controller by itself");
     g_part.fail_all = false;
     part_set_contact(1u, 0u, 1u, 1u);
     g_part.reads = 0;
-    (void)od_touch_gt911_service(&g_cfg, 7000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 7000u, 0u);
     CHECK(g_part.reads == 0u);
 }
 
@@ -816,7 +833,7 @@ static void test_suspend_resume(void)
     od_touch_gt911_suspend();
     g_part.reads = 0;
     part_set_contact(1u, 0u, 1u, 1u);
-    CHECK(od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL) == OD_TOUCH_IDLE_MS);
+    CHECK(od_touch_gt911_service(&g_cfg, 2000u, 0u) == OD_TOUCH_IDLE_MS);
     CHECK(g_part.reads == 0u);
 
     CASE("resume probes the RETAINED address rather than re-resolving");
@@ -830,10 +847,10 @@ static void test_suspend_resume(void)
     od_touch_gt911_suspend();
     (void)od_touch_gt911_resume(&g_cfg, 4000u);
     g_part.reads = 0;
-    (void)od_touch_gt911_service(&g_cfg, 5000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 5000u, 0u);
     CHECK(g_part.reads == 0u);                      /* still suspended */
     (void)od_touch_gt911_resume(&g_cfg, 6000u);
-    (void)od_touch_gt911_service(&g_cfg, 7000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 7000u, 0u);
     CHECK(g_part.reads > 0u);
 
     CASE("force_resume collapses any depth");
@@ -843,7 +860,7 @@ static void test_suspend_resume(void)
     (void)od_touch_gt911_force_resume(&g_cfg, 8000u);
     g_part.reads = 0;
     part_set_contact(1u, 0u, 2u, 2u);
-    (void)od_touch_gt911_service(&g_cfg, 9000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 9000u, 0u);
     CHECK(g_part.reads > 0u);
 
     CASE("a part that stopped answering gets a FULL re-resolve, not a light resume");
@@ -888,10 +905,10 @@ static void test_no_change_and_retry_latency(void)
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     part_set_contact(1u, 0u, 5u, 6u);
     g_bus_ready_id = 0xFEu;                      /* prepare fails */
-    (void)od_touch_gt911_service(&g_cfg, 1300u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 1300u, 0u);
     CHECK(g_msd[0] == 0xA5u);                    /* nothing read */
     g_bus_ready_id = BUS_INSTANCE;               /* bus is back, well inside the interval */
-    (void)od_touch_gt911_service(&g_cfg, 1350u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 1350u, 0u);
     CHECK((g_msd[0] & 0x0Fu) == 1u);             /* retried at once, not 200 ms later */
 }
 
@@ -956,13 +973,10 @@ static void test_reestablish_and_int_rearm(void)
     CHECK(g_int_trigger_armed);
 
     CASE("and an edge still reaches the machine afterwards");
-    {
-        uint8_t consumed = 0u;
-
-        part_set_contact(1u, 0u, 9u, 9u);
-        (void)od_touch_gt911_service(&g_cfg, 2005u, 0x01u, &consumed);
-        CHECK(consumed == 0x01u);
-    }
+    g_latched_mask = 0x01u;
+    part_set_contact(1u, 0u, 9u, 9u);
+    (void)od_touch_gt911_service(&g_cfg, 2005u, 0x01u);
+    CHECK(g_latched_mask == 0x00u);
 }
 
 /* THE SUBJECT OF 6bfa613 WAS UNPINNED. Every fixture had one controller, so the remainder-vs-
@@ -985,7 +999,7 @@ static void test_multi_controller(void)
     setup_two(40u, 100u);
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
-    CHECK(od_touch_gt911_service(&g_cfg, 1000u, 0u, NULL) == 40u);
+    CHECK(od_touch_gt911_service(&g_cfg, 1000u, 0u) == 40u);
 
     /* The concrete drift 6bfa613 describes: at 99/100 ms, returning the whole interval instead of
      * the remainder pushes the slower controller out on every pass the faster one causes. */
@@ -993,8 +1007,8 @@ static void test_multi_controller(void)
     setup_two(99u, 100u);
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
-    (void)od_touch_gt911_service(&g_cfg, 1099u, 0u, NULL);      /* A is due, B is not */
-    CHECK(od_touch_gt911_service(&g_cfg, 1099u, 0u, NULL) == 1u); /* B wants 1 ms, not 100 */
+    (void)od_touch_gt911_service(&g_cfg, 1099u, 0u);      /* A is due, B is not */
+    CHECK(od_touch_gt911_service(&g_cfg, 1099u, 0u) == 1u); /* B wants 1 ms, not 100 */
 
     /* Both controllers are scripted at one address on one bus, so they ARE one fake part: the
      * first to poll acknowledges the status and the second correctly sees not-ready. Give each
@@ -1010,7 +1024,7 @@ static void test_multi_controller(void)
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     memset(g_msd, 0xA5, sizeof g_msd);
     part_set_contact(1u, 0u, 0x0102u, 0x0304u);
-    (void)od_touch_gt911_service(&g_cfg, 1200u, 0u, NULL);      /* A not due, B due */
+    (void)od_touch_gt911_service(&g_cfg, 1200u, 0u);      /* A not due, B due */
     CHECK(g_msd[5] == (uint8_t)1u && g_msd[6] == 0x02u && g_msd[7] == 0x01u);
     CHECK(g_msd[0] == 0xA5u && g_msd[4] == 0xA5u);              /* A's block untouched */
     CHECK(g_msd[10] == 0xA5u);                                  /* nothing past B's block */
@@ -1019,13 +1033,10 @@ static void test_multi_controller(void)
     setup_two(200u, 200u);
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
-    {
-        uint8_t consumed = 0u;
-
-        part_set_contact(1u, 0u, 1u, 1u);
-        (void)od_touch_gt911_service(&g_cfg, 1005u, 0x02u, &consumed);
-        CHECK(consumed == 0x02u);
-    }
+    g_latched_mask = 0x02u;
+    part_set_contact(1u, 0u, 1u, 1u);
+    (void)od_touch_gt911_service(&g_cfg, 1005u, 0x02u);
+    CHECK(g_latched_mask == 0x00u);
 }
 
 /* A set bit that the machine will never act on has to be DISCARDED. Both wrappers gate their whole
@@ -1033,15 +1044,18 @@ static void test_multi_controller(void)
  * ever and the deadline is never consulted again. */
 static void test_stuck_irq_bits(void)
 {
-    uint8_t consumed;
-
     CASE("an edge for a controller that is not configured is discarded");
     setup(0u, 0u, 0x5Du, PIN_INT);
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
-    consumed = 0u;
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0x08u, &consumed);   /* index 3: absent */
-    CHECK((consumed & 0x08u) != 0u);
+    g_latched_mask = 0x08u;
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0x08u);   /* index 3: absent */
+    CHECK(g_latched_mask == 0x00u);
+
+    CASE("and so is one above the last controller index, which the loop cannot reach");
+    g_latched_mask = 0x80u;
+    (void)od_touch_gt911_service(&g_cfg, 2001u, 0x80u);
+    CHECK(g_latched_mask == 0x00u);
 
     CASE("an edge for a DISABLED controller is discarded");
     setup(0u, 0u, 0x5Du, PIN_INT);
@@ -1052,22 +1066,22 @@ static void test_stuck_irq_bits(void)
         uint32_t t;
 
         for (t = 2000u; t <= 7000u; t += 1000u) {
-            (void)od_touch_gt911_service(&g_cfg, t, 0u, NULL);
+            (void)od_touch_gt911_service(&g_cfg, t, 0u);
         }
     }
     CHECK(od_touch_gt911_address(0) == 0u);                          /* disabled */
-    consumed = 0u;
-    (void)od_touch_gt911_service(&g_cfg, 8000u, 0x01u, &consumed);
-    CHECK((consumed & 0x01u) != 0u);
+    g_latched_mask = 0x01u;
+    (void)od_touch_gt911_service(&g_cfg, 8000u, 0x01u);
+    CHECK(g_latched_mask == 0x00u);
 
     CASE("edges raised while suspended are discarded, not held for the whole refresh");
     setup(0u, 0u, 0x5Du, PIN_INT);
     part_reset(0x5Du);
     (void)od_touch_gt911_init(&g_cfg, 1000u);
     od_touch_gt911_suspend();
-    consumed = 0u;
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0x01u, &consumed);
-    CHECK(consumed == 0x01u);
+    g_latched_mask = 0x01u;
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0x01u);
+    CHECK(g_latched_mask == 0x00u);
 }
 
 /* The per-poll bound the authority checks on EVERY poll, not only at bring-up: a config write can
@@ -1083,7 +1097,7 @@ static void test_msd_bound_on_every_poll(void)
     (void)od_touch_gt911_init(&g_cfg, 2000u);
     memset(g_msd, 0xA5, sizeof g_msd);
     part_set_contact(1u, 0u, 1u, 2u);
-    (void)od_touch_gt911_service(&g_cfg, 3000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 3000u, 0u);
     CHECK(g_msd[8] == 0xA5u && g_msd[9] == 0xA5u && g_msd[10] == 0xA5u);
 
     /* THE ABOVE ONLY PROVES THE RETAINED-BRANCH GUARD. Removing the bound inside touch_pack_msd()
@@ -1101,7 +1115,7 @@ static void test_msd_bound_on_every_poll(void)
     memset(g_msd, 0xA5, sizeof g_msd);
     g_cfg.touch_controllers[0].touch_data_start_byte = 8u;   /* no init follows */
     part_set_contact(1u, 0u, 1u, 2u);
-    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 2000u, 0u);
     CHECK(g_msd[8] == 0xA5u && g_msd[9] == 0xA5u && g_msd[10] == 0xA5u);
 }
 
@@ -1117,7 +1131,7 @@ static void test_held_low_line(void)
     g_part.reads = 0;
     part_set_contact(1u, 0u, 3u, 4u);
     g_int_level = 0;                                  /* asserted */
-    (void)od_touch_gt911_service(&g_cfg, 1005u, 0u, NULL);
+    (void)od_touch_gt911_service(&g_cfg, 1005u, 0u);
     CHECK(g_part.reads > 0u);
     CHECK((g_msd[0] & 0x0Fu) == 1u);
 }
@@ -1183,11 +1197,108 @@ static void test_int_pin_moves(void)
         uint32_t t;
 
         for (t = 2000u; t <= 8000u; t += 1000u) {
-            (void)od_touch_gt911_service(&g_cfg, t, 0u, NULL);
+            (void)od_touch_gt911_service(&g_cfg, t, 0u);
         }
     }
     CHECK(od_touch_gt911_address(0) == 0u);
     CHECK(irq_slots_used() == 0u);
+}
+
+/* The held-low check must read the pin the TRIGGER is on, not the one the config currently names.
+ * A config write can move int_pin under a live controller with no re-init; polling the new pin --
+ * which may belong to another subsystem and may sit permanently low -- makes line_low true on
+ * every pass, servicing the controller on every loop iteration and ignoring its interval. */
+static void test_held_low_reads_the_attached_pin(void)
+{
+    CASE("a config that moves int_pin does not make the driver poll a stranger's line");
+    setup(0u, 0u, 0x5Du, PIN_INT);
+    g_cfg.touch_controllers[0].poll_interval_ms = 200u;
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+
+    /* The ISR is on PIN_INT, which is idle high. The config now names a different pin, and that
+     * one is held low by whoever owns it. */
+    g_cfg.touch_controllers[0].int_pin = (uint8_t)(PIN_INT + 5u);
+    g_int_level_pin = (uint8_t)(PIN_INT + 5u);
+    g_int_level = 0;
+
+    g_part.reads = 0;
+    part_set_contact(1u, 0u, 1u, 1u);
+    (void)od_touch_gt911_service(&g_cfg, 1005u, 0u);        /* nothing due, no edge */
+    CHECK(g_part.reads == 0u);
+    g_int_level_pin = PIN_INT;
+    g_int_level = 1;
+
+    CASE("and the real line, once asserted, still works");
+    g_int_level = 0;
+    (void)od_touch_gt911_service(&g_cfg, 1006u, 0u);
+    CHECK(g_part.reads > 0u);
+    g_int_level = 1;
+}
+
+/* Pin 0 is a LEGAL interrupt pin -- ESP32 GPIO0, Nordic P0.00 encoded 0x00 -- so it must not
+ * collide with the "no pin attached" sentinel. With 0 as the sentinel such a controller is
+ * invisible to the stale-pin detach, to disable, and to init's detach-by-record. */
+static void test_int_pin_zero(void)
+{
+    CASE("a controller on INT pin 0 still gets its ISR detached when the pin moves");
+    setup(0u, 0u, 0x5Du, 0u);
+    g_int_level_pin = 0u;
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    CHECK(irq_pin_attached(0u));
+    CHECK(irq_slots_used() == 1u);
+    g_cfg.touch_controllers[0].int_pin = PIN_INT;
+    (void)od_touch_gt911_reestablish(&g_cfg, 2000u);
+    CHECK(!irq_pin_attached(0u));
+    CHECK(irq_slots_used() == 1u);
+    g_int_level_pin = PIN_INT;
+
+    CASE("and when it is disabled");
+    setup(0u, 0u, 0x5Du, 0u);
+    g_int_level_pin = 0u;
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    CHECK(irq_slots_used() == 1u);
+    g_part.fail_all = true;
+    {
+        uint32_t t;
+
+        for (t = 2000u; t <= 8000u; t += 1000u) {
+            (void)od_touch_gt911_service(&g_cfg, t, 0u);
+        }
+    }
+    CHECK(irq_slots_used() == 0u);
+    g_int_level_pin = PIN_INT;
+}
+
+/* The retained-runtime branch keeps a controller without re-resolving it. If the config moved it
+ * to another bus, transacting on the RETAINED bus_id would report "kept" while talking to whatever
+ * answers that address somewhere else. */
+static void test_retained_branch_uses_the_new_bus(void)
+{
+    CASE("a controller moved to another bus is not kept on the old one");
+    setup(0u, 0u, 0x5Du, 0xFFu);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    CHECK(od_touch_gt911_address(0) == 0x5Du);
+
+    g_cfg.data_bus_count = 2u;
+    g_cfg.data_buses[1].instance_number = 7u;
+    g_cfg.data_buses[1].bus_type = 0x01u;
+    g_cfg.data_buses[1].pin_1 = 14u;
+    g_cfg.data_buses[1].pin_2 = 15u;
+    g_cfg.touch_controllers[0].bus_id = 7u;
+    g_bus_wired_id = 7u;                       /* the part really is on bus 7 now */
+    g_bus_ready_id = 7u;
+    g_trace_len = 0;
+    (void)od_touch_gt911_init(&g_cfg, 2000u);
+    CHECK(trace_has("bus:7"));
+    CHECK(!trace_has("bus:3"));                /* never touched the retained bus */
+    CHECK(od_touch_gt911_address(0) == 0x5Du);
+
+    CASE("and the enable pin is re-asserted on the retained path");
+    CHECK(trace_index("w:22:1") >= 0);
 }
 
 static void test_int_pin_query(void)
@@ -1224,6 +1335,9 @@ int main(void)
     test_msd_bound_on_every_poll();
     test_held_low_line();
     test_int_pin_moves();
+    test_held_low_reads_the_attached_pin();
+    test_int_pin_zero();
+    test_retained_branch_uses_the_new_bus();
     test_int_pin_query();
 
     printf("touch_gt911: %u checks, %u failures\n", g_checks, g_fails);

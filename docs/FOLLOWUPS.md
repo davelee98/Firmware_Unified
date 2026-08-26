@@ -1303,3 +1303,41 @@ evaluate, which this fleet does not have.
 Neither case is reachable in the host suite: the fault injection fails the status read first, so it
 exercises the path that *does* disable. A test for this would have to fail one register and not the
 other, which is worth adding whenever the behaviour is revisited.
+
+---
+
+## 22. `Firmware_Unified` / nordic-zephyr — interrupt-driven touch allocates a GPIOTE channel, and nobody has measured what it costs
+
+Raised 2026-08-25 in review of the touch promotion. **Not a defect — an unpriced capability.**
+
+`Firmware_NRF54` and the port it fed used **polling only**: "INT-driven wakeups are not used here:
+like the button/led modules this is a cooperatively polled module driven from the main loop"
+(`Firmware_NRF54/src/opendisplay_touch.c:21`). The INT pin was driven during reset, because that
+selects the I2C address, and never carried a handler.
+
+The shared driver attaches one. `od_touch_app_gpio_attach_int()` requests `OD_GPIO_EDGE_FALLING`,
+Zephyr maps that to `GPIO_INT_EDGE_FALLING`, and `gpio_nrfx_pin_interrupt_configure()` allocates a
+dedicated **GPIOTE IN channel** for any edge trigger on a pin not covered by `sense-edge-mask`.
+There is no `sense-edge-mask` on any board in this repo.
+
+**Why that matters on this product.** A GPIOTE channel in event mode holds its power domain up.
+Nordic's own figures put System ON IDLE at roughly 20 µA with one allocated against ~3 µA without,
+on nRF54L — and nRF52840 errata 89 describes 400-450 µA static current when GPIOTE event mode is
+combined with EasyDMA TWIM/SPIM, which is exactly this firmware's configuration: SPIM to the panel
+and TWIM to the GT911. On a battery e-paper tag that is not a rounding error.
+
+**Mitigating, and the reason this is a follow-up rather than a blocker:** it is config-gated. Only
+a board that declares a touch controller attaches anything, and no board in this fleet has one, so
+nothing ships paying for it today.
+
+**What to do when a touch board exists.** Measure first — the checklist carries the row. If the
+cost is real, the standard remedy is `sense-edge-mask` in the board devicetree plus a level
+trigger, which uses the shared SENSE mechanism instead of a dedicated channel. That is a per-board
+change, not a driver change, which is why the driver is not the place to fix it.
+
+**Channel budget, separately.** `OD_GPIO_IRQ_SLOTS` is 8 and the seam's stated consumers are four
+buttons and up to four touch controllers — exactly 8, no headroom. On nRF54L15 the P0 GPIOTE
+instance has only **4** channels, so four touch controllers on P0 exhaust the hardware before the
+slot table does. Attach failure degrades to polling with a warning rather than failing, so this is
+a capacity note rather than a fault, but a board wanting more than a couple of interrupt sources
+per port should check it.

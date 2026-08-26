@@ -64,9 +64,14 @@ struct touch_runtime {
     uint8_t  ok;
     uint8_t  reg_high_first;  /* 1 = documented order; 0 = the undocumented one, kept as fallback */
     uint8_t  int_attached;
-    /* The pin the ISR is actually on; 0 means none, which is both what memset gives and what
-     * valid_pin() already rejects everywhere else in this file -- so a zeroed runtime cannot
-     * cause a detach of pin 0. `int_attached` alone cannot survive a
+    /* The pin the ISR is actually on; 0xFF means none.
+     *
+     * NOT 0, though memset would make that free: 0 is a LEGAL interrupt pin -- ESP32 GPIO0, and
+     * Nordic P0.00, which the compact encoding writes as 0x00 -- and every int_pin test in this
+     * file is `!= 0xFF`, not valid_pin(). With 0 as the sentinel a controller on pin 0 would be
+     * invisible to the stale-pin detach, to disable, and to init's detach-by-record, reinstating
+     * the orphaned-ISR bug this field exists to close. So every clear goes through
+     * touch_rt_clear(). `int_attached` alone cannot survive a
      * config reload that MOVES the interrupt pin: the new pin gets attached and the old one keeps
      * its ISR for ever -- spurious service on ESP32, and on Nordic a permanently consumed callback
      * slot out of eight, so eventually no controller can attach at all. */
@@ -117,6 +122,14 @@ static void touch_log_unsupported(const struct od_config *cfg, uint8_t i)
     if (ic != OD_TOUCH_IC_NONE && ic != OD_TOUCH_IC_GT911) {
         od_log_warn("Touch[%u]: skipped (only GT911=1 implemented, got %u)", i, (unsigned)ic);
     }
+}
+
+/* THE ONLY WAY A RUNTIME IS CLEARED. memset alone would leave int_pin_attached at 0, which is a
+ * legal pin -- see the field's comment. */
+static void touch_rt_clear(struct touch_runtime *rt)
+{
+    memset(rt, 0, sizeof *rt);
+    rt->int_pin_attached = 0xFFu;
 }
 
 static bool valid_pin(uint8_t pin)
@@ -479,9 +492,9 @@ static void touch_disable(uint8_t idx, struct touch_runtime *rt, const char *rea
     }
     rt->disabled = 1u;
     rt->ok = 0u;
-    if (rt->int_pin_attached != 0u) {
+    if (rt->int_pin_attached != 0xFFu) {
         od_touch_app_gpio_detach_int(rt->int_pin_attached);
-        rt->int_pin_attached = 0u;
+        rt->int_pin_attached = 0xFFu;
         rt->int_attached = 0u;
     }
     od_log_warn("Touch[%u]: disabled (%s)", idx, reason);
@@ -493,9 +506,9 @@ static void touch_attach_int(uint8_t idx, const struct TouchController *t,
     /* A RECORDED PIN THAT IS NO LONGER THE CONFIGURED ONE IS DETACHED FIRST. A config write can
      * move the interrupt pin under a live controller, and nothing re-initialises touch on reload;
      * without this the old pin keeps its ISR for the rest of the boot. */
-    if (rt->int_pin_attached != 0u && rt->int_pin_attached != t->int_pin) {
+    if (rt->int_pin_attached != 0xFFu && rt->int_pin_attached != t->int_pin) {
         od_touch_app_gpio_detach_int(rt->int_pin_attached);
-        rt->int_pin_attached = 0u;
+        rt->int_pin_attached = 0xFFu;
         rt->int_attached = 0u;
     }
     if (t->int_pin == 0xFFu || rt->int_attached) {
@@ -608,7 +621,7 @@ static uint8_t touch_interval(const struct TouchController *t)
 /* Returns the delay this controller wants before it is serviced again. */
 static uint32_t touch_service_one(uint8_t idx, const struct od_config *cfg,
                                   const struct TouchController *t, struct touch_runtime *rt,
-                                  uint32_t now_ms, bool edge, bool *consumed_edge)
+                                  uint32_t now_ms, bool edge)
 {
     const uint8_t interval = touch_interval(t);
     const bool    high_first = rt->reg_high_first != 0u;
@@ -629,7 +642,11 @@ static uint32_t touch_service_one(uint8_t idx, const struct od_config *cfg,
         /* A held-low line means a report is waiting even though its edge was missed. Suppressed
          * during the failure backoff: a controller that is not answering also holds INT low, and
          * without this the backoff would be defeated by the very symptom it is backing off from. */
-        line_low = (od_touch_app_gpio_read(t->int_pin) == 0);
+        /* THE PIN THE TRIGGER IS ON, not the one the config currently names. A config write can
+         * move int_pin under a live controller with no re-init, and polling the new pin -- which
+         * may belong to another subsystem and may sit low -- would make line_low true on every
+         * pass, servicing this controller on every loop iteration and ignoring its interval. */
+        line_low = (od_touch_app_gpio_read(rt->int_pin_attached) == 0);
         if (line_low && rt->fail_streak > 0u &&
             (uint32_t)(now_ms - rt->last_fail_ms) < TOUCH_I2C_FAIL_BACKOFF_MS) {
             line_low = false;
@@ -644,7 +661,9 @@ static uint32_t touch_service_one(uint8_t idx, const struct od_config *cfg,
         return (uint32_t)(interval - elapsed);
     }
     if (edge) {
-        *consumed_edge = true;
+        /* BEFORE THE I2C, matching the authority. Clearing after the service walk instead leaves
+         * a millisecond-wide window in which an arriving edge is discarded. */
+        od_touch_app_irq_consume((uint8_t)(1u << idx));
     }
     if (!od_touch_app_bus_prepare(rt->bus_id)) {
         /* last_poll_ms is NOT stamped: nothing was polled. Stamping it would make a controller
@@ -762,16 +781,18 @@ uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms)
     /* BY RECORD, NOT BY CONFIG. Walking the NEW config would miss exactly the pin that matters --
      * one a reload just moved away from, whose ISR is still installed. */
     for (i = 0; i < OD_TOUCH_MAX_CONTROLLERS; i++) {
-        if (s_rt[i].int_pin_attached != 0u) {
+        if (s_rt[i].int_pin_attached != 0xFFu) {
             od_touch_app_gpio_detach_int(s_rt[i].int_pin_attached);
-            s_rt[i].int_pin_attached = 0u;
+            s_rt[i].int_pin_attached = 0xFFu;
             s_rt[i].int_attached = 0u;
         }
     }
     /* s_suspend IS DELIBERATELY NOT CLEARED. The donor's init does not touch its suspend counter
      * either: a re-init that ran inside a refresh bracket would otherwise drop the outstanding
      * suspend and let the next poll contend with the panel for the bus. */
-    memset(s_rt, 0, sizeof s_rt);
+    for (i = 0; i < OD_TOUCH_MAX_CONTROLLERS; i++) {
+        touch_rt_clear(&s_rt[i]);
+    }
     if (cfg == NULL || cfg->touch_controller_count == 0u) {
         return OD_TOUCH_IDLE_MS;
     }
@@ -792,6 +813,11 @@ uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms)
             s_rt[i].int_attached = 0u;
             s_rt[i].disabled = 0u;
             s_rt[i].fail_streak = 0u;
+            /* THE NEW CONFIG'S BUS, not the retained one. Validating the new record and then
+             * transacting on the old bus_id would report "kept" while talking to whatever sits at
+             * that address on a bus this controller no longer uses. */
+            s_rt[i].bus_id = t->bus_id;
+            touch_apply_enable_pin(t);          /* the donor asserts this before the retained check */
             if (touch_bus_ok(cfg, t) && od_touch_app_bus_prepare(s_rt[i].bus_id)) {
                 gt911_clear_status(&s_rt[i]);
                 if (t->int_pin != 0xFFu) {
@@ -804,7 +830,7 @@ uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms)
                 continue;
             }
             od_log_warn("Touch[%u]: bus restore failed; falling back to full bring-up", i);
-            memset(&s_rt[i], 0, sizeof s_rt[i]);
+            touch_rt_clear(&s_rt[i]);
         }
         if (touch_bring_up(i, cfg, t, &s_rt[i], now_ms)) {
             up++;
@@ -815,58 +841,46 @@ uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms)
     return up ? TOUCH_DEFAULT_INTERVAL_MS : OD_TOUCH_IDLE_MS;
 }
 
-uint32_t od_touch_gt911_service(const struct od_config *cfg, uint32_t now_ms,
-                                uint8_t irq_mask, uint8_t *consumed_out)
+uint32_t od_touch_gt911_service(const struct od_config *cfg, uint32_t now_ms, uint8_t irq_mask)
 {
     uint32_t next = OD_TOUCH_IDLE_MS;
-    uint8_t  consumed = 0;
     uint8_t  i;
 
-    if (consumed_out != NULL) {
-        *consumed_out = 0u;
-    }
     if (cfg == NULL || s_suspend > 0u) {
-        /* Edges raised while the panel had the bus are stale by the time it gives it back, and
-         * the resume re-acknowledges the part anyway. Discard them, or the wrapper busy-polls for
-         * the whole refresh. */
-        if (consumed_out != NULL) {
-            *consumed_out = irq_mask;
-        }
+        /* Edges raised while the panel had the bus are stale by the time it gives it back, and the
+         * resume re-acknowledges the part anyway. Discard them, or a caller that gates on a
+         * non-empty mask busy-polls for the whole refresh. */
+        od_touch_app_irq_consume(irq_mask);
         return OD_TOUCH_IDLE_MS;
     }
+    /* Bits above the last controller index cannot be reached by the loop below and nothing else
+     * clears them, so they are discarded here rather than left to spin. */
+    od_touch_app_irq_consume((uint8_t)(irq_mask & (uint8_t)~((1u << OD_TOUCH_MAX_CONTROLLERS) - 1u)));
+
     for (i = 0; i < OD_TOUCH_MAX_CONTROLLERS; i++) {
         const struct TouchController *t = touch_cfg(cfg, i);
-        bool     edge = (irq_mask & (uint8_t)(1u << i)) != 0u;
-        bool     took = false;
+        const uint8_t bit = (uint8_t)(1u << i);
+        bool     edge = (irq_mask & bit) != 0u;
         uint32_t want;
 
         /* A BIT THIS MACHINE WILL NEVER ACT ON IS DISCARDED, NOT LEFT SET. There is no controller
-         * here -- the index is past the count, the type is not GT911, or a config reload dropped
-         * it -- and its ISR may still be attached to the old pin and re-setting the bit. The
-         * authority clears the mask itself under the interrupt lock inside its disable path;
-         * shared/ has no lock, so reporting the bit as consumed is how it says "drop this".
-         *
-         * Leaving it set is not merely untidy: both wrappers gate their whole early return on
-         * `mask == 0`, so one stuck bit makes the full service walk run on every loop pass for
-         * ever and the deadline is never consulted again. */
+         * here -- index past the count, type not GT911, or a config reload dropped it -- and its
+         * ISR may still be on the old pin, re-setting the bit. The authority clears the mask
+         * itself inside its disable path; this seam is how shared/ says the same thing without a
+         * lock of its own. */
         if (t == NULL) {
-            consumed |= (uint8_t)(irq_mask & (uint8_t)(1u << i));
+            od_touch_app_irq_consume((uint8_t)(irq_mask & bit));
+            touch_log_unsupported(cfg, i);
             continue;
         }
         if (s_rt[i].disabled || !s_rt[i].ok) {
-            consumed |= (uint8_t)(irq_mask & (uint8_t)(1u << i));
+            od_touch_app_irq_consume((uint8_t)(irq_mask & bit));
             continue;
         }
-        want = touch_service_one(i, cfg, t, &s_rt[i], now_ms, edge, &took);
-        if (took) {
-            consumed |= (uint8_t)(1u << i);
-        }
+        want = touch_service_one(i, cfg, t, &s_rt[i], now_ms, edge);
         if (want < next) {
             next = want;
         }
-    }
-    if (consumed_out != NULL) {
-        *consumed_out = consumed;
     }
     return next;
 }
@@ -972,15 +986,11 @@ uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms)
     return OD_TOUCH_IDLE_MS;
 }
 
-uint32_t od_touch_gt911_service(const struct od_config *cfg, uint32_t now_ms,
-                                uint8_t irq_mask, uint8_t *consumed_out)
+uint32_t od_touch_gt911_service(const struct od_config *cfg, uint32_t now_ms, uint8_t irq_mask)
 {
     (void)cfg;
     (void)now_ms;
     (void)irq_mask;
-    if (consumed_out != NULL) {
-        *consumed_out = 0u;
-    }
     return OD_TOUCH_IDLE_MS;
 }
 

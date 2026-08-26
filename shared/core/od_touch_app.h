@@ -62,14 +62,30 @@ bool od_touch_app_bus_prepare(uint8_t bus_id);
  * per operation and implements this empty. */
 void od_touch_app_bus_invalidate(void);
 
+/* Clear these bits from the latched interrupt mask, under the target's own interrupt lock.
+ *
+ * A SEAM RATHER THAN A RETURN VALUE, AND THE TIMING IS THE WHOLE REASON. The driver calls this at
+ * the instant it decides to service a controller -- before any I2C -- which is where the authority
+ * clears, a few instructions wide. Reporting the bits back for the caller to clear after the
+ * service walk instead left a window of milliseconds (up to three retries x two framings x two
+ * register reads, plus 500 us between retries) in which an arriving edge was discarded. On a
+ * falling-edge panel, which is every panel in this fleet, the held-low check does not fire, so
+ * that sample waits for the next timed poll.
+ *
+ * Also called for bits the driver will never act on -- a controller that is disabled, absent from
+ * the config, or out of range -- because nothing else can ever clear those, and a caller that
+ * gates on a non-empty mask would otherwise spin for ever. */
+void od_touch_app_irq_consume(uint8_t bits);
+
 /* One byte of the advertisement's dynamic block. Bounds are the driver's. */
 void od_touch_app_msd_write(uint8_t index, uint8_t value);
 
 /* Republish the advertisement, after a changed sample has been written.
  *
- * ORDER IS LOAD-BEARING and the driver owns it: od_adv_app_boost() is called BEFORE this,
- * because on a target with advertising-interval states the publish is what selects the interval,
- * so a boost requested afterwards lands too late for the packet it exists for. */
+ * The driver calls od_adv_app_boost() before this. Not because any target here needs that order --
+ * ESP32's boost is an empty function and Nordic's publish only sets a pending flag -- but because
+ * it is the order that stays correct if a target ever selects its interval DURING the publish,
+ * which is the nRF/Bluefruit shape and the one that produced a real defect. DIVERGENCE_MATRIX 25. */
 void od_touch_app_msd_publish(void);
 
 #ifdef __cplusplus

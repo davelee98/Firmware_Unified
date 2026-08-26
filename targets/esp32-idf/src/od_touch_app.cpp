@@ -95,6 +95,16 @@ bool od_touch_app_bus_prepare(uint8_t bus_id)
     return initOrRestoreWireForBus(bus_id);
 }
 
+void od_touch_app_irq_consume(uint8_t bits)
+{
+    if (bits == 0u) {
+        return;
+    }
+    od_hal_gpio_irq_lock();
+    s_irq_mask = (uint8_t)(s_irq_mask & ~bits);
+    od_hal_gpio_irq_unlock();
+}
+
 void od_touch_app_msd_write(uint8_t index, uint8_t value)
 {
     if (index < sizeof(dynamicreturndata)) {
@@ -123,7 +133,6 @@ void processTouchInput(void)
 {
     uint32_t now;
     uint8_t  mask;
-    uint8_t  consumed = 0;
 
     // Skip while a transfer is streaming: GT911 reads contend with it for the bus AND the loop
     // task. The shared lifecycle query covers direct, PIPE and partial streams. The refresh case
@@ -144,17 +153,10 @@ void processTouchInput(void)
         return;
     }
 
-    // The shared machine reports which bits it acted on AND which it never will -- a disabled or
-    // absent controller, or the whole mask while suspended -- because nothing else can ever clear
-    // those, and the early return above gates on the mask. A second edge from a controller it DID
-    // service is not distinguishable here and is recovered by the held-low check or a timed poll.
-    s_next_due_ms = now + od_touch_gt911_service(&globalConfig, now, mask, &consumed);
-
-    if (consumed != 0u) {
-        od_hal_gpio_irq_lock();
-        s_irq_mask = (uint8_t)(s_irq_mask & ~consumed);
-        od_hal_gpio_irq_unlock();
-    }
+    // The machine clears bits itself through od_touch_app_irq_consume(), at the instant it acts on
+    // one and immediately for one it never will. Nothing is cleared here: doing it after the walk
+    // is what discarded edges arriving during the I2C.
+    s_next_due_ms = now + od_touch_gt911_service(&globalConfig, now, mask);
 }
 
 void touchSuspendForEpdRefresh(void)

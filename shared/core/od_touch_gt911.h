@@ -52,23 +52,18 @@ uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms);
 /* Service every controller that is due, and publish any changed sample.
  *
  * `irq_mask` carries latched FALLING edges, bit per controller index, as the target's ISR set
- * them. `*consumed_out` receives the bits this call acted on, so the TARGET clears them under its
- * own interrupt lock -- shared/ has no lock to take and must not invent one. Pass 0 and NULL on a
- * target with no interrupt wiring.
+ * them. The machine clears them through od_touch_app_irq_consume() at the moment it acts on one,
+ * or immediately for a bit it will never act on -- so the target's lock stays on the target's
+ * side and the clear happens before the I2C rather than after the whole walk. Pass 0 on a target
+ * with no interrupt wiring.
  *
- * A BIT IS REPORTED CONSUMED WHEN IT WAS ACTED ON *OR* WHEN IT NEVER WILL BE. The second half is
- * not tidiness: a bit for a controller that is disabled, absent from the config, or suspended can
- * never be cleared by anything else, and a caller that gates its early return on `mask != 0` --
- * which both adapters do -- would then run the full service walk on every loop pass for ever.
- *
- * What the mask does NOT preserve is a second edge from a controller this call already serviced:
+ * WHAT THE MASK DOES NOT PRESERVE is a second edge from a controller this call already serviced:
  * the bit was already 1, the ISR's OR adds nothing, and the clear removes both. That sample is
- * recovered by the held-low line check or the next timed poll instead. Distinguishing the two
- * would need a per-controller generation counter, which is not worth an ISR-side write here.
+ * recovered by the held-low line check or the next timed poll. Distinguishing the two would need
+ * a per-controller generation counter, which is not worth an ISR-side write here.
  *
  * Returns the delay until the next call is wanted. */
-uint32_t od_touch_gt911_service(const struct od_config *cfg, uint32_t now_ms,
-                                uint8_t irq_mask, uint8_t *consumed_out);
+uint32_t od_touch_gt911_service(const struct od_config *cfg, uint32_t now_ms, uint8_t irq_mask);
 
 /* Suspend polling across a panel refresh, which contends for the bus. Nestable: the matching
  * resume() count must be reached before any controller is touched again. */

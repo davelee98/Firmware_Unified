@@ -98,6 +98,16 @@ void od_touch_app_bus_invalidate(void)
 	/* Nothing is cached, so nothing to drop -- see od_touch_app_bus_prepare(). */
 }
 
+void od_touch_app_irq_consume(uint8_t bits)
+{
+	if (bits == 0u) {
+		return;
+	}
+	od_gpio_irq_lock();
+	s_irq_mask = (uint8_t)(s_irq_mask & ~bits);
+	od_gpio_irq_unlock();
+}
+
 void od_touch_app_msd_write(uint8_t index, uint8_t value)
 {
 	opendisplay_ble_set_dynamic_byte(index, value);
@@ -124,7 +134,6 @@ void opendisplay_touch_process(void)
 {
 	uint32_t now;
 	uint8_t  mask;
-	uint8_t  consumed = 0u;
 
 	/* AN EDGE PULLS SERVICE FORWARD, so the mask is read before the deadline is tested. Gating
 	 * on the deadline alone would leave a controller with a long configured interval unable to
@@ -138,19 +147,10 @@ void opendisplay_touch_process(void)
 		return;
 	}
 
-	s_next_due_ms = now + od_touch_gt911_service(opendisplay_get_global_config(), now,
-						     mask, &consumed);
-
-	/* Clear what the machine acted on AND what it says it never will -- a disabled or absent
-	 * controller, or the whole mask while suspended. Nothing else can clear those, and the early
-	 * return above gates on the mask, so a stuck bit would busy-poll for ever. A second edge from
-	 * a controller it DID service is not distinguishable here and is recovered by the held-low
-	 * check or the next timed poll. */
-	if (consumed != 0u) {
-		od_gpio_irq_lock();
-		s_irq_mask = (uint8_t)(s_irq_mask & ~consumed);
-		od_gpio_irq_unlock();
-	}
+	/* The machine clears bits itself through od_touch_app_irq_consume(), at the instant it acts
+	 * on one and immediately for one it never will. Nothing is cleared here: doing it after the
+	 * walk is what discarded edges arriving during the I2C. */
+	s_next_due_ms = now + od_touch_gt911_service(opendisplay_get_global_config(), now, mask);
 }
 
 void opendisplay_touch_resume_after_refresh(void)
