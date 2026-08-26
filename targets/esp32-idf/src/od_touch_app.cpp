@@ -144,10 +144,10 @@ void processTouchInput(void)
         return;
     }
 
-    // The shared machine reports which bits it acted on and this clears exactly those, so a bit
-    // for a controller it did not reach survives. A second edge from a controller it DID service
-    // does not -- the bit was already set, so the ISR's OR adds nothing -- and is recovered by
-    // the held-low check or the next timed poll, as on the donors.
+    // The shared machine reports which bits it acted on AND which it never will -- a disabled or
+    // absent controller, or the whole mask while suspended -- because nothing else can ever clear
+    // those, and the early return above gates on the mask. A second edge from a controller it DID
+    // service is not distinguishable here and is recovered by the held-low check or a timed poll.
     s_next_due_ms = now + od_touch_gt911_service(&globalConfig, now, mask, &consumed);
 
     if (consumed != 0u) {

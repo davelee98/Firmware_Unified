@@ -277,17 +277,70 @@ int od_touch_app_gpio_read(uint8_t pin)
     return g_int_level;
 }
 
+/* MODELS A FINITE, PER-PIN REGISTRY, because that is what both stacks have and it is where the
+ * defect lives: Nordic has eight callback slots, and an ISR left on a pin the config moved away
+ * from consumes one for the rest of the boot. A fake that only counts attaches cannot see it. */
+#define FAKE_IRQ_SLOTS 8u
+static uint8_t  g_irq_pins[FAKE_IRQ_SLOTS];   /* 0 = free */
+
+static unsigned irq_slots_used(void)
+{
+    unsigned i;
+    unsigned n = 0;
+
+    for (i = 0; i < FAKE_IRQ_SLOTS; i++) {
+        if (g_irq_pins[i] != 0u) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static bool irq_pin_attached(uint8_t pin)
+{
+    unsigned i;
+
+    for (i = 0; i < FAKE_IRQ_SLOTS; i++) {
+        if (g_irq_pins[i] == pin) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool od_touch_app_gpio_attach_int(uint8_t idx, uint8_t pin)
 {
-    (void)idx; (void)pin;
+    unsigned i;
+
+    (void)idx;
     if (!g_attach_ok) {
         return false;
     }
-    g_attached++;
-    g_int_trigger_armed = true;
-    return true;
+    for (i = 0; i < FAKE_IRQ_SLOTS; i++) {
+        if (g_irq_pins[i] == 0u) {
+            g_irq_pins[i] = pin;
+            g_attached++;
+            g_int_trigger_armed = true;
+            trace("irq+:%u", pin, 0);
+            return true;
+        }
+    }
+    return false;                      /* every slot consumed */
 }
-void od_touch_app_gpio_detach_int(uint8_t pin) { (void)pin; g_detached++; }
+
+void od_touch_app_gpio_detach_int(uint8_t pin)
+{
+    unsigned i;
+
+    for (i = 0; i < FAKE_IRQ_SLOTS; i++) {
+        if (g_irq_pins[i] == pin) {
+            g_irq_pins[i] = 0u;
+            g_detached++;
+            trace("irq-:%u", pin, 0);
+            return;
+        }
+    }
+}
 
 bool od_touch_app_bus_prepare(uint8_t bus_id)
 {
@@ -346,6 +399,7 @@ static void setup(uint8_t start_byte, uint8_t flags, uint8_t addr, uint8_t int_p
     g_attached = 0;
     g_detached = 0;
     g_attach_ok = true;
+    memset(g_irq_pins, 0, sizeof g_irq_pins);
     g_int_level = 1;
     g_enable_asserted_at = 0;
     g_bus_ready_id = BUS_INSTANCE;
@@ -1068,6 +1122,74 @@ static void test_held_low_line(void)
     CHECK((g_msd[0] & 0x0Fu) == 1u);
 }
 
+/* A config write can move the interrupt pin under a live controller, and nothing re-initialises
+ * touch on reload. Recording only THAT an interrupt was attached leaves the old pin's ISR
+ * installed for the rest of the boot. */
+static void test_int_pin_moves(void)
+{
+    CASE("moving the INT pin detaches the old one before attaching the new");
+    setup(0u, 0u, 0x5Du, PIN_INT);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    CHECK(irq_pin_attached(PIN_INT));
+    CHECK(irq_slots_used() == 1u);
+
+    g_cfg.touch_controllers[0].int_pin = (uint8_t)(PIN_INT + 1u);
+    (void)od_touch_gt911_reestablish(&g_cfg, 2000u);
+    CHECK(irq_pin_attached((uint8_t)(PIN_INT + 1u)));
+    CHECK(!irq_pin_attached(PIN_INT));                  /* the old ISR is gone */
+    CHECK(irq_slots_used() == 1u);                      /* and its slot came back */
+
+    CASE("repeated moves do not exhaust the registry");
+    {
+        uint8_t p;
+
+        for (p = 2u; p < 12u; p++) {
+            g_cfg.touch_controllers[0].int_pin = (uint8_t)(PIN_INT + p);
+            (void)od_touch_gt911_reestablish(&g_cfg, 2000u + p);
+        }
+        CHECK(irq_slots_used() == 1u);
+        CHECK(irq_pin_attached((uint8_t)(PIN_INT + 11u)));
+    }
+
+    CASE("a re-init detaches by RECORD, so a moved pin is not orphaned");
+    setup(0u, 0u, 0x5Du, PIN_INT);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    g_cfg.touch_controllers[0].int_pin = (uint8_t)(PIN_INT + 1u);
+    (void)od_touch_gt911_init(&g_cfg, 2000u);
+    CHECK(!irq_pin_attached(PIN_INT));
+    CHECK(irq_slots_used() <= 1u);
+
+    /* THE CASE THE INIT-LOOP CHANGE ACTUALLY DEFENDS. When the pin merely moves, the attach-time
+     * detach cleans up and this passes either way; when the controller LEAVES the config there is
+     * no later attach to clean up after it, and detaching by the new config finds nothing. */
+    CASE("a controller removed from the config does not orphan its ISR");
+    setup(0u, 0u, 0x5Du, PIN_INT);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    CHECK(irq_slots_used() == 1u);
+    g_cfg.touch_controller_count = 0u;
+    (void)od_touch_gt911_init(&g_cfg, 2000u);
+    CHECK(irq_slots_used() == 0u);
+
+    CASE("disabling a controller frees its slot");
+    setup(0u, 0u, 0x5Du, PIN_INT);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    CHECK(irq_slots_used() == 1u);
+    g_part.fail_all = true;
+    {
+        uint32_t t;
+
+        for (t = 2000u; t <= 8000u; t += 1000u) {
+            (void)od_touch_gt911_service(&g_cfg, t, 0u, NULL);
+        }
+    }
+    CHECK(od_touch_gt911_address(0) == 0u);
+    CHECK(irq_slots_used() == 0u);
+}
+
 static void test_int_pin_query(void)
 {
     CASE("a configured INT pin is recognised");
@@ -1101,6 +1223,7 @@ int main(void)
     test_stuck_irq_bits();
     test_msd_bound_on_every_poll();
     test_held_low_line();
+    test_int_pin_moves();
     test_int_pin_query();
 
     printf("touch_gt911: %u checks, %u failures\n", g_checks, g_fails);

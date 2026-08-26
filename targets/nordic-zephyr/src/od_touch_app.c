@@ -141,9 +141,11 @@ void opendisplay_touch_process(void)
 	s_next_due_ms = now + od_touch_gt911_service(opendisplay_get_global_config(), now,
 						     mask, &consumed);
 
-	/* Clear exactly what was acted on, so a bit for a controller the machine did not reach
-	 * survives to the next pass. A second edge from a controller it DID service is not
-	 * distinguishable here and is recovered by the held-low check or the next timed poll. */
+	/* Clear what the machine acted on AND what it says it never will -- a disabled or absent
+	 * controller, or the whole mask while suspended. Nothing else can clear those, and the early
+	 * return above gates on the mask, so a stuck bit would busy-poll for ever. A second edge from
+	 * a controller it DID service is not distinguishable here and is recovered by the held-low
+	 * check or the next timed poll. */
 	if (consumed != 0u) {
 		od_gpio_irq_lock();
 		s_irq_mask = (uint8_t)(s_irq_mask & ~consumed);

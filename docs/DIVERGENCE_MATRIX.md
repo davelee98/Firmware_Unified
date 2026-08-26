@@ -1031,7 +1031,17 @@ about every shipped device.
 Found in review of the shared touch promotion. **A deliberate departure from both donors**, and
 the only behaviour change the promotion makes to a working controller.
 
-Every resume path wakes the interrupt line before re-attaching:
+**ONLY ONE DONOR HAD AN INTERRUPT AT ALL, and an earlier form of this entry said both did.**
+`Firmware_NRF54` states outright that "INT-driven wakeups are not used here: like the button/led
+modules this is a cooperatively polled module driven from the main loop" — it drives INT during
+reset, because that selects the address, and never attaches a handler. The in-tree Nordic port it
+fed did the same. So the defect below is the **ESP32 authority's**, and on Nordic the shared driver
+introduces interrupt-driven touch that target never had. That is why the GPIO IRQ seam existed
+dormant and why this promotion is its first consumer — recorded here because "Nordic gained a
+capability" is a bigger statement than "a bug was fixed", and no board in this fleet can exercise
+it.
+
+Every resume path in the donor that *does* have interrupts wakes the line before re-attaching:
 
 ```c
 gt911_int_wake(t);                       /* drive INT high, delay, reconfigure as input */
@@ -1039,23 +1049,32 @@ if (!rt->int_irq_attached) {             /* <-- still 1, so the attach is SKIPPE
     attach_touch_int(idx, t->int_pin);
 }
 ```
-— `Firmware/src/touch_input.cpp`, and identically in both ports before this promotion.
+— `Firmware/src/touch_input.cpp`, and identically in the ESP32 port before this promotion.
 
 **Reconfiguring the pad destroys the trigger on both stacks.** Zephyr's `gpio_pin_configure()`
 removes the existing trigger and frees the GPIOTE channel; ESP-IDF's `gpio_config()` here sets
 `intr_type = GPIO_INTR_DISABLE`. So after the wake the hardware has no interrupt, while
 `int_irq_attached` still says it has one — and the guard then declines to restore it.
 
-| | Both donors | Shared |
-|---|---|---|
-| After a resume's INT wake | flag says attached, hardware trigger gone | re-attached |
-| Edges advance service | no | yes |
-| Recovery | timed poll and held-low check only | interrupt-driven again |
+| | `../Firmware` / ESP32 | `Firmware_NRF54` / Nordic | Shared |
+|---|---|---|---|
+| Touch interrupt at all | yes | **none — polled only** | yes, on both |
+| After a resume's INT wake | flag says attached, trigger gone | n/a | re-attached |
+| Edges advance service | no | n/a | yes |
+| Recovery | timed poll and held-low check only | polling was the design | interrupt-driven again |
 
 **It is a latency regression, not a loss of function**, which is why it survived: the timed poll
 and the held-low check still deliver every sample, so touch keeps working and simply stops being
 interrupt-driven after the first panel refresh. Nothing in a log distinguishes that from a quiet
-panel.
+panel — and on the one donor that had interrupts, that is also the only donor anyone could have
+noticed it on.
+
+**A second stale-record case, fixed with it:** the runtime recorded only *that* an interrupt was
+attached, not *which pin*. A config write can move the interrupt pin under a live controller and
+nothing re-initialises touch on reload, so the new pin was attached and the old one kept its ISR
+for the rest of the boot — spurious service on ESP32, and on Nordic one of only eight callback
+slots consumed permanently, until no controller could attach at all. The runtime now carries the
+attached pin and detaches a stale one before attaching.
 
 The fix puts the clear where the damage is done — `gt911_int_wake()` takes the runtime and clears
 `int_attached` itself, because the function that reconfigures the pad is the one that knows the

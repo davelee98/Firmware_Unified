@@ -56,12 +56,15 @@ uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms);
  * own interrupt lock -- shared/ has no lock to take and must not invent one. Pass 0 and NULL on a
  * target with no interrupt wiring.
  *
- * WHAT THE CONSUMED MASK DOES AND DOES NOT BUY. A bit set for a controller this call did not
- * reach is left alone, so that edge survives. An edge from a controller it DID service, arriving
- * after the snapshot, does not: the bit was already 1, the ISR's OR adds nothing, and the clear
- * removes both. That sample is recovered by the held-low line check or the next timed poll rather
- * than by the mask -- the same property the donors have. Distinguishing the two would need a
- * per-controller generation counter, which is not worth an ISR-side write on this path.
+ * A BIT IS REPORTED CONSUMED WHEN IT WAS ACTED ON *OR* WHEN IT NEVER WILL BE. The second half is
+ * not tidiness: a bit for a controller that is disabled, absent from the config, or suspended can
+ * never be cleared by anything else, and a caller that gates its early return on `mask != 0` --
+ * which both adapters do -- would then run the full service walk on every loop pass for ever.
+ *
+ * What the mask does NOT preserve is a second edge from a controller this call already serviced:
+ * the bit was already 1, the ISR's OR adds nothing, and the clear removes both. That sample is
+ * recovered by the held-low line check or the next timed poll instead. Distinguishing the two
+ * would need a per-controller generation counter, which is not worth an ISR-side write here.
  *
  * Returns the delay until the next call is wanted. */
 uint32_t od_touch_gt911_service(const struct od_config *cfg, uint32_t now_ms,

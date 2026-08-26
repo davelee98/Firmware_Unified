@@ -64,6 +64,13 @@ struct touch_runtime {
     uint8_t  ok;
     uint8_t  reg_high_first;  /* 1 = documented order; 0 = the undocumented one, kept as fallback */
     uint8_t  int_attached;
+    /* The pin the ISR is actually on; 0 means none, which is both what memset gives and what
+     * valid_pin() already rejects everywhere else in this file -- so a zeroed runtime cannot
+     * cause a detach of pin 0. `int_attached` alone cannot survive a
+     * config reload that MOVES the interrupt pin: the new pin gets attached and the old one keeps
+     * its ISR for ever -- spurious service on ESP32, and on Nordic a permanently consumed callback
+     * slot out of eight, so eventually no controller can attach at all. */
+    uint8_t  int_pin_attached;
     uint8_t  disabled;
     uint8_t  latched;         /* a contact has been seen, so a release is reportable */
     uint8_t  fail_streak;
@@ -254,11 +261,21 @@ static bool gt911_probe(uint8_t bus_id, uint8_t addr7, uint8_t *high_first_out)
  * RST's rising edge is what selects the address (Rev.10 4.2). Collapsing any pair into a
  * "configure output at level" call reorders that and changes which address the part answers on --
  * which is why od_touch_app keeps set_mode_output and write separate. */
-static void gt911_hw_reset(const struct TouchController *t, bool int_low_for_5d)
+static void gt911_hw_reset(const struct TouchController *t, struct touch_runtime *rt,
+                           bool int_low_for_5d)
 {
     if (t->rst_pin == 0xFFu) {
         return;
     }
+    /* Same reason as gt911_int_wake(): this drives and reconfigures INT, which destroys the
+     * trigger. Clearing here keeps the record coherent when the probe that follows FAILS and the
+     * bring-up returns before reaching the re-attach.
+     *
+     * NO OBSERVABLE EFFECT TODAY, and deliberately kept anyway: a controller in that state is
+     * !ok, every service path returns early on !ok, and a later successful re-establish repairs
+     * the record. It is here so the invariant "int_attached means a live trigger" holds without
+     * a reader having to prove the unreachable case. Do not go looking for the test. */
+    rt->int_attached = 0u;
     if (t->int_pin == 0xFFu) {
         od_touch_app_gpio_set_mode_output(t->rst_pin);
         od_touch_app_gpio_write(t->rst_pin, false);
@@ -331,7 +348,7 @@ static uint8_t gt911_resolve(const struct TouchController *t, struct touch_runti
     if (want != 0u && want != 0xFFu) {
         if (t->rst_pin != 0xFFu) {
             od_touch_app_delay_ms(GT911_PRE_RESET_DELAY_MS);
-            gt911_hw_reset(t, want == GT911_ADDR_5D);
+            gt911_hw_reset(t, rt, want == GT911_ADDR_5D);
             od_touch_app_delay_ms(GT911_POST_RESET_SETTLE_MS);
         } else {
             od_touch_app_delay_ms(10u);
@@ -348,13 +365,13 @@ static uint8_t gt911_resolve(const struct TouchController *t, struct touch_runti
      * on a part that was just told to be 0x5D. */
     if (t->rst_pin != 0xFFu) {
         od_touch_app_delay_ms(GT911_PRE_RESET_DELAY_MS);
-        gt911_hw_reset(t, true);
+        gt911_hw_reset(t, rt, true);
         od_touch_app_delay_ms(GT911_POST_RESET_SETTLE_MS);
         if (gt911_probe(rt->bus_id, GT911_ADDR_5D, &rt->reg_high_first)) {
             return GT911_ADDR_5D;
         }
         od_touch_app_delay_ms(GT911_PRE_RESET_DELAY_MS);
-        gt911_hw_reset(t, false);
+        gt911_hw_reset(t, rt, false);
         od_touch_app_delay_ms(GT911_POST_RESET_SETTLE_MS);
         if (gt911_probe(rt->bus_id, GT911_ADDR_14, &rt->reg_high_first)) {
             return GT911_ADDR_14;
@@ -453,16 +470,18 @@ static void touch_pack_msd(uint8_t start, uint8_t count, uint8_t track_id, uint1
 
 /* --------------------------------------------------------------------- lifecycle */
 
-static void touch_disable(uint8_t idx, const struct TouchController *t, struct touch_runtime *rt,
-                          const char *reason)
+/* No TouchController argument: the pin to detach comes from the RUNTIME, because that is the one
+ * an ISR is actually on -- the config may have moved since. */
+static void touch_disable(uint8_t idx, struct touch_runtime *rt, const char *reason)
 {
     if (rt->disabled) {
         return;
     }
     rt->disabled = 1u;
     rt->ok = 0u;
-    if (rt->int_attached && t->int_pin != 0xFFu) {
-        od_touch_app_gpio_detach_int(t->int_pin);
+    if (rt->int_pin_attached != 0u) {
+        od_touch_app_gpio_detach_int(rt->int_pin_attached);
+        rt->int_pin_attached = 0u;
         rt->int_attached = 0u;
     }
     od_log_warn("Touch[%u]: disabled (%s)", idx, reason);
@@ -471,6 +490,14 @@ static void touch_disable(uint8_t idx, const struct TouchController *t, struct t
 static void touch_attach_int(uint8_t idx, const struct TouchController *t,
                              struct touch_runtime *rt)
 {
+    /* A RECORDED PIN THAT IS NO LONGER THE CONFIGURED ONE IS DETACHED FIRST. A config write can
+     * move the interrupt pin under a live controller, and nothing re-initialises touch on reload;
+     * without this the old pin keeps its ISR for the rest of the boot. */
+    if (rt->int_pin_attached != 0u && rt->int_pin_attached != t->int_pin) {
+        od_touch_app_gpio_detach_int(rt->int_pin_attached);
+        rt->int_pin_attached = 0u;
+        rt->int_attached = 0u;
+    }
     if (t->int_pin == 0xFFu || rt->int_attached) {
         return;
     }
@@ -480,6 +507,7 @@ static void touch_attach_int(uint8_t idx, const struct TouchController *t,
         return;
     }
     rt->int_attached = 1u;
+    rt->int_pin_attached = t->int_pin;
 }
 
 static bool touch_bring_up(uint8_t idx, const struct od_config *cfg,
@@ -631,7 +659,7 @@ static uint32_t touch_service_one(uint8_t idx, const struct od_config *cfg,
         rt->last_fail_ms = now_ms;
         rt->last_poll_ms = now_ms;
         if (rt->fail_streak >= TOUCH_I2C_FAIL_DISABLE_THRESHOLD) {
-            touch_disable(idx, t, rt, "too many I2C read failures");
+            touch_disable(idx, rt, "too many I2C read failures");
             return OD_TOUCH_IDLE_MS;
         }
         if (rt->fail_streak == 1u) {
@@ -679,7 +707,7 @@ static uint32_t touch_service_one(uint8_t idx, const struct od_config *cfg,
              * the authority does it and changing it would disable controllers the field currently
              * tolerates; recorded in FOLLOWUPS 21. */
             if (rt->fail_streak >= TOUCH_I2C_FAIL_DISABLE_THRESHOLD) {
-                touch_disable(idx, t, rt, "too many I2C read failures");
+                touch_disable(idx, rt, "too many I2C read failures");
                 return OD_TOUCH_IDLE_MS;
             }
             return TOUCH_I2C_FAIL_BACKOFF_MS;
@@ -731,11 +759,13 @@ uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms)
 
     memcpy(prior, s_rt, sizeof prior);
 
+    /* BY RECORD, NOT BY CONFIG. Walking the NEW config would miss exactly the pin that matters --
+     * one a reload just moved away from, whose ISR is still installed. */
     for (i = 0; i < OD_TOUCH_MAX_CONTROLLERS; i++) {
-        const struct TouchController *t = touch_cfg(cfg, i);
-
-        if (t != NULL && s_rt[i].int_attached && t->int_pin != 0xFFu) {
-            od_touch_app_gpio_detach_int(t->int_pin);
+        if (s_rt[i].int_pin_attached != 0u) {
+            od_touch_app_gpio_detach_int(s_rt[i].int_pin_attached);
+            s_rt[i].int_pin_attached = 0u;
+            s_rt[i].int_attached = 0u;
         }
     }
     /* s_suspend IS DELIBERATELY NOT CLEARED. The donor's init does not touch its suspend counter
