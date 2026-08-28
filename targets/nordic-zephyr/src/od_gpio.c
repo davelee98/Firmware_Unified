@@ -32,6 +32,24 @@ bool od_gpio_port_ready(uint8_t port)
 	return dev != NULL && device_is_ready(dev);
 }
 
+void od_gpio_set_mode_output(uint8_t cfg)
+{
+	uint8_t port;
+	uint8_t pin;
+
+	if (!od_pin_decode(cfg, &port, &pin)) {
+		od_log_debug("gpio: cfg=0x%02X does not decode; output mode IGNORED", cfg);
+		return;
+	}
+	/* GPIO_OUTPUT with neither INIT_HIGH nor INIT_LOW: the latch keeps whatever it held. */
+	int err = gpio_pin_configure(gpio_dev(port), pin, GPIO_OUTPUT);
+
+	if (err != 0) {
+		od_log_error("gpio: mode OUTPUT P%u.%02u (cfg=0x%02X) FAILED: %d",
+			     port, pin, cfg, err);
+	}
+}
+
 void od_gpio_configure_output(uint8_t cfg, bool initial_high)
 {
 	uint8_t port;

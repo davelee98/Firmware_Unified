@@ -293,6 +293,22 @@ target_include_directories(od_sensor_bq27220_test PRIVATE ${CMAKE_CURRENT_LIST_D
 target_link_libraries(od_sensor_bq27220_test od_shared)
 add_test(NAME sensor_bq27220 COMMAND od_sensor_bq27220_test)
 
+# touch_gt911: the shared driver against a register-addressed fake part. The MSD expectations were
+# written from the donor's format comment BEFORE the packing code, because that comment is the only
+# normative description of the layout that exists and three independent hosts implement it.
+#
+# The map cases are the ones worth reading, and the obvious probe does NOT work: a driver that
+# caches raw and maps at pack time re-maps the cached value to the same pixel, so the latched
+# release agrees byte for byte. What separates them is change detection -- two raw coordinates that
+# CLIP to the same pixel are one sample with the map before the cache and two after it.
+# No od_log_test_stub.c: this suite defines _od_log itself so it can COUNT records -- an
+# unsupported touch_ic_type must be diagnosed once, not once per service pass.
+add_executable(od_touch_gt911_test
+    touch_gt911_test.c)
+target_include_directories(od_touch_gt911_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_link_libraries(od_touch_gt911_test od_shared)
+add_test(NAME touch_gt911 COMMAND od_touch_gt911_test)
+
 # silabs_storage: the BG22 overlay, where od_config_asm's reassembly state and the NVM3 record are
 # one object. The two static asserts in the storage file compare LAYOUT; this compares SEQUENCING
 # -- the header is written over the four live assembler state words, so the order of capture,

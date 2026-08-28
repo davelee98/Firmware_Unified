@@ -229,17 +229,13 @@ set(OD_SHARED_SOURCES_APP_SENSOR
     "${CMAKE_CURRENT_LIST_DIR}/core/od_sensor_bq27220.c"
 )
 
-# APP_TOUCH IS DECLARED, EMPTY, AND NOT IN THE AGGREGATE.
-#
-# The first shared GT911 driver failed review and was deleted rather than parked here: while it was
-# listed it built into every ESP32 image, surviving only on --gc-sections, and once delisted it
-# became a shared/ source belonging to no list -- the exact thing the one-list rule above exists to
-# prevent. Its review findings are the specification for the next attempt
-# (plans/PLAN_SENSOR_SEAM_2026-08-23.md step 8) and git holds the code.
-#
-# The tier stays declared and empty so the next driver has somewhere to land, and so a consumer
-# naming it does not fail on an undefined variable.
-set(OD_SHARED_SOURCES_APP_TOUCH)
+# APP_TOUCH is the shared GT911 driver. Named for a seam, like APP_SENSOR: od_touch_app.h carries
+# GPIO and the reset delays, because there is no shared GPIO HAL and inventing one to serve a
+# single driver would be a larger change than the promotion. A consumer must also provide
+# od_hal_i2c and od_adv_app_boost. BG22 takes neither this nor APP_SENSOR.
+set(OD_SHARED_SOURCES_APP_TOUCH
+    "${CMAKE_CURRENT_LIST_DIR}/core/od_touch_gt911.c"
+)
 
 # HAL_LOG owns portable record formatting. Enabled targets must implement od_hal_log and
 # od_hal_time; OD_CAP_LOG=0 compiles explicit no-op entry points with no HAL references or state.
@@ -268,6 +264,7 @@ set(OD_SHARED_SOURCES
     ${OD_SHARED_SOURCES_APP_LED}
     ${OD_SHARED_SOURCES_APP_BUZZER}
     ${OD_SHARED_SOURCES_APP_SENSOR}
+    ${OD_SHARED_SOURCES_APP_TOUCH}
     ${OD_SHARED_SOURCES_HAL_LOG}
     ${OD_SHARED_SOURCES_HAL_WDT}
 )

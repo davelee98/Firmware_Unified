@@ -423,6 +423,22 @@ adv_boost_one_entry_point() {
 }
 check "advertising: one boost entry point" adv_boost_one_entry_point
 
+# PERMANENT, AND IT CATCHES A TRANSCRIPTION, NOT A REIMPLEMENTATION. Derived from targets/ rather
+# than a fixed file list so a fourth target is in scope from the day it arrives -- which matters,
+# because this driver reached two ports by being copied, and the copies then disagreed about the
+# over-count wedge and the read framings.
+#
+# What it actually detects is the constants and helper names a copy carries over. A determined
+# reimplementation using lowercase 0x814e, computed register addresses, renamed helpers or a bare
+# `status & 0x80` passes. Do not read this as proof that only one parser exists; it is a tripwire
+# on the cheapest way to grow a second one. od_touch_app.c is the seam and holds none of it.
+touch_one_gt911_driver() {
+    absent_or_fail "target-side GT911 register policy returned; shared od_touch_gt911 owns it" \
+        '(0[xX]814[EeFf]|GT911_REG_|GT911_MAX_CONTACTS|gt911_hw_reset|apply_touch_map)' \
+        targets $(find shared -name '*.c' -o -name '*.h' | grep -v 'od_touch_gt911')
+}
+check "touch: one GT911 driver" touch_one_gt911_driver
+
 # PERMANENT. A promoted opcode answers from shared code; a target assembling its own reply bytes
 # for one is invisible until a wire capture disagrees with the corpus.
 #
@@ -963,8 +979,16 @@ log_hal_structure() {
         rc=1
     fi
 
-    hits=$(grep -rInE '\bod_log_(error|warn|info|debug|raw)[[:space:]]*\([^;]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(' \
-           shared/core --include='*.c' --exclude='od_log.c' 2>/dev/null || true)
+    # STRING LITERALS ARE STRIPPED FIRST, and that is not a nicety. The rule is about ARGUMENTS,
+    # but a message whose own text reads "disabled (%s)" or "(check wiring, pull-ups)" puts an
+    # identifier immediately before a '(' inside the quotes -- so the unstripped form flags correct
+    # code for the wording of its message, and the only way to pass is to write worse messages.
+    # awk removes double-quoted spans per line before matching, and keeps file:line so a real hit
+    # still points at itself.
+    hits=$(find shared/core -name '*.c' ! -name 'od_log.c' -print0 \
+           | xargs -0 -r awk '{ line=$0; gsub(/"[^"]*"/, "", line);
+                             if (line ~ /od_log_(error|warn|info|debug|raw)[[:space:]]*\([^;]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\(/)
+                                 print FILENAME ":" FNR ": " $0 }' 2>/dev/null || true)
     if [ -n "$hits" ]; then
         echo "$hits"
         echo "shared log argument contains a nested function call; capability-off must not hide side effects"

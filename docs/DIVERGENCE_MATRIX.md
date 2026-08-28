@@ -623,17 +623,30 @@ longer waits on anything outside this repo.
 
 ### 13.1 The same defect wearing a different constant: ESP32's no-`DataBus` default-pin path
 
-**Ruled 2026-08-24; implementation pending sensor-seam step 8.** Distinct from the five sites
-above because the `bus_id` is *not* `0xFF`. ESP32 touch accepts `data_bus_count == 0` with a
-declared, non-sentinel `bus_id` and transacts anyway, on whichever bus the board last selected.
+**Ruled 2026-08-24. RESOLVED 2026-08-28**, on both targets and for sensors as well as touch.
+Distinct from the five sites above because the `bus_id` is *not* `0xFF`: a declared, non-sentinel
+`bus_id` that matches no `DataBus` record used to transact anyway, on whichever bus the board last
+selected.
 
-| | `../Firmware` (donor) | `targets/esp32-idf` today | nordic-zephyr | Shared (step 8) |
+| | `../Firmware` (donor) | `targets/esp32-idf` | nordic-zephyr | Shared |
 |---|---|---|---|---|
-| `bus_id == 0xFF` | substitutes bus 0 | **refuses** (step-1 fix, `touch_input.cpp:304`) | **refuses** | refuses |
-| declared `bus_id`, `data_bus_count == 0` | transacts on the board-default bus | transacts on the board-default bus | refuses | **refuses** |
+| `bus_id == 0xFF` | substitutes bus 0 | **refuses** | **refuses** | **refuses** (`od_touch_gt911.c` `touch_bus_ok()`, `od_sensor_*.c`) |
+| declared `bus_id`, no matching `DataBus` record | transacts on the board-default bus | **refuses** | **refuses** | **refuses** |
 
-The first row is already resolved in this repo; only the second is outstanding, and it is the one
-this ruling closes.
+**The transport closed the second row, not the drivers**, and that is the mechanism this ruling
+predicted: both I2C HALs resolve a `bus_id` through `od_config_data_bus()` and fail when nothing
+answers to it — `selectConfiguredBus()` (`targets/esp32-idf/src/display_service.cpp:757`) and
+`select_bus()` (`targets/nordic-zephyr/src/od_hal_i2c.c:23`). So no consumer of the shared
+operations can reach an unnamed bus, whether or not it checks for itself.
+
+Where the refusal lands still differs, and it matters when reading a log. The shared GT911 driver
+checks admission and says so once — `Touch[N]: no usable data_bus (bus_id M); not probed` — and
+never probes. `od_sensor_sht40.c` and `od_sensor_bq27220.c` refuse only `0xFF` themselves, so an
+unnamed bus reaches them as a plain transaction failure at the first read.
+
+ESP32's board-default pins survive in `initOrRestoreWireForOpenDisplay()` (`:784`) for the PANEL,
+which has no `bus_id` of its own and takes the first record or the default. That is the one
+remaining unkeyed consumer, and it is out of this ruling's scope.
 
 The shared HAL is keyed by `DataBus.instance_number` (§ 14), so a bus that appears in no
 `data_buses` entry **has no identity the seam can name** — there is no argument the shared driver
@@ -997,3 +1010,144 @@ returned level for an error code is dead code on both targets; the adapters ask 
 
 **Not hardware-qualified.** No board has confirmed the corrected reading; the row is open in
 docs/HARDWARE_VERIFICATION_CHECKLIST.md.
+
+---
+
+## 22. GT911 `poll_interval_ms == 0` — the header says 25 ms, every firmware uses 100 (recorded 2026-08-25)
+
+Cited by `shared/core/od_touch_gt911.c` and, until this entry, **cited at a section that did not
+exist** — found in review of the promotion.
+
+The canonical header documents the field as *"minimum time between polls; 0 = default 25 ms"*
+(`opendisplay_structs.h:951`). No firmware has ever used 25.
+
+| | `../Firmware` | `Firmware_NRF54` | Shared |
+|---|---|---|---|
+| `poll_interval_ms == 0` | 100 ms | 100 ms | 100 ms |
+| Source of the number | `TOUCH_PROCESS_MIN_INTERVAL_MS`, the process-loop floor | same | same |
+
+Both donors substitute their process-loop floor, not the documented default, and they do it for a
+structural reason: the whole touch pass was rate-limited to 100 ms, so a 25 ms request could not
+have been honoured even if the constant had said so. The shared machine returns a real delay and
+could serve 25 ms now — but changing it would speed up every deployed board that left the field at
+zero, which is a power change nobody asked for and which no board here can measure.
+
+**Recorded, not resolved.** The host is the party that should move: `py-opendisplay` writing an
+explicit `100` where it now writes `0` would make the config say what the firmware does. Until
+then a config read shows `0` and the device polls at 100 ms, and the header's sentence is wrong
+about every shipped device.
+
+---
+
+## 23. GT911 — waking INT destroyed the interrupt, and both donors re-attached only if they thought it was gone (fixed 2026-08-25)
+
+Found in review of the shared touch promotion. **A deliberate departure from both donors**, and
+the only behaviour change the promotion makes to a working controller.
+
+**ONLY ONE DONOR HAD AN INTERRUPT AT ALL, and an earlier form of this entry said both did.**
+`Firmware_NRF54` states outright that "INT-driven wakeups are not used here: like the button/led
+modules this is a cooperatively polled module driven from the main loop" — it drives INT during
+reset, because that selects the address, and never attaches a handler. The in-tree Nordic port it
+fed did the same. So the defect below is the **ESP32 authority's**, and on Nordic the shared driver
+introduces interrupt-driven touch that target never had. That is why the GPIO IRQ seam existed
+dormant and why this promotion is its first consumer — recorded here because "Nordic gained a
+capability" is a bigger statement than "a bug was fixed", and no board in this fleet can exercise
+it.
+
+Every resume path in the donor that *does* have interrupts wakes the line before re-attaching:
+
+```c
+gt911_int_wake(t);                       /* drive INT high, delay, reconfigure as input */
+if (!rt->int_irq_attached) {             /* <-- still 1, so the attach is SKIPPED */
+    attach_touch_int(idx, t->int_pin);
+}
+```
+— `Firmware/src/touch_input.cpp`, and identically in the ESP32 port before this promotion.
+
+**Reconfiguring the pad destroys the trigger on both stacks.** Zephyr's `gpio_pin_configure()`
+removes the existing trigger and frees the GPIOTE channel; ESP-IDF's `gpio_config()` here sets
+`intr_type = GPIO_INTR_DISABLE`. So after the wake the hardware has no interrupt, while
+`int_irq_attached` still says it has one — and the guard then declines to restore it.
+
+| | `../Firmware` / ESP32 | `Firmware_NRF54` / Nordic | Shared |
+|---|---|---|---|
+| Touch interrupt at all | yes | **none — polled only** | yes, on both |
+| After a resume's INT wake | flag says attached, trigger gone | n/a | re-attached |
+| Edges advance service | no | n/a | yes |
+| Recovery | timed poll and held-low check only | polling was the design | interrupt-driven again |
+
+**It is a latency regression, not a loss of function**, which is why it survived: the timed poll
+and the held-low check still deliver every sample, so touch keeps working and simply stops being
+interrupt-driven after the first panel refresh. Nothing in a log distinguishes that from a quiet
+panel — and on the one donor that had interrupts, that is also the only donor anyone could have
+noticed it on.
+
+**A second stale-record case, fixed with it:** the runtime recorded only *that* an interrupt was
+attached, not *which pin*. A config write can move the interrupt pin under a live controller and
+nothing re-initialises touch on reload, so the new pin was attached and the old one kept its ISR
+for the rest of the boot — spurious service on ESP32, and on Nordic one of only eight callback
+slots consumed permanently, until no controller could attach at all. The runtime now carries the
+attached pin and detaches a stale one before attaching.
+
+The fix puts the clear where the damage is done — `gt911_int_wake()` takes the runtime and clears
+`int_attached` itself, because the function that reconfigures the pad is the one that knows the
+trigger is gone. `tests/host/touch_gt911_test.c` models the destruction in its GPIO fake, so a
+driver that reverts to the donor form fails.
+
+**Not hardware-qualified.** ESP32 is the only target that can exercise it.
+
+---
+
+## 24. GT911 post-refresh recovery — ESP32 brackets it, Nordic does not (recorded 2026-08-25)
+
+The two ports drive the same recovery from different shapes, which the promotion had to serve
+without picking one.
+
+| | `esp32-idf` | `nordic-zephyr` |
+|---|---|---|
+| Before a refresh | `touchSuspendForEpdRefresh()`, nestable | nothing |
+| After a refresh | `touchResumeAfterEpdRefresh()`, balanced | one unconditional call |
+| Teardown | `touchForceResume()` collapses any depth | nothing |
+
+The first cut of the shared machine offered only a suspend-counted `resume()`, which fits ESP32
+and makes Nordic's recovery a **silent no-op** — its hook would return without probing anything,
+so a controller disturbed by the panel stayed disturbed until enough status reads failed to
+disable it. Review caught it before any board ran the code.
+
+`od_touch_gt911_reestablish()` is therefore a separate entry point: unconditional, with no
+reference to the suspend count. ESP32 keeps the counted `resume()`/`force_resume()` pair because
+its brackets are real and its teardown force-resumes on paths that may not have suspended.
+
+**Neither shape was normalised**, deliberately. Making Nordic suspend before a refresh would be a
+behaviour change on a target where the refresh path was never audited for pairing — an unbalanced
+suspend wedges touch for the rest of the boot, which is a worse failure than the one being fixed.
+
+---
+
+## 25. Touch advertising boost — adopted from the non-authority port, and reordered (2026-08-25)
+
+Two changes the promotion makes to the touch publish path. Neither is visible on any board today,
+which is exactly why they are written down.
+
+**The boost on a touch edge is Nordic's, and the authority has no such call.** Neither
+`../Firmware/src/touch_input.cpp` nor the ESP32 port it fed calls the boost from touch at all —
+their touch path ends in `updatemsdata()`. `Firmware_NRF54` boosts, and the shared driver adopts
+that. This is the **non-authority** side of a disagreement, taken deliberately: § 20 of the plan
+records the reasoning, and the short form is that ESP32 advertises at 30-60 ms permanently and so
+has no slow state a boost would rescue, while Nordic idles at 1000 ms and does.
+
+Consequence to be aware of: on ESP32 `od_adv_app_boost()` is an empty function, so this is
+behaviourally nil there **today**. It stops being nil the moment that target grows an
+advertising-interval policy, which its own implementation comment anticipates.
+
+**The order is boost-then-publish; the Nordic donor was publish-then-boost.** No target in this
+repo can tell the difference: ESP32's boost is empty, and Nordic's publish only sets a pending flag
+with the payload and the interval both applied later in the same loop pass. The order was chosen
+because it is the one that stays correct if a target ever selects its interval *during* the
+publish — the nRF/Bluefruit shape, where doing it the other way round produced a real defect
+(a press advertised at the slow interval and only the release at the boosted one, so a host saw
+"not pressed" reliably and "pressed" almost never; `device_control.cpp` carries the write-up).
+
+An earlier form of the driver's comment asserted the order was load-bearing *here*. It is not, on
+any target in this repo, and saying so invited a future reader to trust a mechanism that does not
+exist.

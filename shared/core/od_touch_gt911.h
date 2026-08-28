@@ -1,0 +1,101 @@
+/* Shared GT911 touch driver.
+ *
+ * Owns the config walk, the reset dance that selects the I2C address, the product-ID probe with
+ * its register byte-order fallback, both read framings, the retry and failure-disable policy, the
+ * status/contact decode, the COORDINATE MAP, the per-controller cadence, and the MSD packing.
+ * The bus is shared/hal/od_hal_i2c.h; GPIO and delays are od_touch_app.h.
+ *
+ * A SCHEDULED MACHINE, NOT A POLL LOOP. Every entry point returns the milliseconds until it
+ * next wants to run, and takes `now_ms` rather than sampling a clock -- shared/core does not
+ * touch the ambient time HAL. This is the od_led / od_buzzer idiom, and it is what lets one
+ * driver serve a FreeRTOS loop, a Zephyr work queue and a superloop without any of them leaking
+ * in. The first attempt at this driver exposed poll(cfg, now) and could not express per-controller
+ * intervals, IRQ-selected reads, the failure backoff or publish-on-change; that is why it was
+ * rejected rather than patched.
+ *
+ * ONLY ESP32 CAN RUN THIS. No board in this fleet has a touch controller on any other target, so
+ * elsewhere it is compiled and never executed -- docs/HARDWARE_VERIFICATION_CHECKLIST.md. Do not
+ * cite a build as evidence for any behaviour here.
+ *
+ * THE WIRE FORMAT IS FROZEN. The canonical header names the 5-byte block and bounds its offset,
+ * but the layout INSIDE those bytes is defined only by a comment in the donor firmware, which
+ * py-opendisplay, the JavaScript decoder and the iOS app each implement independently. There is
+ * no version field, so a packing change breaks every deployed host silently. See
+ * plans/PLAN_SENSOR_SEAM_2026-08-23.md 8.1, and tests/host/touch_gt911_test.c, whose expected
+ * bytes were written from that comment before this file existed.
+ */
+
+#ifndef OD_TOUCH_GT911_H
+#define OD_TOUCH_GT911_H
+
+#include "od_config.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* One bit per controller in the IRQ mask; bounded by the config's own touch array. */
+#define OD_TOUCH_MAX_CONTROLLERS OD_CONFIG_MAX_TOUCH
+
+/* "Nothing changed; do not touch the schedule." Distinct from a delay because an unmatched
+ * resume must not be able to postpone a controller that is actively polling. */
+#define OD_TOUCH_NO_CHANGE 0u
+
+/* What a fully idle machine asks for. Not "never": a controller can come back through the timed
+ * poll after a failure streak, so the machine must keep breathing. */
+#define OD_TOUCH_IDLE_MS 1000u
+
+/* Reset, resolve an address, probe the product ID and prepare every configured controller.
+ * Returns the delay until the first service() call is wanted. */
+uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms);
+
+/* Service every controller that is due, and publish any changed sample.
+ *
+ * `irq_mask` carries latched FALLING edges, bit per controller index, as the target's ISR set
+ * them. The machine clears them through od_touch_app_irq_consume() at the moment it acts on one,
+ * or immediately for a bit it will never act on -- so the target's lock stays on the target's
+ * side and the clear happens before the I2C rather than after the whole walk. Pass 0 on a target
+ * with no interrupt wiring.
+ *
+ * WHAT THE MASK DOES NOT PRESERVE is a second edge from a controller this call already serviced:
+ * the bit was already 1, the ISR's OR adds nothing, and the clear removes both. That sample is
+ * recovered by the held-low line check or the next timed poll. Distinguishing the two would need
+ * a per-controller generation counter, which is not worth an ISR-side write here.
+ *
+ * Returns the delay until the next call is wanted. */
+uint32_t od_touch_gt911_service(const struct od_config *cfg, uint32_t now_ms, uint8_t irq_mask);
+
+/* Suspend polling across a panel refresh, which contends for the bus. Nestable: the matching
+ * resume() count must be reached before any controller is touched again. */
+void od_touch_gt911_suspend(void);
+
+/* Undo one suspend(); on the last one, re-establish every controller. Probes the product ID at
+ * the retained address first and only falls back to a full reset and re-resolve, because a
+ * working controller does not need its address re-selected. Returns the next-service delay. */
+uint32_t od_touch_gt911_resume(const struct od_config *cfg, uint32_t now_ms);
+
+/* Collapse the suspend count and resume now, whatever its depth. Idempotent: returns
+ * OD_TOUCH_NO_CHANGE and does nothing when nothing was suspended. */
+uint32_t od_touch_gt911_force_resume(const struct od_config *cfg, uint32_t now_ms);
+
+/* Re-establish every controller NOW, with no reference to the suspend count.
+ *
+ * FOR A TARGET WHOSE REFRESH HOOK IS UNPAIRED. ESP32 brackets a panel refresh with
+ * suspend()/resume() and its teardown path force-resumes, so the count is the right gate there.
+ * Nordic has a single post-refresh call and no suspend at all, so gating on the count makes its
+ * recovery a silent no-op -- which is what happened when this driver was promoted, and is why
+ * this entry point exists rather than the two targets sharing one that fits neither. */
+uint32_t od_touch_gt911_reestablish(const struct od_config *cfg, uint32_t now_ms);
+
+/* True when `pin` is a configured controller's interrupt pin, so a target's ISR plumbing can ask
+ * whether an edge belongs to touch without duplicating the config walk. */
+bool od_touch_gt911_is_int_pin(const struct od_config *cfg, uint8_t pin);
+
+/* Test and diagnostic accessors -- the resolved address, or 0 when the controller is not up. */
+uint8_t od_touch_gt911_address(uint8_t index);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* OD_TOUCH_GT911_H */

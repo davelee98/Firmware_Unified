@@ -1057,7 +1057,18 @@ elapsed = k_uptime_get_32() - start;    /* accounting must use real elapsed time
 ```
 
 Consumers waiting on it: the LED runner (`plans/PLAN_LED_RUNNER_2026-08-23.md` § 4), the button
-port (`plans/PLAN_NORDIC_BUTTONS_2026-08-22.md` B4), and any future timed work.
+port (`plans/PLAN_NORDIC_BUTTONS_2026-08-22.md` B4), **touch** (added 2026-08-27), and any future
+timed work.
+
+Touch is the one with the sharpest deadline, and the one whose own design the loop defeats.
+`od_touch_gt911_service()` returns the delay it wants and `opendisplay_touch_process()` reads the
+IRQ mask before the deadline precisely so an edge can pull service forward — but the ISR only sets
+a bit (`targets/nordic-zephyr/src/od_touch_app.c:24-27`) and cannot shorten the sleep the loop is
+already in. So the returned delay is a floor, not a ceiling: connected, the ~10 ms poll bounds it;
+disconnected, an edge waits up to the 500 ms idle step, or up to 1 s while a `sleep_timeout_ms` is
+being consumed in one-second chunks. No board in this fleet has a touch controller, so this is
+latent — but it is the reason a shared driver's cadence contract cannot be evaluated on this
+target until the wake mechanism exists.
 
 **Why it is not fixed in passing:** this loop governs advertising restarts, MSD refresh cadence and
 the watchdog feed site. Waking early changes how often all three run, and the naive version --
@@ -1266,3 +1277,126 @@ it has proven no newer request replaced.
 Low severity: one dropped boost degrades latency, not correctness of any wire content, and the
 window is three seconds wide so a repeat event recovers it. Fix when the boost gains a second
 implementation, since a correct pattern should be established before it is copied.
+
+---
+
+## 21. `Firmware` / `Firmware_Unified` — a GT911 whose point block never answers retries for ever
+
+Found 2026-08-25 in review of the shared touch promotion. **Sibling defect, inherited deliberately
+rather than fixed**, so the promotion is behaviour-preserving; recorded so it reads as a decision.
+
+The poll reads the status register, then reads the 8-byte point block only when the status says a
+contact is present. A successful status read resets the failure streak:
+
+```c
+rt->fail_streak = 0u;                       /* status read succeeded */
+...
+if (!gt911_read(..., GT911_REG_POINT1, p, sizeof p, high_first)) {
+    rt->fail_streak++;                      /* point read failed: streak is now 1 */
+```
+
+So a part whose status register answers and whose point block does not increments the streak to
+one, and has it reset to zero by the next pass's successful status read. **The five-failure
+disable threshold is unreachable on that path**, and the controller retries indefinitely at the
+100 ms backoff. Only a failing *status* read can ever disable a controller.
+
+A second, narrower case: `gt911_clear_status()` discards its write result, so a part that reads
+but cannot be written keeps its buffer-ready bit set and — per the GT911 Programming Guide Rev.10
+§ 5 p.28 — keeps pulsing INT, again without contributing to the disable state.
+
+**Why it is not fixed here.** Both are the authority's behaviour (`Firmware/src/touch_input.cpp`),
+and the promotion's contract is to preserve it. Making the point-read path count toward the
+threshold would disable controllers that the field currently tolerates — a partial read failure is
+recoverable and common on a marginal bus, where a status failure is not. Changing it is a product
+decision about whether a half-working touch panel should go quiet, and it needs a board to
+evaluate, which this fleet does not have.
+
+Neither case is reachable in the host suite: the fault injection fails the status read first, so it
+exercises the path that *does* disable. A test for this would have to fail one register and not the
+other, which is worth adding whenever the behaviour is revisited.
+
+---
+
+## 22. `Firmware_Unified` / nordic-zephyr — interrupt-driven touch allocates a GPIOTE channel, and nobody has measured what it costs
+
+Raised 2026-08-25 in review of the touch promotion. **Not a defect — an unpriced capability.**
+
+`Firmware_NRF54` and the port it fed used **polling only**: "INT-driven wakeups are not used here:
+like the button/led modules this is a cooperatively polled module driven from the main loop"
+(`Firmware_NRF54/src/opendisplay_touch.c:21`). The INT pin was driven during reset, because that
+selects the I2C address, and never carried a handler.
+
+The shared driver attaches one. `od_touch_app_gpio_attach_int()` requests `OD_GPIO_EDGE_FALLING`,
+Zephyr maps that to `GPIO_INT_EDGE_FALLING`, and `gpio_nrfx_pin_interrupt_configure()` allocates a
+dedicated **GPIOTE IN channel** for any edge trigger on a pin not covered by `sense-edge-mask`.
+There is no `sense-edge-mask` on any board in this repo.
+
+**Why that matters on this product.** A GPIOTE channel in event mode holds its power domain up.
+Nordic's own figures put System ON IDLE at roughly 20 µA with one allocated against ~3 µA without,
+on nRF54L — and nRF52840 errata 89 describes 400-450 µA static current when GPIOTE event mode is
+combined with EasyDMA TWIM/SPIM, which is exactly this firmware's configuration: SPIM to the panel
+and TWIM to the GT911. On a battery e-paper tag that is not a rounding error.
+
+**Mitigating, and the reason this is a follow-up rather than a blocker:** it is config-gated. Only
+a board that declares a touch controller attaches anything, and no board in this fleet has one, so
+nothing ships paying for it today.
+
+**What to do when a touch board exists.** Measure first — the checklist carries the row. If the
+cost is real, the standard remedy is `sense-edge-mask` in the board devicetree plus a level
+trigger, which uses the shared SENSE mechanism instead of a dedicated channel. That is a per-board
+change, not a driver change, which is why the driver is not the place to fix it.
+
+**Channel budget, separately.** `OD_GPIO_IRQ_SLOTS` is 8 and the seam's stated consumers are four
+buttons and up to four touch controllers — exactly 8, no headroom. On nRF54L15 the P0 GPIOTE
+instance has only **4** channels, so four touch controllers on P0 exhaust the hardware before the
+slot table does. Attach failure degrades to polling with a warning rather than failing, so this is
+a capacity note rather than a fault, but a board wanting more than a couple of interrupt sources
+per port should check it.
+
+---
+
+## 23. `Firmware_Unified` / both targets — a config reload never reconciles the touch runtime
+
+Found 2026-08-27, in independent review of the GT911 promotion. **Predates it**: both donors have
+the same shape, and the shared driver inherited it rather than introducing it.
+
+`od_touch_gt911_init()` is the only entry point that reconciles `s_rt` against a config, and both
+targets call it exactly once, from boot (`targets/esp32-idf/src/main.cpp:225`,
+`targets/nordic-zephyr/src/opendisplay_ble.c:1028`). A config write that reloads
+`struct od_config` in place (`targets/esp32-idf/src/communication.cpp:178`,
+`targets/nordic-zephyr/src/opendisplay_ble.c:940`) therefore changes what the driver READS on its
+next pass without changing anything it has already BOUND. Four consequences, in severity order:
+
+1. **A controller moved to another `bus_id` keeps transacting on the old bus.** `touch_service_one()`
+   uses `rt->bus_id`, fixed at bring-up; nothing re-runs `touch_bus_ok()`. If something answers the
+   same address on the old bus, the device reports plausible-but-wrong contacts — the same failure
+   `DIVERGENCE_MATRIX` § 13 exists to prevent, reached by reload instead of by a `0xFF` sentinel.
+   Init's retained branch already takes the NEW config's bus for exactly this reason; the reload
+   path never reaches it.
+2. **A controller ADDED by the reload is never brought up.** Its runtime is `!ok`, and `service()`
+   skips `!ok`. `od_touch_gt911_reestablish()` does bring up an `!ok`-but-not-disabled runtime, so
+   a refresh that reaches it heals this — but which refreshes those are differs by target, and
+   **an ESP32 partial refresh is not one of them**. `od_xfer_app_begin_partial()` never calls
+   `touchSuspendForEpdRefresh()` (`targets/esp32-idf/src/display_service.cpp:1901`) and the PARTIAL
+   arm of `od_xfer_app_refresh()` clears `xferApp` directly instead of going through
+   `xferAppClear()` (`:1963`), so neither half of the bracket runs: a device fed only partial
+   writes stays dead until a full or boot refresh, or a reboot. Nordic's post-refresh call sits
+   after both arms (`targets/nordic-zephyr/src/opendisplay_display.cpp:819`) and heals either way.
+3. **A controller REMOVED by the reload keeps its ISR.** `touch_cfg()` returns NULL, `service()`
+   consumes the bit and moves on; nothing detaches, because detach-by-record lives in `init()`.
+4. **A changed `int_pin` is honoured by neither the trigger nor the held-low read.** Both follow
+   `int_pin_attached` until a lifecycle event reconciles them. That half is deliberate and is what
+   the held-low check was fixed to do — polling the pin the config now names would service the
+   controller on every pass if a stranger holds it low — but it does mean the runtime and the
+   loaded config disagree about the pin for as long as the reload goes unreconciled.
+
+**Not fixed in passing.** The fix is to call `od_touch_gt911_init()` from each target's reload
+path, and init is not free: it can run the ~500 ms reset dance per controller, and on ESP32 it
+would run inside whatever context handles a config write. The retained-runtime branch exists to
+make that cheap for the common case, and is already exercised at boot on the ordinary path: when
+a boot screen is rendered, the FIRST GT911 bring-up happens inside `initDisplay()`'s boot-refresh
+resume (`targets/esp32-idf/src/display_service.cpp:1493` → `od_touch_gt911_reestablish()`) before
+`initTouchInput()` runs, so the init that follows takes the retained branch. Deep-sleep wake,
+`CLEAR_ON_BOOT`, an absent display and any early return reach `initTouchInput()` first and take the
+full bring-up instead. Wiring reload to init needs its own change and its own hardware gate, on the
+one target where any of it can be observed.

@@ -688,6 +688,45 @@ Treat the rows below as the only thing standing behind that.
       gained the authority's second retry pass.
 - [ ] **A sensor with `bus_id == 0xFF` is not probed**, and is not attached to bus 0.
 
+### Shared GT911 driver — step 8 (2026-08-25)
+
+`shared/core/od_touch_gt911.c` replaced both targets' local implementations.
+**ESP32 is the only target in this fleet that can qualify any of it** — no Nordic board here has
+a touch controller, so every Nordic row below is release debt awaiting hardware that does not
+exist, the same standing constraint as BG22's TNB132M.
+
+#### ESP32-S3, a board with a GT911 fitted
+
+- [ ] **A contact reports the right pixel.** Touch a known point; the MSD's 5-byte block carries
+      mapped, clipped panel coordinates. A driver that skipped the map emits perfectly well-formed
+      bytes carrying RAW controller coordinates, and nothing anywhere reports an error
+      (DIVERGENCE_MATRIX § 20 area, plan § 8.1).
+- [ ] **Each `TouchFlags` bit does what it says** — `SWAP_XY`, `INVERT_X`, `INVERT_Y` — checked
+      against the panel, not against the host's rendering.
+- [ ] **Release reports the last contact, not the origin**: low nibble 6, coordinates retained.
+- [ ] **THE REGISTER BYTE ORDER IS REVERSED FROM BOTH DONORS.** The documented high-byte-first
+      order is probed first now (§ 20). Confirm the part still binds, and capture which order the
+      log reports — a part that only answers the undocumented order should still bind one probe
+      later, and nobody here has seen such a part.
+- [ ] **An over-count status does not wedge touch.** Hard to induce deliberately; at minimum
+      confirm touch survives a long session with no dead window (FOLLOWUPS § 17).
+- [ ] **Interrupt-driven service actually happens** — not just polling. Confirm a contact is
+      reported faster than the 100 ms poll interval would allow.
+- [ ] **Touch survives a panel refresh**, including the suspend/resume bracket, and is still
+      interrupt-driven afterwards. That last clause is § 23: the re-attach was broken in the donor
+      and a polled recovery looks identical to a working one.
+- [ ] **`enable_pin`, where a board has one**, is asserted before the probe.
+
+#### Nordic — NO BOARD IN THIS FLEET HAS A TOUCH CONTROLLER
+
+- [ ] **`od_touch_gt911_reestablish()` recovers the part after a refresh** (§ 24). Nordic's hook is
+      unpaired, so this path is Nordic-only and has never run.
+- [ ] **Interrupt-driven touch works at all.** This target never had it; the promotion is the GPIO
+      IRQ seam's first consumer.
+- [ ] **Measure the idle current with a touch controller configured**, and compare against the same
+      board with touch disabled. See FOLLOWUPS § 22: an edge trigger allocates a GPIOTE IN channel,
+      which keeps a power domain up. This is a battery tag and nobody has measured the cost.
+
 ### Charge-state polarity — a WIRE-VISIBLE correction (2026-08-24)
 
 `DIVERGENCE_MATRIX` § 21 / `FOLLOWUPS` § 19. Bit 7 of the BQ27220 MSD byte now reports the

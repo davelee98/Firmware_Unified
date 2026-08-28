@@ -20,6 +20,16 @@ bool od_pin_decode(uint8_t cfg, uint8_t *port_out, uint8_t *pin_out);
 /* Platform codecs use this to reject encoded ports absent from the selected SoC. */
 bool od_gpio_port_ready(uint8_t port);
 void od_gpio_configure_output(uint8_t cfg, bool initial_high);
+
+/* Make a pad an output WITHOUT choosing its level -- ESP32's od_hal_gpio_set_mode_output(), and
+ * Arduino's pinMode(OUTPUT) before it.
+ *
+ * THE GT911 RESET SEQUENCE NEEDS THIS AND configure_output() CANNOT SERVE IT. That sequence
+ * re-asserts RST as an output while it is already high, and configure_output() must pick an
+ * initial level: passing false drives RST low for the width of the call, producing a spurious
+ * falling-then-rising edge that re-runs the part's address strap. Zephyr's GPIO_OUTPUT alone
+ * leaves the latch untouched, which is the behaviour the sequence assumes. */
+void od_gpio_set_mode_output(uint8_t cfg);
 void od_gpio_configure_input(uint8_t cfg, bool pull_up, bool pull_down);
 void od_gpio_write(uint8_t cfg, bool level_high);
 int od_gpio_read(uint8_t cfg);

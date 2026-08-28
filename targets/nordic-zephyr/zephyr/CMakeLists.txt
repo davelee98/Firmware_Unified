@@ -241,7 +241,7 @@ target_sources(app PRIVATE
   ${SRC_DIR}/boot_screen.cpp
   ${SRC_DIR}/opendisplay_epd_map.c
   ${SRC_DIR}/opendisplay_led.c
-  ${SRC_DIR}/opendisplay_touch.c
+  ${SRC_DIR}/od_touch_app.c
   ${SRC_DIR}/opendisplay_buzzer.c
   ${SRC_DIR}/opendisplay_pipe.c
   ${SRC_DIR}/od_cmd_device.c
@@ -288,6 +288,7 @@ target_sources(app PRIVATE ${OD_SHARED_SOURCES_PURE} ${OD_SHARED_SOURCES_HAL_CRY
                            ${OD_SHARED_SOURCES_APP_NFC} ${OD_SHARED_SOURCES_APP_LED}
                            ${OD_SHARED_SOURCES_APP_BUZZER}
                            ${OD_SHARED_SOURCES_APP_SENSOR}
+                           ${OD_SHARED_SOURCES_APP_TOUCH}
                            ${OD_SHARED_SOURCES_HAL_LOG})
 
 # The per-source INCLUDE_DIRECTORIES property that used to sit here is GONE, and its removal is
