@@ -449,7 +449,7 @@ looks arbitrary and is not); delete the story.
   clear an ISR this driver never attached, and on ESP32 buttons are registered before touch. The
   cold-start case in the host suite is what enforces the initializer; no assert can.
   **ONLY ESP32 COULD EVER RUN THIS, AND NO BOARD IN THIS FLEET HAS A CONTROLLER FITTED.** Every
-  row in docs/HARDWARE_VERIFICATION_CHECKLIST.md § Shared GT911 driver is open; a build is not
+  row in docs/HARDWARE_VERIFICATION_CHECKLIST.md § Shared GT911 touch driver is open; a build is not
   evidence, and the Nordic rows are release debt against hardware that does not exist here.
   Decisions recorded in `DIVERGENCE_MATRIX` §§ 20 and 22-25: documented register byte order tried
   first (both donors probed the undocumented one first), the 100 ms default interval the header

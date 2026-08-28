@@ -688,45 +688,6 @@ Treat the rows below as the only thing standing behind that.
       gained the authority's second retry pass.
 - [ ] **A sensor with `bus_id == 0xFF` is not probed**, and is not attached to bus 0.
 
-### Shared GT911 driver — step 8 (2026-08-25)
-
-`shared/core/od_touch_gt911.c` replaced both targets' local implementations.
-**ESP32 is the only target in this fleet that can qualify any of it** — no Nordic board here has
-a touch controller, so every Nordic row below is release debt awaiting hardware that does not
-exist, the same standing constraint as BG22's TNB132M.
-
-#### ESP32-S3, a board with a GT911 fitted
-
-- [ ] **A contact reports the right pixel.** Touch a known point; the MSD's 5-byte block carries
-      mapped, clipped panel coordinates. A driver that skipped the map emits perfectly well-formed
-      bytes carrying RAW controller coordinates, and nothing anywhere reports an error
-      (DIVERGENCE_MATRIX § 20 area, plan § 8.1).
-- [ ] **Each `TouchFlags` bit does what it says** — `SWAP_XY`, `INVERT_X`, `INVERT_Y` — checked
-      against the panel, not against the host's rendering.
-- [ ] **Release reports the last contact, not the origin**: low nibble 6, coordinates retained.
-- [ ] **THE REGISTER BYTE ORDER IS REVERSED FROM BOTH DONORS.** The documented high-byte-first
-      order is probed first now (§ 20). Confirm the part still binds, and capture which order the
-      log reports — a part that only answers the undocumented order should still bind one probe
-      later, and nobody here has seen such a part.
-- [ ] **An over-count status does not wedge touch.** Hard to induce deliberately; at minimum
-      confirm touch survives a long session with no dead window (FOLLOWUPS § 17).
-- [ ] **Interrupt-driven service actually happens** — not just polling. Confirm a contact is
-      reported faster than the 100 ms poll interval would allow.
-- [ ] **Touch survives a panel refresh**, including the suspend/resume bracket, and is still
-      interrupt-driven afterwards. That last clause is § 23: the re-attach was broken in the donor
-      and a polled recovery looks identical to a working one.
-- [ ] **`enable_pin`, where a board has one**, is asserted before the probe.
-
-#### Nordic — NO BOARD IN THIS FLEET HAS A TOUCH CONTROLLER
-
-- [ ] **`od_touch_gt911_reestablish()` recovers the part after a refresh** (§ 24). Nordic's hook is
-      unpaired, so this path is Nordic-only and has never run.
-- [ ] **Interrupt-driven touch works at all.** This target never had it; the promotion is the GPIO
-      IRQ seam's first consumer.
-- [ ] **Measure the idle current with a touch controller configured**, and compare against the same
-      board with touch disabled. See FOLLOWUPS § 22: an edge trigger allocates a GPIOTE IN channel,
-      which keeps a power domain up. This is a battery tag and nobody has measured the cost.
-
 ### Charge-state polarity — a WIRE-VISIBLE correction (2026-08-24)
 
 `DIVERGENCE_MATRIX` § 21 / `FOLLOWUPS` § 19. Bit 7 of the BQ27220 MSD byte now reports the
@@ -745,30 +706,6 @@ charge-state pin, and a charger that can be plugged and unplugged — which is t
       board with software charge control still actually charges after `od_sensor_bq27220_init()`.
 - [ ] **A board with no state pin still advertises a sane SOC** with bit 7 clear, rather than a
       garbage byte, now that a failed read reports UNKNOWN instead of a level.
-
-### Nordic touch — NO BOARD IN THIS FLEET HAS A TOUCH CONTROLLER (2026-08-24)
-
-**Stated by project direction.** These rows are open **release debt awaiting hardware that does not
-exist here**, the same standing constraint as BG22's TNB132M and NFC antenna — a stronger form of
-open than the rows above, because nothing schedules them. No host coverage qualifies one, and
-merged code is not evidence.
-
-Everything Nordic touch has received — the step-2 fold onto `opendisplay_i2c.c`, the step-5 repoint
-onto `od_hal_i2c`, and the `bus_speed_hz` ruling — is therefore a **software candidate that has
-never driven a GT911 on this target**. That is not a reason to undo any of it; it is a reason not to
-cite the Nordic side as evidence for the shared driver when step 8 lands.
-
-- [ ] **Touch reports contacts at all** after the private bit-banger was folded away.
-- [ ] **GT911 at the configured bus rate.** With `bus_speed_hz` unset or 100000 this reproduces the
-      private engine's 5 µs half-period exactly, so that case is a regression check.
-- [ ] **GT911 at 400 kHz** — the one case the private engine could never reach, and the rate
-      ruling's only real risk. **If touch fails here, that is the measured evidence for a clamp:**
-      record it and clamp with a reason, rather than restoring a hardcoded 5 µs.
-- [ ] **A clone that stretches the clock fails the transfer** rather than sampling garbage, and
-      five consecutive failures disable touch.
-
-**ESP32 is where touch can actually be exercised**, so the GT911 rows in the ESP32 section above
-are the ones that carry weight for the shared behaviour.
 
 ### EFR32BG22 NFC transport — step 9, a software candidate (2026-08-24)
 
@@ -801,3 +738,159 @@ and say nothing about it. They must not be cited for these rows.
 **Explicitly out of scope for any of these rows: stuck-bus behaviour.** This engine drives SCL
 push-pull and only ever reads SDA, so it cannot detect clock stretching, and a held-low SDA reads
 as ACK and as data 0. Do not write a row that asserts otherwise.
+
+---
+
+## Shared GT911 touch driver
+
+`shared/core/od_touch_gt911.c` is the only GT911 implementation on any target. Every row below is
+open.
+
+**ESP32 is the only target in this fleet that can close any of them.** No Nordic board here has a
+touch controller fitted, so the Nordic rows are release debt awaiting hardware that does not exist
+— the same standing constraint as BG22's TNB132M. Host coverage qualifies nothing here: the suite
+drives a fake register file, and a fake supplies hardware, not answers.
+
+### The rig
+
+- A board with a GT911 fitted, `INT` and `RST` wired to GPIOs the config names, on a `DataBus`
+  record the config declares.
+- A host running `py-opendisplay` to decode the advertisement — the 5-byte block is the product,
+  and the device's own log cannot check it.
+- The device log (`s3-n16r8-extuart-debug` or equivalent). Several rows are readable only there.
+- A logic analyser for the two timing rows. Everything else is observable without one.
+
+### ESP32-S3 — bring-up and addressing
+
+- [ ] **A configured `i2c_addr_7bit` of `0x5D` binds**, and the log names it:
+      `Touch[0]: GT911 @0x5D BE <w>x<h> INT+poll`.
+- [ ] **A configured `0x14` binds**, which proves the reset dance drives the address selection
+      rather than the part answering wherever it likes.
+- [ ] **Auto-detect binds** with `i2c_addr_7bit` at `0` or `0xFF`, and reports which address it
+      resolved.
+- [ ] **A configured address the part does not answer on fails cleanly** — one warning naming the
+      address, no bind, and no fallback to auto-detection.
+- [ ] **The log reports `BE`**, the documented register byte order. `LE` means the part only
+      answered the undocumented order; record it, because nothing here has seen such a part.
+- [ ] **The reported resolution is the panel's.** `<w>x<h>` in the init line comes from the part's
+      own registers, so a sane pair proves it is answering with data rather than merely ACKing.
+- [ ] **`rst_pin` absent (`0xFF`) still binds** by probe alone, on a board that can be strapped to
+      a known address.
+- [ ] **`enable_pin` is asserted before the first transaction.** On a board with one, the rail is
+      up before any address is probed; a controller behind an unasserted enable diagnoses as a
+      wiring fault.
+- [ ] **The reset sequence matches the part's requirements**, on a logic analyser: both pads driven
+      before either changes level, `RST` low ≥ 10 ms, `INT` held at the address-select level across
+      `RST`'s rising edge, then low ≥ 50 ms before the host floats it.
+
+### ESP32-S3 — bus admission
+
+- [ ] **`bus_id == 0xFF` is not probed.** One warning, no transaction, and nothing appears on
+      bus 0.
+- [ ] **A `bus_id` naming no `DataBus` record is refused**, rather than transacting on whichever
+      bus was selected last.
+- [ ] **Touch on a second declared bus works**, and the panel or a sensor on the first bus keeps
+      working across touch polls — the selection is re-established per transaction.
+
+### ESP32-S3 — what the wire carries
+
+- [ ] **A contact reports the right pixel.** Touch a known point; the block carries mapped, clipped
+      panel coordinates. Raw controller coordinates are perfectly well-formed bytes and nothing
+      anywhere reports an error, so only a known point catches this.
+- [ ] **Each `TouchFlags` bit does what it says** — `SWAP_XY`, `INVERT_X`, `INVERT_Y` — checked
+      against the panel, not against the host's rendering, and with at least one combination of
+      two bits.
+- [ ] **Coordinates clip to the panel.** A contact at the extreme edge reports at most
+      `pixel_width - 1` / `pixel_height - 1`, never beyond.
+- [ ] **Release keeps the last contact**: low nibble `6`, coordinates unchanged from the last
+      touching sample.
+- [ ] **Untouched since boot is all zeros** across the whole 5-byte block.
+- [ ] **The contact count tracks fingers**, 1..5 in the low nibble, with the first contact's
+      coordinates.
+- [ ] **The track id lands in the high nibble** and changes when a new contact begins.
+- [ ] **`touch_data_start_byte` places the block**, checked at `0` and at `6`, with a
+      `binary_inputs` or sensor block configured at bytes the touch block must not touch.
+- [ ] **`py-opendisplay` decodes it.** `AdvertisementData.touch_event()` and `TouchTracker` emit
+      `touch_down`, `touch_move` and `touch_up` for a press, a drag and a release.
+
+### ESP32-S3 — cadence and interrupts
+
+- [ ] **Interrupt-driven service happens.** A contact is reported faster than the 100 ms poll
+      interval alone would allow.
+- [ ] **A missed edge still reports.** The held-low line check recovers a sample whose edge was
+      lost; the contact appears without waiting for the next timed poll.
+- [ ] **`poll_interval_ms` is honoured** — `0` gives 100 ms, and a configured value polls at that
+      rate.
+- [ ] **Two controllers keep their own cadence**, configured at different intervals, with neither
+      slowed to the other's.
+- [ ] **An idle part does not pulse `INT`.** With no contact, the line stays idle over a long
+      window rather than pulsing every refresh period.
+- [ ] **A static contact does not republish.** Holding a finger still leaves the advertisement
+      unchanged; only a changed sample republishes.
+
+### ESP32-S3 — failure handling
+
+- [ ] **Five consecutive read failures disable touch**, with one warning, and the rest of the
+      firmware keeps running: BLE stays connectable and the panel still refreshes. Pull the part or
+      hold SDA low to induce it.
+- [ ] **A failing part does not busy-poll.** During the failure streak the loop keeps its 100 ms
+      backoff rather than servicing on every pass, which a held-low `INT` would otherwise cause.
+- [ ] **Touch survives a long session with no dead window**, which is the only practical check that
+      an over-count status does not wedge it.
+- [ ] **A disabled controller stays disabled until a lifecycle event**, and does not come back on
+      its own.
+
+### ESP32-S3 — lifecycle
+
+- [ ] **Touch survives a panel refresh**, and is still interrupt-driven afterwards. Confirm the
+      post-refresh latency, not merely that contacts report — a polled recovery looks identical to
+      a working one.
+- [ ] **Touch works after a mid-transfer BLE disconnect**, which force-resumes it from a teardown
+      with nothing suspended.
+- [ ] **A transfer completes at normal throughput with touch configured**, and touch reports again
+      once it ends.
+- [ ] **A config write moves the block.** Change `touch_data_start_byte` on a running device; the
+      next sample lands at the new offset, and an offset past byte 6 writes nothing at all rather
+      than truncating.
+- [ ] **A config write does NOT reconcile the runtime.** Change `bus_id` or `int_pin` on a running
+      device and record what happens: `init()` is boot-only, so the controller keeps the binding it
+      has (FOLLOWUPS § 23). This row exists to measure the gap, not to pass.
+- [ ] **The config survives a reboot** and the controller re-binds to the same address.
+- [ ] **Deep-sleep wake re-initialises touch**, and contacts report after the wake.
+
+### ESP32-S3 — coexistence
+
+- [ ] **A binary input on GPIO 0 keeps working** with touch configured, and again with touch absent
+      from the config. Both cases run the touch init.
+- [ ] **A button configured on the touch `INT` pin is left to touch**, and the button does not
+      double-register the pin.
+- [ ] **Two GT911s on one board**, if one exists: both bind at different addresses, both blocks
+      land at their own offsets, and neither disables the other when one fails.
+
+### Nordic — no board in this fleet has a touch controller
+
+Every ESP32 row above applies here too and is untested. These are the ones that are Nordic's
+alone:
+
+- [ ] **`od_touch_gt911_reestablish()` recovers the part after a refresh.** This target's refresh
+      hook is unpaired, so this entry point runs nowhere else.
+- [ ] **Interrupt-driven touch works at all.** This is the GPIO IRQ seam's first consumer on this
+      target.
+- [ ] **GT911 at the configured bus rate**, with `bus_speed_hz` unset or `100000`.
+- [ ] **GT911 at 400 kHz.** If touch fails here, that is the measured evidence for a clamp: record
+      it and clamp with a reason.
+- [ ] **A clone that stretches the clock fails the transfer** rather than sampling garbage, and
+      five consecutive failures disable touch.
+- [ ] **Idle current with a touch controller configured**, against the same board with touch
+      disabled. An edge trigger allocates a GPIOTE IN channel, which holds a power domain up on a
+      battery tag (FOLLOWUPS § 22).
+- [ ] **Interrupt latency against the idle loop.** The driver's returned delay is a floor here: an
+      ISR sets a bit and cannot shorten a `k_msleep` already running, so measure what a contact
+      actually costs while disconnected (FOLLOWUPS § 16).
+
+### EFR32BG22 — nothing to run
+
+The profile declines touch, the image links no touch symbol and no seam reference, and the
+capability-off arm answers idle, no address, not an interrupt pin. That is a link-time property the
+software gate checks; no board row follows from it.
+
