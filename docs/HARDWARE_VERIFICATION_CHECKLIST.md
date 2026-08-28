@@ -751,146 +751,162 @@ touch controller fitted, so the Nordic rows are release debt awaiting hardware t
 — the same standing constraint as BG22's TNB132M. Host coverage qualifies nothing here: the suite
 drives a fake register file, and a fake supplies hardware, not answers.
 
-### The rig
+### The rig, and the two channels
+
+**Evidence is exactly two things: what the debug serial log prints, and what the device advertises
+in the MSD.** No JTAG, no debug probe, no RTT, no logic analyser, no current meter. A stimulus can
+be anything a hand can do — touch the panel, unplug the part, pull the power — but if the result
+cannot be read in the log or in the MSD, it is not a row. Every row below names which channel
+answers it.
 
 - A board with a GT911 fitted, `INT` and `RST` wired to GPIOs the config names, on a `DataBus`
   record the config declares.
-- A host running `py-opendisplay` to decode the advertisement — the 5-byte block is the product,
-  and the device's own log cannot check it.
-- The device log (`s3-n16r8-extuart-debug` or equivalent). Several rows are readable only there.
-- A logic analyser for the two timing rows. Everything else is observable without one.
+- A build whose log reaches a serial console over USB, at DEBUG level: `s3-n16r8-extuart-debug`
+  or equivalent. One row below reads a line that INFO compiles away.
+- A host running `py-opendisplay`, decoding the MSD and timestamping arrivals. Arrival times are
+  how the cadence rows are read; there is no other clock available.
+- A way to break the bus by hand — unplug the controller, or short SDA to ground.
 
-### ESP32-S3 — bring-up and addressing
+**Deliberately not rows**, because neither channel can answer them: the reset waveform against the
+part's timing diagram, `INT` staying quiet on an idle part, and idle current with a controller
+configured. They are real questions and they need instruments this constraint excludes; a row
+nobody can run reads as coverage.
 
-- [ ] **A configured `i2c_addr_7bit` of `0x5D` binds**, and the log names it:
-      `Touch[0]: GT911 @0x5D BE <w>x<h> INT+poll`.
-- [ ] **A configured `0x14` binds**, which proves the reset dance drives the address selection
-      rather than the part answering wherever it likes.
-- [ ] **Auto-detect binds** with `i2c_addr_7bit` at `0` or `0xFF`, and reports which address it
-      resolved.
-- [ ] **A configured address the part does not answer on fails cleanly** — one warning naming the
-      address, no bind, and no fallback to auto-detection.
-- [ ] **The log reports `BE`**, the documented register byte order. `LE` means the part only
-      answered the undocumented order; record it, because nothing here has seen such a part.
-- [ ] **The reported resolution is the panel's.** `<w>x<h>` in the init line comes from the part's
-      own registers, so a sane pair proves it is answering with data rather than merely ACKing.
-- [ ] **`rst_pin` absent (`0xFF`) still binds** by probe alone, on a board that can be strapped to
-      a known address.
-- [ ] **`enable_pin` is asserted before the first transaction.** On a board with one, the rail is
-      up before any address is probed; a controller behind an unasserted enable diagnoses as a
-      wiring fault.
-- [ ] **The reset sequence matches the part's requirements**, on a logic analyser: both pads driven
-      before either changes level, `RST` low ≥ 10 ms, `INT` held at the address-select level across
-      `RST`'s rising edge, then low ≥ 50 ms before the host floats it.
+### ESP32-S3 — bring-up and addressing (log)
 
-### ESP32-S3 — bus admission
+- [ ] **A configured `i2c_addr_7bit` of `0x5D` binds.** Log: `Touch[0]: GT911 @0x5D BE <w>x<h>
+      INT+poll`.
+- [ ] **A configured `0x14` binds.** Log: the same line at `@0x14`. Only the reset dance can put
+      the part there, so this is what says the address selection works rather than the part
+      answering wherever it likes.
+- [ ] **Auto-detect binds** with `i2c_addr_7bit` at `0` or `0xFF`. Log: the bind line names
+      whichever address it resolved.
+- [ ] **A configured address the part does not answer on fails cleanly.** Log: one
+      `probe failed at configured addr 0x..` and then `init failed` — and no bind line at another
+      address, which would mean it fell back to auto-detection.
+- [ ] **The byte order is the documented one.** Log: `BE` in the bind line. `LE` means the part
+      answered only the undocumented order — record it, because nothing here has seen such a part.
+- [ ] **The reported resolution is the panel's.** Log: `<w>x<h>` comes from the part's own
+      registers, so a sane pair says it is answering with data rather than merely ACKing.
+- [ ] **`rst_pin` absent (`0xFF`) still binds** by probe alone, on a board strapped to a known
+      address. Log: the bind line.
+- [ ] **`enable_pin` works.** Log: a board with one binds at all. A controller behind an unasserted
+      enable does not answer its address, so the bind is the whole check.
 
-- [ ] **`bus_id == 0xFF` is not probed.** One warning, no transaction, and nothing appears on
-      bus 0.
-- [ ] **A `bus_id` naming no `DataBus` record is refused**, rather than transacting on whichever
-      bus was selected last.
-- [ ] **Touch on a second declared bus works**, and the panel or a sensor on the first bus keeps
-      working across touch polls — the selection is re-established per transaction.
+### ESP32-S3 — bus admission (log)
 
-### ESP32-S3 — what the wire carries
+- [ ] **`bus_id == 0xFF` is not probed.** Log: `no usable data_bus (bus_id 255); not probed`, and
+      no bind line — in particular not one on bus 0.
+- [ ] **A `bus_id` naming no `DataBus` record is refused.** Log: the same line naming that id,
+      rather than a bind.
+- [ ] **Touch on a second declared bus binds**, and a sensor on the first keeps reporting. Log: the
+      touch bind line plus the sensor's own lines, both continuing.
 
-- [ ] **A contact reports the right pixel.** Touch a known point; the block carries mapped, clipped
-      panel coordinates. Raw controller coordinates are perfectly well-formed bytes and nothing
-      anywhere reports an error, so only a known point catches this.
-- [ ] **Each `TouchFlags` bit does what it says** — `SWAP_XY`, `INVERT_X`, `INVERT_Y` — checked
-      against the panel, not against the host's rendering, and with at least one combination of
-      two bits.
+### ESP32-S3 — what the wire carries (MSD)
+
+- [ ] **A contact reports the right pixel.** Touch a known point — a corner is easiest — and read
+      the block: mapped, clipped panel coordinates. Raw controller coordinates are well-formed
+      bytes that nothing reports as wrong, so only a known point catches it.
+- [ ] **Each `TouchFlags` bit does what it says.** `SWAP_XY`, `INVERT_X`, `INVERT_Y`, and one
+      combination of two, each checked by touching the same physical corner and reading where the
+      block says it was.
 - [ ] **Coordinates clip to the panel.** A contact at the extreme edge reports at most
       `pixel_width - 1` / `pixel_height - 1`, never beyond.
-- [ ] **Release keeps the last contact**: low nibble `6`, coordinates unchanged from the last
+- [ ] **Release keeps the last contact.** Low nibble `6`, coordinates unchanged from the last
       touching sample.
 - [ ] **Untouched since boot is all zeros** across the whole 5-byte block.
-- [ ] **The contact count tracks fingers**, 1..5 in the low nibble, with the first contact's
+- [ ] **The contact count tracks fingers**, 1..5 in the low nibble, carrying the first contact's
       coordinates.
 - [ ] **The track id lands in the high nibble** and changes when a new contact begins.
-- [ ] **`touch_data_start_byte` places the block**, checked at `0` and at `6`, with a
-      `binary_inputs` or sensor block configured at bytes the touch block must not touch.
+- [ ] **`touch_data_start_byte` places the block.** Check at `0` and at `6`, with a
+      `binary_inputs` or sensor block configured beside it, and confirm neither overwrites the
+      other.
 - [ ] **`py-opendisplay` decodes it.** `AdvertisementData.touch_event()` and `TouchTracker` emit
-      `touch_down`, `touch_move` and `touch_up` for a press, a drag and a release.
+      `touch_down`, `touch_move` and `touch_up` across a press, a drag and a release.
 
-### ESP32-S3 — cadence and interrupts
+### ESP32-S3 — cadence and interrupts (MSD arrival times)
 
-- [ ] **Interrupt-driven service happens.** A contact is reported faster than the 100 ms poll
-      interval alone would allow.
-- [ ] **A missed edge still reports.** The held-low line check recovers a sample whose edge was
-      lost; the contact appears without waiting for the next timed poll.
-- [ ] **`poll_interval_ms` is honoured** — `0` gives 100 ms, and a configured value polls at that
-      rate.
+- [ ] **Interrupt-driven service happens.** Set `poll_interval_ms` to `255` and touch the panel:
+      the sample still arrives promptly. Polling alone could not beat 255 ms, so arrival time
+      separates the two. The bind line ending `INT+poll` says the trigger attached; this row says
+      it fires.
+- [ ] **A missed edge still reports.** Tap repeatedly and confirm no contact is swallowed — the
+      held-low check recovers a sample whose edge was lost, without waiting for the next timed
+      poll.
+- [ ] **`poll_interval_ms` is honoured.** `0` behaves as 100 ms; a configured value changes the
+      arrival cadence of a moving contact to match.
 - [ ] **Two controllers keep their own cadence**, configured at different intervals, with neither
       slowed to the other's.
-- [ ] **An idle part does not pulse `INT`.** With no contact, the line stays idle over a long
-      window rather than pulsing every refresh period.
-- [ ] **A static contact does not republish.** Holding a finger still leaves the advertisement
-      unchanged; only a changed sample republishes.
+- [ ] **A static contact does not republish.** Hold a finger still: the advertisement stops
+      changing. Only a changed sample republishes.
 
-### ESP32-S3 — failure handling
+### ESP32-S3 — failure handling (log, then MSD)
 
-- [ ] **Five consecutive read failures disable touch**, with one warning, and the rest of the
-      firmware keeps running: BLE stays connectable and the panel still refreshes. Pull the part or
-      hold SDA low to induce it.
-- [ ] **A failing part does not busy-poll.** During the failure streak the loop keeps its 100 ms
-      backoff rather than servicing on every pass, which a held-low `INT` would otherwise cause.
-- [ ] **Touch survives a long session with no dead window**, which is the only practical check that
-      an over-count status does not wedge it.
-- [ ] **A disabled controller stays disabled until a lifecycle event**, and does not come back on
+- [ ] **Five consecutive read failures disable touch.** Unplug the part or hold SDA low. Log: one
+      `I2C read failed` warning, then `disabled (too many I2C read failures)`. MSD: the block stops
+      changing.
+- [ ] **The device survives it.** The host stays connected and advertisements keep arriving at
+      their normal rate; the log shows no reset and no watchdog line.
+- [ ] **A failing part does not busy-poll.** Log: the failure warning does not repeat per loop
+      pass — the backoff holds even though a dead part also holds `INT` low.
+- [ ] **Touch survives a long session with no dead window.** MSD: contacts still report after
+      hours. This is the only practical check that an over-count status does not wedge it.
+- [ ] **A disabled controller stays disabled** until a lifecycle event, rather than reappearing on
       its own.
 
 ### ESP32-S3 — lifecycle
 
-- [ ] **Touch survives a panel refresh**, and is still interrupt-driven afterwards. Confirm the
-      post-refresh latency, not merely that contacts report — a polled recovery looks identical to
-      a working one.
-- [ ] **Touch works after a mid-transfer BLE disconnect**, which force-resumes it from a teardown
-      with nothing suspended.
-- [ ] **A transfer completes at normal throughput with touch configured**, and touch reports again
-      once it ends.
-- [ ] **A config write moves the block.** Change `touch_data_start_byte` on a running device; the
-      next sample lands at the new offset, and an offset past byte 6 writes nothing at all rather
-      than truncating.
+- [ ] **Touch survives a panel refresh.** Push an image, wait for the refresh, then touch. MSD:
+      contacts report again. Repeat with `poll_interval_ms` at `255` — a prompt sample says the
+      interrupt was re-attached, and a polled recovery looks identical to a working one without
+      that.
+- [ ] **Touch works after a mid-transfer BLE disconnect**, which force-resumes from a teardown with
+      nothing suspended. MSD: contacts report after reconnecting.
+- [ ] **A transfer is not slowed by touch.** An upload with a controller configured completes in
+      the same time as one without, measured by the host.
+- [ ] **A config write moves the block.** Change `touch_data_start_byte` on a running device; MSD:
+      the next sample lands at the new offset. An offset past `6` writes nothing rather than
+      truncating.
 - [ ] **A config write does NOT reconcile the runtime.** Change `bus_id` or `int_pin` on a running
-      device and record what happens: `init()` is boot-only, so the controller keeps the binding it
-      has (FOLLOWUPS § 23). This row exists to measure the gap, not to pass.
-- [ ] **The config survives a reboot** and the controller re-binds to the same address.
-- [ ] **Deep-sleep wake re-initialises touch**, and contacts report after the wake.
+      device and record what the log and MSD actually show: `init()` is boot-only, so the
+      controller keeps the binding it has (FOLLOWUPS § 23). This row exists to measure the gap, not
+      to pass.
+- [ ] **The config survives a reboot.** Log: the same bind line after a power cycle.
+- [ ] **Deep-sleep wake re-initialises touch.** Log: the bind line after the wake. MSD: contacts
+      report.
 
 ### ESP32-S3 — coexistence
 
 - [ ] **A binary input on GPIO 0 keeps working** with touch configured, and again with touch absent
-      from the config. Both cases run the touch init.
-- [ ] **A button configured on the touch `INT` pin is left to touch**, and the button does not
-      double-register the pin.
-- [ ] **Two GT911s on one board**, if one exists: both bind at different addresses, both blocks
-      land at their own offsets, and neither disables the other when one fails.
+      from the config. MSD: the `binary_inputs` block still counts presses. Both cases run the
+      touch init.
+- [ ] **A button configured on the touch `INT` pin is left to touch.** Log:
+      `Button: skip pin <n> (reserved for GT911 INT)` — a DEBUG line, so it needs the debug build.
+      MSD: pressing that pin moves no `binary_inputs` bit, and touch still reports.
+- [ ] **Two GT911s on one board**, if one exists: both bind at their own addresses, both blocks
+      land at their own offsets, and one failing does not disable the other.
 
 ### Nordic — no board in this fleet has a touch controller
 
-Every ESP32 row above applies here too and is untested. These are the ones that are Nordic's
-alone:
+Every ESP32 row above applies here too and is untested. These are Nordic's alone:
 
 - [ ] **`od_touch_gt911_reestablish()` recovers the part after a refresh.** This target's refresh
-      hook is unpaired, so this entry point runs nowhere else.
-- [ ] **Interrupt-driven touch works at all.** This is the GPIO IRQ seam's first consumer on this
-      target.
+      hook is unpaired, so this entry point runs nowhere else. MSD: contacts report after a
+      refresh.
+- [ ] **Interrupt-driven touch works at all** — the GPIO IRQ seam's first consumer on this target.
+      Read as on ESP32: `poll_interval_ms` at `255`, and the arrival time.
 - [ ] **GT911 at the configured bus rate**, with `bus_speed_hz` unset or `100000`.
 - [ ] **GT911 at 400 kHz.** If touch fails here, that is the measured evidence for a clamp: record
       it and clamp with a reason.
 - [ ] **A clone that stretches the clock fails the transfer** rather than sampling garbage, and
-      five consecutive failures disable touch.
-- [ ] **Idle current with a touch controller configured**, against the same board with touch
-      disabled. An edge trigger allocates a GPIOTE IN channel, which holds a power domain up on a
-      battery tag (FOLLOWUPS § 22).
-- [ ] **Interrupt latency against the idle loop.** The driver's returned delay is a floor here: an
-      ISR sets a bit and cannot shorten a `k_msleep` already running, so measure what a contact
-      actually costs while disconnected (FOLLOWUPS § 16).
+      five consecutive failures disable touch. Log: the disable line.
+- [ ] **Interrupt latency while disconnected**, timed from the host's arrivals. The driver's
+      returned delay is a floor here: an ISR sets a bit and cannot shorten a `k_msleep` already
+      running (FOLLOWUPS § 16). GPIOTE idle current is the other half of that question
+      (FOLLOWUPS § 22) and needs a meter, so it is not a row.
 
 ### EFR32BG22 — nothing to run
 
 The profile declines touch, the image links no touch symbol and no seam reference, and the
 capability-off arm answers idle, no address, not an interrupt pin. That is a link-time property the
 software gate checks; no board row follows from it.
-
