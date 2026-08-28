@@ -25,6 +25,9 @@
 #include "od_hal_i2c.h"
 #include "od_touch_app.h"
 
+#include "od_log.h"
+
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -40,6 +43,33 @@ static const char *g_case = "";
         printf("FAIL %s:%d [%s] %s\n", __FILE__, __LINE__, g_case, #cond); \
     } \
 } while (0)
+
+/* THIS SUITE COUNTS LOG RECORDS, so it defines _od_log itself instead of linking the shared
+ * no-op stub. A warning is a wire-invisible behaviour that a fake part cannot show: an unsupported
+ * touch_ic_type is diagnosed once at init, and a driver that repeated it from the service walk
+ * would flood the log at the poll rate for the life of the boot. */
+static unsigned g_warns;
+
+void _od_log(int level, const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    va_end(ap);
+    (void)fmt;
+    if (level <= OD_LOG_WARN) {
+        g_warns++;
+    }
+}
+
+void od_log_raw(const char *fmt, ...)
+{
+    (void)fmt;
+}
+
+void od_log_flush(void)
+{
+}
 
 /* ------------------------------------------------------------------ the fake GT911 */
 
@@ -317,6 +347,18 @@ bool od_touch_app_gpio_attach_int(uint8_t idx, uint8_t pin)
 
     (void)idx;
     if (!g_attach_ok) {
+        /* A FAILED ATTACH RELEASES WHAT THE PIN ALREADY HAD, because both seams do: ESP32's
+         * od_hal_gpio_config_irq() removes the handler before adding one, and Zephyr's irq_attach()
+         * frees the slot and the callback on either error exit. A fake that kept the old
+         * registration would leave the driver looking like it still owned the pin, which is the
+         * state this models. */
+        for (i = 0; i < FAKE_IRQ_SLOTS; i++) {
+            if (g_irq_pins[i] == pin) {
+                g_irq_pins[i] = 0xFFu;
+                trace("irq-:%u", pin, 0);
+            }
+        }
+        g_int_trigger_armed = false;
         return false;
     }
     for (i = 0; i < FAKE_IRQ_SLOTS; i++) {
@@ -413,6 +455,7 @@ static void setup(uint8_t start_byte, uint8_t flags, uint8_t addr, uint8_t int_p
     g_boosts = 0;
     g_attached = 0;
     g_detached = 0;
+    g_warns = 0;
     g_attach_ok = true;
     g_latched_mask = 0u;
     memset(g_irq_pins, 0xFF, sizeof g_irq_pins);
@@ -1314,8 +1357,112 @@ static void test_int_pin_query(void)
     CHECK(!od_touch_gt911_is_int_pin(&g_cfg, 0xFFu));
 }
 
+/* THE FIRST init() OF THE PROCESS MUST DETACH NOTHING, and this case has to run before any
+ * other -- setup() calls init() to normalise state, so every case after the first has already
+ * spent the cold start.
+ *
+ * s_rt is a file static and int_pin_attached's "no pin" is 0xFF, so a zeroed slot names pin 0 --
+ * legal on both targets -- and init's detach-by-record would clear an ISR this driver never
+ * attached. ESP32 registers its buttons before initTouchInput(), so pin 0 there is a button's. */
+static void test_cold_start_detaches_nothing(void)
+{
+    CASE("the first init() leaves another subsystem's pin-0 interrupt alone");
+    memset(&g_cfg, 0, sizeof g_cfg);
+    memset(g_irq_pins, 0xFF, sizeof g_irq_pins);
+    g_attach_ok = true;
+    g_detached = 0;
+    g_irq_pins[0] = 0u;                    /* a button's ISR, on a pin the driver does not own */
+    g_cfg.touch_controller_count = 0u;     /* and a board with no touch configured at all */
+
+    (void)od_touch_gt911_init(&g_cfg, 0u);
+
+    CHECK(g_detached == 0u);
+    CHECK(irq_pin_attached(0u));
+    memset(g_irq_pins, 0xFF, sizeof g_irq_pins);
+}
+
+/* A configured IC this firmware does not implement is diagnosed ONCE, at init. Repeating it from
+ * the service walk emits the same line at the poll rate for the life of the boot -- 1 Hz with
+ * nothing else configured, and as fast as the shortest configured interval when another
+ * controller sets the cadence. The donor's service walk skips an unsupported type in silence. */
+static void test_unsupported_ic_warns_once(void)
+{
+    unsigned at_init;
+    uint32_t t;
+
+    CASE("an unsupported touch_ic_type is diagnosed once, not once per service pass");
+    setup(0u, 0u, 0x5Du, 0xFFu);
+    g_cfg.touch_controllers[0].touch_ic_type = 2u;   /* neither NONE nor GT911 */
+    g_warns = 0;
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    at_init = g_warns;
+    CHECK(at_init == 1u);
+
+    for (t = 2000u; t <= 12000u; t += 1000u) {
+        (void)od_touch_gt911_service(&g_cfg, t, 0u);
+    }
+    CHECK(g_warns == at_init);
+}
+
+/* The retained-runtime branch copies a runtime the detach loop above it has already released, so
+ * it must not inherit that runtime's attach record. If the new config drops the INT pin there is
+ * no attach to correct the record, and the stale pin survives to the next disable -- which
+ * detaches whatever holds it by then. */
+static void test_retained_branch_drops_the_detached_pin(void)
+{
+    uint32_t t;
+
+    CASE("a retained controller that loses its INT pin does not detach a stranger later");
+    setup(0u, 0u, 0x5Du, PIN_INT);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    CHECK(irq_pin_attached(PIN_INT));
+
+    g_cfg.touch_controllers[0].int_pin = 0xFFu;
+    (void)od_touch_gt911_init(&g_cfg, 2000u);
+    CHECK(od_touch_gt911_address(0) == 0x5Du);     /* kept, not re-resolved */
+    CHECK(irq_slots_used() == 0u);                 /* and its ISR released */
+
+    g_irq_pins[0] = PIN_INT;                       /* another subsystem takes the freed pin */
+    g_part.fail_all = true;
+    for (t = 3000u; t <= 9000u; t += 1000u) {
+        (void)od_touch_gt911_service(&g_cfg, t, 0u);
+    }
+    CHECK(od_touch_gt911_address(0) == 0u);        /* the failure streak disabled it */
+    CHECK(irq_pin_attached(PIN_INT));              /* without taking the stranger's ISR with it */
+}
+
+/* An attach that FAILS installs nothing, so the runtime must stop naming the pin. The seams
+ * unwind completely on failure and the reconfigure that precedes the attach has already destroyed
+ * the old trigger, so a record kept here sends the next disable() to detach a pin this driver does
+ * not own -- and by then something else may. */
+static void test_failed_attach_releases_the_pin_record(void)
+{
+    uint32_t t;
+
+    CASE("a failed IRQ re-attach does not leave the driver claiming the pin");
+    setup(0u, 0u, 0x5Du, PIN_INT);
+    part_reset(0x5Du);
+    (void)od_touch_gt911_init(&g_cfg, 1000u);
+    CHECK(irq_pin_attached(PIN_INT));
+
+    g_attach_ok = false;
+    (void)od_touch_gt911_reestablish(&g_cfg, 2000u);
+    CHECK(irq_slots_used() == 0u);                 /* the failed attach released the old one */
+    CHECK(od_touch_gt911_address(0) == 0x5Du);     /* and the controller is still up, polling */
+
+    g_irq_pins[0] = PIN_INT;                       /* another subsystem takes the free pin */
+    g_part.fail_all = true;
+    for (t = 3000u; t <= 9000u; t += 1000u) {
+        (void)od_touch_gt911_service(&g_cfg, t, 0u);
+    }
+    CHECK(od_touch_gt911_address(0) == 0u);        /* the failure streak disabled it */
+    CHECK(irq_pin_attached(PIN_INT));              /* without taking the stranger's ISR with it */
+}
+
 int main(void)
 {
+    test_cold_start_detaches_nothing();            /* FIRST: the cold start is spent by setup() */
     test_msd_packing();
     test_coordinate_map();
     test_byte_order();
@@ -1338,6 +1485,9 @@ int main(void)
     test_held_low_reads_the_attached_pin();
     test_int_pin_zero();
     test_retained_branch_uses_the_new_bus();
+    test_retained_branch_drops_the_detached_pin();
+    test_unsupported_ic_warns_once();
+    test_failed_attach_releases_the_pin_record();
     test_int_pin_query();
 
     printf("touch_gt911: %u checks, %u failures\n", g_checks, g_fails);

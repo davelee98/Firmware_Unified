@@ -1057,7 +1057,18 @@ elapsed = k_uptime_get_32() - start;    /* accounting must use real elapsed time
 ```
 
 Consumers waiting on it: the LED runner (`plans/PLAN_LED_RUNNER_2026-08-23.md` § 4), the button
-port (`plans/PLAN_NORDIC_BUTTONS_2026-08-22.md` B4), and any future timed work.
+port (`plans/PLAN_NORDIC_BUTTONS_2026-08-22.md` B4), **touch** (added 2026-08-27), and any future
+timed work.
+
+Touch is the one with the sharpest deadline, and the one whose own design the loop defeats.
+`od_touch_gt911_service()` returns the delay it wants and `opendisplay_touch_process()` reads the
+IRQ mask before the deadline precisely so an edge can pull service forward — but the ISR only sets
+a bit (`targets/nordic-zephyr/src/od_touch_app.c:24-27`) and cannot shorten the sleep the loop is
+already in. So the returned delay is a floor, not a ceiling: connected, the ~10 ms poll bounds it;
+disconnected, an edge waits up to the 500 ms idle step, or up to 1 s while a `sleep_timeout_ms` is
+being consumed in one-second chunks. No board in this fleet has a touch controller, so this is
+latent — but it is the reason a shared driver's cadence contract cannot be evaluated on this
+target until the wake mechanism exists.
 
 **Why it is not fixed in passing:** this loop governs advertising restarts, MSD refresh cadence and
 the watchdog feed site. Waking early changes how often all three run, and the naive version --
@@ -1341,3 +1352,51 @@ instance has only **4** channels, so four touch controllers on P0 exhaust the ha
 slot table does. Attach failure degrades to polling with a warning rather than failing, so this is
 a capacity note rather than a fault, but a board wanting more than a couple of interrupt sources
 per port should check it.
+
+---
+
+## 23. `Firmware_Unified` / both targets — a config reload never reconciles the touch runtime
+
+Found 2026-08-27, in independent review of the GT911 promotion. **Predates it**: both donors have
+the same shape, and the shared driver inherited it rather than introducing it.
+
+`od_touch_gt911_init()` is the only entry point that reconciles `s_rt` against a config, and both
+targets call it exactly once, from boot (`targets/esp32-idf/src/main.cpp:225`,
+`targets/nordic-zephyr/src/opendisplay_ble.c:1028`). A config write that reloads
+`struct od_config` in place (`targets/esp32-idf/src/communication.cpp:178`,
+`targets/nordic-zephyr/src/opendisplay_ble.c:940`) therefore changes what the driver READS on its
+next pass without changing anything it has already BOUND. Four consequences, in severity order:
+
+1. **A controller moved to another `bus_id` keeps transacting on the old bus.** `touch_service_one()`
+   uses `rt->bus_id`, fixed at bring-up; nothing re-runs `touch_bus_ok()`. If something answers the
+   same address on the old bus, the device reports plausible-but-wrong contacts — the same failure
+   `DIVERGENCE_MATRIX` § 13 exists to prevent, reached by reload instead of by a `0xFF` sentinel.
+   Init's retained branch already takes the NEW config's bus for exactly this reason; the reload
+   path never reaches it.
+2. **A controller ADDED by the reload is never brought up.** Its runtime is `!ok`, and `service()`
+   skips `!ok`. `od_touch_gt911_reestablish()` does bring up an `!ok`-but-not-disabled runtime, so
+   a refresh that reaches it heals this — but which refreshes those are differs by target, and
+   **an ESP32 partial refresh is not one of them**. `od_xfer_app_begin_partial()` never calls
+   `touchSuspendForEpdRefresh()` (`targets/esp32-idf/src/display_service.cpp:1901`) and the PARTIAL
+   arm of `od_xfer_app_refresh()` clears `xferApp` directly instead of going through
+   `xferAppClear()` (`:1963`), so neither half of the bracket runs: a device fed only partial
+   writes stays dead until a full or boot refresh, or a reboot. Nordic's post-refresh call sits
+   after both arms (`targets/nordic-zephyr/src/opendisplay_display.cpp:819`) and heals either way.
+3. **A controller REMOVED by the reload keeps its ISR.** `touch_cfg()` returns NULL, `service()`
+   consumes the bit and moves on; nothing detaches, because detach-by-record lives in `init()`.
+4. **A changed `int_pin` is honoured by neither the trigger nor the held-low read.** Both follow
+   `int_pin_attached` until a lifecycle event reconciles them. That half is deliberate and is what
+   the held-low check was fixed to do — polling the pin the config now names would service the
+   controller on every pass if a stranger holds it low — but it does mean the runtime and the
+   loaded config disagree about the pin for as long as the reload goes unreconciled.
+
+**Not fixed in passing.** The fix is to call `od_touch_gt911_init()` from each target's reload
+path, and init is not free: it can run the ~500 ms reset dance per controller, and on ESP32 it
+would run inside whatever context handles a config write. The retained-runtime branch exists to
+make that cheap for the common case, and is already exercised at boot on the ordinary path: when
+a boot screen is rendered, the FIRST GT911 bring-up happens inside `initDisplay()`'s boot-refresh
+resume (`targets/esp32-idf/src/display_service.cpp:1493` → `od_touch_gt911_reestablish()`) before
+`initTouchInput()` runs, so the init that follows takes the retained branch. Deep-sleep wake,
+`CLEAR_ON_BOOT`, an absent display and any early return reach `initTouchInput()` first and take the
+full bring-up instead. Wiring reload to init needs its own change and its own hardware gate, on the
+one target where any of it can be observed.

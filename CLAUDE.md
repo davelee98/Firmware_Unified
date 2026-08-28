@@ -419,6 +419,46 @@ looks arbitrary and is not); delete the story.
   No fake ever sees an expected reply: the generated table is included by the runner and nothing
   else, and profiles get semantic knobs instead. That is what stops the corpus becoming its own
   oracle.
+- **Shared GT911 touch driver — SOFTWARE ONLY, AND NOTHING ABOUT IT IS HARDWARE-QUALIFIED
+  (2026-08-28).** `shared/core/od_touch_gt911.{c,h}` is the only GT911 implementation: the config
+  walk, the reset dance that SELECTS THE I2C ADDRESS (INT's level at RST's rising edge does it, so
+  the pad ordering is a contract and not style), the product-ID probe with its register byte-order
+  fallback, both read framings, the retry and failure-disable policy, the coordinate map, the
+  per-controller cadence and the MSD packing.
+  **A SCHEDULED MACHINE, NOT A POLL LOOP**: every entry point takes `now_ms` and returns the delay
+  until it next wants to run, which is what lets one driver serve a FreeRTOS loop, a Zephyr work
+  queue and a superloop. `OD_TOUCH_NO_CHANGE` is distinct from a delay so an unmatched resume
+  cannot postpone a controller that is actively polling — ESP32 force-resumes on EVERY teardown.
+  `od_touch_app.h` (APP_TOUCH) carries GPIO, the reset delays, the IRQ-mask clear and the
+  advertisement write, because there is no shared GPIO HAL and inventing one for a single driver
+  is a larger change than the promotion; cadence, the map, publish-on-change, the backoff and the
+  address cascade are policy and stay in `shared/`. The mask is cleared through the seam at the
+  instant the driver decides to read, not after the walk, so an edge arriving during the I2C is
+  not discarded. BG22 declines the tier and compiles the capability-off arm; Nordic is the first
+  consumer of `od_gpio.h`'s IRQ seam, and its unpaired refresh hook takes `reestablish()` rather
+  than the suspend-counted `resume()`, which would be a silent no-op there.
+  **THE MSD PACKING IS FROZEN BY CONVENTION, NOT BY THE HEADER.** The canonical header names the
+  5-byte block and bounds its offset; the layout inside it exists only in a donor comment that
+  py-opendisplay, the JavaScript decoder and the iOS app each implement independently, with no
+  version field, so a packing change breaks every deployed host silently.
+  `tests/host/touch_gt911_test.c` was written from that comment before the packing code existed
+  and agrees byte for byte with py-opendisplay's `AdvertisementData.touch_event()`, release
+  included (low nibble 6, last mapped coordinates retained).
+  **`int_pin_attached`'s sentinel is 0xFF and the static spells it out per element**: 0 is a legal
+  interrupt pin — ESP32 GPIO0, Nordic P0.00 — so a zeroed record makes init's detach-by-record
+  clear an ISR this driver never attached, and on ESP32 buttons are registered before touch. The
+  cold-start case in the host suite is what enforces the initializer; no assert can.
+  **ONLY ESP32 COULD EVER RUN THIS, AND NO BOARD IN THIS FLEET HAS A CONTROLLER FITTED.** Every
+  row in docs/HARDWARE_VERIFICATION_CHECKLIST.md § Shared GT911 driver is open; a build is not
+  evidence, and the Nordic rows are release debt against hardware that does not exist here.
+  Decisions recorded in `DIVERGENCE_MATRIX` §§ 20 and 22-25: documented register byte order tried
+  first (both donors probed the undocumented one first), the 100 ms default interval the header
+  calls 25 ms, INT re-attach after a wake that destroys the trigger, Nordic's refresh hook, and
+  the advertising boost's position. One deliberate departure from the authority: an over-count
+  status is CLEARED and skipped, because `Firmware` skips without clearing and wedges touch until
+  a lifecycle event (FOLLOWUPS § 17). **A config reload does not reconcile the runtime** — `init()`
+  is boot-only on both targets, so a controller moved to another `bus_id` keeps transacting on the
+  old one (FOLLOWUPS § 23).
 - **Config-storage seam software candidate, not hardware-qualified (2026-08-24, `490415d`).**
   `shared/core/od_config_store.c` is the only implementation of the stored record — `0xDEADBEEF`,
   version 1, a 16-byte little-endian header, CRC-32 over the payload — over `shared/hal/od_hal_nvs.h`,

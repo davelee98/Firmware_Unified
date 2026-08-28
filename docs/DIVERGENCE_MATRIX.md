@@ -623,17 +623,30 @@ longer waits on anything outside this repo.
 
 ### 13.1 The same defect wearing a different constant: ESP32's no-`DataBus` default-pin path
 
-**Ruled 2026-08-24; implementation pending sensor-seam step 8.** Distinct from the five sites
-above because the `bus_id` is *not* `0xFF`. ESP32 touch accepts `data_bus_count == 0` with a
-declared, non-sentinel `bus_id` and transacts anyway, on whichever bus the board last selected.
+**Ruled 2026-08-24. RESOLVED 2026-08-28**, on both targets and for sensors as well as touch.
+Distinct from the five sites above because the `bus_id` is *not* `0xFF`: a declared, non-sentinel
+`bus_id` that matches no `DataBus` record used to transact anyway, on whichever bus the board last
+selected.
 
-| | `../Firmware` (donor) | `targets/esp32-idf` today | nordic-zephyr | Shared (step 8) |
+| | `../Firmware` (donor) | `targets/esp32-idf` | nordic-zephyr | Shared |
 |---|---|---|---|---|
-| `bus_id == 0xFF` | substitutes bus 0 | **refuses** (step-1 fix, `touch_input.cpp:304`) | **refuses** | refuses |
-| declared `bus_id`, `data_bus_count == 0` | transacts on the board-default bus | transacts on the board-default bus | refuses | **refuses** |
+| `bus_id == 0xFF` | substitutes bus 0 | **refuses** | **refuses** | **refuses** (`od_touch_gt911.c` `touch_bus_ok()`, `od_sensor_*.c`) |
+| declared `bus_id`, no matching `DataBus` record | transacts on the board-default bus | **refuses** | **refuses** | **refuses** |
 
-The first row is already resolved in this repo; only the second is outstanding, and it is the one
-this ruling closes.
+**The transport closed the second row, not the drivers**, and that is the mechanism this ruling
+predicted: both I2C HALs resolve a `bus_id` through `od_config_data_bus()` and fail when nothing
+answers to it — `selectConfiguredBus()` (`targets/esp32-idf/src/display_service.cpp:757`) and
+`select_bus()` (`targets/nordic-zephyr/src/od_hal_i2c.c:23`). So no consumer of the shared
+operations can reach an unnamed bus, whether or not it checks for itself.
+
+Where the refusal lands still differs, and it matters when reading a log. The shared GT911 driver
+checks admission and says so once — `Touch[N]: no usable data_bus (bus_id M); not probed` — and
+never probes. `od_sensor_sht40.c` and `od_sensor_bq27220.c` refuse only `0xFF` themselves, so an
+unnamed bus reaches them as a plain transaction failure at the first read.
+
+ESP32's board-default pins survive in `initOrRestoreWireForOpenDisplay()` (`:784`) for the PANEL,
+which has no `bus_id` of its own and takes the first record or the default. That is the one
+remaining unkeyed consumer, and it is out of this ruling's scope.
 
 The shared HAL is keyed by `DataBus.instance_number` (§ 14), so a bus that appears in no
 `data_buses` entry **has no identity the seam can name** — there is no argument the shared driver

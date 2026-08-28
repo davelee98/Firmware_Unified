@@ -301,9 +301,10 @@ add_test(NAME sensor_bq27220 COMMAND od_sensor_bq27220_test)
 # caches raw and maps at pack time re-maps the cached value to the same pixel, so the latched
 # release agrees byte for byte. What separates them is change detection -- two raw coordinates that
 # CLIP to the same pixel are one sample with the map before the cache and two after it.
+# No od_log_test_stub.c: this suite defines _od_log itself so it can COUNT records -- an
+# unsupported touch_ic_type must be diagnosed once, not once per service pass.
 add_executable(od_touch_gt911_test
-    touch_gt911_test.c
-    od_log_test_stub.c)
+    touch_gt911_test.c)
 target_include_directories(od_touch_gt911_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 target_link_libraries(od_touch_gt911_test od_shared)
 add_test(NAME touch_gt911 COMMAND od_touch_gt911_test)

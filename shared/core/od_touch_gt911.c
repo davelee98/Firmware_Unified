@@ -87,7 +87,20 @@ struct touch_runtime {
     uint32_t last_fail_ms;
 };
 
-static struct touch_runtime s_rt[OD_TOUCH_MAX_CONTROLLERS];
+/* int_pin_attached's "no pin" is 0xFF, so the static needs it spelled out: a zeroed slot names
+ * pin 0, which is legal, and init's detach-by-record would clear whatever ISR is on it before any
+ * controller has been brought up.
+ *
+ * NOTHING IN THE LANGUAGE CHECKS THIS LIST. The assert below pins the ARRAY at four; a short
+ * initializer list is zero-filled in silence, which is the bug itself. The cold-start case in
+ * tests/host/touch_gt911_test.c is the check -- it is first in main() because setup() spends the
+ * process's only cold start. */
+static struct touch_runtime s_rt[OD_TOUCH_MAX_CONTROLLERS] = {
+    { .int_pin_attached = 0xFFu },
+    { .int_pin_attached = 0xFFu },
+    { .int_pin_attached = 0xFFu },
+    { .int_pin_attached = 0xFFu },
+};
 static uint8_t s_suspend;
 
 /* THE IRQ MASK IS A uint8_t AND EVERY ADAPTER HARDCODES FOUR ISRs. Raising OD_CONFIG_MAX_TOUCH
@@ -516,6 +529,12 @@ static void touch_attach_int(uint8_t idx, const struct TouchController *t,
     }
     od_touch_app_gpio_config_input(t->int_pin, true);
     if (!od_touch_app_gpio_attach_int(idx, t->int_pin)) {
+        /* NOTHING IS INSTALLED, so the record must not claim the pin. Both seams unwind a failed
+         * attach completely -- ESP32 removes the handler before adding one, and Zephyr frees the
+         * slot and the callback on either error exit -- and the reconfigure above destroyed the
+         * previous trigger regardless. A record left naming this pin sends a later disable() or
+         * init() to detach at a pin this driver no longer owns. */
+        rt->int_pin_attached = 0xFFu;
         od_log_warn("Touch[%u]: IRQ attach failed on pin %u -- polling only", idx, t->int_pin);
         return;
     }
@@ -811,6 +830,11 @@ uint32_t od_touch_gt911_init(const struct od_config *cfg, uint32_t now_ms)
             t->touch_data_start_byte <= TOUCH_MSD_MAX_START) {
             s_rt[i] = prior[i];
             s_rt[i].int_attached = 0u;
+            /* The loop above detached by record, so the retained pin is no longer one this driver
+             * owns. Keeping it would let a later disable() detach a pin the new config does not
+             * name -- and which another subsystem may hold. touch_attach_int() records the pin it
+             * actually attaches. */
+            s_rt[i].int_pin_attached = 0xFFu;
             s_rt[i].disabled = 0u;
             s_rt[i].fail_streak = 0u;
             /* THE NEW CONFIG'S BUS, not the retained one. Validating the new record and then
@@ -870,7 +894,6 @@ uint32_t od_touch_gt911_service(const struct od_config *cfg, uint32_t now_ms, ui
          * lock of its own. */
         if (t == NULL) {
             od_touch_app_irq_consume((uint8_t)(irq_mask & bit));
-            touch_log_unsupported(cfg, i);
             continue;
         }
         if (s_rt[i].disabled || !s_rt[i].ok) {
