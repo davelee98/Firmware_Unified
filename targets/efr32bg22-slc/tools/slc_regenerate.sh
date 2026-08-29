@@ -27,13 +27,27 @@ TARGET_DIR="$(cd "$HERE/.." && pwd)"
 
 # Java 21 ships with slt but is not on PATH; without it slc reports "command not
 # found", which reads like a missing runtime rather than a missing PATH entry.
-JAVA_DIR="${OD_SLC_JAVA_DIR:-$HOME/.silabs/slt/installs/archive/java21-v21.0.5/java21_linux_x86_64/jre/bin}"
-if [[ -x "$JAVA_DIR/java" ]]; then
+# Globbed rather than pinned to one archive/platform string: slt's java21/slc-cli
+# point versions drift (and the platform directory name itself differs, e.g.
+# java21_linux_x86_64 vs macosx.x86_64_*), so a hardcoded path goes stale on the
+# next slt update or a different OS without ever being wrong about the pin itself.
+JAVA_DIR="${OD_SLC_JAVA_DIR:-}"
+if [[ -z "$JAVA_DIR" ]]; then
+  for d in "$HOME"/.silabs/slt/installs/archive/java21-v*/*/jre/bin; do
+    [[ -x "$d/java" ]] && { JAVA_DIR="$d"; break; }
+  done
+fi
+if [[ -n "$JAVA_DIR" && -x "$JAVA_DIR/java" ]]; then
   export PATH="$JAVA_DIR:$PATH"
 fi
 
-SLC="${SLC:-$HOME/.silabs/slt/installs/archive/slc-cli-v6.0.17/slc_cli/slc}"
-if [[ ! -x "$SLC" ]]; then
+SLC="${SLC:-}"
+if [[ -z "$SLC" ]]; then
+  for f in "$HOME"/.silabs/slt/installs/archive/slc-cli-v*/slc_cli/slc; do
+    [[ -x "$f" ]] && { SLC="$f"; break; }
+  done
+fi
+if [[ -z "$SLC" || ! -x "$SLC" ]]; then
   SLC="$(command -v slc || true)"
 fi
 if [[ -z "$SLC" || ! -x "$SLC" ]]; then

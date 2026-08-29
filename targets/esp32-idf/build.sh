@@ -64,7 +64,9 @@ for arg in "$@"; do
     esac
 done
 if [ ${#BOARDS[@]} -eq 0 ]; then
-    mapfile -t BOARDS < <(all_boards)
+    # Not mapfile: macOS ships bash 3.2 (GPLv2-frozen), which predates it.
+    BOARDS=()
+    while IFS= read -r b; do BOARDS+=("$b"); done < <(all_boards)
     if [ "$RELEASE_ONLY" = 1 ]; then
         # Filter by name, not a separate registry: -debug is the only marker a board fragment
         # carries today (see boards/*-debug.cmake), so this is where "what ships" is decided.
@@ -231,7 +233,7 @@ for b in "${BUILT[@]}"; do
     # The chip comes from the build's own sdkconfig, not from a table here: a second mapping
     # of board -> chip is a thing that can disagree with the board fragment.
     chip="$(sed -n 's/^CONFIG_IDF_TARGET="\(.*\)"$/\1/p' "build/$b/sdkconfig" | head -1)"
-    size="$(stat -c %s "$src")"
+    size="$(stat -c %s "$src" 2>/dev/null || stat -f %z "$src")"
     printf '%-28s %-10s %10s  python -m esptool --chip %s write_flash 0x0 opendisplay-%s-merged.bin\n' \
         "$b" "$chip" "$size" "$chip" "$b" >> "$MANIFEST"
     printf '  %-28s %-10s %10s bytes\n' "$b" "$chip" "$size"

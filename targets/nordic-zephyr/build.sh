@@ -198,7 +198,7 @@ REL_LINE=""
 if [[ -f "${HEX}" ]]; then
   cp "${HEX}" "${RELEASE_DIR}/opendisplay-${BOARD_TAG}${PROFILE_SUFFIX}-merged.hex"
   REL_LINE="$(printf '%-22s %10s  opendisplay-%s%s-merged.hex' \
-      "${BOARD_TAG}${PROFILE_SUFFIX}" "$(stat -c %s "${HEX}")" "${BOARD_TAG}" "${PROFILE_SUFFIX}")"
+      "${BOARD_TAG}${PROFILE_SUFFIX}" "$(stat -c %s "${HEX}" 2>/dev/null || stat -f %z "${HEX}")" "${BOARD_TAG}" "${PROFILE_SUFFIX}")"
 fi
 if [[ -n "${UPDATE_BIN}" ]]; then
   cp "${UPDATE_BIN}" "${RELEASE_DIR}/opendisplay-${BOARD_TAG}${PROFILE_SUFFIX}-ota.bin"

@@ -458,6 +458,19 @@ promoted_response_literal_absent() {
 }
 check "transfer: no target response literal for a promoted opcode" promoted_response_literal_absent
 
+# PERMANENT. `securityConfig` is a C++ reference to globalConfig.security (targets/esp32-idf/src/
+# main.h). Re-declaring it as an object compiles and LINKS -- a variable's mangled name carries no
+# type -- and the consumer then reads the reference's own 4-byte pointer word as if it were the
+# 64-byte struct. The boot screen did exactly that: encryption_enabled came back as a byte of an
+# address, so a device with encryption off printed "KEY1: hidden" and shipped garbage in the QR.
+# encryption_state.h holds the one correct declaration; every consumer includes it.
+security_config_is_a_reference() {
+    absent_or_fail "securityConfig re-declared as an object; include encryption_state.h instead" \
+        'extern[[:space:]]+struct[[:space:]]+SecurityConfig[[:space:]]+securityConfig\b' \
+        targets
+}
+check "esp32: securityConfig declared only as a reference" security_config_is_a_reference
+
 # PERMANENT. od_core_reset() is the shared half of a teardown; a target hand-rolling the list is
 # what od_core.h exists to prevent.
 #
@@ -1099,17 +1112,19 @@ log_off_link_proof() {
 }
 check "host: logging capability-off link proof" log_off_link_proof
 
+# The _? in these patterns tolerates Mach-O's leading underscore on every C symbol (nm reports
+# _od_pipe_start, not od_pipe_start) so the ratchet means the same thing on macOS as on Linux.
 pipe_off_link_proof() {
     local binary="$BUILD_ROOT/host-gcc/od_pipe_off_test" hits entry_count
 
     [ -x "$binary" ] || { echo "capability-off PIPE fixture was not built"; return 1; }
-    hits=$(nm -a "$binary" | grep -E '\b(s_pipe|s_reorder|od_pipe_reorder_slot_t)\b' || true)
+    hits=$(nm -a "$binary" | grep -E '\b_?(s_pipe|s_reorder|od_pipe_reorder_slot_t)\b' || true)
     if [ -n "$hits" ]; then
         echo "$hits"
         echo "OD_CAP_PIPE=0 retained PIPE sequencing or reorder storage"
         return 1
     fi
-    entry_count=$(nm -g "$binary" | grep -Ec '\bod_pipe_(start|data|end)$' || true)
+    entry_count=$(nm -g "$binary" | grep -Ec '\b_?od_pipe_(start|data|end)$' || true)
     if [ "$entry_count" -ne 3 ]; then
         echo "OD_CAP_PIPE=0 must retain exactly the three dispatch entry points (found $entry_count)"
         return 1
@@ -1127,7 +1142,7 @@ nfc_off_link_proof() {
     local binary="$BUILD_ROOT/host-gcc/od_nfc_off_test" hits entry_count refs obj obj_count
 
     [ -x "$binary" ] || { echo "capability-off NFC fixture was not built"; return 1; }
-    hits=$(nm -a "$binary" | grep -E "\bs_nfc\b" || true)
+    hits=$(nm -a "$binary" | grep -E "\b_?s_nfc\b" || true)
     if [ -n "$hits" ]; then
         echo "$hits"
         echo "OD_CAP_NFC=0 retained the chunk assembler"
@@ -1147,7 +1162,7 @@ nfc_off_link_proof() {
         echo "OD_CAP_NFC=0 still references the tag seam ($refs undefined seam symbols)"
         return 1
     fi
-    entry_count=$(nm -g "$binary" | grep -Ec "\bod_nfc_(frame|reset)$" || true)
+    entry_count=$(nm -g "$binary" | grep -Ec "\b_?od_nfc_(frame|reset)$" || true)
     if [ "$entry_count" -ne 2 ]; then
         echo "OD_CAP_NFC=0 must retain both entry points (found $entry_count)"
         return 1
