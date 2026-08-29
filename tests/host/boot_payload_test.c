@@ -1,5 +1,7 @@
 #include "od_boot_payload.h"
 
+#include "opendisplay_structs.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -46,6 +48,51 @@ int main(void)
     CHECK(strcmp(line, "KEY1: hidden") == 0);
     od_boot_format_key_line("KEY1:", key, 8u, true, true, line, sizeof(line));
     CHECK(strcmp(line, "KEY1: not set") == 0);
+
+    /* The key-state tree, every input combination, no gaps. Two inputs decide whether a key is
+     * in force and the third only chooses between HIDDEN and SHOWN, so the show flag must not
+     * reach the answer while encryption is off or the key is absent. */
+    {
+        static const struct {
+            uint8_t enabled;
+            bool key_set;
+            uint8_t flags;
+            enum od_boot_key_state want;
+        } cases[] = {
+            {0u, false, 0u,                                   OD_BOOT_KEY_NOT_SET},
+            {0u, false, OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN,   OD_BOOT_KEY_NOT_SET},
+            {0u, true,  0u,                                   OD_BOOT_KEY_NOT_SET},
+            {0u, true,  OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN,   OD_BOOT_KEY_NOT_SET},
+            {1u, false, 0u,                                   OD_BOOT_KEY_NOT_SET},
+            {1u, false, OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN,   OD_BOOT_KEY_NOT_SET},
+            {1u, true,  0u,                                   OD_BOOT_KEY_HIDDEN},
+            {1u, true,  OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN,   OD_BOOT_KEY_SHOWN},
+        };
+        for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+            struct SecurityConfig sec;
+            memset(&sec, 0, sizeof(sec));
+            sec.encryption_enabled = cases[i].enabled;
+            sec.flags = cases[i].flags;
+            if (cases[i].key_set) {
+                memcpy(sec.encryption_key, key, sizeof(sec.encryption_key));
+            }
+            if (od_boot_key_state(&sec) != cases[i].want) {
+                fprintf(stderr, "FAIL key_state case %u: enabled=%u key_set=%d flags=0x%02X\n",
+                        i, cases[i].enabled, (int)cases[i].key_set, cases[i].flags);
+                ++failures;
+            }
+        }
+        /* An absent config is a device with nothing configured, not a crash. */
+        CHECK(od_boot_key_state(NULL) == OD_BOOT_KEY_NOT_SET);
+        /* One non-zero byte is a key. The zero test is over the whole 16, not a prefix. */
+        {
+            struct SecurityConfig sec;
+            memset(&sec, 0, sizeof(sec));
+            sec.encryption_enabled = 1u;
+            sec.encryption_key[15] = 0x01u;
+            CHECK(od_boot_key_state(&sec) == OD_BOOT_KEY_HIDDEN);
+        }
+    }
 
     CHECK(od_boot_url_build(0x1234u, 0xabcdefu, key, true, 0x7856u, url, sizeof(url)));
     CHECK(strcmp(url, "https://opendisplay.org/l/?EjSrze8AESIzRFVmd4iZqrvM3e7_eFY") == 0);

@@ -16,6 +16,26 @@ extern "C" {
 
 bool od_boot_key_is_zero(const uint8_t key[OD_BOOT_KEY_SIZE]);
 
+/* What the boot screen may say about the key, as one decision. Every renderer asks this rather
+ * than re-deriving it: the panel layouts differ, the policy does not.
+ *
+ *   encryption_enabled == 0                      -> NOT_SET, whatever the show flag says
+ *   encryption_enabled != 0, key all-zero/absent -> NOT_SET
+ *   encryption_enabled != 0, key set, no flag    -> HIDDEN
+ *   encryption_enabled != 0, key set, flag set   -> SHOWN
+ *
+ * NOT_SET is the only answer when no key is in force, so a device that demands nothing never
+ * claims protection and never publishes a key -- on the panel or in the QR payload. */
+enum od_boot_key_state {
+    OD_BOOT_KEY_NOT_SET = 0,
+    OD_BOOT_KEY_HIDDEN,
+    OD_BOOT_KEY_SHOWN
+};
+
+struct SecurityConfig;
+
+enum od_boot_key_state od_boot_key_state(const struct SecurityConfig *sec);
+
 void od_boot_format_key_display(const uint8_t key[OD_BOOT_KEY_SIZE], bool show_key,
                                 char out[OD_BOOT_KEY_HEX_SIZE]);
 

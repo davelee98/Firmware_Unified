@@ -167,6 +167,9 @@ static void make_case(struct od_config *cfg, struct SecurityConfig *sec,
   cfg->displays[0].legacy_tag_type = 0x1234;
   cfg->manufacturer_data.manufacturer_id = 0x5678;
   for (unsigned i = 0; i < sizeof(sec->encryption_key); i++) sec->encryption_key[i] = (uint8_t)i;
+  /* A key the device actually demands, and asked to be shown. Both are needed for the renderer
+   * to print it: a key that is not in force is rendered as absent whatever the flag says. */
+  sec->encryption_enabled = 1u;
   sec->flags = OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN;
 }
 
@@ -194,6 +197,22 @@ int main(void)
   assert(g_begin_frames == 1 && g_begin_planes == 1 && g_writes == 128);
   assert(g_end_planes == 1 && g_end_frames == 1);
   assert(g_hash == 0xBA916E4Cu);
+
+  /* A stored key with encryption_enabled == 0 is not in force, so the key lines and the QR
+   * payload render it as absent -- byte for byte what a device carrying no key at all renders.
+   * Asserted as an identity rather than a second pinned hash so the two cannot drift apart. */
+  reset_fake();
+  make_case(&cfg, &sec, 296, 128, OD_COLOR_SCHEME_MONO);
+  sec.encryption_enabled = 0u;
+  assert(render(&cfg, &sec, row, sizeof(row), qr, sizeof(qr)));
+  const uint32_t absent_key_hash = g_hash;
+  assert(absent_key_hash != 0xBA916E4Cu);
+
+  reset_fake();
+  make_case(&cfg, &sec, 296, 128, OD_COLOR_SCHEME_MONO);
+  memset(sec.encryption_key, 0, sizeof(sec.encryption_key));
+  assert(render(&cfg, &sec, row, sizeof(row), qr, sizeof(qr)));
+  assert(g_hash == absent_key_hash);
 
   reset_fake();
   make_case(&cfg, &sec, 296, 128, OD_COLOR_SCHEME_GRAY8);

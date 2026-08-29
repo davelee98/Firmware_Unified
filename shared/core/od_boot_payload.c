@@ -1,5 +1,7 @@
 #include "od_boot_payload.h"
 
+#include "opendisplay_structs.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -35,6 +37,16 @@ bool od_boot_key_is_zero(const uint8_t key[OD_BOOT_KEY_SIZE])
         }
     }
     return true;
+}
+
+enum od_boot_key_state od_boot_key_state(const struct SecurityConfig *sec)
+{
+    if (sec == NULL || sec->encryption_enabled == 0u ||
+        od_boot_key_is_zero(sec->encryption_key)) {
+        return OD_BOOT_KEY_NOT_SET;
+    }
+    return (sec->flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN) != 0u
+        ? OD_BOOT_KEY_SHOWN : OD_BOOT_KEY_HIDDEN;
 }
 
 void od_boot_format_key_display(const uint8_t key[OD_BOOT_KEY_SIZE], bool show_key,

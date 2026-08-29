@@ -272,7 +272,9 @@ static void logSecurityConfig() {
         od_log_debug("Security config: Rewrite allowed (unauthorized config writes permitted)");
     }
     if (securityConfig.flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN) {
-        od_log_debug("Security config: Show key on screen enabled (future feature)");
+        /* Not a future feature -- the boot screen honours it. It prints the key only when the
+         * key is also in force, so this line alone does not mean the key is on the panel. */
+        od_log_debug("Security config: Show key on screen enabled");
     }
     if (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_ENABLED) {
         od_log_debug("Security config: Reset pin %u enabled (polarity: %s, pullup: %s, pulldown: %s)",
