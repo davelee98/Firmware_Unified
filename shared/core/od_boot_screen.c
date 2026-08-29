@@ -441,9 +441,12 @@ bool od_boot_screen_render(const struct od_config *cfg,
                            const struct SecurityConfig *security,
                            const struct od_boot_bufs *bufs) {
     static const uint8_t zeroKey[OD_BOOT_KEY_SIZE] = {0};
-    const uint8_t *key = security != NULL ? security->encryption_key : zeroKey;
-    const bool showKey = security != NULL &&
-        (security->flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN) != 0u;
+    /* od_boot_key_state() is the whole policy; this renderer only spends it. NOT_SET passes
+     * zeroKey on, so the key lines, the small-screen hex and the QR payload all agree that a key
+     * which is not in force is absent. */
+    const enum od_boot_key_state keyState = od_boot_key_state(security);
+    const uint8_t *key = keyState == OD_BOOT_KEY_NOT_SET ? zeroKey : security->encryption_key;
+    const bool showKey = keyState == OD_BOOT_KEY_SHOWN;
     if (cfg == NULL || cfg->display_count == 0u || bufs == NULL ||
         bufs->row == NULL || bufs->qr == NULL) {
       return false;

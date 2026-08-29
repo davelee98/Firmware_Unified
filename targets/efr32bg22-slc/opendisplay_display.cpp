@@ -357,6 +357,7 @@ static bool render_boot_screen(BBEPDISP &epd, const struct GlobalConfig *cfg)
   uint16_t w, h;
   uint32_t last3;
   const uint8_t *key;
+  enum od_boot_key_state key_state;
   bool show_key;
   char url[OD_BOOT_URL_SIZE];
   QRCode qr;
@@ -385,8 +386,11 @@ static bool render_boot_screen(BBEPDISP &epd, const struct GlobalConfig *cfg)
   h = (uint16_t)epd.height;
 
   last3 = (uint32_t)(SYSTEM_GetUnique() & 0xFFFFFFu);
-  key = sec != nullptr ? sec->encryption_key : zero_key;
-  show_key = sec != nullptr && (sec->flags & SECURITY_FLAG_SHOW_KEY_ON_SCREEN) != 0u;
+  /* The same policy the other two targets get through od_boot_screen_render(); this panel only
+   * differs in how it lays the answer out. */
+  key_state = od_boot_key_state(sec);
+  key = key_state == OD_BOOT_KEY_NOT_SET ? zero_key : sec->encryption_key;
+  show_key = key_state == OD_BOOT_KEY_SHOWN;
   if (!od_boot_url_build(dc->legacy_tag_type, last3, key, show_key,
                          cfg->manufacturer_data.manufacturer_id, url, sizeof(url))) {
     return false;

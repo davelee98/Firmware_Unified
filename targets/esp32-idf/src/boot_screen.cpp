@@ -4,6 +4,10 @@
 #include "display_fastepd.h"
 #include "display_service.h"
 #include "encryption.h"
+/* securityConfig is a reference to globalConfig.security, not an object of its own. Declaring it
+ * here as `extern struct SecurityConfig` would compile and link, and `&securityConfig` would then
+ * be the address of the reference's own pointer word rather than of the config. */
+#include "encryption_state.h"
 #include "od_boot_app.h"
 #include "od_boot_screen.h"
 #include "structs.h"
@@ -12,7 +16,6 @@
 #include <stdlib.h>
 
 extern struct od_config globalConfig;
-extern struct SecurityConfig securityConfig;
 extern BBEPDISP bbep;
 extern uint8_t staticRowBuffer[BOOT_ROW_BUFFER_SIZE];
 

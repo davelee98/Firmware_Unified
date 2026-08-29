@@ -1400,3 +1400,80 @@ resume (`targets/esp32-idf/src/display_service.cpp:1493` → `od_touch_gt911_ree
 `CLEAR_ON_BOOT`, an absent display and any early return reach `initTouchInput()` first and take the
 full bring-up instead. Wiring reload to init needs its own change and its own hardware gate, on the
 one target where any of it can be observed.
+
+## 24. `Firmware` — the boot screen calls a disabled key "hidden"
+
+Found 2026-08-28, on a flashed ESP32 running this repo's port; the defect is the donor's and was
+inherited rather than introduced. Fixed here (`DIVERGENCE_MATRIX` § 26), reported there.
+
+`../Firmware/src/boot_screen.cpp:152-173`. `bootFormatKeyLine()` and `formatBootKeyDisplay()`
+branch on `bootKeyIsAllZero()` and `OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN`, and never read
+`securityConfig.encryption_enabled`. A device with a stored key and encryption switched off
+therefore prints `KEY1: hidden` / `KEY2: hidden`, which an owner reads as "this device is
+protected and I need to find the key" — for a device that will accept every command
+unauthenticated.
+
+That state is legal and reachable: the 0x27 arm normalises only the other direction (a zero key
+clears the enable flag), and disabling encryption is not supposed to destroy the key.
+
+The same call site feeds the QR, so it is not only cosmetic: `bootBuildUrl()` embeds the key in
+the `opendisplay.org/l/` payload when the show flag is set, whether or not the device will ever
+ask for it.
+
+Fix shape, if upstream wants the one taken here: derive the key-in-force condition once
+(`encryption_enabled != 0 && !bootKeyIsAllZero()`) and treat the key as absent everywhere in the
+boot screen when it is false, leaving both formatters' strings and their inputs alone.
+
+**Second, smaller item in the same area: the flag's documentation is stale.**
+`OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN` is described as "(future feature)" in
+`../opendisplay-protocol/src/opendisplay_structs.h:903` and in all four generated bindings
+(`.py:479`, `.js:692`, `.d.ts:318`, `.swift:742`), and the same words reach an owner through
+`../opendisplay.org/httpdocs/firmware/toolbox/config.yaml:1418`. It is not a future feature: it is
+implemented and shipping on every target this repo builds — ESP32 and Nordic through
+`od_boot_screen_render()`, BG22 through its own renderer. Someone reading the toolbox has been
+told the switch does nothing.
+
+Canonical-first, so the header changes in `opendisplay-protocol`, then the bindings regenerate and
+`tools/sync_protocol_header.py` brings it down here; the `config.yaml` wording is the website's own.
+
+Not fixable from this repo — sibling repositories are read-only references.
+
+## 25. `opendisplay.org` — `getPrimaryService()` has no timeout, so a stale Chrome GATT link hangs connect for ever
+
+Found 2026-08-28, on hardware, after a long misdirected hunt through the firmware. **Confirmed
+browser-side**: fully quitting Chrome fixes it; clearing the macOS Bluetooth cache does not, and
+neither does rebooting the device.
+
+`httpdocs/js/ble-common.js:807`, in `_doConnectToGATT()`:
+
+```js
+this.log(`GATT Server state: connected=${this.gattServer.connected}`, 'info');
+this.service = await this.gattServer.getPrimaryService(this.serviceUUID);   // no timeout
+this.characteristic = await this.waitForEncryptionAndGetCharacteristic(5, 400);  // guarded
+await this.enableNotificationsWithRetry(5, 400);                                 // guarded
+```
+
+The two steps AFTER it retry with attempt counts (`:686`, `:724`). The one that actually hangs does
+not. Chrome keeps one OS-level GATT link per device per profile, shared across tabs; when a stale
+page still holds it, service discovery never completes and that await never settles. The user sees
+the log stop dead after `GATT Server state: connected=true` with no error, because nothing rejected
+— `handleError()` was never reached.
+
+The file already knows this state exists. `:794-796` reads "Browser may still hold an open GATT link
+while our app state was reset (failed service discovery, mid-reconnect race, etc.)" — it handles
+finding the link already open, but not the link being open and unusable.
+
+**Fix shape:** race `getPrimaryService()` against a timeout (the 5 x 400 ms budget its neighbours
+use is the house style). On expiry, log that discovery stalled, call `device.gatt.disconnect()` to
+drop the stale link, and retry — which is what quitting Chrome achieves by force. Anything is better
+than a silent unsettled promise, because the symptom as it stands points the user at the device.
+
+**Firmware is exonerated, and the evidence should not be re-litigated.** From two device captures:
+one boot session (uptime 131 s and 3817 s, monotonic, no reset between) served a frozen connection
+and a fully working config read; frozen and working connections are byte-identical device-side
+through `GAP CONNECT`, the 2M-PHY refusal, and the ATT MTU exchange, which proves ATT itself was
+working; and none of `repeat pairing`, `encryption change` or `passkey action`
+(`targets/esp32-idf/ble/od_ble_nimble.cpp:538-566`, all `ESP_LOGW`) ever fired, which rules out the
+stale-bond class that `:750-772` exists to fix.
+
+Not fixable from this repo — sibling repositories are read-only references.

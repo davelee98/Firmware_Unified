@@ -1151,3 +1151,115 @@ publish — the nRF/Bluefruit shape, where doing it the other way round produced
 An earlier form of the driver's comment asserted the order was load-bearing *here*. It is not, on
 any target in this repo, and saying so invited a future reader to trust a mechanism that does not
 exist.
+
+## 26. Boot-screen key line — a stored key with encryption off read as "hidden" (fixed 2026-08-28)
+
+**A deliberate departure from the authority.** The hunt started from a flashed ESP32 whose owner
+had neither set a key nor enabled encryption and whose boot screen said `KEY1: hidden` regardless.
+That board turned out to have a **second and independent** defect, § 27 below, and it — not this
+one — is what produced the symptom there. This section stands on its own: the policy defect is
+real, is the donor's, and reaches every renderer. It simply was not what that panel was showing.
+
+`../Firmware/src/boot_screen.cpp:152-173` decides the key line from two inputs only — are the 16
+key bytes all zero, and is `OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN` set. It never reads
+`encryption_enabled`. The shared renderer was a faithful port of that and inherited it, so this is
+not a port regression; both said "hidden" for any non-zero key, in force or not.
+
+`encryption_enabled == 0` alongside a non-zero key is a **legal, reachable state**.
+`od_config_apply_packet()` (`shared/core/od_config.c`, packet 0x27) normalises only the other
+direction: a zero key clears the flag, because a device demanding authentication against a
+guessable key reads as protected and is not. Nothing clears the key when the flag goes to zero,
+and nothing should — an owner who disables encryption keeps the key for when they re-enable it.
+
+So the screen claimed a protection the device does not enforce, and sent its owner looking for a
+key that nothing would ask for. `od_boot_screen_render()` now derives `keyInForce` —
+`encryption_enabled != 0` **and** the key is non-zero — and passes `zeroKey` when it is false, so
+the two key lines, the small-screen hex and the **QR payload** all treat a key that is not in
+force as absent. That last one is the only host-visible half: `od_boot_payload_build()` embeds the
+key at bytes 5..20 when `show_key`, and a device that will not ask for a key no longer publishes
+one to `opendisplay.org/l/`.
+
+**Fixed at two sites, because there are two renderers.** ESP32 and Nordic share
+`od_boot_screen_render()`; BG22 has its own for its small panel
+(`targets/efr32bg22-slc/opendisplay_display.cpp`), reaching the same shared formatters through
+`od_boot_url_build()` and `od_boot_format_key_display()`. It computed `key` and `show_key` exactly
+the way the shared renderer did and carried the identical defect — rendering 32 `X`s and embedding
+the key in the QR for a device that demands neither.
+
+So the policy is not a condition each renderer derives — it is `od_boot_key_state()`
+(`shared/core/od_boot_payload.c`), returning `NOT_SET` / `HIDDEN` / `SHOWN`, and both renderers
+only spend the answer. Two inputs decide whether a key is in force; the show flag chooses only
+between the latter two and cannot reach the answer while encryption is off or the key is absent.
+The formatters could not host this — they are handed a key, not a policy — which is how the same
+tree came to be written twice. A third panel layout now inherits it instead of re-deriving it.
+
+Unchanged, deliberately: the flag itself is read correctly (bit 1,
+`opendisplay_structs.h:903`) and its meaning is untouched, and `od_boot_format_key_line()` /
+`od_boot_format_key_display()` keep the donors' exact strings and their `key_is_zero` + `show_key`
+contract. The decision about what "the key" **is** belongs to the caller that knows the policy;
+the formatters only render what they are handed.
+
+The condition is not invented here. `py-opendisplay` already carries it as
+`SecurityConfig.encryption_enabled_flag` — "True if encryption is both enabled and key is
+non-zero" (`../py-opendisplay/src/opendisplay/models/config.py:828-830`) — so the host and the
+boot screen now agree about what a key in force is.
+
+`tests/host/boot_payload_test.c` walks all eight combinations of the three inputs, plus a NULL
+config and a key whose only non-zero byte is the last — the zero test is over all 16 bytes, not a
+prefix. `tests/host/boot_screen_test.c` pins the rendered result as an identity rather than a
+second hash: a stored key with
+encryption disabled renders byte for byte what a device carrying no key at all renders, and both
+differ from the in-force hash. Its `make_case()` now sets `encryption_enabled = 1`, which is what
+it always meant — the case was pinned against a renderer that never read the field.
+
+Upstream keeps the defect; it is reported as `FOLLOWUPS.md` § 24.
+
+## 27. ESP32 boot screen read a pointer as its `SecurityConfig` (fixed 2026-08-28)
+
+**Not a divergence — a defect this repo introduced**, recorded here because it is what § 26's
+flashed ESP32 was actually showing, and because § 26's fix could not have changed that panel by
+itself.
+
+`targets/esp32-idf/src/main.h` makes `securityConfig` an **alias**, not an object:
+
+```cpp
+struct SecurityConfig &securityConfig = globalConfig.security;
+```
+
+That is a Firmware_Unified adaptation — security moved inside the parsed aggregate so the zero-key
+normalisation cannot be separated from the parse that applies it (`shared/core/od_config.h`), and
+the old name was kept so consumers did not have to care. `targets/esp32-idf/src/boot_screen.cpp`
+re-declared it as an object:
+
+```cpp
+extern struct SecurityConfig securityConfig;   /* it is a reference */
+```
+
+**This compiles and it links.** A variable's mangled name carries no type, so nothing in the
+toolchain can object. A namespace-scope reference is stored as a pointer, and the map says so:
+`.rodata.securityConfig 0x3c0fe464 0x4`. `&securityConfig` in that translation unit was therefore
+the address of a 4-byte pointer word in flash, and `od_boot_screen_render()` read 64 bytes from
+there as a `struct SecurityConfig` — a 60-byte out-of-bounds read of unrelated `.rodata`.
+
+On `s3-n16r8-extuart-debug` those bytes were `9b 8a ca 3f 14 74 37 40 …`, the little-endian address
+`0x3fca8a9b` of `globalConfig.security` followed by whatever the linker placed next:
+
+| field | value read | consequence |
+|---|---|---|
+| `encryption_enabled` | `0x9b` | non-zero — "encryption on" |
+| `encryption_key[16]` | `8a ca 3f 14 …` | non-zero — "key in force" |
+| `flags` | `0x40` | `SHOW_KEY_ON_SCREEN` (bit 1) clear |
+
+Which is `HIDDEN`, on every boot, for every config. The show-key flag could not have worked either,
+and the QR payload described a device that did not exist. **Both the pre- and post-§ 26 policies
+produce `hidden` from those bytes**, which is why the symptom survived that fix and why the two
+defects are separable: § 26 is the policy, this is which object the policy was applied to.
+
+The fix is one line — `boot_screen.cpp` includes `encryption_state.h`, which holds the single
+correct declaration, and the local `extern` is gone. Nordic and BG22 were never exposed: both
+reach the config through `od_get_parsed_security()`, a function, where the type is checked.
+
+Ratcheted as "esp32: securityConfig declared only as a reference" in [tools/check.sh](../tools/check.sh),
+because neither the compiler nor the linker can see this class of error and no host test can
+either — the host suite never links `main.h`. The rule is an absence grep over `targets/`, so a
+second consumer re-declaring the alias fails the gate rather than silently reading rodata.
