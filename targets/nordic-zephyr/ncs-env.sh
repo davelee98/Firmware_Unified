@@ -87,7 +87,13 @@ _activate_ncs_env() {
 
   local tc_id tc_root
   tc_id="$("${NCS_ROOT}/nrf/scripts/print_toolchain_checksum.sh")"
-  tc_root="${HOME}/ncs/toolchains/${tc_id}"
+  # Two first-party install roots, not an open glob: the legacy nrfutil toolchain-manager
+  # location, and the one the current nRF Connect for VS Code extension defaults to instead.
+  # NCS_TOOLCHAINS_ROOT overrides both, same as NCS_ROOT does for the SDK checkout.
+  tc_root="${NCS_TOOLCHAINS_ROOT:-${HOME}/ncs/toolchains}/${tc_id}"
+  if [[ ! -d "${tc_root}" && -z "${NCS_TOOLCHAINS_ROOT:-}" && -d "/opt/nordic/ncs/toolchains/${tc_id}" ]]; then
+    tc_root="/opt/nordic/ncs/toolchains/${tc_id}"
+  fi
   if [[ ! -d "${tc_root}" ]]; then
     if command -v west >/dev/null 2>&1; then
       return 0

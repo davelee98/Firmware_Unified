@@ -80,9 +80,13 @@ mkdir -p "${RELEASE_DIR}"
 LOG_DIR="${RELEASE_DIR}/logs"
 mkdir -p "${LOG_DIR}"
 
-declare -A STATUS ELAPSED
+# Not declare -A: macOS ships bash 3.2 (GPLv2-frozen), which predates associative arrays.
+# STATUS/ELAPSED are plain indexed arrays kept parallel to TARGETS by position instead.
+STATUS=()
+ELAPSED=()
 rc=0
 
+i=0
 for t in "${TARGETS[@]}"; do
   dir="$(od_target_dir "$t")"
   cmd="$(od_target_cmd "$t")"
@@ -96,13 +100,14 @@ for t in "${TARGETS[@]}"; do
   # Each target script sources its own toolchain, so run it from its own directory in a
   # subshell -- PROFILE is exported for the one target that reads it.
   if ( cd "${SCRIPT_DIR}/${dir}" && PROFILE="${PROFILE}" bash -c "${cmd}" ) 2>&1 | tee "${log}"; then
-    STATUS[$t]=ok
+    STATUS[$i]=ok
   else
-    STATUS[$t]=FAILED
+    STATUS[$i]=FAILED
     rc=1
   fi
-  ELAPSED[$t]=$((SECONDS - start))
-  echo "--- ${t}: ${STATUS[$t]} ($((ELAPSED[$t]))s, log: ${log#${SCRIPT_DIR}/})"
+  ELAPSED[$i]=$((SECONDS - start))
+  echo "--- ${t}: ${STATUS[$i]} (${ELAPSED[$i]}s, log: ${log#${SCRIPT_DIR}/})"
+  i=$((i+1))
 done
 
 # The summary records THIS RUN. Artefacts in release/ can outlive the build that made them,
@@ -118,10 +123,12 @@ done
   [[ -n "${PROFILE}" ]] && echo "profile  ${PROFILE} (nordic-zephyr only)"
   echo
   printf '%-8s %-8s %8s  %s\n' TARGET STATUS SECONDS MANIFEST
+  i=0
   for t in "${TARGETS[@]}"; do
     m="MANIFEST-$(basename "$(od_target_dir "$t")").txt"
     [[ -f "${RELEASE_DIR}/${m}" ]] || m="(none)"
-    printf '%-8s %-8s %8s  %s\n' "$t" "${STATUS[$t]}" "${ELAPSED[$t]}" "$m"
+    printf '%-8s %-8s %8s  %s\n' "$t" "${STATUS[$i]}" "${ELAPSED[$i]}" "$m"
+    i=$((i+1))
   done
 } > "${SUMMARY}"
 

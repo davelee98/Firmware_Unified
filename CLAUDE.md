@@ -78,6 +78,17 @@ looks arbitrary and is not); delete the story.
   — or drive them directly, `cmake -S tests/host -B <dir> && cmake --build <dir> && ctest
   --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF.
   `tools/sdkconfig_baseline.sh` is a gate a change must not break.
+- **`./build-release.sh` (repo root) is the actual "build everything" entry point** — it is not
+  a reimplementation, just a driver: for each target it `cd`s into `targets/<dir>/` and runs that
+  target's own front door (`esp32-idf`: `./build.sh`; `nordic-zephyr`: `./build.sh --all`;
+  `efr32bg22-slc`: `./build-and-flash.sh --no-flash`), writing artefacts + a per-target
+  `release/MANIFEST-<target>.txt` plus one top-level `release/MANIFEST.txt` summary and a log per
+  target under `release/logs/`. `./build-release.sh nordic esp32` builds a subset,
+  `./build-release.sh --list` prints the target/directory/command table, and every target still
+  runs even if an earlier one fails (nonzero exit iff any did) — so a release directory is never
+  silently left with stale artefacts from a target that didn't rerun. It does **not** activate any
+  toolchain itself (none of the three is on `PATH`); export what each target's own script expects
+  (e.g. `NCS_ROOT` for nordic-zephyr, per docs/TOOLCHAINS.md) before calling it.
 - **`shared/` is no longer empty** —
   `core/od_{adv_control,advert,buzzer,cmd,color,config,config_asm,config_read,config_tlv,core,dispatch,gate,led,log,nfc,pipe,reply,rxq,session,txq,watchdog,xfer,xfer_direct,xfer_partial,zlib_inflate,zlib_pump}.c`
   listed in `shared/sources.cmake` (never globbed) in per-HAL tiers, plus the two all-inline
