@@ -470,6 +470,37 @@ looks arbitrary and is not); delete the story.
   a lifecycle event (FOLLOWUPS § 17). **A config reload does not reconcile the runtime** — `init()`
   is boot-only on both targets, so a controller moved to another `bus_id` keeps transacting on the
   old one (FOLLOWUPS § 23).
+- **Boot-screen key policy — HARDWARE-VERIFIED on ESP32-S3 ONLY, for the panel lines only
+  (2026-08-28).** Two separable defects behind one symptom, and the write-ups are
+  `docs/DIVERGENCE_MATRIX.md` §§ 26 and 27.
+  **§ 26 is the donor's policy defect**: `../Firmware`'s boot screen decides the key line from the
+  zero-key test and the show flag alone and never reads `encryption_enabled`, so a stored-but-
+  disabled key rendered as `hidden` — claiming a protection the device does not enforce, and
+  publishing the key in the QR. `encryption_enabled == 0` beside a non-zero key is legal and
+  reachable: `od_config_apply_packet()` normalises only the other direction. The policy is now
+  `od_boot_key_state()` returning NOT_SET/HIDDEN/SHOWN, and **both renderers only spend the
+  answer** — the shared one and BG22's own, which had independently grown the identical defect.
+  **§ 27 is ESP32-only, was this repo's own, and is what the flashed board was actually showing.**
+  `securityConfig` is a *reference* to `globalConfig.security` (`targets/esp32-idf/src/main.h`);
+  `boot_screen.cpp` re-declared it as an **object**. That compiles AND LINKS — a variable's mangled
+  name carries no type — so the renderer read the reference's own 4-byte `.rodata` pointer word as
+  a 64-byte `struct SecurityConfig`, 60 bytes of it out of bounds. `encryption_enabled` came back
+  as a byte of an address (`0x9b`), the key as the rest of it, `flags` as `0x40`: **`HIDDEN` on
+  every boot, for every config, under both the old and the new policy**. That is why § 26's fix
+  did not move that panel and why the two are separable. Nordic and BG22 were never exposed — both
+  reach the config through `od_get_parsed_security()`, where the type is checked.
+  **Nothing in the toolchain or the host suite can see § 27** (the host suite never links
+  `main.h`), so it is ratcheted as "esp32: securityConfig declared only as a reference" in
+  `tools/check.sh` — an absence grep over `targets/`.
+  **Evidence, and its limits.** On `s3-n16r8-extuart-debug` (reTerminal E1001) all four key states
+  render correctly on the zone layout: off+key and off+no-key give `not set`, on+key+flag-clear
+  gives `hidden`, on+key+flag-set gives the hex. **The QR payload was not decoded** — which is the
+  only host-visible half of § 26 — and neither the small-screen hex path nor the FastEPD renderer
+  was exercised. Nordic and BG22 have no evidence at all; BG22's own renderer is the *only* place
+  its layout runs. Rows: `docs/HARDWARE_VERIFICATION_CHECKLIST.md` § Boot-screen key policy.
+  Upstream keeps § 26; reported as `FOLLOWUPS.md` § 24, which also records that
+  `OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN` is still documented as "(future feature)" in the canonical
+  header, all four bindings and the website's `config.yaml` while shipping on every target.
 - **Config-storage seam software candidate, not hardware-qualified (2026-08-24, `490415d`).**
   `shared/core/od_config_store.c` is the only implementation of the stored record — `0xDEADBEEF`,
   version 1, a 16-byte little-endian header, CRC-32 over the payload — over `shared/hal/od_hal_nvs.h`,
