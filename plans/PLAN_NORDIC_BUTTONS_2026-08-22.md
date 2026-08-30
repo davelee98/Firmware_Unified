@@ -1,6 +1,11 @@
-# Port the ESP32 button behaviour to nordic-zephyr
+# OBSOLETE — Port the ESP32 button behaviour to nordic-zephyr
 
-**Status:** proposed, 2026-08-22. Successor to
+**Status:** obsolete, 2026-08-30. Do not execute this plan. It is retained as reference only and
+is replaced by
+[PLAN_NORDIC_BUTTON_INTEGRATION_2026-08-30.md](PLAN_NORDIC_BUTTON_INTEGRATION_2026-08-30.md),
+which was derived afresh from the current ESP32 reference and current target integration surfaces.
+
+Originally proposed 2026-08-22. Successor to
 [PLAN_DEDUP_OUTSTANDING_2026-08-22.md](PLAN_DEDUP_OUTSTANDING_2026-08-22.md) D10, which recorded
 the defect and chose the honest half of the fix (delete the flag that did nothing). This plan is
 the other half: make the missed press impossible rather than documented.

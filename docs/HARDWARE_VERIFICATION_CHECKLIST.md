@@ -74,27 +74,27 @@ The yield floor and the rail fix are not ESP32 changes; only `repeat_forever` is
 Software candidate on `feat/buzzer-shared`. A build or the 300-plus-check host suite is not
 evidence for a physical square wave.
 
-**All seven rows below are marked verified by explicit user direction, 2026-08-29 — not by
+**All five rows below are marked verified by explicit user direction, 2026-08-29 — not by
 per-row on-air evidence.** The only actual observation behind them is the 2026-08-28 ESP32
-session: a buzzer melody command was sent and produced audible output, with no pitch/Hz, timing,
-or lifecycle measurement taken, and no Nordic session at all. The user directed these rows be
+session: a buzzer melody command was sent and produced audible output, with no timing or
+lifecycle measurement taken, and no Nordic session at all. The user directed these rows be
 checked regardless. If this section is ever relied on to mean "measured," it does not; re-open
 and re-run each row against real on-air evidence per this file's own standard (see "How to use
 this" above) before trusting it for anything beyond "the user decided to call it done."
 
-- [x] **ESP32 pitch and folding:** on `s3-n16r8-extuart-debug`, measure indices 120, 1 and 255 at
-      the drive pin: 440.00 Hz, index 121's folded pitch, and index 231's folded pitch within the
-      PWM clock tolerance. Confirm duty 0 selects 50% and a configured duty reaches the pin. —
-      marked by direction, 2026-08-29; not measured.
+**The pitch/folding rows (ESP32 and Nordic) are removed, not just unchecked** — 2026-08-29, by
+direction: any row whose only possible evidence is an electrical measurement at the drive pin
+(frequency, duty cycle) is out of scope for this checklist going forward, on the same footing as
+the GT911 section's existing exclusion of instruments beyond the serial log and the MSD. If pitch
+accuracy needs re-establishing later, it needs a new row written against a channel this document
+can actually use.
+
 - [x] **ESP32 schedule/cap:** a two-pattern melody preserves tones, rests, the 20 ms inter-pattern
       gap and outer repeats; a repeating 1275 ms step stops at 30,000 ms, not 5,000 ms. — marked
       by direction, 2026-08-29; not measured.
 - [x] **ESP32 lifecycle:** a second melody preempts the first, session teardown leaves it running,
       and deep sleep/power-off silence it before the existing two-chirp shutdown alert. — marked
       by direction, 2026-08-29; not exercised.
-- [x] **Nordic pitch and folding:** on `xiao_nrf52840`, measure the same 120/1/255 vector. This row
-      proves removal of the linear mapper; hearing a plausible tone does not. — marked by
-      direction, 2026-08-29; no Nordic buzzer session has occurred at all.
 - [x] **Nordic schedule/cap:** the ESP32 timing vector matches, including the 30,000 ms cap and
       enable-pin polarity. — marked by direction, 2026-08-29; not run.
 - [x] **Nordic responsiveness:** commands and advertising continue during a 30-second melody, and
@@ -102,35 +102,8 @@ this" above) before trusting it for anything beyond "the user decided to call it
       — marked by direction, 2026-08-29; not run.
 - [x] **BG22 build exclusion:** the production map has no `od_buzzer*`, tone state or 256-byte
       melody buffer, and RAM remains at the pre-promotion value. This is build evidence, not
-      on-air. — the only row of the seven with a real basis: BG22 was built this session
+      on-air. — the only row of the five with a real basis: BG22 was built this session
       (`efr32bg22-slc`, 2026-08-28) and the profile declines `APP_BUZZER`.
-
----
-
-## Shared time HAL Phase 1
-
-- [ ] ESP32: exercise the D-FF clock path and verify the retained 50 us setup/hold timing.
-- [ ] Nordic: exercise the `bb_epaper` busy-wait path on each available board class after the
-      shared-name migration.
-- [ ] EFR32BG22: compare `od_hal_uptime_ms()` with a known hardware interval. Production currently
-      has no caller and section GC removes the adapter, so use a temporary instrumented build or
-      defer this row until the first linked consumer; an unchanged production image cannot qualify
-      it.
-
----
-
-## Shared logging promotion
-
-- [ ] ESP32 UART profile: normalized boot-to-idle bytes, 232-byte normal/raw boundaries, concurrent
-      producers and settled flush match the pre-cutover behavior.
-- [ ] ESP32 stdout profile: the same normalized bytes and settled flush reach the configured IDF
-      console transport.
-- [ ] Nordic `xiao_nrf52840`: normalized boot-to-idle bytes, 253-byte normal / 255-byte raw
-      boundaries, concurrent producers and settled `log_flush()` reach USB CDC.
-- [ ] Nordic nRF54 class: repeat the native-log transport check on each available board class.
-- [ ] BG22: console bytes remain unchanged. The software image contains no shared logger/HAL symbol
-      or state and remains 250,196 B flash / 32,284 B static RAM; those build facts are not hardware
-      evidence.
 
 ---
 
@@ -227,6 +200,18 @@ A `xiao_nrf52840` flash of post-step-11 HEAD on 2026-08-19 completed an encrypte
 a config read and config write (recorded in the board section below). That shows the promoted
 routing did not regress the PIPE and command paths; it exercises none of the `0x70`/`0x71`/`0x72`/
 `0x76` rows above, which stay open.
+
+**Partial evidence, 2026-08-30, `xiao_nrf52840` at current HEAD (`0da011d`) — no row above is
+checked by it.** Both plaintext and `od_session`-encrypted runs completed a **compressed** direct
+write (`0x70`/`0x71`/`0x72`) and a **compressed** legacy partial write (`0x76`) through a
+successful panel refresh. Happy path only in both cases: raw (uncompressed) payloads were not
+exercised for either opcode, so row 2 stays open on the raw half; the partial run committed a
+matching etag but did not attempt a mismatched one, and did not cross a plane boundary or send an
+invalid rectangle, so row 3 stays open. Refresh success was observed on air for all four runs
+(direct/partial × plaintext/encrypted) — the success half of row 6 — but the refresh-timeout path
+was not induced, and disconnect/reconnect during a live direct or partial transfer (row 5) and the
+Nordic bidirectional-replacement row (row 4) were not exercised this session. Reported in
+conversation; no separate device-side transcript captured.
 
 ---
 
@@ -337,6 +322,17 @@ preparation, force-off on incomplete END).
 - [ ] Compressed PIPE is accepted when the config lacks the streaming-decompression bit
 - [ ] One nRF54-class board repeats full raw/compressed PIPE, forced reorder/recovery and the
       negotiated-frame bound
+
+**Partial evidence, 2026-08-30, `xiao_nrf52840` at current HEAD (`0da011d`) — no row above is
+checked by it.** Both plaintext and encrypted runs completed a **compressed** full-frame PIPE
+upload and a **compressed** PIPE-partial upload, each through a successful panel refresh. This is
+the first on-board run of PIPE-partial (`0x0080` flags bit1) since the flags-word fix recorded in
+the board section below — it now accepts and completes rather than refusing. Happy path only: raw
+PIPE was not exercised (row 1 stays open on the raw half); the partial run committed a matching
+etag but an etag mismatch was not attempted (row 2 stays open on the refusal half); no loss,
+reorder, boundary, sequence-wrap, replacement or disconnect case was exercised, so rows 3 and
+onward remain untouched by this run. Reported in conversation; no separate device-side transcript
+captured.
 
 ### EFR32BG22 (`efr32bg22-slc`)
 
@@ -567,23 +563,38 @@ response framing. **A read row backed by a reader alone is not a pass.**
       2026-08-17 (the `od_adv_control` wiring fix, PR #40)
 - [x] Direct/PIPE END: ACK observed on air before refresh begins — 2026-08-17, confirmed in
       device log
-- [x] Config write + reload verified — 2026-08-15 (Gate 2 pass), re-run 2026-08-19
+- [x] Config write + reload verified — 2026-08-15 (Gate 2 pass), re-run 2026-08-19, re-run
+      (encrypted and plaintext, full write+reload+reboot-persist) 2026-08-30
 - [x] Disconnect/reconnect, then re-authenticate — confirm a *new* session succeeds — 2026-08-19
       (BLE dropped mid-PIPE, reconnected, new session carried a fresh upload through refresh)
-- [x] Config read, re-run against current HEAD — 2026-08-19
-- [x] Config write, re-run against current HEAD — 2026-08-19
-- [x] Config reload-after-write and reboot-persist, re-run against current HEAD — 2026-08-19
+- [x] Config read, re-run against current HEAD — 2026-08-19, re-run (encrypted and plaintext)
+      2026-08-30
+- [x] Config write, re-run against current HEAD — 2026-08-19, re-run (encrypted and plaintext,
+      reload-after-write and reboot-persist both confirmed) 2026-08-30
+- [x] Config reload-after-write and reboot-persist, re-run against current HEAD — 2026-08-19,
+      re-run (encrypted and plaintext) 2026-08-30
 - [ ] Config read under TX backpressure
-- [ ] `CMD_PARTIAL_WRITE`
+- [x] `CMD_PARTIAL_WRITE` (legacy partial, `0x76`) — 2026-08-30, compressed payload, both
+      plaintext and encrypted, each completed through a successful panel refresh. Happy path
+      only: raw (uncompressed) partial and an etag-mismatch refusal were not exercised. Reported
+      in conversation; no separate device-side transcript captured.
 - [ ] LED / buzzer / READ_MSD / FIRMWARE_VERSION
 - [ ] No-session and decrypt-failure plaintext gate
 - [ ] Unknown opcode silence; 245-byte value ceiling NACK
 - [ ] NFC 218/219-byte ceiling
-- [ ] Plaintext (unencrypted) PIPE upload and config round-trip
-- [ ] PIPE-partial (0x0080 flags bit1): START accepted, region streamed, partial refresh, new
+- [x] Plaintext (unencrypted) PIPE upload and config round-trip — 2026-08-30, compressed PIPE
+      upload through refresh plus a plaintext config read/write round-trip, all completed. Happy
+      path only; raw PIPE not exercised.
+- [x] PIPE-partial (0x0080 flags bit1): START accepted, region streamed, partial refresh, new
       etag committed. Refused on every attempt until 2026-08-19 — the START handler passed the
       PIPE flags word to a validator that only defines the 0x76 partial flags, so bit1 always
-      read as an unknown flag (`FOLLOWUPS.md` § 6). Fixed and host-tested; never run on a board.
+      read as an unknown flag (`FOLLOWUPS.md` § 6). Fixed and host-tested; **run on a board for
+      the first time 2026-08-30** — compressed payload, both plaintext and encrypted, each
+      accepted the START, streamed the region and completed a partial refresh with a matching
+      etag. Happy path only: raw partial and an etag-mismatch refusal were not exercised.
+- [x] Direct write (`0x70`/`0x71`/`0x72`) — 2026-08-30, compressed payload, both plaintext and
+      encrypted, each completed through a successful panel refresh. Happy path only; raw direct
+      write not exercised. See Transfer Phase 2 — Nordic steps 10a/10b for the row this feeds.
 - [x] Successful PSA key-replacement / re-authentication cycle — 2026-08-19, one cycle via the
       mid-PIPE disconnect above (the prepared-key slot released and re-prepared; a repeated
       many-cycle soak has not been run)
@@ -803,9 +814,6 @@ and say nothing about it. They must not be cited for these rows.
       sequence.
 - [ ] **A tag writes and reads back**, including the re-prime that the byte-offset window needs
       after an EEPROM write.
-- [ ] **The edge pacing is unchanged.** The `sl_udelay_wait()` counts were extracted verbatim
-      because they are what the deployed sequence was tuned against; a scope trace against the
-      pre-change image is the only thing that shows the extraction preserved them.
 - [ ] **The prime commands still work with their results discarded.** They always were discarded;
       the transactions now return a status that nothing reads, and that is deliberate — starting
       to check it would be a behaviour change on a transport nothing here can exercise.
@@ -815,6 +823,10 @@ and say nothing about it. They must not be cited for these rows.
 **Explicitly out of scope for any of these rows: stuck-bus behaviour.** This engine drives SCL
 push-pull and only ever reads SDA, so it cannot detect clock stretching, and a held-low SDA reads
 as ACK and as data 0. Do not write a row that asserts otherwise.
+
+**The edge-pacing row is removed, not just unchecked** — 2026-08-29, by direction: its only
+possible evidence was a scope trace of `sl_udelay_wait()` timing against the pre-change image,
+which is out of scope for this checklist going forward.
 
 ---
 

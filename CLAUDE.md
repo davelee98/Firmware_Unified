@@ -53,508 +53,69 @@ looks arbitrary and is not); delete the story.
 
 ## Status
 
-- **Two broadly HARDWARE-VERIFIED targets, plus scoped Phase 1 clearance on every target family.**
-  `targets/esp32-idf/` — 11 board configurations build, with
-  hardware verification on an ESP32-S3. And
-  `targets/nordic-zephyr/` **as of 2026-08-14, extended 2026-08-15, on the `xiao_nrf52840` board
-  only**: image upload, config write + reload and host-side MSD decode, then MIGRATION.md's full
-  Gate 2 including the encrypted/authenticated path, all exercised on a flashed device, and
-  re-confirmed 2026-08-19 at post-Phase-2-step-11 HEAD (encrypted PIPE upload, config read,
-  config write with reload and reboot-persist, plus interrupted-transfer recovery after a
-  mid-PIPE BLE disconnect). Transfer
-  Phase 1's pump matrix was marked cleared on 2026-08-18 for ESP32 tinfl/portable profiles, the
-  nRF54 class, `xiao_nrf52840` and BG22. The broader nRF54-board and BG22 migration matrices remain
-  open; scoped pump clearance is not a complete target Gate 2 pass.
-- **THERE IS NO CI. `tools/check.sh` (repo root) is every gate this repo has, and nothing runs
-  it but you.** Boundary greps, the C11 ownership ratchets, the host suite under gcc + clang, the
-  same suite under ASan/UBSan, the pre-auth fuzz targets, the py-opendisplay wire corpus, and the
-  shim ratchet;
-  `--targets` adds all three target families (ESP32 boards + sdkconfig baseline, all three Nordic
-  boards, and the BG22 headless build) and is required before merge. **A SKIP IS NOT A PASS** — missing
-  clang or ESP-IDF skips rather than fails, so read the summary, which reprints skips and exits
-  2 when there were any.
-- Paths in this bullet are relative to `targets/esp32-idf/`. `./build.sh` there builds every board
-  fragment (it sources ESP-IDF itself; never on `PATH`). `tools/run_host_tests.sh` runs host tests
-  — or drive them directly, `cmake -S tests/host -B <dir> && cmake --build <dir> && ctest
-  --test-dir <dir>`, which is the repo-root path and needs no ESP-IDF.
-  `tools/sdkconfig_baseline.sh` is a gate a change must not break.
-- **`./build-release.sh` (repo root) is the actual "build everything" entry point** — it is not
-  a reimplementation, just a driver: for each target it `cd`s into `targets/<dir>/` and runs that
-  target's own front door (`esp32-idf`: `./build.sh`; `nordic-zephyr`: `./build.sh --all`;
-  `efr32bg22-slc`: `./build-and-flash.sh --no-flash`), writing artefacts + a per-target
-  `release/MANIFEST-<target>.txt` plus one top-level `release/MANIFEST.txt` summary and a log per
-  target under `release/logs/`. `./build-release.sh nordic esp32` builds a subset,
-  `./build-release.sh --list` prints the target/directory/command table, and every target still
-  runs even if an earlier one fails (nonzero exit iff any did) — so a release directory is never
-  silently left with stale artefacts from a target that didn't rerun. It does **not** activate any
-  toolchain itself (none of the three is on `PATH`); export what each target's own script expects
-  (e.g. `NCS_ROOT` for nordic-zephyr, per docs/TOOLCHAINS.md) before calling it.
-- **`shared/` is no longer empty** —
-  `core/od_{adv_control,advert,buzzer,cmd,color,config,config_asm,config_read,config_tlv,core,dispatch,gate,led,log,nfc,pipe,reply,rxq,session,txq,watchdog,xfer,xfer_direct,xfer_partial,zlib_inflate,zlib_pump}.c`
-  listed in `shared/sources.cmake` (never globbed) in per-HAL tiers, plus the two all-inline
-  headers `od_span.h` and `od_nonce_window.h` and pure seam headers including `od_cmd_app.h`,
-  `od_session_app.h`, `od_inflate_app.h`, `od_xfer_app.h` and `od_nfc_app.h`, which correctly have no
-  entry there. Consumers:
-  host tests and `esp32-idf` take the aggregate; `nordic-zephyr` takes PURE + HAL_CRYPTO +
-  HAL_RADIO + HAL_WDT + HAL_LOG + APP_SESSION + APP_RXQ + APP_INFLATE + APP_XFER + APP_NFC +
-  APP_LED + APP_BUZZER;
-  `efr32bg22-slc` takes PURE + HAL_CRYPTO + HAL_RADIO + HAL_LOG + APP_SESSION + APP_INFLATE +
-  APP_XFER + APP_NFC + APP_LED and deliberately compiles HAL_LOG capability-off while declining
-  APP_RXQ, APP_BUZZER, HAL_ADV and HAL_WDT. **APP_NFC is not optional for a consumer that takes `od_core.c`**:
-  `od_core_reset()` names `od_nfc_reset()`, whatever the capability setting. APP tiers are named for a **seam** rather than a HAL because they need a target function
-  rather than a driver.
-- **THE WHOLE COMMAND PATH IS SHARED ON BOTH TARGETS.** (C8 2026-08-15, C10 2026-08-15,
-  C11 2026-08-16). **NOW HARDWARE-VERIFIED on `esp32-idf`** (`s3-n16r8-extuart-debug`,
-  2026-08-17): PIPE upload, `CMD_PARTIAL_WRITE` (0x76), config read, and config write
-  (write + reload-after-write confirmed) all completed, each run twice — once plaintext,
-  once under `od_session` encryption. **Nordic verified too**
-  (`xiao_nrf52840`, PROFILE=debug, 2026-08-17, extended 2026-08-19 at post-Phase-2-step-11 HEAD):
-  an encrypted PIPE upload completed with the panel displaying the image correctly, and config
-  read and config write both completed, the write reloading in place and persisting across a
-  reboot. A BLE disconnect mid-PIPE was also survived: the
-  reconnected client re-authenticated and pushed a fresh upload through refresh, so teardown
-  ordering, the disconnect reset path and one PSA key-replacement cycle are exercised.
-  `CMD_PARTIAL_WRITE` has not yet been run through this shared stack on Nordic, and plaintext
-  PIPE was not separately confirmed there. `od_txq` is egress (capacity a counter,
-  ownership a generation-tagged token), `od_reply` chooses seal-or-plain **at the call site**
-  instead of inferring it from response bytes, `od_gate` maps every `od_session` result to a wire
-  action, `od_dispatch` owns the ordering AND the opcode map, `od_config_read` makes CONFIG_READ a
-  resumable producer, and `od_frame_policy()` is the outcome table as data.
-  **The ordering IS the design** (`od_dispatch.h`): reservation precedes the *gate*, which answers
-  `[00][cmd][FE]` and needs a slot of its own, and precedes *decrypt*, because decrypt advances the
-  replay window — so a frame deferred after decrypting is a replay when re-offered. That is why
-  `OD_FRAME_DEFERRED` is returnable only before decrypt.
-- **C11 (2026-08-16) retired the dispatch scaffolding. HARDWARE-VERIFIED on `esp32-idf`
-  (2026-08-17, see above); Nordic verified for the PIPE and config paths (see above), with
-  `CMD_PARTIAL_WRITE` still open there.**
-  - **The opcode map is `od_dispatch.c`'s, once.** Targets supply named per-command hooks
-    (`shared/core/od_cmd_app.h`); `od_cmd_dispatch()` is gone from both. Every target defines every
-    hook **still declared there**, so adding a target-owned opcode without every target stating its
-    answer is a **link error** — and that check immediately found a live C8 defect: **ESP32 had
-    answered nothing to `CMD_FIRMWARE_VERSION` since the cutover**, because the pre-gate arm moved
-    into shared dispatch and no target case was left behind it. That is the one command a client
-    must be able to issue before it can authenticate. A **promoted** opcode leaves that surface:
-    its row names the shared state machine directly and capability-off behaviour is compiled into
-    it, so the link-error enforcement covers the target-owned rows only.
-    `0x70`/`0x71`/`0x72`/`0x76` went that way in Phase 2 step 11, PIPE in Phase 3 and NFC in
-    Phase 4, so the link-error surface now covers the target-owned rows only.
-  - **One deliberate wire change:** Nordic `0x0052` now answers
-    `{FF,52,OD_ERR_POWER_OFF_UNSUPPORTED,00}` instead of falling silent. It has no power latch, and
-    silence left a host unable to tell that from firmware older than the command.
-  - **Nordic PIPE commands return truthful verdicts.** The three entry points were `void`, so the
-    caller had no choice but an unconditional `OD_CMD_OK` — a frame answered with a hard NACK was
-    reported as accepted, and the verdict is what decides whether a frame stamps the session's
-    activity clock. Silence is refusal too: DATA for a transfer that is not open draws nothing
-    (a `0x81` NACK is fatal to a client's upload loop) but accepts nothing either.
-  - **ESP32's frame context is an argument.** `g_commandOrigin`, `g_commandInstance`,
-    `commandOrigin()` and `imageDataWritten()` are gone; both ingresses build an `od_reply_t` and
-    call `od_dispatch_app_frame()`. `enum CommandOrigin` retired in favour of `od_origin_t`.
-  - **`opendisplay_pipe.c` is transport and pump only**, 1194 → 200 lines. Commands moved with
-    their state to `od_cmd_{device,config}.c` (direct and NFC have since been promoted to shared
-    machines and their files are gone), each exporting the one reset disconnect
-    cleanup calls.
-  - **Both session objects are private to their `od_session_app` translation unit**, and
-    `od_core_reset()` is the shared half of a teardown (producers — NFC assembly, transfer,
-  config-read — then egress, then session, in that order).
-    RX is deliberately not in it: its producer differs per target.
-  - **Three defects fixed**: Nordic's prepared-key slot no longer latches on a failed
-    `psa_destroy_key` (it dropped ownership only on success, so authentication was unavailable
-    until reboot); ESP32's RNG is `psa_generate_random()` and can report failure, where
-    `esp_fill_random()` returns `void`; a successful `od_session_seal()` stamps activity, and
-    nothing else does. A fourth surfaced during the work: a failing `hwinfo_get_device_id()` folded
-    an uninitialised stack buffer, so the wire-visible device identity could differ between boots.
-  - Ratcheted by symbol in [tools/check.sh](tools/check.sh): no second opcode map, no implicit
-    frame context, no exported session singleton, no byte-inferred sealing.
-- **`od_rxq` is the inbound ring on BOTH targets** (C9, 2026-08-15), replacing ESP32's
-  `command_queue.cpp` and Nordic's 40 × 509 B `k_msgq`. SPSC, peek/consume rather than a copying
-  pop, and every slot carries its writer's identity so stale frames self-discard at dispatch.
-  **Nordic's BLE value admission narrowed from 509 to 253 (ATT MTU 256)** and now refuses over-length writes at ATT
-  with 0x0D as ESP32 does, rather than dropping them silently at the queue — which also keeps the
-  245..253 dispatcher NACK reachable on both. RX storage stays 256 bytes wide. Measured on
-  `xiao_nrf54l15`: RAM 176712 → 154700 B
-  (**22.0 KB reclaimed**, more than the plan's ~12 KB estimate because narrowing the MTU shrinks
-  the ACL buffers too). Both queue depths are now derived from the target's own `PIPE_MAX_W + 2`
-  and asserted where both constants are visible. HARDWARE-VERIFIED on `esp32-idf`
-  (`s3-n16r8-extuart-debug`, 2026-08-17, via the PIPE/config run described above), and on
-  Nordic (`xiao_nrf52840`, 2026-08-17 for PIPE traffic, 2026-08-19 for config read and config
-  write) — `CMD_PARTIAL_WRITE` has not exercised this ring on Nordic yet.
-  **`od_session` is CALLED ON BOTH `esp32-idf` AND `nordic-zephyr`, AND NOW
-  HARDWARE-VERIFIED ON BOTH** (C5 2026-08-15, C6 2026-08-15; Gate 2 passed on the
-  nRF52840 2026-08-15; `esp32-idf`/`s3-n16r8-extuart-debug` 2026-08-17 — PIPE upload,
-  `CMD_PARTIAL_WRITE`, config read and config write all completed encrypted). It owns the
-  0x0050 handshake, the KDF, the replay window and the CCM
-  envelope in both directions; each target keeps only its clock, its device identity and its
-  logging. `esp32-idf/src/encryption.cpp` went 863 → 285 lines (the swap, plus
-  the CC310 arm and the crypto forwarders it orphaned) and `nordic-zephyr/src/opendisplay_pipe.c`
-  1320 → 1082; both `struct EncryptionSession`s are gone, and the session object went 632→112 B
-  and 640→112 B respectively.
-  **NATIVE PSA CCM IS PROVEN ON SILICON** (nRF52840, 2026-08-15) — `od_hal_crypto` (C1) replaced
-  Nordic's hand-rolled RFC 3610 with `psa_aead_*`, and the shortened-tag key policy
-  (`PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 12)`) accepts and authenticates real traffic.
-  That was the single likeliest first-flash failure and it is retired: plain `PSA_ALG_CCM` pins a
-  16-byte tag and would have failed every operation with `NOT_PERMITTED`.
-  **`esp32-idf` C5/C1/C8-C11 ARE NOW HARDWARE-VERIFIED** (2026-08-17, `s3-n16r8-extuart-debug`)
-  — C5's swap, C1's mbedTLS CCM arm, and the C8-C11 shared dispatch/txq/reply/gate/config_read
-  stack all ran real PIPE upload, `CMD_PARTIAL_WRITE`, config read and config write traffic,
-  plaintext and encrypted. **Nordic (`xiao_nrf52840`, 2026-08-17 and 2026-08-19) now carries
-  C8-C11 hardware-verified for the same paths bar one** — an encrypted PIPE upload completed
-  through the shared stack with the panel rendering correctly, and config read and config write
-  completed at post-Phase-2-step-11 HEAD (reload-after-write and reboot-persist included), and a
-  mid-PIPE disconnect was followed by a successful
-  re-authenticated upload — but `CMD_PARTIAL_WRITE` and a plaintext (unencrypted) run have not
-  been exercised there yet. Two things that only
-  hardware shows, and that neither run specifically exercised: the
-  `diff == 0` replay fix and the exact inner-length check are the two behaviour changes
-  (`DIVERGENCE_MATRIX` § 6.5-6.9) that can refuse a frame the old code accepted — this was a
-  clean-traffic run, not a malformed/replayed-frame regression pass.
-  **The `OD-S1` PIPE silence fix is UNPROVEN on either target** — though the stimulus for it now
-  exists: `targets/esp32-idf/tools/od-device-cli.py dispatch-gate` (C12.2) seals one `0x0081` frame
-  and writes the retained bytes twice, requires a fresh device-side `nonce_reason=3` report, and
-  uses a corrupted-tag control so that silence is falsifiable. Its helpers are host-tested; it has
-  never run on a board. The nRF52840 pass completed an
-  encrypted upload but did not deliberately induce loss or reordering, so the path that stays
-  quiet on a nonce-rejected `0x81` frame — instead of sending the NACK that kills the upload —
-  has never been exercised. It is not host-testable; forcing reorder on a board is the only way.
-  Nordic additionally caps NFC read tag data at 218 B (was 238) so a sealed response still fits a
-  BLE frame; that cap is also unexercised.
-  docs/OD_SESSION.md is the subsystem reference — wire shapes, the four derivations, the design
-  decisions, and the verification state in one place.
-  The one flaw the promotion could NOT fix is filed: `FOLLOWUPS.md` § 5, **bidirectional nonce
-  reuse** — both directions share one `session_id` and both counters start at 0, so the same
-  CCM nonce is used under one key each way. It needs a protocol revision, not a firmware change.
-  **`od_watchdog` is no longer a scaffold, and NOT YET HARDWARE-VERIFIED on either target.**
-  Both `esp32-idf` (`hal/od_hal_wdt.c`, over the IDF Task Watchdog) and `nordic-zephyr`
-  (`src/od_hal_wdt.c`, over the devicetree `watchdog0` + `gpregret2` nodes) implement
-  `od_hal_wdt.h` and call the policy through a per-target `od_watchdog_app` owner. Two things
-  to know before flashing: arming widens the ESP32 idle-task TWDT check from 60 s to
-  `OD_WDT_TIMEOUT_S` (300 s, the ~240 s panel-refresh bound), and on Nordic only `main()`
-  feeds — a wedge confined to the display work queue does not trip it.
-  **CALLED AND HARDWARE-VERIFIED on `esp32-idf` (2026-08-13):** `od_adv_control`, `od_advert`,
-  `od_config_asm`, `od_config_tlv`, `od_span` — a board flashed with the `od_advert` swap wrote
-  a config carrying an NFC packet and completed an encrypted image upload.
-  **CALLED AND HARDWARE-VERIFIED on `nordic-zephyr` (2026-08-14, `xiao_nrf52840`):** `od_advert`
-  and `od_config`. `struct od_config` is the parsed-config aggregate (the `struct GlobalConfig`
-  copies are gone), `od_config_parse()` is the whole of `loadGlobalConfig()`, and Nordic's
-  530-line packet switch, its own CRC-16 and its own size table went with it. Evidence from one
-  flashed board: image upload completes; a config write is re-parsed across a reboot; the host
-  decodes the MSD correctly, with battery and temperature right (the two fields `od_advert`
-  re-encodes, including its float-domain clamp) and button presses reaching the dynamic block
-  (so the `binary_inputs` packet survives the new parse and lands where the encoder reads it).
-  That upload only passed once BLE TX power was fixed — see `zephyr/CMakeLists.txt`
-  `OD_TX_POWER_DBM`, which also records why Zephyr's `BT_CTLR_TX_PWR_*` Kconfig is inert under
-  the SoftDevice Controller.
-  **CALLED, NOT YET HARDWARE-EXERCISED:** `od_advert` on `efr32bg22-slc` — with that, no open-coded MSD copy
-  is left on any target, and `tests/host/advert_test.c` holds the two encoders they shipped as the
-  differential reference (do not "update" those to match the encoder).
-  **C13 BROADER HARDWARE GATE OPEN on `efr32bg22-slc` (2026-08-17):** config parsing,
-  config assembly, session, PSA/CRYPTOACC CCM, egress and dispatch now use the shared path. The
-  NVM3 record and assembler overlay one 2,048-byte buffer while retaining the deployed 16-byte
-  record header. The headless image links at 249,796 B flash and 32,284 B in the size tool's
-  heap-inclusive data-plus-BSS summary (480 B main-RAM headroom). The map's elastic heap grows from
-  0x2958 to 0x2d58, proving a 1,024 B non-heap static-RAM reduction. The target-production Silabs
-  corpus runs the real BG22 command hooks against fake drivers and passes. A second production-source
-  fault suite covers persistence ordering/failure, event pressure/deadlines, DIRECT END completion,
-  and NFC limits with 232 assertions. Phase 1 compressed direct is cleared, but the rest of C13's
-  behavior is not hardware-qualified. The remaining
-  unpromoted protocol logic was **PIPE and NFC**, both since promoted (Phases 3 and 4). Direct and
-  legacy partial use shared
-  `od_xfer`; the PIPE-capable targets retain only the explicitly inventoried machinery that target
-  PIPE still calls until Phase 3.
-- **C14 canonical portable inflater (2026-08-18):** `shared/core/od_zlib_inflate.{c,h}` is the
-  only portable implementation. The former target-local/vendor copies, checksum helpers,
-  heap-window mode, obsolete headers, and placeholder compression directory are gone. The
-  source is in the PURE tier; every target receives it through `shared/sources.cmake`, while ESP32
-  Wi-Fi builds select tinfl through `od_inflate_app`. `tools/check.sh --targets` passed 16/0/0,
-  including all 11 ESP32 configurations, all three Nordic boards, and BG22. Its compressed-upload
-  qualification is recorded through the Transfer Phase 1 hardware clearance below.
-- **Transfer Phase 1 cleared (2026-08-18):** `od_zlib_pump` is the single
-  push/poll/finalization loop on all targets, with exact output accounting and a target-selected
-  backend behind `od_inflate_app.h`. Callers retain the only decompression scratch buffer (2,048 B
-  on the measured ESP32 tinfl profile, 256 B on Nordic/BG22), and link maps show one inflater
-  history object per image. The host pump suite covers split input/output, back-references,
-  truncation, checksum and size failures, reset, sink refusal and backend-count mismatch.
-  `tools/check.sh --targets` passed 17/0/0 in review; BG22 remains at 32,284 B static RAM with
-  480 B headroom. The project marked all six pump rows cleared in
-  `docs/HARDWARE_VERIFICATION_CHECKLIST.md` on 2026-08-18, unblocking the Phase 2 direct/partial
-  per-target cutovers. Each cutover retains its own mandatory hardware gate.
-- **Transfer Phase 2 software candidates exist on ESP32, Nordic and BG22 (2026-08-19); none is
-  hardware-qualified.** Dispatch routes `0x70`/`0x71`/`0x72`/`0x76` directly to shared `od_xfer`;
-  the four temporary target hooks are gone and their reservation budgets remain `1`/`2`/`2`/`1`.
-  ESP32 and Nordic retain explicitly ratcheted target machinery still required by PIPE; either
-  START displaces the other owner before the singleton pump can be reset or pushed. BG22 has no
-  PIPE, so its cutover deletes the entire target-local direct parser, inflater loop, counters and
-  reply construction. Its adapter retains the 256-byte scratch buffer, capability-off `0x76` reply
-  and aborting two-second TX drain/completion barrier. Barrier recovery powers the panel off,
-  resets transport/session state without recursively resetting the active transfer and closes only
-  the issuing connection tag. The BG22 image is 250,292 B flash and 32,284 B static RAM: 944 B less
-  flash than the dormant candidate with RAM unchanged and 480 B headroom. Per-target evidence rows
-  remain open in `docs/HARDWARE_VERIFICATION_CHECKLIST.md`; implementation by project direction is
-  not a pass. A `xiao_nrf52840` flash of this HEAD on 2026-08-19 completed an encrypted PIPE
-  upload plus config read and config write, so the promoted routing did not regress the PIPE and
-  command paths — it exercises none of the `0x70`/`0x71`/`0x72`/`0x76` rows, which stay open.
-- **Transfer Phase 3 shared PIPE software candidate (2026-08-20); not hardware-qualified.**
-  `shared/core/od_pipe.{c,h}` is the only `0x80`/`0x81`/`0x82` state machine. Dispatch routes the
-  three opcodes directly to it with budgets `1`/`3`/`3`; ESP32 and Nordic retain only panel/write
-  adapter operations, and BG22's capability-off build keeps the deployed `FF 80 04 00` START
-  refusal with silent unknown DATA/END and no reorder state. `od_xfer` owns PIPE accounting,
-  inflater use, hardware lifecycle and fatal state; `od_core_reset()` owns transfer teardown.
-  The host suite builds the production machine at W=32, W=16 and capability-off. Hardware rows
-  are itemized and remain open in `docs/HARDWARE_VERIFICATION_CHECKLIST.md`; implementation by
-  project direction is not a pass. The all-target software gate passes 32/0/0; BG22 remains
-  250,292 B flash / 32,284 B static RAM with 480 B headroom and retains no PIPE state symbol.
-  Post-implementation review restored donor-compatible raw full-frame trailing-byte truncation,
-  raw partial overflow refusal, per-transfer target preparation and ESP32 force-off on incomplete
-  PIPE END; cadence/SACK masks, multi-slot drain, sequence wrap, compressed full/partial admission
-  and substitution paths are pinned in the production-machine suite, and the DATA fuzzer drives
-  sequences of frames through both full and partial machines.
-- **Transfer Phase 4 — NFC promoted, and NOTHING ABOUT IT IS HARDWARE-QUALIFIED (2026-08-22).**
-  `shared/core/od_nfc.{c,h}` is the only `0x0083` machine. Dispatch names `od_nfc_frame` at budget
-  `1`, `od_cmd_app_nfc` is gone from `od_cmd_app.h`, and no target-side NFC handler, parser or
-  assembler symbol survives — the `od_nfc_app_*` adapters do, because they are the seam. Nordic and
-  BG22 keep NDEF encode/decode and tag I/O behind it; ESP32 builds the capability-off arm and its
-  images carry both entry points, no assembler and no seam reference (checked on all 11 board
-  configurations).
-  **THE HARDWARE GATES FOR STEPS 5 AND 6 WERE WAIVED BY PROJECT DIRECTION, NOT PASSED**, and the
-  waiver is recorded in the plan. **No board in this fleet has an NFC antenna or a TNB132M fitted**,
-  so every `0x0083` row in docs/HARDWARE_VERIFICATION_CHECKLIST.md is open release debt awaiting
-  hardware that does not exist here — a stronger form of open than Phases 1–3. No host coverage
-  qualifies one, and merged code is not evidence.
-  Four wire-visible changes, all in `docs/DIVERGENCE_MATRIX.md` § 10: the chunk assembler binds the
-  full `od_reply_t` again (both ports had dropped a check both donors have, so any connection could
-  commit another's assembly); the inline-write length bound is 32-bit everywhere, closing a ~65 KB
-  overrun reachable **unauthenticated** with security disabled; BG22 tests length before record
-  type, so an over-declared length answers `0x01` where it answered `0x03`; and a failed START/DATA
-  ACK now clears the assembler. Two differences were deliberately **not** normalised: the 218-byte
-  read cap both ports narrowed from the donors' 238, and the refuse-versus-truncate split above it,
-  which is a property of the record and the adapter together rather than of the target.
-  `CONFIG_NFC_T2T_NRFXLIB` is now set on all three Nordic boards. On nRF52840 the antenna pair
-  P0.09/P0.10 is **statically reserved** whenever NFCT is built: UICR `NFCPINS` latches the pads at
-  reset, so ownership cannot follow config, and no GPIO-owning image exists (docs/FOLLOWUPS.md
-  § 10). Cost: `xiao_ble` +7,660 B flash / +2,602 B RAM, `xiao_nrf54l15` +8,068 / +2,598, mostly
-  the tag library rather than the machine. BG22 lost 32 B of `heap_size` (11,504 → 11,472), inside
-  X3's 64 B ceiling — measured as heap because `data + bss` is constant there by construction.
-- **Transfer Phase 5 closed the plane (2026-08-22).** The transfer plane — pump, direct, partial,
-  PIPE, NFC — is shared in full, and no target owns wire parsing, byte accounting, chunk assembly,
-  SACK construction, etag policy or transfer ownership. The **deletion inventory came back empty**,
-  which is the result rather than an omission: each cutover deleted its own orphans in the same
-  commit, and X1 forbids inventing more.
-  `tools/check.sh`'s transitional ratchets are consolidated into a permanent set of six absence
-  rules — no second transfer parser, pump, reorder state or NFC assembler; no target-side response
-  literal for a promoted opcode; and no vendor header under `shared/` — replacing three per-target
-  checks that duplicated two rules between them and would have needed a fourth for a fourth target.
-  A seventh, every target teardown reaching `od_core_reset()`, is derived from `targets/*/` rather
-  than a fixed file list, so a new target cannot arrive without one.
-  **They fail closed**: several shared a `2>/dev/null || true` that made an unreadable tree
-  indistinguishable from a clean one, so grep's status is the proof now — 0 matched, 1 clean,
-  >1 unproven. The response-literal rule is grep-verified against identifiers that exist:
-  its first form named `RESP_DIRECT_WRITE_ACK` and two others that do not, and so guarded NFC alone
-  while reading as full coverage.
-  All 15 images were read rather than merely produced. That read is what shows `s_pipe` and
-  `s_reorder` are `od_pipe.c`'s own statics present wherever PIPE is enabled and absent on BG22,
-  which a source grep cannot distinguish from a target leftover.
-- **Shared time HAL software candidate (2026-08-19):** `shared/hal/od_hal_time.h` is the canonical
-  two-function ambient-clock/busy-wait seam. ESP32 keeps its unreconciled bounded millisecond sleep
-  in target-private `od_hal_sleep.h`; Nordic's `od_uptime_get_32`/`od_busy_wait` names are gone;
-  BG22 implements the seam with the SDK's 64-bit tick count and converts to milliseconds before
-  narrowing. Before sleeptimer initialization, or on another SDK conversion failure, that adapter
-  returns the boot-domain origin (`0`) rather than asserting or logging. Its production-source host
-  test crosses the underlying 32-bit tick rollover, pins the `uint32_t` millisecond wrap and checks
-  the pre-init result. **BG22 now has production callers** — `opendisplay_led.c` twice and, since
-  the boost seam, `opendisplay_ble.c` — so the "linker discards both functions, zero dormant
-  footprint" reading recorded here on 2026-08-19 no longer holds and must not be cited as evidence
-  of anything. `tools/check.sh --targets` passed 27/0/0 when this was written.
-  **Not hardware-qualified:** ESP32 D-FF timing, Nordic panel timing and an instrumented BG22
-  known-interval check remain open. Ten existing BG22 raw 32-bit tick conversions are deliberately
-  not swept into this promotion and are tracked in `docs/FOLLOWUPS.md` § 7.
-- **Shared logging software candidate (2026-08-19):** `shared/core/od_log.{c,h}` owns record
-  formatting, level filtering, raw output, the hex renderer and a real-zero dropped count.
-  ESP32 and Nordic implement the five-function complete-record seam in `od_hal_log.h`; every
-  emission crosses it once, with transport serialization left below the seam. Nordic preserves
-  `LOG_RAW` and passes its mutable stack record so Zephyr's deferred logger copies it before return;
-  a production-adapter host test clobbers the source stack and verifies the queued bytes survive.
-  ESP32 preserves its UART/stdout selection and moves bounded drain plus the 5 ms settlement into
-  the HAL. Target-local logger copies, ready/loop-task hooks, multipart writes, the logger mutex and
-  application drop accounting are gone. BG22 sets `OD_CAP_LOG=0`, implements no log HAL and links
-  no logger symbol or state; its image remains 250,196 B flash / 32,284 B static RAM. The host suite
-  is 48/48 and `tools/check.sh --targets` passes 29/0/0. **Not hardware-qualified:** normalized
-  ESP32/Nordic log captures, concurrent transport submission and the earlier time-HAL timing rows
-  remain open in `docs/HARDWARE_VERIFICATION_CHECKLIST.md`.
-- `targets/esp32-idf/hal/` implements `od_hal_{nvs,log,gpio,time,i2c,adc,panel,crypto}`;
-  `od_hal_crypto_random.c` is its own translation unit so a host test can compile the RNG arm
-  without mbedTLS.
-- **`shared/hal/od_hal_crypto.h` is the third shared HAL** (2026-08-15, with `od_hal_adv` and
-  `od_hal_wdt`), implemented on `esp32-idf` (mbedTLS), `nordic-zephyr` (native
-  `psa_aead_*`, which needed only `CONFIG_PSA_WANT_ALG_CCM=y` — the hand-rolled RFC 3610 both
-  Nordic targets carried existed because that Kconfig was never set, not because PSA lacked CCM),
-  and `efr32bg22-slc` (PSA shortened-tag CCM through the linked CRYPTOACC transparent driver).
-  Prepared **key slots**, not a key in the caller's struct: the targets clear a session with
-  `memset`, which would drop a live PSA handle and exhaust a finite pool. Four-valued status so a
-  tag mismatch and an engine fault stay distinguishable — the session's 3-strike policy depends on
-  it. **NOT YET HARDWARE-VERIFIED**, and that commit also deletes Nordic's soft CCM (preserved as
-  `tests/host/session_ccm_reference.inc`), so treat the CCM path as unproven until a board
-  authenticates and completes an encrypted upload.
+This section is a terse summary, not the record. Row-level hardware evidence — which board, which
+opcode, which date, plaintext vs encrypted, raw vs compressed, happy-path vs negative case — belongs
+solely in `docs/HARDWARE_VERIFICATION_CHECKLIST.md`; a bullet here should point at that file's
+section rather than restate its detail. If you're about to write more than one sentence of
+test-scope narrative in this file, it belongs in the checklist instead.
+
+- **Two broadly hardware-verified targets**: `esp32-idf` (11 board configs, verified on an
+  ESP32-S3) and `nordic-zephyr`'s `xiao_nrf52840` board. Everything else — other boards, other
+  opcodes, other subsystems — is scoped or open. `docs/HARDWARE_VERIFICATION_CHECKLIST.md` is the
+  itemized per-target/per-opcode record; update it alongside this section whenever a hardware
+  test runs, and read it (not this file) for row-level evidence.
+- **No CI.** `tools/check.sh` (repo root) is the only gate, and nothing runs it but you. Plain
+  invocation covers host tests, sanitizers, fuzz targets and the wire corpus; `--targets` adds all
+  three target families and is required before merge. A skip is not a pass — read the summary,
+  which exits 2 on any skip.
+- `targets/esp32-idf/build.sh` builds every board fragment (sources ESP-IDF itself; never on
+  `PATH`). `tools/run_host_tests.sh` runs host tests without ESP-IDF.
+- `./build-release.sh` (repo root) drives every target's own build entry point, writing
+  `release/MANIFEST-<target>.txt` + one top-level summary and a log per target. `--list` prints
+  the target table; every target still runs even if an earlier one fails. It does not activate
+  any toolchain — export what each target's script expects first (docs/TOOLCHAINS.md).
+- **`shared/{core,hal}` implements the whole protocol stack** — dispatch, config, transfer
+  (pump/direct/partial/PIPE/NFC), session/crypto, logging, watchdog, advertising, GT911 touch,
+  buzzer, config storage — composed per target in named tiers from `shared/sources.cmake` (never
+  globbed; that file is the ground truth for which target takes which tier). No promoted
+  subsystem has a target-side reimplementation — enforced by the absence ratchets in
+  `tools/check.sh` and "The one rule" below. Layering and the `od_hal_*` interface contracts are
+  `docs/SHARED_API_DESIGN.md`.
+- **Command/dispatch/session/rxq/watchdog/crypto path is shared on ESP32 and Nordic**, both
+  hardware-verified for PIPE upload, config read/write and (ESP32 only) `CMD_PARTIAL_WRITE`,
+  plaintext and encrypted — checklist has the per-opcode rows. `docs/OD_SESSION.md` is the
+  session subsystem reference (wire shapes, KDF, replay window, verification state). Two known
+  open risks worth carrying in your head rather than looking up each time: `FOLLOWUPS.md` § 5,
+  **bidirectional nonce reuse** (both directions share one session id and start both counters at
+  0 — needs a protocol revision, not a firmware fix), and the `OD-S1` PIPE-silence-on-replay path
+  is still unproven on any board (checklist § Nordic `xiao_nrf52840`).
+- **Transfer plane (pump, direct, partial, PIPE, NFC) is fully shared** across all three targets
+  — no target owns wire parsing, chunk assembly, SACK construction or transfer ownership; see
+  `docs/DIVERGENCE_MATRIX.md` §§ 3-5, 10 for the wire-visible decisions made while promoting it.
+  Per-phase/per-target hardware qualification is itemized and mostly open in the checklist
+  (§§ Transfer Phase 1-5). **NFC's hardware gates were waived by project direction**, not passed —
+  no board in this fleet has an NFC antenna or a TNB132M fitted, so every `0x0083` row is release
+  debt against hardware that doesn't exist here, a stronger form of "open" than the other phases.
+- **Shared HALs beyond crypto/session**: time (`od_hal_time`), logging (`od_hal_log`), watchdog,
+  advertising, GT911 touch, config storage (`od_config_store` + `od_hal_nvs`), buzzer. All
+  implemented on their respective target sets; hardware qualification is itemized per-HAL in the
+  checklist and mostly open — touch and buzzer especially, since **no board in this fleet has a
+  touch controller fitted** (checklist § Shared GT911 touch driver).
+- **Boot-screen key policy** (`od_boot_key_state`) fixed two separable defects — write-ups in
+  `docs/DIVERGENCE_MATRIX.md` §§ 26-27 — hardware-verified on ESP32-S3 only, and only for the
+  panel key-state lines (checklist § Boot-screen key policy has the exact coverage and gaps,
+  including the undecoded QR payload).
 - **Never hardware-verified:** the WiFi/LAN transport, and the F4/F7 correctness fixes.
-- **THE ARDUINO SHIM IS GONE** (2026-08-16). `targets/esp32-idf/compat/` went 22 files to 0 and
-  was deleted, along with its ratchet. `tools/check.sh`'s "esp32: arduino-free app code" replaces
-  it and checks CALLS, not includes — the ratchet's include-count reached 0 while three call
-  sites still reached shim primitives, because `delay(long)` and `millis()` are declared by an
-  OD-PATCH in `third_party/bb_epaper/src/bb_epaper.h`. Those two now live beside the vendored
-  library that wants each: `millis()` in `vendor/fastepd/fastepd_adapter.cpp`, `delay(long)` in
-  `panel/od_bbep_idf_io.inl`, both forwarding to `od_hal_time`. Record:
-  docs/ARCHIVE_esp32_arduino_shim.md.
-- **`targets/esp32-idf/vendor/fastepd/` is not a shim** and outlived `compat/`: the permanent
-  FastEPD adapter (Arduino `SPI` over IDF `spi_master`). It and both vendored panel libraries sit
-  off the include path, granted per-source in `main/CMakeLists.txt` — adding a consumer is an edit
-  there, not an `#include`.
-- **THE WIRE CORPUS IS NOW CHECKED FROM BOTH ENDS** (C12, 2026-08-16). `tests/vectors/dispatch.json`
-  was only ever replayed through py-opendisplay's public API, and `tests/host/replay_vectors.py:18`
-  says outright that firmware replies are "never checkable here" — so every `expect.reply` had gone
-  unchecked against firmware since the corpus was authored. `tests/host/corpus_runner.c` drives the
-  same file through the production `od_dispatch_frame()`. It found a wire regression on its first
-  run: C10 had silently replaced Nordic's oversize refusal `[FF][cmd_lo][FE]` — the bytes both
-  donors ship — with `[00][cmd][FF]`, which is *also* the decrypt-failure answer, so a host could
-  not tell the two apart. Restored, and pinned.
-  **THREE EXECUTABLES, and the difference is what a pass MEANS.** `od_cmd_app_*` is static
-  link-time composition, so hook sets cannot share a binary — and the answer to that is not a
-  runtime registry. `dispatch_corpus_portable` defines every routed entry point itself — except
-  `od_nfc_frame`, which it compiles from `shared/core/od_nfc.c` at `OD_CAP_NFC=0` so the
-  capability-off vector runs the shipped arm rather than a fixture agreeing with it — so it
-  proves shared dispatch routed and plumbed a vector and nothing below that. The Nordic and Silabs
-  binaries link their target's production command code for target-owned opcodes and the real shared
-  `od_xfer` for `0x70`/`0x71`/`0x72`/`0x76`, over target-specific driver and `od_xfer_app` fakes.
-  A production pass therefore means firmware policy emitted those bytes; the fake supplies
-  hardware, not policy.
-  A `historical-fixture` vector is excluded from the production profile by construction, and a
-  `target-production` vector that a capability predicate excludes there is a FAILURE — its claim
-  would otherwise stand with nothing behind it.
-  No fake ever sees an expected reply: the generated table is included by the runner and nothing
-  else, and profiles get semantic knobs instead. That is what stops the corpus becoming its own
-  oracle.
-- **Shared GT911 touch driver — SOFTWARE ONLY, AND NOTHING ABOUT IT IS HARDWARE-QUALIFIED
-  (2026-08-28).** `shared/core/od_touch_gt911.{c,h}` is the only GT911 implementation: the config
-  walk, the reset dance that SELECTS THE I2C ADDRESS (INT's level at RST's rising edge does it, so
-  the pad ordering is a contract and not style), the product-ID probe with its register byte-order
-  fallback, both read framings, the retry and failure-disable policy, the coordinate map, the
-  per-controller cadence and the MSD packing.
-  **A SCHEDULED MACHINE, NOT A POLL LOOP**: every entry point takes `now_ms` and returns the delay
-  until it next wants to run, which is what lets one driver serve a FreeRTOS loop, a Zephyr work
-  queue and a superloop. `OD_TOUCH_NO_CHANGE` is distinct from a delay so an unmatched resume
-  cannot postpone a controller that is actively polling — ESP32 force-resumes on EVERY teardown.
-  `od_touch_app.h` (APP_TOUCH) carries GPIO, the reset delays, the IRQ-mask clear and the
-  advertisement write, because there is no shared GPIO HAL and inventing one for a single driver
-  is a larger change than the promotion; cadence, the map, publish-on-change, the backoff and the
-  address cascade are policy and stay in `shared/`. The mask is cleared through the seam at the
-  instant the driver decides to read, not after the walk, so an edge arriving during the I2C is
-  not discarded. BG22 declines the tier and compiles the capability-off arm; Nordic is the first
-  consumer of `od_gpio.h`'s IRQ seam, and its unpaired refresh hook takes `reestablish()` rather
-  than the suspend-counted `resume()`, which would be a silent no-op there.
-  **THE MSD PACKING IS FROZEN BY CONVENTION, NOT BY THE HEADER.** The canonical header names the
-  5-byte block and bounds its offset; the layout inside it exists only in a donor comment that
-  py-opendisplay, the JavaScript decoder and the iOS app each implement independently, with no
-  version field, so a packing change breaks every deployed host silently.
-  `tests/host/touch_gt911_test.c` was written from that comment before the packing code existed
-  and agrees byte for byte with py-opendisplay's `AdvertisementData.touch_event()`, release
-  included (low nibble 6, last mapped coordinates retained).
-  **`int_pin_attached`'s sentinel is 0xFF and the static spells it out per element**: 0 is a legal
-  interrupt pin — ESP32 GPIO0, Nordic P0.00 — so a zeroed record makes init's detach-by-record
-  clear an ISR this driver never attached, and on ESP32 buttons are registered before touch. The
-  cold-start case in the host suite is what enforces the initializer; no assert can.
-  **ONLY ESP32 COULD EVER RUN THIS, AND NO BOARD IN THIS FLEET HAS A CONTROLLER FITTED.** Every
-  row in docs/HARDWARE_VERIFICATION_CHECKLIST.md § Shared GT911 touch driver is open; a build is not
-  evidence, and the Nordic rows are release debt against hardware that does not exist here.
-  Decisions recorded in `DIVERGENCE_MATRIX` §§ 20 and 22-25: documented register byte order tried
-  first (both donors probed the undocumented one first), the 100 ms default interval the header
-  calls 25 ms, INT re-attach after a wake that destroys the trigger, Nordic's refresh hook, and
-  the advertising boost's position. One deliberate departure from the authority: an over-count
-  status is CLEARED and skipped, because `Firmware` skips without clearing and wedges touch until
-  a lifecycle event (FOLLOWUPS § 17). **A config reload does not reconcile the runtime** — `init()`
-  is boot-only on both targets, so a controller moved to another `bus_id` keeps transacting on the
-  old one (FOLLOWUPS § 23).
-- **Boot-screen key policy — HARDWARE-VERIFIED on ESP32-S3 ONLY, for the panel lines only
-  (2026-08-28).** Two separable defects behind one symptom, and the write-ups are
-  `docs/DIVERGENCE_MATRIX.md` §§ 26 and 27.
-  **§ 26 is the donor's policy defect**: `../Firmware`'s boot screen decides the key line from the
-  zero-key test and the show flag alone and never reads `encryption_enabled`, so a stored-but-
-  disabled key rendered as `hidden` — claiming a protection the device does not enforce, and
-  publishing the key in the QR. `encryption_enabled == 0` beside a non-zero key is legal and
-  reachable: `od_config_apply_packet()` normalises only the other direction. The policy is now
-  `od_boot_key_state()` returning NOT_SET/HIDDEN/SHOWN, and **both renderers only spend the
-  answer** — the shared one and BG22's own, which had independently grown the identical defect.
-  **§ 27 is ESP32-only, was this repo's own, and is what the flashed board was actually showing.**
-  `securityConfig` is a *reference* to `globalConfig.security` (`targets/esp32-idf/src/main.h`);
-  `boot_screen.cpp` re-declared it as an **object**. That compiles AND LINKS — a variable's mangled
-  name carries no type — so the renderer read the reference's own 4-byte `.rodata` pointer word as
-  a 64-byte `struct SecurityConfig`, 60 bytes of it out of bounds. `encryption_enabled` came back
-  as a byte of an address (`0x9b`), the key as the rest of it, `flags` as `0x40`: **`HIDDEN` on
-  every boot, for every config, under both the old and the new policy**. That is why § 26's fix
-  did not move that panel and why the two are separable. Nordic and BG22 were never exposed — both
-  reach the config through `od_get_parsed_security()`, where the type is checked.
-  **Nothing in the toolchain or the host suite can see § 27** (the host suite never links
-  `main.h`), so it is ratcheted as "esp32: securityConfig declared only as a reference" in
-  `tools/check.sh` — an absence grep over `targets/`.
-  **Evidence, and its limits.** On `s3-n16r8-extuart-debug` (reTerminal E1001) all four key states
-  render correctly on the zone layout: off+key and off+no-key give `not set`, on+key+flag-clear
-  gives `hidden`, on+key+flag-set gives the hex. **The QR payload was not decoded** — which is the
-  only host-visible half of § 26 — and neither the small-screen hex path nor the FastEPD renderer
-  was exercised. Nordic and BG22 have no evidence at all; BG22's own renderer is the *only* place
-  its layout runs. Rows: `docs/HARDWARE_VERIFICATION_CHECKLIST.md` § Boot-screen key policy.
-  Upstream keeps § 26; reported as `FOLLOWUPS.md` § 24, which also records that
-  `OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN` is still documented as "(future feature)" in the canonical
-  header, all four bindings and the website's `config.yaml` while shipping on every target.
-- **Config-storage seam software candidate, not hardware-qualified (2026-08-24, `490415d`).**
-  `shared/core/od_config_store.c` is the only implementation of the stored record — `0xDEADBEEF`,
-  version 1, a 16-byte little-endian header, CRC-32 over the payload — over `shared/hal/od_hal_nvs.h`,
-  the new HAL_NVS tier, which owns the medium and nothing above it. **The seam reads at an OFFSET
-  because BG22 must**: `nvm3_readPartialData` serves header-then-payload with no staging buffer on a
-  part with ~10.5 KB of heap. Neither other medium can — the Zephyr settings NVS backend registers no
-  `csi_load_one` and `nvs_read()` starts at byte 0; ESP-IDF's `nvs_get_blob()` is whole-blob — so both
-  hold one record copy and serve offsets from it. Write takes ONE contiguous caller-owned workspace,
-  because BG22's single `nvm3_writeData` works only through its assembler/record union.
-  **`version` stays carried and unchecked on purpose**: all three write 1, none reads it back, and
-  enforcing it would strand a device on a record it has been using.
-  Two Nordic acceptance changes are real and recorded in `DIVERGENCE_MATRIX` § 17 — a physically
-  truncated record and one exceeding the caller's buffer are now refused — as is its
-  `clearStoredConfig()` reporting success on a failed delete.
-  **S1a is amended in the plan**: a cache is INVALIDATED on a failed mutation, never cleared, because
-  IDF writes the new blob before erasing the old and Zephyr deletes the name before the value, so no
-  adapter can know which record survived. Ratcheted by "config storage: one record framing" and
-  "config storage: one CRC-32"; `absent_or_fail` now excludes `build*`, having never excluded
-  Nordic's `build-xiao_ble`-style trees. BG22 250,148 → 250,552 B flash, static RAM unchanged at
-  32,284 B. **All rows in docs/HARDWARE_VERIFICATION_CHECKLIST.md § Config storage seam are open.**
-- **Shared buzzer runner software candidate, not hardware-qualified (2026-08-23).**
-  `shared/core/od_buzzer.c` is the only melody parser, owned-payload repeat machine, pitch mapper
-  and duration-cap policy. ESP32 retains LEDC and loop polling behind `od_buzzer_app`; Nordic
-  retains its software square-wave and step timers. The authority decisions are explicit:
-  exponential quarter-tone centi-Hz, octave-fold every nonzero index into 117..234, and the live
-  `Firmware` donor's 30,000 ms threshold instead of Nordic's 5,000 ms. `buzzer_test.c` checks all
-  256 indices against the host formula and pins the clamped 30-second schedule. BG22 declines
-  APP_BUZZER entirely; seven hardware rows remain open in the checklist.
-- **BG22 Gate 2 blockers fixed in software, none hardware-qualified (2026-08-22).** Three defects
-  from plans/PLAN_DEDUP_OUTSTANDING_2026-08-22.md § 8 step 1. **`0x0073` could wedge the BG22
-  superloop permanently from any connection** — its phase loop re-entered on every zero-delay
-  transition, and that target has no watchdog. ESP32 and Nordic already yielded at both the flash
-  and the group-closing edge; BG22 now does too, pinned by `tests/host/led_test.c` against the
-  shared production machine and `silabs_led_adapter_test.c` against the BG22 scheduler. **The
-  `group_repeats` sentinel was inverted on all three targets**: raw
-  `0xFE` ran forever and raw `0xFF` — the header's "forever" — stopped immediately. Both now mean
-  indefinite, which is what py-opendisplay encodes and decodes (`DIVERGENCE_MATRIX` § 11).
-  **`shared/profiles.cmake` is now the single definer of BG22's compile-time profile**: the host
-  archives were missing `OD_CONFIG_WITH_{TOUCH,BUZZER,WIFI,DATA_EXTENDED}=0`, so eight executables
-  — including the target-production corpus profile — compiled a `struct od_config` the firmware
-  does not have and passed anyway. Ratcheted by "silabs: one profile definer". And BG22 no longer
-  drives pad `0x00` when `pwr_pin` is unset, and settles the rail 800 ms on the off→on edge.
-  Hardware rows for all three targets: docs/HARDWARE_VERIFICATION_CHECKLIST.md § LED runner
-  and panel rail.
-- Live plan: plans/PLAN_TRANSFER_PHASE45_2026-08-20.md, **complete** — Phase 4 (NFC) and Phase 5
-  (cleanup and release evidence), steps 0–13 all landed. Its hardware rows are the outstanding
-  work, not its steps.
-  PLAN_TRANSFER_PROMOTION_2026-08-17.md is **superseded in full** by it and by
-  PLAN_TRANSFER_PHASE3_2026-08-20.md — read it only for the cross-phase wire freeze, architecture
-  rules and gates the successors inherit rather than restate. The transfer sequence in
-  PLAN_MIGRATION_ENDGAME_2026-08-17.md is superseded; docs/NEXT_STEPS.md is historical. Dispatch
-  C8–C12 landed. C13's Silabs implementation candidate is on `codex/silabs-c13`; hardware Gate 2
-  remains. **docs/HARDWARE_VERIFICATION_CHECKLIST.md is the itemized per-target hardware
-  checklist** — update it alongside this section whenever a hardware test runs.
+- Arduino shim fully removed from `esp32-idf` (docs/ARCHIVE_esp32_arduino_shim.md);
+  `targets/esp32-idf/vendor/fastepd/` is its permanent (non-shim) FastEPD adapter.
+- **The wire corpus (`tests/vectors/dispatch.json`) is checked from both ends**:
+  `tests/host/corpus_runner.c` drives it through firmware's own `od_dispatch_frame()` (previously
+  only py-opendisplay's side was checked), across three target-composition executables with
+  different semantic guarantees — see that file's header comments for what each profile does and
+  doesn't prove before trusting a pass.
+- Live plan: `plans/PLAN_TRANSFER_PHASE45_2026-08-20.md` — complete; its hardware rows are the
+  outstanding work, not its steps. Earlier transfer-sequence plans and `docs/NEXT_STEPS.md` are
+  superseded/historical.
 
 ## The one rule
 
