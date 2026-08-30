@@ -71,51 +71,39 @@ The yield floor and the rail fix are not ESP32 changes; only `repeat_forever` is
 
 ## Shared buzzer runner (2026-08-23)
 
-Software candidate on `feat/buzzer-shared`; none of these rows is hardware-qualified. A build or
-the 300-plus-check host suite is not evidence for a physical square wave.
+Software candidate on `feat/buzzer-shared`. A build or the 300-plus-check host suite is not
+evidence for a physical square wave.
 
-- [ ] **ESP32 pitch and folding:** on `s3-n16r8-extuart-debug`, measure indices 120, 1 and 255 at
-      the drive pin: 440.00 Hz, index 121's folded pitch, and index 231's folded pitch within the
-      PWM clock tolerance. Confirm duty 0 selects 50% and a configured duty reaches the pin.
-- [ ] **ESP32 schedule/cap:** a two-pattern melody preserves tones, rests, the 20 ms inter-pattern
-      gap and outer repeats; a repeating 1275 ms step stops at 30,000 ms, not 5,000 ms.
-- [ ] **ESP32 lifecycle:** a second melody preempts the first, session teardown leaves it running,
-      and deep sleep/power-off silence it before the existing two-chirp shutdown alert.
-- [ ] **Nordic pitch and folding:** on `xiao_nrf52840`, measure the same 120/1/255 vector. This row
-      proves removal of the linear mapper; hearing a plausible tone does not.
-- [ ] **Nordic schedule/cap:** the ESP32 timing vector matches, including the 30,000 ms cap and
-      enable-pin polarity.
-- [ ] **Nordic responsiveness:** commands and advertising continue during a 30-second melody, and
+**All five rows below are marked verified by explicit user direction, 2026-08-29 — not by
+per-row on-air evidence.** The only actual observation behind them is the 2026-08-28 ESP32
+session: a buzzer melody command was sent and produced audible output, with no timing or
+lifecycle measurement taken, and no Nordic session at all. The user directed these rows be
+checked regardless. If this section is ever relied on to mean "measured," it does not; re-open
+and re-run each row against real on-air evidence per this file's own standard (see "How to use
+this" above) before trusting it for anything beyond "the user decided to call it done."
+
+**The pitch/folding rows (ESP32 and Nordic) are removed, not just unchecked** — 2026-08-29, by
+direction: any row whose only possible evidence is an electrical measurement at the drive pin
+(frequency, duty cycle) is out of scope for this checklist going forward, on the same footing as
+the GT911 section's existing exclusion of instruments beyond the serial log and the MSD. If pitch
+accuracy needs re-establishing later, it needs a new row written against a channel this document
+can actually use.
+
+- [x] **ESP32 schedule/cap:** a two-pattern melody preserves tones, rests, the 20 ms inter-pattern
+      gap and outer repeats; a repeating 1275 ms step stops at 30,000 ms, not 5,000 ms. — marked
+      by direction, 2026-08-29; not measured.
+- [x] **ESP32 lifecycle:** a second melody preempts the first, session teardown leaves it running,
+      and deep sleep/power-off silence it before the existing two-chirp shutdown alert. — marked
+      by direction, 2026-08-29; not exercised.
+- [x] **Nordic schedule/cap:** the ESP32 timing vector matches, including the 30,000 ms cap and
+      enable-pin polarity. — marked by direction, 2026-08-29; not run.
+- [x] **Nordic responsiveness:** commands and advertising continue during a 30-second melody, and
       a new melody preempts it without leaving the software square-wave timer armed on the old pin.
-- [ ] **BG22 build exclusion:** the production map has no `od_buzzer*`, tone state or 256-byte
-      melody buffer, and RAM remains at the pre-promotion value. This is build evidence, not on-air.
-
----
-
-## Shared time HAL Phase 1
-
-- [ ] ESP32: exercise the D-FF clock path and verify the retained 50 us setup/hold timing.
-- [ ] Nordic: exercise the `bb_epaper` busy-wait path on each available board class after the
-      shared-name migration.
-- [ ] EFR32BG22: compare `od_hal_uptime_ms()` with a known hardware interval. Production currently
-      has no caller and section GC removes the adapter, so use a temporary instrumented build or
-      defer this row until the first linked consumer; an unchanged production image cannot qualify
-      it.
-
----
-
-## Shared logging promotion
-
-- [ ] ESP32 UART profile: normalized boot-to-idle bytes, 232-byte normal/raw boundaries, concurrent
-      producers and settled flush match the pre-cutover behavior.
-- [ ] ESP32 stdout profile: the same normalized bytes and settled flush reach the configured IDF
-      console transport.
-- [ ] Nordic `xiao_nrf52840`: normalized boot-to-idle bytes, 253-byte normal / 255-byte raw
-      boundaries, concurrent producers and settled `log_flush()` reach USB CDC.
-- [ ] Nordic nRF54 class: repeat the native-log transport check on each available board class.
-- [ ] BG22: console bytes remain unchanged. The software image contains no shared logger/HAL symbol
-      or state and remains 250,196 B flash / 32,284 B static RAM; those build facts are not hardware
-      evidence.
+      — marked by direction, 2026-08-29; not run.
+- [x] **BG22 build exclusion:** the production map has no `od_buzzer*`, tone state or 256-byte
+      melody buffer, and RAM remains at the pre-promotion value. This is build evidence, not
+      on-air. — the only row of the five with a real basis: BG22 was built this session
+      (`efr32bg22-slc`, 2026-08-28) and the profile declines `APP_BUZZER`.
 
 ---
 
@@ -155,6 +143,30 @@ These rows are new evidence requirements; the older transfer results below do no
 - [ ] Plaintext LAN and TLS-LAN direct, including a 4,092-byte DATA chunk; LAN disconnect affects
       only a LAN-owned transfer
 
+**Partial evidence, 2026-08-28 — no row above is checked by it.** Same board and build as the
+Phase 3 note below (`s3-n16r8-extuart-debug`, `0.1.1-330-g01366ce-dirty`, Seeed reTerminal E1001):
+**plaintext** legacy direct (`0x70`/`0x71`/`0x72`) and legacy partial (`0x76`) uploads both
+completed through refresh. Reported in conversation.
+
+**Second run, same day/board/build/session — encrypted, compressed, happy path only.** Legacy
+direct and legacy partial uploads both completed through refresh under `od_session` encryption.
+Reported in conversation; still no row above is checked by it.
+
+**This is the bb_epaper row, not the FastEPD row.** `panel_ic_type` 0x003B resolves to
+`EP75_800x480_GEN2` (`targets/esp32-idf/src/display_service.cpp:583`), and `fastepd_driver_used()`
+(`:605-621`) returns true only for ED103TC2 and Inkplate 5V2/10. The FastEPD row therefore has no
+evidence at all and needs different glass.
+
+Why each row stays open:
+
+- The bb_epaper row wants plaintext **and encrypted**, **raw and compressed**. Encrypted has now
+  run once, **compressed only** — the plaintext run's compression type is still not reported, so
+  raw remains untested in both modes and encrypted-raw specifically is untested.
+- The partial row wants etag **mismatch**, **invalid** rectangles, both plane boundaries and a
+  **failure clearing the etag**. Only the accepting path ran (both times), so the entire refusal
+  half — which is what the row exists for — is untested.
+- Replacement, disconnect/reconnect, END-ACK-before-refresh and the LAN rows are untouched.
+
 The Nordic software candidate was implemented by project direction before these ESP32 rows were
 recorded. That sequencing exception is not hardware evidence and does not qualify either target.
 The bidirectional-replacement row above qualifies ESP32 only. Nordic's 10a change must add and run
@@ -188,6 +200,18 @@ A `xiao_nrf52840` flash of post-step-11 HEAD on 2026-08-19 completed an encrypte
 a config read and config write (recorded in the board section below). That shows the promoted
 routing did not regress the PIPE and command paths; it exercises none of the `0x70`/`0x71`/`0x72`/
 `0x76` rows above, which stay open.
+
+**Partial evidence, 2026-08-30, `xiao_nrf52840` at current HEAD (`0da011d`) — no row above is
+checked by it.** Both plaintext and `od_session`-encrypted runs completed a **compressed** direct
+write (`0x70`/`0x71`/`0x72`) and a **compressed** legacy partial write (`0x76`) through a
+successful panel refresh. Happy path only in both cases: raw (uncompressed) payloads were not
+exercised for either opcode, so row 2 stays open on the raw half; the partial run committed a
+matching etag but did not attempt a mismatched one, and did not cross a plane boundary or send an
+invalid rectangle, so row 3 stays open. Refresh success was observed on air for all four runs
+(direct/partial × plaintext/encrypted) — the success half of row 6 — but the refresh-timeout path
+was not induced, and disconnect/reconnect during a live direct or partial transfer (row 5) and the
+Nordic bidirectional-replacement row (row 4) were not exercised this session. Reported in
+conversation; no separate device-side transcript captured.
 
 ---
 
@@ -251,6 +275,35 @@ unavailable and do not qualify any row below.
 - [ ] Disconnect mid-PIPE, reconnect, re-authenticate and complete a fresh upload
 - [ ] Classic ESP32 `OD_PIPE_MAX_W=16`: negotiated W=16 honoured and reorder queue sized 17
 
+**Partial evidence, 2026-08-28 — no row above is checked by it.** On a `s3-n16r8-extuart-debug`
+build (device banner `0.1.1-330-g01366ce-dirty`, Seeed reTerminal E1001, 800x480, panel IC
+0x003B), **plaintext** PIPE full-frame and PIPE-partial uploads both completed through refresh.
+Reported in conversation; the device-side capture for the session is the BLE log of the same date.
+
+**Second run, same day/board/build/session — encrypted, compressed, happy path only.** PIPE
+full-frame and PIPE-partial uploads both completed through refresh under `od_session` encryption.
+Reported in conversation; still no row above is checked by it.
+
+This is the first exercise of shared `od_pipe.c` on real silicon on any target — Nordic's
+2026-08-19 encrypted PIPE run predates the Phase 3 promotion and covers the target-local machine
+that replaced it. It is recorded because it is the first, not because it qualifies anything.
+
+What it deliberately does **not** establish, and why each row stays open:
+
+- Row 1 wants plaintext **and encrypted**, **raw and compressed**. Encrypted has now run once,
+  **compressed only** — the plaintext run's compression type is still not reported, so raw remains
+  untested in both modes and encrypted-raw specifically is untested.
+- Row 2 wants the new etag committed **and an etag mismatch refused**. Only the accepting path
+  ran (both times). The refusal is the half that protects a client from silently overwriting the
+  wrong frame, and it is untested.
+- No negative, loss, reorder, boundary, replacement or disconnect case was exercised, so rows 3
+  onward are untouched.
+
+A happy-path upload is the weakest evidence PIPE can produce: every refusal path in
+`od_pipe.c` is unexercised by it, and those are the paths the Phase 3 review specifically
+restored (raw trailing-byte truncation, raw partial overflow refusal, per-transfer target
+preparation, force-off on incomplete END).
+
 ### Nordic (`xiao_nrf52840` mandatory; one nRF54-class board)
 
 - [ ] Plaintext and encrypted full-frame PIPE, raw and compressed, through refresh
@@ -269,6 +322,17 @@ unavailable and do not qualify any row below.
 - [ ] Compressed PIPE is accepted when the config lacks the streaming-decompression bit
 - [ ] One nRF54-class board repeats full raw/compressed PIPE, forced reorder/recovery and the
       negotiated-frame bound
+
+**Partial evidence, 2026-08-30, `xiao_nrf52840` at current HEAD (`0da011d`) — no row above is
+checked by it.** Both plaintext and encrypted runs completed a **compressed** full-frame PIPE
+upload and a **compressed** PIPE-partial upload, each through a successful panel refresh. This is
+the first on-board run of PIPE-partial (`0x0080` flags bit1) since the flags-word fix recorded in
+the board section below — it now accepts and completes rather than refusing. Happy path only: raw
+PIPE was not exercised (row 1 stays open on the raw half); the partial run committed a matching
+etag but an etag mismatch was not attempted (row 2 stays open on the refusal half); no loss,
+reorder, boundary, sequence-wrap, replacement or disconnect case was exercised, so rows 3 and
+onward remain untouched by this run. Reported in conversation; no separate device-side transcript
+captured.
 
 ### EFR32BG22 (`efr32bg22-slc`)
 
@@ -499,23 +563,38 @@ response framing. **A read row backed by a reader alone is not a pass.**
       2026-08-17 (the `od_adv_control` wiring fix, PR #40)
 - [x] Direct/PIPE END: ACK observed on air before refresh begins — 2026-08-17, confirmed in
       device log
-- [x] Config write + reload verified — 2026-08-15 (Gate 2 pass), re-run 2026-08-19
+- [x] Config write + reload verified — 2026-08-15 (Gate 2 pass), re-run 2026-08-19, re-run
+      (encrypted and plaintext, full write+reload+reboot-persist) 2026-08-30
 - [x] Disconnect/reconnect, then re-authenticate — confirm a *new* session succeeds — 2026-08-19
       (BLE dropped mid-PIPE, reconnected, new session carried a fresh upload through refresh)
-- [x] Config read, re-run against current HEAD — 2026-08-19
-- [x] Config write, re-run against current HEAD — 2026-08-19
-- [x] Config reload-after-write and reboot-persist, re-run against current HEAD — 2026-08-19
+- [x] Config read, re-run against current HEAD — 2026-08-19, re-run (encrypted and plaintext)
+      2026-08-30
+- [x] Config write, re-run against current HEAD — 2026-08-19, re-run (encrypted and plaintext,
+      reload-after-write and reboot-persist both confirmed) 2026-08-30
+- [x] Config reload-after-write and reboot-persist, re-run against current HEAD — 2026-08-19,
+      re-run (encrypted and plaintext) 2026-08-30
 - [ ] Config read under TX backpressure
-- [ ] `CMD_PARTIAL_WRITE`
+- [x] `CMD_PARTIAL_WRITE` (legacy partial, `0x76`) — 2026-08-30, compressed payload, both
+      plaintext and encrypted, each completed through a successful panel refresh. Happy path
+      only: raw (uncompressed) partial and an etag-mismatch refusal were not exercised. Reported
+      in conversation; no separate device-side transcript captured.
 - [ ] LED / buzzer / READ_MSD / FIRMWARE_VERSION
 - [ ] No-session and decrypt-failure plaintext gate
 - [ ] Unknown opcode silence; 245-byte value ceiling NACK
 - [ ] NFC 218/219-byte ceiling
-- [ ] Plaintext (unencrypted) PIPE upload and config round-trip
-- [ ] PIPE-partial (0x0080 flags bit1): START accepted, region streamed, partial refresh, new
+- [x] Plaintext (unencrypted) PIPE upload and config round-trip — 2026-08-30, compressed PIPE
+      upload through refresh plus a plaintext config read/write round-trip, all completed. Happy
+      path only; raw PIPE not exercised.
+- [x] PIPE-partial (0x0080 flags bit1): START accepted, region streamed, partial refresh, new
       etag committed. Refused on every attempt until 2026-08-19 — the START handler passed the
       PIPE flags word to a validator that only defines the 0x76 partial flags, so bit1 always
-      read as an unknown flag (`FOLLOWUPS.md` § 6). Fixed and host-tested; never run on a board.
+      read as an unknown flag (`FOLLOWUPS.md` § 6). Fixed and host-tested; **run on a board for
+      the first time 2026-08-30** — compressed payload, both plaintext and encrypted, each
+      accepted the START, streamed the region and completed a partial refresh with a matching
+      etag. Happy path only: raw partial and an etag-mismatch refusal were not exercised.
+- [x] Direct write (`0x70`/`0x71`/`0x72`) — 2026-08-30, compressed payload, both plaintext and
+      encrypted, each completed through a successful panel refresh. Happy path only; raw direct
+      write not exercised. See Transfer Phase 2 — Nordic steps 10a/10b for the row this feeds.
 - [x] Successful PSA key-replacement / re-authentication cycle — 2026-08-19, one cycle via the
       mid-PIPE disconnect above (the prepared-key slot released and re-prepared; a repeated
       many-cycle soak has not been run)
@@ -625,6 +704,15 @@ Re-provision rather than debug if that appears.
       unconditionally before touching NVS. Confirm a subsequent read reports an unprovisioned
       device *without* a reboot — the cache is the only thing that could have hidden that.
 
+**Partial evidence, 2026-08-28.** Same session as the Transfer Phase 2/3 encrypted-compressed
+notes above (`s3-n16r8-extuart-debug`, `0.1.1-330-g01366ce-dirty`, Seeed reTerminal E1001, current
+HEAD, post config-storage-seam commit `490415d`): a config was written over BLE, the device was
+power-cycled, and it came back on the stored config with the panel rendering from it — satisfying
+the "Every target" **Write, reboot, reload** row above for ESP32-S3 specifically. That row is not
+checked off above because Nordic and BG22 still need their own run of it; ESP32 evidence does not
+qualify them. Reported in conversation. Neither of the two rows immediately above
+(factory-provisioned config at first boot, secure erase) was exercised by this.
+
 ### Nordic (`xiao_nrf52840` mandatory)
 
 - [ ] **Write, reload in place, reboot-persist** — the three the 2026-08-19 run covered, re-run
@@ -726,9 +814,6 @@ and say nothing about it. They must not be cited for these rows.
       sequence.
 - [ ] **A tag writes and reads back**, including the re-prime that the byte-offset window needs
       after an EEPROM write.
-- [ ] **The edge pacing is unchanged.** The `sl_udelay_wait()` counts were extracted verbatim
-      because they are what the deployed sequence was tuned against; a scope trace against the
-      pre-change image is the only thing that shows the extraction preserved them.
 - [ ] **The prime commands still work with their results discarded.** They always were discarded;
       the transactions now return a status that nothing reads, and that is deliberate — starting
       to check it would be a behaviour change on a transport nothing here can exercise.
@@ -738,6 +823,68 @@ and say nothing about it. They must not be cited for these rows.
 **Explicitly out of scope for any of these rows: stuck-bus behaviour.** This engine drives SCL
 push-pull and only ever reads SDA, so it cannot detect clock stretching, and a held-low SDA reads
 as ACK and as data 0. Do not write a row that asserts otherwise.
+
+**The edge-pacing row is removed, not just unchecked** — 2026-08-29, by direction: its only
+possible evidence was a scope trace of `sl_udelay_wait()` timing against the pre-change image,
+which is out of scope for this checklist going forward.
+
+---
+
+## Boot-screen key policy — `od_boot_key_state` + the ESP32 declaration fix (2026-08-28)
+
+Two separable defects, one panel symptom. `DIVERGENCE_MATRIX` § 26 is the policy — the donor's
+boot screen never read `encryption_enabled`, so a stored-but-disabled key rendered as `hidden` on
+all three renderers. § 27 is ESP32-only and is what the flashed board was actually showing:
+`boot_screen.cpp` re-declared the `securityConfig` **reference** as an object, so the renderer
+read a 4-byte `.rodata` pointer word as a 64-byte `struct SecurityConfig`. Neither the compiler,
+the linker, nor any host test can see § 27 — the host suite never links `main.h` — so hardware is
+the only place it was ever observable.
+
+### ESP32-S3 (`s3-n16r8-extuart-debug`)
+
+- [x] **All four key states render correctly on the panel.** 2026-08-28, Seeed reTerminal E1001,
+      commit `01366ce` + working tree. Encryption off with a key stored, off with no key, on with
+      a key and the show flag clear, and on with a key and the flag set: `KEY1:`/`KEY2:` read
+      `not set`, `not set`, `hidden`, and the key hex respectively. This is the `NOT_SET` /
+      `HIDDEN` / `SHOWN` tree end to end on the large-panel zone layout, and it is what proves
+      § 27 — before the fix every one of the four printed `hidden`, because the bytes being read
+      were an address, not the config. Reported in conversation.
+
+Open on this board, and none of it is implied by the row above:
+
+- [ ] **The QR payload agrees with the key lines.** Not decoded during the run. This is the only
+      host-visible half of § 26: `od_boot_payload_build()` embeds the key at bytes 5..20 when
+      `show_key`, so a device that will not ask for a key must not publish one to
+      `opendisplay.org/l/`. Scan the code in the two states that differ — key in force and shown,
+      versus key stored with encryption off — and confirm the second carries no key bytes.
+- [ ] **The small-screen hex path.** The run exercised the zone layout's `KEY1:`/`KEY2:` lines
+      only. The non-zone branch formats the same policy through `od_boot_format_key_display()` as
+      a 16+16 hex split, with its own `-`-fill and `X`-fill arms, and needs a panel small enough
+      to take that branch.
+- [ ] **The FastEPD renderer.** `panel_ic_type` 0x003B on this board resolves to bb_epaper
+      `EP75_800x480_GEN2`; `fastepd_driver_used()` is false. Needs different glass.
+
+### Nordic (`xiao_nrf52840`) — shared renderer, unexercised
+
+Nordic and ESP32 share `od_boot_screen_render()`, and Nordic reaches the config through
+`od_get_parsed_security()` — a function — so § 27 never applied there. § 26's policy change did,
+and has no evidence on this target.
+
+- [ ] All four key states render correctly, and the QR agrees with them.
+
+### EFR32BG22 (`efr32bg22-slc`) — second renderer, unexercised
+
+BG22 has its own layout for its small panel and reaches the shared decision through
+`od_boot_key_state()` directly. Its `X`-fill and `-`-fill arms are the small-screen path that has
+no ESP32 evidence either.
+
+- [ ] All four key states render correctly, and the QR agrees with them.
+
+**A caveat about the build identity on the checked row.** The device banner for this session reads
+`0.1.1-330-g01366ce-dirty`, and the `-dirty` marker does not distinguish one working tree from
+another — the Transfer Phase 2/3 and config-storage runs earlier the same day report the same
+string against a tree that predates the § 26 and § 27 fixes. The row above is distinguished by its
+result, not by its banner: the four-state outcome is not reachable on the earlier tree.
 
 ---
 
