@@ -9,15 +9,12 @@
 
 #include "od_rxq_app.h"
 
-#include "od_session.h"
-#include "od_session_app.h"
+#include "opendisplay_config_parser.h"
 #include "opendisplay_protocol.h"
 
 bool od_rxq_app_encryption_enabled(void)
 {
-  /* The canonical configured-key rule that shared dispatch and reply already apply, rather than
-   * a second reading of this target's parsed security config. */
-  return od_session_security_enabled(od_session_app_security());
+  return od_security_enabled_snapshot();
 }
 
 bool od_rxq_app_quiet(uint16_t cmd)

@@ -16,6 +16,9 @@ bool loadGlobalConfig(struct od_config *globalConfig);
 const struct SecurityConfig *od_get_parsed_security(void);
 bool od_security_key_set(void);
 
+/* Atomic target-local view for callbacks that run outside the loop thread. */
+bool od_security_enabled_snapshot(void);
+
 #ifdef __cplusplus
 }
 #endif
