@@ -1,5 +1,34 @@
 # Converge debug logging onto shared/core, ESP32 wording as default
 
+## 0. Status — Stages 0a-4 landed on main 2026-08-31
+
+Merged as PR #76 (`7d22fa8`). Everything below this section is the plan as written; the stage
+list in § 7 marks what is done, and Q1, Q2 and Q5 in § 9 are answered by what shipped.
+
+| Stage | Commit | What landed |
+|---|---|---|
+| 0a (L0a) | `286cc85` | Nordic emits one terminal `CR LF` per record |
+| 0 (L0) | `7b399b3` | `od_select_log_profile()`; no target consumes it yet, by design |
+| 3 (L2) | `54e0663` | Session auth/decrypt/seal wording in `od_session.c` |
+| 2 (L1) | `6cb49cb` | `od_rxq.c` logs its own arrivals and drops; `od_rxq_app_report()` gone |
+| 4 (L3) | `6776bbd` | One dropped-response line in `od_txq.c`, at INFO |
+
+Four defects found reviewing those commits landed with them: the host log stub sat inside the
+fake archives where archive-extraction order never pulled it, so a *fresh* configure failed to
+link five suites and the clang fuzz targets (`5a4677e`); the session throttle read a zero
+timestamp as "never logged" and kept its state at `OD_CAP_LOG=0` (`ad5d45d`); Nordic's terminator
+rewrite was skipped above its copy buffer, restoring the doubled CR (`709f0b6`); and the
+selector's duplicate guard missed the `-D` and bare valueless spellings, the latter defining the
+macro as `1` — `OD_LOG_WARN` — so it builds clean at a level nobody chose (`ba33c55`).
+
+Verified at merge: `tools/check.sh` 42 passed / 0 failed, and all three target families green
+(`--esp32` 10 fragments, `--nordic` three boards, `--silabs` BG22 headless). **The Nordic
+hardware capture in § 8 is still open** — L0a is proven by the modeled host adapter test only, so
+no board has yet shown the CDC ACM and RTT bytes.
+
+**Remaining: Stages 5-9** — transfer (L4), config (L5), NFC (L6, needs Q3), dispatch/gate/reply/
+cmd (L7), and the independent ESP32 `ESP_LOGx` cleanup. Q3 and Q4 are still open.
+
 ## 1. Objective and authority
 
 Maximize the fraction of debug/diagnostic logging that lives in `shared/core/*.c` (one
@@ -359,25 +388,25 @@ Stage 8.
 
 ## 7. Implementation stages
 
-0a. **Nordic newline correction (L0a).** Normalize only terminal `CR LF` to `LF` in the Nordic
+0a. **[LANDED `286cc85`] Nordic newline correction (L0a).** Normalize only terminal `CR LF` to `LF` in the Nordic
    HAL, submit through `LOG_PRINTK`, and land the modeled production-adapter regressions. Keep
    this as a distinct commit within the refactor; it does not wait for the NCS 3.4.0 migration.
-0. **Compile-time selector contract (L0).** Add the shared CMake selector and isolated configure-time
+0. **[LANDED `7b399b3`] Compile-time selector contract (L0).** Add the shared CMake selector and isolated configure-time
    fixtures proving valid INFO/DEBUG output plus rejection of empty, unknown and duplicate
    `OD_LOG_LEVEL` selections. Target integration belongs to the build-profile plan.
-1. **RXQ prerequisite (small, mechanical).** Add `shared/core/od_rxq_app.h` with the encryption-enabled
+1. **[LANDED with `6cb49cb`] RXQ prerequisite (small, mechanical).** Add `shared/core/od_rxq_app.h` with the encryption-enabled
    and quiet-frame predicates described in L1, implement it for ESP32 and Nordic, and add the host
    link/test fixtures before removing `od_rxq_app_report()`. Confirm host test CMake linkage covers any shared file
    gaining `od_log_*` calls — `tests/host/od_log_test_stub.c` already exists as the HAL_LOG test
    double (proven by the touch/pipe/sensor tests passing today); verify it's linked wherever
    `od_rxq.c`/`od_session.c`/etc. host tests build, and verify the `OD_CAP_LOG=0` path (BG22-style
    capability-off) still compiles clean for any file that gains calls.
-2. **`od_rxq_app_report` → `od_rxq.c`** (L1). Self-contained, four events, both target
+2. **[LANDED `6cb49cb`] `od_rxq_app_report` → `od_rxq.c`** (L1). Self-contained, four events, both target
    implementations are ~40-70 lines each and disposable once the quiet-frame predicate is
    extracted to its own tiny seam.
-3. **Session logging → `od_session.c`; retain BG22 callback** (L2). Self-contained, restores two missing Nordic
+3. **[LANDED `54e0663`] Session logging → `od_session.c`; retain BG22 callback** (L2). Self-contained, restores two missing Nordic
    auth cases for free, hoists the duplicated rate-limit throttle into one place.
-4. **`od_txq_app_dropped`** (L3) — after § 9 Q2 is answered.
+4. **[LANDED `6776bbd`] `od_txq_app_dropped`** (L3) — Q2 answered as ESP32 wording at Nordic's INFO level.
 5. **Transfer** (L4) — own audit pass, file-by-file over `display_service.cpp` and
    `opendisplay_display.cpp`/`opendisplay_pipe.c`, starting with the `imageWriteLog*` family as the
    first landed slice so Stage 5 has an early, demonstrable result rather than one giant patch.
@@ -420,19 +449,20 @@ sitting.
 
 ## 9. Explicit questions for the user
 
-- **Q1 (L1).** Keep the 32-byte hex dump + ERX/URX token on the RXQ arrival line for both targets
-  (ESP32's richer default), or drop it to match Nordic's terser one-liner? Note the stakes on both
-  sides of this choice precisely: Nordic's current arrival line is `od_log_info` (not `debug` as
-  an earlier draft of this plan's L1 table said), so it is visible in Nordic's default INFO build
-  today. Adopting ESP32's version changes both the *content* (adds the hex dump and ERX/URX token)
-  and the *default-build visibility* (ESP32's version is `debug`-gated, so it would stop appearing
-  in a normal-profile Nordic build and only show up under `OD_LOG_PROFILE=debug`). Nordic's
-  omission may be a deliberate transport-cost call (RTT/UART budget) rather than an oversight, and
-  losing default-build visibility for arrivals is a second, separate cost from the content change.
-- **Q2 (L3).** For `od_txq_app_dropped`: adopt ESP32's `warn` + origin/tag content wholesale, adopt
-  ESP32's wording at Nordic's `info` level (Nordic's rationale — this fires routinely on normal
-  disconnect — reads as correct), or keep the two targets structurally different because their
-  connection-identity models differ (origin/tag token vs. connection generation)?
+- ~~**Q1 (L1).** Keep the 32-byte hex dump + ERX/URX token on the RXQ arrival line for both
+  targets, or drop it to match Nordic's terser one-liner?~~ **Resolved: ESP32's richer line, for
+  both targets** (`6cb49cb`). Nordic gains the hex dump and the encrypted/plaintext token, and
+  loses default-build visibility of arrivals — the line is `debug`-gated, which is what
+  `OD_LOG_PROFILE=debug` exists for. The block sits behind
+  `#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG` rather than relying on `od_log_debug()`'s runtime
+  test, so an INFO build spends nothing on the 192-byte record, the hex formatting or the two
+  seam calls; the pre-convergence ESP32 code formatted the line and then discarded it.
+
+- ~~**Q2 (L3).** For `od_txq_app_dropped`: ESP32's `warn` wholesale, ESP32's wording at Nordic's
+  `info` level, or keep the two structurally different?~~ **Resolved: ESP32's wording at Nordic's
+  `info` level** (`6776bbd`). Nordic's rationale held — the line fires once per queued frame on
+  every normal disconnect mid-upload, so `warn` would be routine noise for an expected event.
+
 - **Q3 (L6).** NFC has no ESP32 behavior to default to. Restyle Nordic's existing wording into the
   established conventions (recommended), or hold NFC logging out of this pass entirely until an
   ESP32-side NFC capability exists to set the pattern?
@@ -464,10 +494,12 @@ sitting.
 
 ## 11. Definition of done
 
-- Nordic CDC ACM and RTT each emit exactly one terminal `CR LF` for a normal complete record;
+- **[PARTIAL]** Nordic CDC ACM and RTT each emit exactly one terminal `CR LF` for a normal complete record;
   `od_log_raw()` remains unterminated unless its caller supplies a terminator, and the ESPHome web
-  console no longer overwrites adjacent Nordic records.
-- `od_rxq.c` and `od_session.c` own their logging directly. The RXQ report seam
+  console no longer overwrites adjacent Nordic records. Held by the modeled host adapter test,
+  including a record larger than the adapter's own buffer; the § 8 hardware capture from CDC ACM
+  and RTT has not been taken, so nothing here rests on bytes a board emitted.
+- **[MET]** `od_rxq.c` and `od_session.c` own their logging directly. The RXQ report seam
   (`od_rxq_app_report()`) is gone from ESP32 and Nordic (or reduced to the minimal quiet-frame
   predicate noted in L1) — it has no BG22 consumer since BG22 doesn't take `APP_RXQ`. **The
   session report seam (`od_session_app_report()`) is deliberately not removed** — it stays
@@ -475,16 +507,19 @@ sitting.
   trivial empty ESP32/Nordic implementations, solely so BG22's existing `printf` diagnostics keep
   firing unchanged (see L2's BG22 note). Do not read this bullet as requiring the session seam
   gone — that would either strand BG22 without its auth/decrypt diagnostics or duplicate them.
-- `od_txq_app_dropped` converged per the § 9 Q2 answer, with the same BG22-callback-only caveat as
+- **[MET]** `od_txq_app_dropped` converged per the § 9 Q2 answer, with the same BG22-callback-only caveat as
   the session seam above (see L3's BG22 note).
-- NFC logging exists in `od_nfc.c` per the § 9 Q3 answer.
-- Transfer and config each have a landed first slice (at minimum: the `imageWriteLog*` family for
+- **[OPEN]** NFC logging exists in `od_nfc.c` per the § 9 Q3 answer.
+- **[OPEN]** Transfer and config each have a landed first slice (at minimum: the `imageWriteLog*` family for
   transfer) and a tracked checklist for the remainder — not required to be 100% complete in one
   pass given the size (151 + 180 call sites across the two subsystems).
-- `tools/check.sh --targets` passes on every stage landed.
-- The shared CMake selector returns exactly one correct INFO/DEBUG definition and rejects empty,
+- **[MET]** `tools/check.sh --targets` passes on every stage landed — all three families run
+  green at `7d22fa8`.
+- **[MET, one caveat]** The shared CMake selector returns exactly one correct INFO/DEBUG definition and rejects empty,
   unknown or duplicate selections in its isolated configure fixture. Target consumption is not
-  part of this plan's definition of done.
-- `shared/core/od_rxq.h`, `shared/sources.cmake`, and `od_session_app.h`/`.c` comments updated to
-  match the new ownership.
-- No change to any `docs/HARDWARE_VERIFICATION_CHECKLIST.md` row.
+  part of this plan's definition of done. Caveat: the fixture runs in cmake **script** mode, not
+  configure mode; the contract it proves is the one written here, but a `CMakeLists.txt`-scoped
+  regression would not be caught by it.
+- **[MET]** `shared/core/od_rxq.h`, `shared/sources.cmake`, and `od_session_app.h`/`.c` comments
+  updated to match the new ownership.
+- **[MET]** No change to any `docs/HARDWARE_VERIFICATION_CHECKLIST.md` row.
