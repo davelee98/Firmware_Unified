@@ -115,6 +115,7 @@ od_cmd_result_t od_xfer_partial_start(const od_cmd_ctx_t *ctx, od_span_t body)
     state->partial.width = width;
     state->partial.height = height;
 
+    od_xfer_log_start();
     if (!od_xfer_app_begin_partial(x, y, width, height, plane_bytes)) {
         return partial_fail(ctx, 0x76u, OD_ERR_PARTIAL_STREAM, true,
                             OD_XFER_ABORT_START_FAILED);
@@ -163,6 +164,7 @@ od_cmd_result_t od_xfer_partial_data_impl(const od_cmd_ctx_t *ctx, od_span_t bod
         return partial_fail(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true,
                             OD_XFER_ABORT_STREAM_FAILED);
     }
+    od_xfer_log_chunk(body);
     if (state->compressed) {
         if (body.n > UINT32_MAX - state->received_bytes) {
             return partial_fail(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true,
@@ -173,6 +175,7 @@ od_cmd_result_t od_xfer_partial_data_impl(const od_cmd_ctx_t *ctx, od_span_t bod
             return partial_fail(ctx, RESP_DIRECT_WRITE_DATA_ACK, OD_ERR_PARTIAL_STREAM, true,
                                 OD_XFER_ABORT_STREAM_FAILED);
         }
+        od_xfer_log_progress();
     } else {
         uint32_t consumed;
         if (state->written_bytes > state->expected_bytes
@@ -186,6 +189,7 @@ od_cmd_result_t od_xfer_partial_data_impl(const od_cmd_ctx_t *ctx, od_span_t bod
                                 OD_XFER_ABORT_STREAM_FAILED);
         }
         state->written_bytes += consumed;
+        od_xfer_log_progress();
     }
     if (od_xfer_reply_app(ctx, ack, (uint16_t)sizeof ack) != OD_TXQ_OK) {
         od_xfer_abort_active(OD_XFER_ABORT_REPLY_FAILED, true);
@@ -227,6 +231,7 @@ od_cmd_result_t od_xfer_partial_end_impl(const od_cmd_ctx_t *ctx, od_span_t body
         od_xfer_app_barrier_abort(&owner);
         return OD_CMD_NACK;
     }
+    od_xfer_log_finish();
     if (od_xfer_app_before_refresh(&owner) != OD_XFER_BARRIER_PROCEED) {
         od_xfer_app_set_displayed_etag(0u);
         od_xfer_clear_state();

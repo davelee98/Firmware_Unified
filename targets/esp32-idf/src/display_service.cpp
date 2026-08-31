@@ -426,8 +426,6 @@ struct XferAppHardwareState {
 
 static XferAppHardwareState xferApp = {};
 
-static bool imageWriteFramesMayStillArrive(void);
-
 // od_txq's only drainer is the loop task, which is the same task running these handlers -- so
 // anything queued here stays queued until we return. Call od_cmd_flush_before_refresh() before any
 // multi-second blocking work (see the refresh tail).
@@ -1630,114 +1628,6 @@ void updatemsdata(){
     mloopcounter = od_advert_advance_counter(mloopcounter);
 }
 
-// --- Quiet image-write logging ---------------------------------------------
-// An image push arrives as a 0x70 start, many 0x71 data frames, and a 0x72 end.
-// Logging every frame + its ack floods the UART (~1 MB of text for a 1.3 MB
-// image) and, once the TX buffer fills, throttles the transfer itself. Instead
-// we log the first frame in full, a 5%-step percentage meter thereafter, and
-// the final frame + chunk total at completion. imageWriteLogQuiet{Cmd,Ack}()
-// let communication.cpp suppress the per-frame command/ack spam accordingly.
-static uint32_t imgLogTotalBytes;    // expected payload for this stream
-static uint32_t imgLogChunks;        // 0x71 frames seen this stream
-static uint8_t  imgLogLastStep;      // last 5% step printed (pct/5)
-static uint16_t imgLogLastLen;       // length of most recent frame
-static uint8_t  imgLogLastHead[16];  // first bytes of most recent frame
-static uint8_t  imgLogLastHeadLen;   // valid bytes in imgLogLastHead
-static uint32_t imgLogStartMs;       // od_hal_uptime_ms() at stream start (for throughput)
-
-// Builds a space-separated "%02X" hex dump of up to sizeof(imgLogLastHead) bytes into buf.
-static void imgLogHex(char* buf, size_t bufSize, const uint8_t* data, uint8_t n) {
-    int pos = 0;
-    buf[0] = '\0';
-    for (uint8_t i = 0; i < n && pos < (int)bufSize; i++) {
-        int written = snprintf(buf + pos, bufSize - pos, i > 0 ? " %02X" : "%02X", data[i]);
-        if (written < 0) {
-            break;
-        }
-        pos += written;
-    }
-}
-
-static void imageWriteLogReset(void) {
-    imgLogTotalBytes = 0;
-    imgLogChunks = 0;
-    imgLogLastStep = 0;
-    imgLogLastLen = 0;
-    imgLogLastHeadLen = 0;
-    imgLogStartMs = 0;
-}
-
-static void imageWriteLogStart(uint32_t totalBytes) {
-    imgLogTotalBytes = totalBytes;
-    imgLogStartMs = od_hal_uptime_ms();
-    // Whether the sender compressed is decided per transfer (START header flag), not
-    // by config, so the transmission_modes dump at boot does not answer it. State the
-    // active mode here: without it a slow push is ambiguous between "sent raw" and
-    // "compressed but the link is the bottleneck".
-    od_log_debug("DW start: %u bytes expected", (unsigned)totalBytes);
-}
-
-static void imageWriteLogChunk(const uint8_t* data, uint16_t len) {
-    imgLogChunks++;
-    imgLogLastLen = len;
-    imgLogLastHeadLen = (len < sizeof(imgLogLastHead)) ? (uint8_t)len : (uint8_t)sizeof(imgLogLastHead);
-    memcpy(imgLogLastHead, data, imgLogLastHeadLen);
-    if (imgLogChunks == 1) {
-        char hex[64];
-        imgLogHex(hex, sizeof(hex), imgLogLastHead, imgLogLastHeadLen);
-        od_log_debug("DW frame 1: %u bytes: %s", len, hex);
-        if (len > 0 && imgLogTotalBytes > 0) {
-            uint32_t est = (imgLogTotalBytes + len - 1) / len;
-            od_log_debug("DW expecting ~%u chunks", (unsigned)est);
-        }
-    }
-}
-
-static void imageWriteLogProgress(uint32_t written, uint32_t total) {
-    if (total == 0) return;
-    uint32_t pct = (uint64_t)written * 100u / total;
-    if (pct >= 100) return;                 // completion summary covers 100%
-    uint8_t step = (uint8_t)(pct / 5u);
-    if (step <= imgLogLastStep) return;
-    imgLogLastStep = step;
-    od_log_debug("DW %u%% (%u chunks, %u/%u bytes)", (unsigned)pct, (unsigned)imgLogChunks, (unsigned)written, (unsigned)total);
-}
-
-static void imageWriteLogFinish(uint32_t written, uint32_t total) {
-    char hex[64];
-    imgLogHex(hex, sizeof(hex), imgLogLastHead, imgLogLastHeadLen);
-    od_log_debug("DW final frame %u: %u bytes: %s", (unsigned)imgLogChunks, imgLogLastLen, hex);
-    uint32_t elapsedMs = od_hal_uptime_ms() - imgLogStartMs;   // unsigned wrap-safe over one stream
-    if (elapsedMs > 0) {
-        float rate = (float)written / 1.024f / (float)elapsedMs;  // bytes/ms /1.024 = KB/s
-        od_log_info("DW complete: %u chunks, %u/%u bytes, %.2f s, %.1f KB/s",
-                    (unsigned)imgLogChunks, (unsigned)written, (unsigned)total,
-                    elapsedMs / 1000.0f, rate);
-    } else {
-        od_log_info("DW complete: %u chunks, %u/%u bytes, %.2f s, n/a KB/s",
-                    (unsigned)imgLogChunks, (unsigned)written, (unsigned)total,
-                    elapsedMs / 1000.0f);
-    }
-}
-
-bool imageWriteLogQuietCmd(void) {
-    return imageWriteFramesMayStillArrive() && imgLogChunks >= 1;
-}
-
-bool imageWriteLogQuietAck(void) {
-    return imageWriteFramesMayStillArrive() && imgLogChunks >= 2;
-}
-
-// True when this raw frame is a mid-stream image-write data chunk (command
-// header 0x0071, unencrypted) whose per-frame BLE-receive/queue logging should
-// be suppressed. Lets the receive callback and queue drain in the other files
-// silence their spam without duplicating the stream-state check.
-bool imageWriteLogQuietFrame(const uint8_t* data, uint16_t len) {
-    return len >= 2 && data[0] == 0x00 &&
-           (data[1] == 0x71 || data[1] == 0x81) && imageWriteLogQuietCmd();
-}
-// ---------------------------------------------------------------------------
-
 static bool directWriteTouchSuspended = false;
 
 /* Resolve the one target-owned direct format exception. ED103TC2 4-gray uses a FastEPD
@@ -1850,7 +1740,6 @@ static bool xferAppWritePartial(uint32_t streamOffset, od_span_t data) {
 
 extern "C" void od_xfer_app_prepare_start(void) {
     if (xferApp.mode != XFER_APP_IDLE) xferAppClear(false);
-    imageWriteLogReset();
 }
 
 extern "C" bool od_xfer_app_panel_info(od_xfer_panel_info_t *out) {
@@ -1872,7 +1761,6 @@ extern "C" bool od_xfer_app_begin_full(const od_color_geometry_t *geometry) {
     xferApp.plane_bytes = geometry->layout == OD_COLOR_LAYOUT_CONTROLLER_PLANES
         ? geometry->part_bytes[0] : 0u;
     xferApp.current_plane = 0xFFu;
-    imageWriteLogStart(geometry->total_bytes);
     touchSuspendForEpdRefresh();
     directWriteTouchSuspended = true;
 #if defined(OPENDISPLAY_FASTEPD)
@@ -1908,21 +1796,16 @@ extern "C" bool od_xfer_app_begin_partial(uint16_t x, uint16_t y, uint16_t width
     xferApp.height = height;
     xferApp.plane_bytes = planeBytes;
     xferApp.current_plane = 0xFFu;
-    imageWriteLogStart(planeBytes * 2u);
     partial_prepare_panel_ram_for(x, y, width, height);
     return true;
 }
 
 extern "C" uint32_t od_xfer_app_write(uint32_t streamOffset, od_span_t data) {
     if (!od_span_valid(data) || data.n == 0u || data.n > UINT32_MAX) return 0u;
-    imageWriteLogChunk((uint8_t *)(uintptr_t)data.p, (uint16_t)data.n);
     const bool accepted = xferApp.mode == XFER_APP_FULL
         ? xferAppWriteFull(streamOffset, data)
         : xferApp.mode == XFER_APP_PARTIAL && xferAppWritePartial(streamOffset, data);
     if (!accepted) return 0u;
-    const uint32_t total = xferApp.mode == XFER_APP_FULL
-        ? xferApp.geometry.total_bytes : xferApp.plane_bytes * 2u;
-    imageWriteLogProgress(streamOffset + (uint32_t)data.n, total);
     return (uint32_t)data.n;
 }
 
@@ -1941,9 +1824,6 @@ extern "C" void od_xfer_app_abort(od_xfer_abort_reason_t reason) {
 
 extern "C" od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *owner) {
     (void)owner;
-    const uint32_t total = xferApp.mode == XFER_APP_FULL
-        ? xferApp.geometry.total_bytes : xferApp.plane_bytes * 2u;
-    imageWriteLogFinish(total, total);
     od_cmd_flush_before_refresh();
     if (xferApp.mode == XFER_APP_FULL) od_hal_delay_ms(20);
     return OD_XFER_BARRIER_PROCEED;
@@ -2002,10 +1882,6 @@ od_origin_t transferSessionOrigin(void) {
 
 bool transferActive(void) {
     return od_xfer_owns_hardware();
-}
-
-static bool imageWriteFramesMayStillArrive(void) {
-    return od_xfer_frames_may_arrive();
 }
 
 static bool panel_skips_bbep_set_addr_window(void) {

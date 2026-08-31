@@ -1,4 +1,4 @@
-/* od_rxq_app.h -- the two per-target facts the shared RX arrival line needs.
+/* od_rxq_app.h -- the two callback-safe predicates the shared RX arrival line needs.
  *
  * The line itself lives in od_rxq.c, one text for every target. These two predicates do not,
  * because neither can be answered from the ring:
@@ -6,9 +6,9 @@
  *   - whether session encryption is configured, which decides the ERX/URX token. ESP32 answers
  *     from its own encryption state and Nordic from its parsed security config; there is no
  *     shared symbol that means the same thing on both.
- *   - whether this opcode's per-frame line should be suppressed, which depends on transfer state
- *     that od_xfer.c owns. Once the transfer logging converges this can become one shared
- *     implementation and these predicates can go.
+ *   - whether this opcode's per-frame line should be suppressed. od_xfer.c owns and publishes
+ *     that policy; target implementations delegate to it so this independently selectable tier
+ *     does not acquire a hidden APP_XFER source dependency.
  *
  * DELIBERATELY NOT ROUTED THROUGH od_session_app.h. APP_RXQ is an independently selectable
  * source tier (shared/sources.cmake); calling the session seam from od_rxq.c would make it

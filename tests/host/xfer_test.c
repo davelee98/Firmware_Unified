@@ -1,11 +1,13 @@
 #include "od_color.h"
 #include "od_inflate_app.h"
+#include "od_log.h"
 #include "od_reply.h"
 #include "od_xfer.h"
 #include "od_xfer_app.h"
 #include "od_zlib_inflate.h"
 #include "od_cmd_test_ctx.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -57,9 +59,43 @@ static uint32_t g_etag;
 static uint8_t g_scratch[64];
 static uint8_t g_written[256];
 static size_t g_written_n;
+static uint32_t g_now_ms;
 static od_tx_reservation_t g_reservation;
 static const od_reply_t OWNER = { OD_ORIGIN_BLE, 7u };
 static const od_reply_t OTHER = { OD_ORIGIN_LAN_PLAIN, 9u };
+
+#define LOG_MAX 32u
+static struct {
+    int level;
+    char text[192];
+} g_logs[LOG_MAX];
+static unsigned g_log_n;
+
+void _od_log(int level, const char *fmt, ...)
+{
+    va_list ap;
+
+    if (g_log_n >= LOG_MAX) {
+        return;
+    }
+    g_logs[g_log_n].level = level;
+    va_start(ap, fmt);
+    (void)vsnprintf(g_logs[g_log_n].text, sizeof g_logs[g_log_n].text, fmt, ap);
+    va_end(ap);
+    ++g_log_n;
+}
+
+static bool logged(int level, const char *needle)
+{
+    unsigned i;
+
+    for (i = 0u; i < g_log_n; ++i) {
+        if (g_logs[i].level == level && strstr(g_logs[i].text, needle) != NULL) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static od_txq_status_t record_reply(bool plain, const uint8_t *frame, uint16_t len)
 {
@@ -206,7 +242,7 @@ bool od_xfer_app_refresh(uint8_t mode, bool *completed)
 
 uint32_t od_xfer_app_displayed_etag(void) { return g_etag; }
 void od_xfer_app_set_displayed_etag(uint32_t etag) { g_etag = etag; }
-uint32_t od_xfer_app_now_ms(void) { return 1234u; }
+uint32_t od_xfer_app_now_ms(void) { return g_now_ms; }
 
 static void setup(void)
 {
@@ -245,6 +281,8 @@ static void setup(void)
     g_consume_limit = UINT32_MAX;
     g_etag = 0x11223344u;
     g_written_n = 0u;
+    g_now_ms = 1234u;
+    g_log_n = 0u;
 }
 
 static uint32_t adler32(od_span_t bytes)
@@ -320,6 +358,68 @@ static void test_raw_direct(void)
     CHECK(g_etag == 0xAABBCCDDu);
     CHECK(g_reply_n == 4u && !g_replies[1].plain && !g_replies[2].plain
           && !g_replies[3].plain);
+}
+
+static void test_transfer_logging(void)
+{
+    od_cmd_ctx_t owner = od_test_cmd_ctx(OWNER, &g_reservation, 2u, false);
+    uint8_t raw[100];
+    uint8_t plain[4] = { 0x21u, 0x22u, 0x23u, 0x24u };
+    uint8_t compressed[32];
+    uint8_t start[4] = { 4u, 0u, 0u, 0u };
+    size_t compressed_n;
+
+    CASE("shared raw transfer progress and quiet snapshot");
+    setup();
+    memset(raw, 0xA5, sizeof raw);
+    g_panel.geometry.total_bytes = sizeof raw;
+    CHECK(!od_xfer_log_quiet(CMD_DIRECT_WRITE_DATA));
+    CHECK(od_xfer_direct_start(&owner, od_span_none()) == OD_CMD_OK);
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
+    CHECK(logged(OD_LOG_DEBUG, "DW start: 100 bytes expected, raw (uncompressed)"));
+#else
+    CHECK(!logged(OD_LOG_DEBUG, "DW start:"));
+#endif
+    CHECK(!od_xfer_log_quiet(CMD_DIRECT_WRITE_DATA));
+    CHECK(od_xfer_data(&owner, od_span_make(raw, 6u)) == OD_CMD_OK);
+    CHECK(od_xfer_log_quiet(CMD_DIRECT_WRITE_DATA));
+    CHECK(od_xfer_log_quiet(CMD_PIPE_WRITE_DATA));
+    CHECK(!od_xfer_log_quiet(CMD_DIRECT_WRITE_END));
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
+    CHECK(logged(OD_LOG_DEBUG, "DW frame 1: 6 bytes: A5 A5 A5 A5 A5 A5"));
+    CHECK(logged(OD_LOG_DEBUG, "DW expecting ~17 chunks"));
+    CHECK(logged(OD_LOG_DEBUG, "DW 6% (1 chunks, 6/100 bytes)"));
+#else
+    CHECK(!logged(OD_LOG_DEBUG, "DW frame 1:"));
+#endif
+    CHECK(od_xfer_data(&owner, od_span_make(raw + 6u, 9u)) == OD_CMD_OK);
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
+    CHECK(logged(OD_LOG_DEBUG, "DW 15% (2 chunks, 15/100 bytes)"));
+#endif
+    CHECK(od_xfer_data(&owner, od_span_make(raw + 15u, 85u)) == OD_CMD_OK);
+    g_now_ms = 2234u;
+    CHECK(od_xfer_end(&owner, od_span_none()) == OD_CMD_OK);
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
+    CHECK(logged(OD_LOG_DEBUG, "DW final frame 3: 85 bytes"));
+#else
+    CHECK(!logged(OD_LOG_DEBUG, "DW final frame"));
+#endif
+    CHECK(logged(OD_LOG_INFO,
+                 "DW complete: 3 chunks, 100/100 bytes, raw, 1.00 s, 0.1 KB/s"));
+    CHECK(!od_xfer_log_quiet(CMD_DIRECT_WRITE_DATA));
+
+    CASE("shared compressed transfer records on-wire bytes");
+    setup();
+    compressed_n = make_stored(od_span_make(plain, sizeof plain), compressed);
+    CHECK(compressed_n == 15u);
+    CHECK(od_xfer_direct_start(&owner, od_span_make(start, sizeof start)) == OD_CMD_OK);
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
+    CHECK(logged(OD_LOG_DEBUG, "DW start: 4 bytes expected, zlib streaming"));
+#endif
+    CHECK(od_xfer_data(&owner, od_span_make(compressed, compressed_n)) == OD_CMD_OK);
+    g_now_ms = 2234u;
+    CHECK(od_xfer_end(&owner, od_span_none()) == OD_CMD_OK);
+    CHECK(logged(OD_LOG_INFO, "4/4 bytes, zlib 15 B on wire (0.27x), 1.00 s"));
 }
 
 static void test_start_boundaries(void)
@@ -673,6 +773,7 @@ static void test_reset_and_geometry(void)
 int main(void)
 {
     test_raw_direct();
+    test_transfer_logging();
     test_start_boundaries();
     test_short_write_and_barrier();
     test_short_consumption_range();

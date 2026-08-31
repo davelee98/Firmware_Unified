@@ -54,11 +54,6 @@ void initDisplay();
 void writeTextAndFill(const char* text);
 // True while shared transfer hardware is active.
 bool transferActive(void);
-// True while an image push is mid-stream and the per-frame command/ack logging
-// should be suppressed (chunk 1 still logs in full; the meter covers the rest).
-bool imageWriteLogQuietCmd(void);
-bool imageWriteLogQuietAck(void);
-bool imageWriteLogQuietFrame(const uint8_t* data, uint16_t len);
 extern volatile bool epdRefreshInProgress;
 /**
  * Close the refresh bracket: clears epdRefreshInProgress AND re-stamps the owner's

@@ -8,6 +8,7 @@
 
 #include "od_log.h"
 #include "od_txq.h"
+#include "od_xfer.h"
 
 #include <stdio.h>
 
@@ -16,11 +17,6 @@
 #ifdef OPENDISPLAY_HAS_WIFI
 #include "wifi_service.h"
 #endif
-
-// Defined in display_service.cpp. True for a mid-stream image-write data ACK (0x0071 / 0x0081)
-// whose per-frame TX logging should be suppressed -- mirrors the RX-side gate in od_rxq_app.cpp,
-// applied here to the outbound ACK for the same opcode rather than the inbound DATA frame.
-bool imageWriteLogQuietFrame(const uint8_t* data, uint16_t len);
 
 /* THE SINGLE TX LOG LINE, and this is the only place it can honestly live now: every response
  * leaves through this function, so a frame cannot reach the wire without having been logged.
@@ -49,7 +45,8 @@ extern "C" od_radio_result_t od_hal_radio_send(od_origin_t origin, uint32_t tag,
     if (frame == nullptr || len == 0u) {
         return OD_RADIO_ERROR;
     }
-    if (!imageWriteLogQuietFrame(frame, len)) {
+    const uint16_t opcode = len >= 2u ? (uint16_t)((frame[0] << 8) | frame[1]) : frame[0];
+    if (len < 2u || !od_xfer_log_quiet(opcode)) {
         logTxFrame(origin, frame, len);
     }
     if (origin != OD_ORIGIN_BLE) {

@@ -6,6 +6,7 @@
 #include "od_span.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,6 +23,10 @@ bool od_xfer_owns_hardware(void);
 bool od_xfer_frames_may_arrive(void);
 bool od_xfer_owner(od_reply_t *out);
 bool od_xfer_started_ms(uint32_t *out);
+
+/* True once an active transfer has begun consuming DATA frames. Safe to call from a radio
+ * callback while the loop task owns the transfer state. */
+bool od_xfer_log_quiet(uint16_t opcode);
 
 #ifdef __cplusplus
 }

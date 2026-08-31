@@ -171,9 +171,11 @@ set(OD_SHARED_SOURCES_APP_SESSION
 # APP_RXQ, like APP_SESSION, is named for a SEAM rather than a HAL: the ring needs no driver at
 # all. It logs arrivals and drops itself, once for both targets instead of once per transport
 # callback; what it cannot answer alone is od_rxq_app.h's two predicates, which a target taking
-# this tier must implement. They are referenced only in a build compiled at OD_LOG_DEBUG, so an
-# INFO build links without them -- tests/host's rxq seam fixture is built at DEBUG for that
-# reason. This tier deliberately does not depend on APP_SESSION.
+# this tier must implement. The quiet predicate delegates to APP_XFER when a target composes both,
+# but keeping the call behind this seam means APP_RXQ itself still has no hidden source-tier
+# dependency. They are referenced only in a build compiled at OD_LOG_DEBUG, so an INFO build links
+# without them -- tests/host's rxq seam fixture is built at DEBUG for that reason. This tier
+# deliberately does not depend on APP_SESSION.
 set(OD_SHARED_SOURCES_APP_RXQ
     "${CMAKE_CURRENT_LIST_DIR}/core/od_rxq.c"
 )

@@ -60,6 +60,7 @@ od_cmd_result_t od_xfer_direct_start(const od_cmd_ctx_t *ctx, od_span_t body)
     state->compressed = compressed;
     state->geometry = panel.geometry;
 
+    od_xfer_log_start();
     if (!od_xfer_app_begin_full(&state->geometry)) {
         od_xfer_abort_active(OD_XFER_ABORT_START_FAILED, false);
         od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_START_ACK);
@@ -97,6 +98,7 @@ od_cmd_result_t od_xfer_direct_data_impl(const od_cmd_ctx_t *ctx, od_span_t body
         od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_DATA_ACK);
         return OD_CMD_NACK;
     }
+    od_xfer_log_chunk(body);
     if (state->compressed) {
         if (body.n > UINT32_MAX - state->received_bytes) {
             od_xfer_abort_active(OD_XFER_ABORT_STREAM_FAILED, false);
@@ -109,6 +111,7 @@ od_cmd_result_t od_xfer_direct_data_impl(const od_cmd_ctx_t *ctx, od_span_t body
             od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_DATA_ACK);
             return OD_CMD_NACK;
         }
+        od_xfer_log_progress();
     } else {
         uint32_t remaining = state->written_bytes < state->expected_bytes
             ? state->expected_bytes - state->written_bytes : 0u;
@@ -124,6 +127,7 @@ od_cmd_result_t od_xfer_direct_data_impl(const od_cmd_ctx_t *ctx, od_span_t body
             }
             state->written_bytes += consumed;
         }
+        od_xfer_log_progress();
 #if OD_XFER_DIRECT_AUTO_END
         if (state->written_bytes >= state->expected_bytes) {
             return od_xfer_direct_end_impl(ctx, od_span_none());
@@ -155,6 +159,7 @@ static od_cmd_result_t finish_refresh(const od_cmd_ctx_t *ctx, od_span_t body)
         od_xfer_app_barrier_abort(&owner);
         return OD_CMD_NACK;
     }
+    od_xfer_log_finish();
     if (od_xfer_app_before_refresh(&owner) != OD_XFER_BARRIER_PROCEED) {
         od_xfer_clear_state();
         od_xfer_app_barrier_abort(&owner);
