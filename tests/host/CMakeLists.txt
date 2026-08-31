@@ -366,6 +366,10 @@ add_executable(od_nordic_log_hal_test
 target_include_directories(od_nordic_log_hal_test PRIVATE
     ${OD_SHARED_INCLUDE_DIRS}
     ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr)
+# The record bounds the Nordic firmware is built with, so the terminator rewrite is exercised at
+# the sizes it actually sees (targets/nordic-zephyr/zephyr/CMakeLists.txt).
+target_compile_definitions(od_nordic_log_hal_test PRIVATE
+    OD_LOG_TEXT_MAX=253u OD_LOG_RAW_TEXT_MAX=255u)
 add_test(NAME nordic_log_hal COMMAND od_nordic_log_hal_test)
 
 # Nordic EPD GPIO fallback: compile the production direct-register writer over a fake nRF GPIO
