@@ -727,6 +727,20 @@ bool od_session_derive_tls_psk(const struct SecurityConfig *sec, uint8_t psk_out
 
 /* --------------------------------------------------------------------- outcome reporting --- */
 
+/* The opcode the seal was attempted for, read from the frame the same way od_reply.c reads it
+ * for the seam call: the two leading bytes are the cmd. Under two bytes there is no opcode, and
+ * that is also the TOO_SHORT case. */
+static uint16_t seal_cmd(od_span_t plain_frame)
+{
+    if (plain_frame.p == NULL || plain_frame.n == 0u) {
+        return 0u;
+    }
+    return (uint16_t)(((uint16_t)plain_frame.p[0] << 8) |
+                      (plain_frame.n > 1u ? plain_frame.p[1] : 0u));
+}
+
+#if OD_CAP_LOG
+
 /* Nonce rejections are throttled at five seconds, in two buckets rather than one per specific
  * reason. Replay and out-of-window travel together because both mean frames were lost or
  * duplicated; everything else -- wrong session, bad tag, malformed, engine fault -- travels
@@ -736,16 +750,26 @@ bool od_session_derive_tls_psk(const struct SecurityConfig *sec, uint8_t psk_out
  * drives these, because nonce failures deliberately do not count as integrity strikes.
  *
  * The clock is the now_ms the caller already supplies for the session's own timing, so there is
- * no second time source here to disagree with the one the timeout reads. */
-static uint32_t s_log_window_ms;   /* replay / out-of-window */
-static uint32_t s_log_other_ms;    /* wrong session, bad tag, malformed, engine fault */
+ * no second time source here to disagree with the one the timeout reads.
+ *
+ * The window is armed by a separate flag rather than by a zero timestamp: now_ms is uptime, so
+ * zero is a reachable instant, and a first record at that instant would leave the bucket looking
+ * unused and throttle nothing for the whole window that follows. */
+struct log_budget {
+    uint32_t last_ms;
+    bool     armed;
+};
 
-static bool budget_allows(uint32_t *last_ms, uint32_t now_ms)
+static struct log_budget s_log_window;   /* replay / out-of-window */
+static struct log_budget s_log_other;    /* wrong session, bad tag, malformed, engine fault */
+
+static bool budget_allows(struct log_budget *b, uint32_t now_ms)
 {
-    if (*last_ms != 0u && (uint32_t)(now_ms - *last_ms) < 5000u) {
+    if (b->armed && (uint32_t)(now_ms - b->last_ms) < 5000u) {
         return false;
     }
-    *last_ms = now_ms;
+    b->last_ms = now_ms;
+    b->armed = true;
     return true;
 }
 
@@ -795,22 +819,10 @@ static void log_open(enum od_session_open rc, uint16_t cmd,
     }
     reason = (report != NULL) ? report->nonce_reason : 0u;
     nonce_loss = (reason == (uint8_t)NONCE_OUT_OF_WINDOW || reason == (uint8_t)NONCE_REPLAY);
-    if (budget_allows(nonce_loss ? &s_log_window_ms : &s_log_other_ms, now_ms)) {
+    if (budget_allows(nonce_loss ? &s_log_window : &s_log_other, now_ms)) {
         od_log_error("ERROR: Decryption failed (0x%04X, rc=%d, nonce_reason=%u)",
                      (unsigned)cmd, (int)rc, (unsigned)reason);
     }
-}
-
-/* The opcode the seal was attempted for, read from the frame the same way od_reply.c reads it
- * for the seam call: the two leading bytes are the cmd. Under two bytes there is no opcode, and
- * that is also the TOO_SHORT case. */
-static uint16_t seal_cmd(od_span_t plain_frame)
-{
-    if (plain_frame.p == NULL || plain_frame.n == 0u) {
-        return 0u;
-    }
-    return (uint16_t)(((uint16_t)plain_frame.p[0] << 8) |
-                      (plain_frame.n > 1u ? plain_frame.p[1] : 0u));
 }
 
 static void log_seal(enum od_session_seal rc, uint16_t cmd)
@@ -819,6 +831,17 @@ static void log_seal(enum od_session_seal rc, uint16_t cmd)
         od_log_warn("Response seal failed (0x%04X, rc=%d)", (unsigned)cmd, (int)rc);
     }
 }
+
+#else /* !OD_CAP_LOG */
+
+/* A target without a log transport must not carry the throttle state or run its bookkeeping;
+ * od_log_* alone compiles to nothing, but the buckets and their updates would survive. The
+ * arguments are still evaluated, so seal_cmd() keeps running exactly once. */
+#define log_auth(rc, report)              ((void)(rc), (void)(report))
+#define log_open(rc, cmd, report, now_ms) ((void)(rc), (void)(cmd), (void)(report), (void)(now_ms))
+#define log_seal(rc, cmd)                 ((void)(rc), (void)(cmd))
+
+#endif /* OD_CAP_LOG */
 
 /* The public entry points: run the operation, then say what it decided.
  *
