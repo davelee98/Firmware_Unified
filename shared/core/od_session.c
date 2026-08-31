@@ -783,26 +783,26 @@ static void log_auth(enum od_session_auth rc, const struct od_session_report *re
         od_log_info("Authentication successful, session established");
         break;
     case OD_SESSION_AUTH_REJECTED:
-        od_log_error("ERROR: Authentication failed (wrong key)");
+        od_log_error("Authentication failed (wrong key)");
         break;
     case OD_SESSION_AUTH_RATE_LIMITED:
         od_log_warn("Authentication rate limited (%u attempts in the window)",
                     (unsigned)(report != NULL ? report->attempts : 0u));
         break;
     case OD_SESSION_AUTH_NOT_CONFIGURED:
-        od_log_error("ERROR: Authentication requested but encryption is not configured");
+        od_log_error("Authentication requested but encryption is not configured");
         break;
     case OD_SESSION_AUTH_EXPIRED:
-        od_log_error("ERROR: Server nonce expired");
+        od_log_error("Server nonce expired");
         break;
     case OD_SESSION_AUTH_CRYPTO_ERROR:
-        od_log_error("ERROR: Crypto engine failure during authentication (status %d)",
+        od_log_error("Crypto engine failure during authentication (status %d)",
                      (int)(report != NULL ? report->crypto_status : OD_HAL_CRYPTO_OK));
         break;
     default:
         /* status_byte is the AUTH_STATUS_* actually placed in the reply, so it names which
          * refusal the host will see -- the one thing an unrecognised rc cannot say by itself. */
-        od_log_error("ERROR: Invalid authentication request (rc=%d, status 0x%02X)", (int)rc,
+        od_log_error("Invalid authentication request (rc=%d, status 0x%02X)", (int)rc,
                      (unsigned)(report != NULL ? report->status_byte : 0u));
         break;
     }
@@ -820,7 +820,7 @@ static void log_open(enum od_session_open rc, uint16_t cmd,
     reason = (report != NULL) ? report->nonce_reason : 0u;
     nonce_loss = (reason == (uint8_t)NONCE_OUT_OF_WINDOW || reason == (uint8_t)NONCE_REPLAY);
     if (budget_allows(nonce_loss ? &s_log_window : &s_log_other, now_ms)) {
-        od_log_error("ERROR: Decryption failed (0x%04X, rc=%d, nonce_reason=%u)",
+        od_log_error("Decryption failed (0x%04X, rc=%d, nonce_reason=%u)",
                      (unsigned)cmd, (int)rc, (unsigned)reason);
     }
 }

@@ -68,7 +68,7 @@ void resetChunkedWriteState(void) {
 
 bool initConfigStorage(){
     if (od_config_store_init() != OD_CONFIG_STORE_OK) {
-        od_log_error("ERROR: Failed to initialise NVS config storage");
+        od_log_error("Failed to initialise NVS config storage");
         return false;
     }
     return true;
@@ -101,17 +101,17 @@ bool saveConfig(uint8_t* configData, uint32_t len){
     case OD_CONFIG_STORE_OK:
         return true;
     case OD_CONFIG_STORE_TOO_BIG:
-        od_log_error("ERROR: Config data too large (%u bytes)", (unsigned)len);
+        od_log_error("Config data too large (%u bytes)", (unsigned)len);
         return false;
     default:
-        od_log_error("ERROR: Failed to write config to NVS");
+        od_log_error("Failed to write config to NVS");
         return false;
     }
 }
 
 bool clearStoredConfig(void) {
     if (od_config_store_clear() != OD_CONFIG_STORE_OK) {
-        od_log_error("ERROR: Failed to remove stored config");
+        od_log_error("Failed to remove stored config");
         return false;
     }
     /* One memset, not two: securityConfig is a member of globalConfig now, so zeroing the
@@ -134,13 +134,13 @@ bool loadConfig(uint8_t* configData, uint32_t* len){
     case OD_CONFIG_STORE_EMPTY:
         return false;           /* unprovisioned device -- not an error, just nothing stored */
     case OD_CONFIG_STORE_TOO_BIG:
-        od_log_error("ERROR: Stored config larger than this build accepts");
+        od_log_error("Stored config larger than this build accepts");
         return false;
     case OD_CONFIG_STORE_CORRUPT:
-        od_log_error("ERROR: Stored config rejected (magic, length or CRC)");
+        od_log_error("Stored config rejected (magic, length or CRC)");
         return false;
     default:
-        od_log_error("ERROR: Failed to read config from NVS");
+        od_log_error("Failed to read config from NVS");
         return false;
     }
 }
@@ -317,31 +317,31 @@ bool loadGlobalConfig(){
     if (report.unknown_id != 0) {
         /* The walk reports the id and this target says it. Losing "Unknown packet ID 0x%02X"
          * in the promotion would have traded a diagnostic for nothing. */
-        od_log_warn("WARNING: Unknown packet ID 0x%02X, remainder of config skipped",
+        od_log_warn("Unknown packet ID 0x%02X, remainder of config skipped",
                     report.unknown_id);
     }
     if (walk == OD_CFG_TLV_TOO_SHORT) {
-        od_log_error("ERROR: Config too short");
+        od_log_error("Config too short");
         return false;
     }
     if (walk != OD_CFG_TLV_OK) {
         /* A packet claimed more bytes than the blob holds. Reported per packet type before the
          * walk was shared; the walk cannot name the type, so this is the same information from
          * one place. */
-        od_log_error("ERROR: Config truncated -- a packet claims more data than the blob holds");
+        od_log_error("Config truncated -- a packet claims more data than the blob holds");
         return false;
     }
     if (report.dropped_full != 0) {
         /* Was one "Maximum <type> count reached" per arm. The count is aggregate now; the caps
          * are identical on every target and a host that hits one has over-sent some type. */
-        od_log_warn("WARNING: %u config packet(s) dropped at an instance cap",
+        od_log_warn("%u config packet(s) dropped at an instance cap",
                     (unsigned)report.dropped_full);
     }
 
     // Advisory (warn-only) validation using CRC-16/CCITT to match the toolbox, nRF and
     // Silabs firmware. Not enforced: a mismatch logs a warning only.
     if (report.crc_checked && report.crc_stored != report.crc_computed) {
-        od_log_warn("WARNING: Config CRC mismatch (given: 0x%04X, calculated: 0x%04X)",
+        od_log_warn("Config CRC mismatch (given: 0x%04X, calculated: 0x%04X)",
                     report.crc_stored, report.crc_computed);
     }
 

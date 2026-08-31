@@ -262,7 +262,7 @@ static void esp32_ble_deinit_before_restart() {
     if (ble.end()) {              // clearAll: disables + releases the BT controller
         od_log_info("BLE deinitialized before restart");
     } else {
-        od_log_error("ERROR: BLE teardown FAILED before restart -- the controller is still "
+        od_log_error("BLE teardown FAILED before restart -- the controller is still "
                      "enabled; expect nimble_port_init() to fail on the next boot");
     }
     od_hal_delay_ms(100);
@@ -593,7 +593,7 @@ od_cmd_result_t handleDeepSleepCommand(const od_cmd_ctx_t *ctx, const uint8_t* p
         overrideSeconds = ((uint16_t)payload[0] << 8) | payload[1];
         // Bytes beyond 2 ignored for forward compatibility.
     } else if (payloadLen == 1) {
-        od_log_warn("WARNING: malformed 0x%04X payload length 1 - ignoring", CMD_DEEP_SLEEP);
+        od_log_warn("Malformed 0x%04X payload length 1 -- ignoring", CMD_DEEP_SLEEP);
     }
     // Enforce a 60 s floor on host overrides: a very short wake timer risks a rapid
     // sleep/wake churn that never stays awake long enough to service a client. This

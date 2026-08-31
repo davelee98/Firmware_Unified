@@ -134,7 +134,7 @@ static uint32_t instancePublish(uint16_t handle, uint16_t epoch) {
     }
     // Cannot happen while the table is sized at the connection cap; if the stack
     // ever exceeds it, the link is unrepresentable and therefore unserviceable.
-    od_log_error("ERROR: BLE instance table full, handle %u unrepresentable", (unsigned)handle);
+    od_log_error("BLE instance table full, handle %u unrepresentable", (unsigned)handle);
     return 0;
 }
 
@@ -318,7 +318,7 @@ bool BleTransport::begin(const char* deviceName) {
     // WRITE | WRITE_NR, auto CCCD, maximum value OD_BLE_MAX_FRAME - 3) is
     // built in ble/od_ble_nimble.cpp and is a wire contract -- see od_ble.h.
     if (!od_ble_init(deviceName)) {
-        od_log_error("ERROR: Failed to initialise the BLE stack");
+        od_log_error("Failed to initialise the BLE stack");
         return false;
     }
     s_ready = true;
@@ -377,7 +377,7 @@ bool BleTransport::end() {
     // isReady(), a re-init, a connection callback arriving against an emptied instance table
     // -- reasoned from whichever answer it happened to ask.
     if (!od_ble_deinit()) {
-        od_log_error("ERROR: BLE teardown failed -- stack still UP, transport state unchanged");
+        od_log_error("BLE teardown failed -- stack still UP, transport state unchanged");
         return false;
     }
     s_ready = false;
@@ -491,7 +491,7 @@ bool BleTransport::disconnect(uint16_t handle, uint16_t epoch) {
         // od_ble_disconnect() already treats "the link is gone" as success
         // (BLE_HS_ENOTCONN / BLE_HS_EALREADY), so a false here is a genuine failure
         // to ask, not a benign race with a client that left first.
-        od_log_warn("WARNING: BLE disconnect request failed for handle %u", (unsigned)handle);
+        od_log_warn("BLE disconnect request failed for handle %u", (unsigned)handle);
     }
     return ok;
 }

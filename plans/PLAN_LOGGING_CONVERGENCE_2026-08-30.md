@@ -380,11 +380,9 @@ Stage 8.
   is `error`; a rejected-but-expected event (rate limit, malformed input from a possibly-hostile
   peer) is `warn`; a normal lifecycle event (challenge sent, session established) is `info`;
   per-frame/high-volume detail is `debug`.
-- **Open question on the redundant level prefix**: ESP32's text often repeats the level inside the
-  message ("ERROR: Authentication failed") even though `od_log.c` already stamps the level letter
-  in the record prefix (`[0012.345|C0] E: ...`) — so the record reads `E: ERROR: ...`. Flagged as
-  § 9 Q4 rather than silently resolved either way, since dropping it changes ESP32's own historical
-  wording, not just Nordic's.
+- **No level word inside the message.** `od_log.c` already stamps the level letter in the record
+  prefix (`[0012.345|C0] E: ...`), so an `ERROR:`/`WARNING:` text prefix makes the record read
+  `E: ERROR: ...`. New logging never writes one (§ 9 Q4, resolved).
 
 ## 7. Implementation stages
 
@@ -463,12 +461,25 @@ sitting.
   `info` level** (`6776bbd`). Nordic's rationale held — the line fires once per queued frame on
   every normal disconnect mid-upload, so `warn` would be routine noise for an expected event.
 
-- **Q3 (L6).** NFC has no ESP32 behavior to default to. Restyle Nordic's existing wording into the
-  established conventions (recommended), or hold NFC logging out of this pass entirely until an
-  ESP32-side NFC capability exists to set the pattern?
-- **Q4 (§ 6).** Drop the redundant `ERROR:`/`WARNING:` text prefix repo-wide (the level letter
-  already carries this), even though that's a wording change to ESP32's own text, not just
-  Nordic's?
+- ~~**Q3 (L6).** NFC has no ESP32 behavior to default to. Restyle Nordic's existing wording into
+  the established conventions, or hold NFC out of this pass?~~ **Resolved: promote it, held to the
+  same weight any other command gets on ESP32.** NFC is not a privileged subsystem: it gets an
+  ordinary command handler's diagnostic budget, not a running commentary on the tag state machine.
+  Concretely, Nordic's seven `[OD][NFC]`-tagged lines in `opendisplay_nfc.c` are all `od_log_info`
+  today, including five setup-refusal paths and one success line; restyle them into full-sentence
+  text with no bracket tag, map severity by § 6 (a failed `payload_set`/`emulation_start`/
+  `t2t_setup` is `error`, an absent or disabled config is `info`, an unsupported `nfc_ic_type` is
+  `warn`), and keep per-frame assembly detail at `debug` or drop it. The `[OD][NFC]` prefix goes:
+  no other subsystem tags its lines, and the record already carries a level letter and timestamp.
+
+- ~~**Q4 (§ 6).** Drop the redundant `ERROR:`/`WARNING:` text prefix repo-wide, even though that's
+  a wording change to ESP32's own text, not just Nordic's?~~ **Resolved: dropped, repo-wide.** 52
+  sites carried it — 9 in `shared/`, 43 in `targets/esp32-idf/`, none in Nordic or BG22 — and no
+  test asserted on the text. One site needed more than a strip: Nordic's
+  `factory_config.c` reported a failed factory provision as `od_log_info("ERROR: ...")`, where the
+  text was the only thing carrying severity; it is now `od_log_error()` with no prefix, which is
+  what the record already had to mean.
+
 - ~~**Q5 (L2).** Confirm no `tools/check.sh` ratchet targets `od_session_app_report` by name before
   it goes unreferenced on BG22.~~ **Resolved:** `grep -n od_session_app_report tools/check.sh`
   returns nothing — no ratchet names it. Moot regardless, since L2 now keeps the call to
