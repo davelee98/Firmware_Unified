@@ -17,8 +17,12 @@
 
 set(OD_FUZZ_FLAGS -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -g)
 
+# od_log_test_stub.c is listed here, not carried by od_session_fake: an archive member is only
+# extracted for a symbol already undefined when the linker reaches it, and nothing in a fuzz
+# harness references _od_log, so a stub inside the fake would be skipped and od_log.c pulled from
+# od_shared with no transport under it.
 foreach(target session_open_raw session_open_sealed session_auth)
-    add_executable(od_fuzz_${target} fuzz_${target}.c)
+    add_executable(od_fuzz_${target} fuzz_${target}.c ../host/od_log_test_stub.c)
     target_link_libraries(od_fuzz_${target} od_session_fake)
     target_include_directories(od_fuzz_${target} PRIVATE ${CMAKE_CURRENT_LIST_DIR})
     target_compile_options(od_fuzz_${target} PRIVATE ${OD_FUZZ_FLAGS})
