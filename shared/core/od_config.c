@@ -1,6 +1,8 @@
-/* od_config.c -- see od_config.h. Plain C99, no HAL, no allocation, no logging. */
+/* od_config.c -- see od_config.h. Plain C99, no HAL and no allocation. */
 
 #include "od_config.h"
+
+#include "od_log.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -231,6 +233,55 @@ struct parse_ctx {
     struct od_config_report *report;
 };
 
+static void log_parse_result(const struct od_config *cfg, size_t blob_len,
+                             enum od_config_tlv_result walk,
+                             const struct od_config_report *report)
+{
+    unsigned buzzers = 0u;
+    unsigned nfc = 0u;
+
+    if (report->unknown_id != 0u) {
+        od_log_warn("Unknown config packet 0x%02X; remainder skipped",
+                    (unsigned)report->unknown_id);
+    }
+    if (walk == OD_CFG_TLV_TOO_SHORT) {
+        od_log_error("Config too short: %u bytes", (unsigned)blob_len);
+        return;
+    }
+    if (walk == OD_CFG_TLV_TRUNCATED) {
+        od_log_error("Config truncated: a packet exceeds the blob");
+        return;
+    }
+    if (walk != OD_CFG_TLV_OK) {
+        od_log_error("Config rejected while applying a packet");
+        return;
+    }
+    if (report->dropped_full != 0u) {
+        od_log_warn("%u config packet(s) dropped at an instance cap",
+                    (unsigned)report->dropped_full);
+    }
+    if (report->dropped_not_built != 0u) {
+        od_log_info("%u config packet(s) ignored for unavailable subsystems",
+                    (unsigned)report->dropped_not_built);
+    }
+    if (report->crc_checked && report->crc_stored != report->crc_computed) {
+        od_log_warn("Config CRC mismatch: stored 0x%04X, computed 0x%04X",
+                    (unsigned)report->crc_stored, (unsigned)report->crc_computed);
+    }
+#if OD_CONFIG_WITH_BUZZER
+    buzzers = cfg->passive_buzzer_count;
+#endif
+#if OD_CONFIG_WITH_NFC
+    nfc = cfg->nfc_config_count;
+#endif
+    od_log_info("Config parsed: version=%u, displays=%u, leds=%u, sensors=%u, "
+                "data_buses=%u, binary_inputs=%u, buzzers=%u, nfc=%u, flash=%u",
+                (unsigned)cfg->version, (unsigned)cfg->display_count,
+                (unsigned)cfg->led_count, (unsigned)cfg->sensor_count,
+                (unsigned)cfg->data_bus_count, (unsigned)cfg->binary_input_count,
+                buzzers, nfc, (unsigned)cfg->flash_config_count);
+}
+
 static bool on_packet(void *vctx, uint8_t packet_id, od_span_t body)
 {
     struct parse_ctx *ctx = (struct parse_ctx *)vctx;
@@ -257,24 +308,28 @@ enum od_config_tlv_result od_config_parse(struct od_config *cfg, od_span_t blob,
                                           struct od_config_report *report)
 {
     struct parse_ctx ctx;
+    struct od_config_report local_report;
+    struct od_config_report *active_report = report != NULL ? report : &local_report;
     enum od_config_tlv_result walk;
     uint8_t version = 0u;
     uint8_t unknown_id = 0u;
 
-    if (report != NULL) {
-        memset(report, 0, sizeof(*report));
-    }
+    memset(active_report, 0, sizeof(*active_report));
     if (cfg == NULL) {
+        od_log_error("Config parse rejected: invalid destination");
         return OD_CFG_TLV_TOO_SHORT;
     }
 
     od_config_reset(cfg);
     if (!od_span_valid(blob)) {
+        od_log_error("Config parse rejected: invalid blob");
         return OD_CFG_TLV_TOO_SHORT;
     }
 
+    od_log_info("Parsing config: %u bytes", (unsigned)blob.n);
+
     ctx.cfg = cfg;
-    ctx.report = report;
+    ctx.report = active_report;
     walk = od_config_tlv_walk(blob, on_packet, &ctx, &version, &unknown_id);
 
     cfg->version = version;
@@ -282,9 +337,7 @@ enum od_config_tlv_result od_config_parse(struct od_config *cfg, od_span_t blob,
      * it undefined, and a consumer reading a stale minor version is worse than reading 0. */
     cfg->minor_version = 0u;
 
-    if (report != NULL) {
-        report->unknown_id = unknown_id;
-    }
+    active_report->unknown_id = unknown_id;
 
     if (walk != OD_CFG_TLV_OK) {
         /* loaded stays false, and it is the ONLY thing separating a partial parse from a real
@@ -292,6 +345,7 @@ enum od_config_tlv_result od_config_parse(struct od_config *cfg, od_span_t blob,
          * half-way leaves every packet before the truncation stored -- the reset above cleared
          * whatever was there before, it does not un-store what the walk just did. A caller that
          * ignores both this return and cfg->loaded reads those packets as a whole config. */
+        log_parse_result(cfg, blob.n, walk, active_report);
         return walk;
     }
 
@@ -299,14 +353,17 @@ enum od_config_tlv_result od_config_parse(struct od_config *cfg, od_span_t blob,
      * two bytes are the stored value; everything before them is the covered region -- and the
      * `if` above the take() is what makes the saturating trim the right tool here rather than a
      * split (od_span.h: take/drop are for lengths already known to fit). */
-    if (blob.n >= OD_CFG_TLV_CRC_LEN && report != NULL) {
-        report->crc_checked = true;
-        report->crc_stored = (uint16_t)((uint16_t)blob.p[blob.n - 2u] |
-                                        ((uint16_t)blob.p[blob.n - 1u] << 8));
-        report->crc_computed = od_config_tlv_crc16(od_span_take(blob, blob.n - OD_CFG_TLV_CRC_LEN));
+    if (blob.n >= OD_CFG_TLV_CRC_LEN) {
+        active_report->crc_checked = true;
+        active_report->crc_stored = (uint16_t)((uint16_t)blob.p[blob.n - 2u] |
+                                               ((uint16_t)blob.p[blob.n - 1u] << 8));
+        active_report->crc_computed =
+            od_config_tlv_crc16(od_span_take(blob, blob.n - OD_CFG_TLV_CRC_LEN));
     }
 
     cfg->loaded = true;
+    log_parse_result(cfg, blob.n, walk, active_report);
+    od_config_log_dump(cfg);
     return OD_CFG_TLV_OK;
 }
 

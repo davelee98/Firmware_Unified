@@ -23,11 +23,7 @@
 #include "opendisplay_config_parser.h"
 #include "od_log.h"
 #include "od_session.h"
-#include "opendisplay_constants.h"
 #include "opendisplay_config_storage.h"
-#include "opendisplay_device_flags.h"
-#include <stdio.h>
-#include <string.h>
 
 /* The config parsed last, for the two security accessors below. A pointer rather than a copy:
  * security lives inside the aggregate so that nothing can read an encryption_enabled the
@@ -64,83 +60,21 @@ bool od_security_enabled_snapshot(void)
 	return __atomic_load_n(&s_security_enabled_snapshot, __ATOMIC_ACQUIRE) != 0u;
 }
 
-static void log_parse_result(const struct od_config *cfg, const struct od_config_report *report)
-{
-	if (report->unknown_id != 0u) {
-		od_log_info("Unknown pkt 0x%02X, remainder of config skipped", report->unknown_id);
-	}
-	if (report->dropped_full != 0u) {
-		od_log_info("%u pkt(s) dropped at an instance cap", (unsigned)report->dropped_full);
-	}
-	if (report->dropped_not_built != 0u) {
-		od_log_info("%u pkt(s) for subsystems not built in",
-			    (unsigned)report->dropped_not_built);
-	}
-	if (report->crc_checked && report->crc_stored != report->crc_computed) {
-		od_log_info("CRC mismatch: 0x%04X vs 0x%04X", report->crc_stored,
-			    report->crc_computed);
-	}
-
-	if ((cfg->system_config.device_flags & DEVICE_FLAG_CHANNEL_SOUNDING) != 0u) {
-		od_log_info("system_config: CHANNEL_SOUNDING enabled");
-	}
-	/* Panel bring-up leans on these four lines more than on anything else this file logs: a
-	 * wrong pin or a wrong IC shows up here and nowhere else until the display stays blank. */
-	for (uint8_t i = 0; i < cfg->display_count; i++) {
-		const struct DisplayConfig *d = &cfg->displays[i];
-
-		od_log_info("Display %u: ic=0x%04X %dx%d", (unsigned)i, d->panel_ic_type,
-			    d->pixel_width, d->pixel_height);
-		od_log_info("Display %u: RST=%d BUSY=%d DC=%d", (unsigned)i, d->reset_pin,
-			    d->busy_pin, d->dc_pin);
-		od_log_info("Display %u: CS=%d DATA=%d CLK=%d", (unsigned)i, d->cs_pin,
-			    d->data_pin, d->clk_pin);
-		od_log_info("Display %u: color=%d modes=0x%02X", (unsigned)i, d->color_scheme,
-			    d->transmission_modes);
-	}
-	if (cfg->security_loaded) {
-		od_log_info("Security: enabled=%d, flags=0x%02X, reset_pin=%d",
-			    (int)cfg->security.encryption_enabled, (unsigned)cfg->security.flags,
-			    (int)cfg->security.reset_pin);
-	}
-	od_log_info("Config parsed: version=%d, displays=%d, leds=%d, sensors=%d, data_buses=%d, binary_inputs=%d, buzzers=%d, nfc=%d, flash=%d",
-		    cfg->version, cfg->display_count, cfg->led_count, cfg->sensor_count,
-		    cfg->data_bus_count, cfg->binary_input_count, cfg->passive_buzzer_count,
-		    cfg->nfc_config_count, cfg->flash_config_count);
-}
-
 bool parseConfigBytes(uint8_t *configData, uint32_t configLen, struct od_config *globalConfig)
 {
-	struct od_config_report report;
 	enum od_config_tlv_result walk;
-
-	if (globalConfig == NULL || configData == NULL) {
-		od_log_info("Invalid parameters for parseConfigBytes");
-		publish_security_enabled(NULL);
-		return false;
-	}
-
-	od_log_info("Parsing config: %u bytes", (unsigned)configLen);
 
 	/* Resets, walks, stores, normalises, and computes the advisory CRC. globalConfig->loaded is
 	 * set only on a clean walk; a blob that truncates half-way keeps the packets that preceded
 	 * the truncation, so `loaded` is what callers must read, not the counts. */
-	walk = od_config_parse(globalConfig, od_span_make(configData, configLen), &report);
+	walk = od_config_parse(globalConfig, od_span_make(configData, configLen), NULL);
 	s_parsed = globalConfig;
 	publish_security_enabled(globalConfig);
 
-	if (walk == OD_CFG_TLV_TOO_SHORT) {
-		od_log_info("Config too short: %u bytes", (unsigned)configLen);
-		return false;
-	}
 	if (walk != OD_CFG_TLV_OK) {
-		/* Reported per packet type before the walk was shared ("system_config: need %zu,
-		 * have %u"); the walk cannot name the type, so this is the same fact, once. */
-		od_log_info("Config truncated: a packet claims more data than the blob holds");
 		return false;
 	}
 
-	log_parse_result(globalConfig, &report);
 	return true;
 }
 
@@ -150,7 +84,7 @@ bool loadGlobalConfig(struct od_config *globalConfig)
 	uint32_t configLen = OD_CONFIG_MAX_SIZE;
 
 	if (globalConfig == NULL) {
-		od_log_info("Invalid parameter for loadGlobalConfig");
+		od_log_error("Config load rejected: invalid destination");
 		publish_security_enabled(NULL);
 		return false;
 	}
@@ -159,13 +93,11 @@ bool loadGlobalConfig(struct od_config *globalConfig)
 	s_parsed = globalConfig;
 
 	if (!initConfigStorage()) {
-		od_log_info("Failed to initialize config storage");
 		publish_security_enabled(globalConfig);
 		return false;
 	}
 
 	if (!loadConfig(configData, &configLen)) {
-		od_log_info("No config found");
 		publish_security_enabled(globalConfig);
 		return false;
 	}

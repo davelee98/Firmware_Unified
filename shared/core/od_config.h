@@ -25,9 +25,11 @@
  *      counted; the earlier instances stand. All three agreed here.
  *
  * WHAT IS DELIBERATELY NOT PROMOTED. Storage (this module never reads or writes NVS; it is
- * handed a blob), all logging, and every target side effect -- the ESP32's LED re-detect and
- * its WifiConfig.server_host numeric-IP coercion, which is LAN-transport behaviour on the one
- * target that has a LAN transport. Targets keep those by acting on the per-packet result.
+ * handed a blob) and every target side effect -- the ESP32's LED re-detect and its
+ * WifiConfig.server_host numeric-IP coercion, which is LAN-transport behaviour on the one target
+ * that has a LAN transport. Parse outcomes and the credential-redacted configuration dump live
+ * here because this is the sole owner of those values; live runtime state remains with its
+ * target.
  *
  * Nordic's rescan_security_packet() is also NOT promoted. It scans the raw blob for an 0x27 it
  * missed, and it exists because an unknown id ends the walk: a blob carrying 0x2C on a build
@@ -43,8 +45,7 @@
  * exist to save RAM on a part that has none to spare -- not to opt a target out of a packet
  * because its hardware is absent. The ESP32 has no NFC and stores nfc_configs anyway.
  *
- * NO HAL, no allocation, no logging: the PURE tier. Reports what happened and lets the caller
- * say it.
+ * NO HAL and no allocation: the PURE tier. Logging compiles away on capability-off targets.
  */
 #ifndef OD_CONFIG_H
 #define OD_CONFIG_H
@@ -166,8 +167,7 @@ enum od_config_apply {
     OD_CONFIG_APPLY_SHORT_BODY   /* body smaller than the struct -- never from the walk */
 };
 
-/* Everything the target used to log from inside its own parser. Filled by od_config_parse();
- * shared/ has no log seam and a kernel-free target may have nowhere to send one. */
+/* Parse accounting filled by od_config_parse(). */
 struct od_config_report {
     uint16_t stored;             /* packets stored */
     uint16_t dropped_full;       /* packets dropped at an instance cap */
@@ -186,6 +186,10 @@ struct od_config_report {
 
 /* Zero every field. Equivalent to the memset each target opens its load with. */
 void od_config_reset(struct od_config *cfg);
+
+/* DEBUG-only dump of every stored non-reserved configuration field. Credentials and key bytes
+ * are represented only by bounded lengths/presence. A capability-off build emits nothing. */
+void od_config_log_dump(const struct od_config *cfg);
 
 /* True when any of the 16 key bytes is non-zero. Exposed because targets ask it outside the
  * parse (Nordic's od_security_key_set), and because it is half of the zero-key rule. */

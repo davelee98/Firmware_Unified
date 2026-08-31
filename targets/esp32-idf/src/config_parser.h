@@ -35,9 +35,6 @@ bool clearStoredConfig(void);
 bool loadConfig(uint8_t* configData, uint32_t* len);
 bool hasValidStoredConfig(void);
 bool loadGlobalConfig();
-void printConfigSummary();
-// Suppress the informational config dumps (parse-time detail + printConfigSummary)
-// without touching ERROR/WARNING output. Used to keep a deep-sleep wake quiet.
 void full_config_init();
 
 // The one 4 KB config staging buffer, shared by every consumer that needs a

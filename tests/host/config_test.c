@@ -10,13 +10,84 @@
  * expectations below are Firmware's: the zero-key rule and skip-not-overwrite at the caps.
  */
 #include "od_config.h"
+#include "od_log.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 static unsigned g_checks;
 static unsigned g_failures;
 static const char *g_case = "(none)";
+
+#define LOG_CAP 256u
+#define LOG_TEXT_CAP 256u
+
+struct captured_log {
+    int level;
+    char text[LOG_TEXT_CAP];
+};
+
+static struct captured_log g_logs[LOG_CAP];
+static unsigned g_log_count;
+
+void _od_log(int level, const char *fmt, ...)
+{
+    va_list ap;
+
+    if (g_log_count >= LOG_CAP) {
+        return;
+    }
+    g_logs[g_log_count].level = level;
+    va_start(ap, fmt);
+    (void)vsnprintf(g_logs[g_log_count].text, sizeof(g_logs[g_log_count].text), fmt, ap);
+    va_end(ap);
+    ++g_log_count;
+}
+
+static void logs_reset(void)
+{
+    memset(g_logs, 0, sizeof(g_logs));
+    g_log_count = 0u;
+}
+
+static bool logged_exact(int level, const char *text)
+{
+    unsigned i;
+
+    for (i = 0u; i < g_log_count; ++i) {
+        if (g_logs[i].level == level && strcmp(g_logs[i].text, text) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool logged_contains(int level, const char *text)
+{
+    unsigned i;
+
+    for (i = 0u; i < g_log_count; ++i) {
+        if (g_logs[i].level == level && strstr(g_logs[i].text, text) != NULL) {
+            return true;
+        }
+    }
+    return false;
+}
+
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
+static bool any_log_contains(const char *text)
+{
+    unsigned i;
+
+    for (i = 0u; i < g_log_count; ++i) {
+        if (strstr(g_logs[i].text, text) != NULL) {
+            return true;
+        }
+    }
+    return false;
+}
+#endif
 
 #define CHECK(cond)                                                             \
     do {                                                                        \
@@ -77,6 +148,145 @@ static void fill_body(uint8_t *body, uint16_t size, uint8_t seed)
     for (i = 0; i < size; ++i) {
         body[i] = (uint8_t)(seed + i);
     }
+}
+
+static void test_parse_logging(void)
+{
+    struct od_config cfg;
+    struct blob b;
+    uint8_t body[sizeof(struct DisplayConfig)];
+    char expected[LOG_TEXT_CAP];
+    unsigned i;
+
+    CASE("successful parse outcomes are logged by shared config");
+    blob_start(&b, 3u);
+    fill_body(body, (uint16_t)sizeof(struct SystemConfig), 0x10u);
+    blob_add(&b, 0x01u, body, (uint16_t)sizeof(struct SystemConfig));
+    blob_finish(&b, true);
+    logs_reset();
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), NULL) == OD_CFG_TLV_OK);
+    (void)snprintf(expected, sizeof expected, "Parsing config: %u bytes", (unsigned)b.len);
+    CHECK(logged_exact(OD_LOG_INFO, expected));
+    CHECK(logged_exact(OD_LOG_INFO,
+          "Config parsed: version=3, displays=0, leds=0, sensors=0, data_buses=0, "
+          "binary_inputs=0, buzzers=0, nfc=0, flash=0"));
+
+    CASE("advisory CRC mismatch is logged without rejecting the config");
+    blob_start(&b, 1u);
+    blob_finish(&b, false);
+    logs_reset();
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), NULL) == OD_CFG_TLV_OK);
+    CHECK(logged_contains(OD_LOG_WARN, "Config CRC mismatch: stored 0x"));
+
+    CASE("instance cap drops are logged");
+    blob_start(&b, 1u);
+    for (i = 0u; i < OD_CONFIG_MAX_DISPLAYS + 1u; ++i) {
+        fill_body(body, (uint16_t)sizeof(struct DisplayConfig), (uint8_t)i);
+        blob_add(&b, 0x20u, body, (uint16_t)sizeof(struct DisplayConfig));
+    }
+    blob_finish(&b, true);
+    logs_reset();
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), NULL) == OD_CFG_TLV_OK);
+    CHECK(logged_exact(OD_LOG_WARN, "1 config packet(s) dropped at an instance cap"));
+
+    CASE("unknown and malformed config outcomes are logged");
+    blob_start(&b, 1u);
+    blob_add(&b, 0x7Eu, body, 1u);
+    blob_finish(&b, true);
+    logs_reset();
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), NULL) == OD_CFG_TLV_OK);
+    CHECK(logged_exact(OD_LOG_WARN, "Unknown config packet 0x7E; remainder skipped"));
+
+    blob_start(&b, 1u);
+    blob_add(&b, 0x20u, NULL, 1u);
+    blob_finish(&b, true);
+    logs_reset();
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), NULL) == OD_CFG_TLV_TRUNCATED);
+    CHECK(logged_exact(OD_LOG_ERROR, "Config truncated: a packet exceeds the blob"));
+
+    memset(&b, 0, sizeof b);
+    b.len = 4u;
+    logs_reset();
+    CHECK(od_config_parse(&cfg, od_span_make(b.bytes, b.len), NULL) == OD_CFG_TLV_TOO_SHORT);
+    CHECK(logged_exact(OD_LOG_ERROR, "Config too short: 4 bytes"));
+}
+
+static void test_config_dump_logging(void)
+{
+    struct od_config cfg;
+
+    CASE("the complete config dump is debug-only and redacts secrets");
+    od_config_reset(&cfg);
+    cfg.loaded = true;
+
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
+    cfg.version = 4u;
+    cfg.display_count = 1u;
+    cfg.led_count = 1u;
+    cfg.sensor_count = 1u;
+    cfg.data_bus_count = 1u;
+    cfg.binary_input_count = 1u;
+    cfg.flash_config_count = 1u;
+#if OD_CONFIG_WITH_TOUCH
+    cfg.touch_controller_count = 1u;
+#endif
+#if OD_CONFIG_WITH_BUZZER
+    cfg.passive_buzzer_count = 1u;
+#endif
+#if OD_CONFIG_WITH_NFC
+    cfg.nfc_config_count = 1u;
+#endif
+#if OD_CONFIG_WITH_WIFI
+    cfg.wifi_config_loaded = true;
+    memcpy(cfg.wifi_config.ssid, "SECRET_SSID", sizeof("SECRET_SSID"));
+    memcpy(cfg.wifi_config.password, "SECRET_PASSWORD", sizeof("SECRET_PASSWORD"));
+    memcpy(cfg.wifi_config.server_host, "SECRET_SERVER", sizeof("SECRET_SERVER"));
+#endif
+    cfg.security_loaded = true;
+    memcpy(cfg.security.encryption_key, "SECRET_KEY_BYTES", sizeof cfg.security.encryption_key);
+#if OD_CONFIG_WITH_DATA_EXTENDED
+    cfg.data_extended_loaded = true;
+    memcpy(cfg.data_extended.model_name, "Model One", sizeof("Model One"));
+#endif
+
+    logs_reset();
+    od_config_log_dump(&cfg);
+    CHECK(logged_exact(OD_LOG_DEBUG, "=== Configuration Summary ==="));
+    CHECK(logged_contains(OD_LOG_DEBUG, "--- System Configuration ---"));
+    CHECK(logged_contains(OD_LOG_DEBUG, "--- Manufacturer Data ---"));
+    CHECK(logged_contains(OD_LOG_DEBUG, "--- Power Configuration ---"));
+    CHECK(logged_contains(OD_LOG_DEBUG, "--- Display Configurations (1) ---"));
+    CHECK(logged_contains(OD_LOG_DEBUG, "--- LED Configurations (1) ---"));
+    CHECK(logged_contains(OD_LOG_DEBUG, "--- Sensor Configurations (1) ---"));
+    CHECK(logged_contains(OD_LOG_DEBUG, "--- Data Bus Configurations (1) ---"));
+    CHECK(logged_contains(OD_LOG_DEBUG, "--- Binary Input Configurations (1) ---"));
+    CHECK(logged_contains(OD_LOG_DEBUG, "--- Security Configuration ---"));
+    CHECK(logged_contains(OD_LOG_DEBUG, "--- Flash Configurations (1) ---"));
+#if OD_CONFIG_WITH_WIFI
+    CHECK(logged_contains(OD_LOG_DEBUG, "SSID / Password: 11 chars / set"));
+    CHECK(!any_log_contains("SECRET_SSID"));
+    CHECK(!any_log_contains("SECRET_PASSWORD"));
+    CHECK(!any_log_contains("SECRET_SERVER"));
+#endif
+    CHECK(!any_log_contains("SECRET_KEY_BYTES"));
+#if OD_CONFIG_WITH_TOUCH
+    CHECK(logged_contains(OD_LOG_DEBUG, "--- Touch Controllers (1) ---"));
+#endif
+#if OD_CONFIG_WITH_BUZZER
+    CHECK(logged_contains(OD_LOG_DEBUG, "--- Buzzers (1) ---"));
+#endif
+#if OD_CONFIG_WITH_NFC
+    CHECK(logged_contains(OD_LOG_DEBUG, "--- NFC Configurations (1) ---"));
+#endif
+#if OD_CONFIG_WITH_DATA_EXTENDED
+    CHECK(logged_contains(OD_LOG_DEBUG, "--- Data Extended ---"));
+    CHECK(logged_exact(OD_LOG_DEBUG, "  model_name: Model One"));
+#endif
+#else
+    logs_reset();
+    od_config_log_dump(&cfg);
+    CHECK(g_log_count == 0u);
+#endif
 }
 
 /* -------------------------------------------------------------------------------- the tests --- */
@@ -503,6 +713,8 @@ static void test_data_bus_lookup(void)
 
 int main(void)
 {
+    test_parse_logging();
+    test_config_dump_logging();
     test_single_instance_packets();
     test_data_bus_lookup();
     test_instance_caps();
