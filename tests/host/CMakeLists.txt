@@ -665,6 +665,18 @@ target_include_directories(od_nordic_session_app_test PRIVATE
 target_link_libraries(od_nordic_session_app_test od_session_fake)
 add_test(NAME nordic_session_app COMMAND od_nordic_session_app_test)
 
+# nordic_config_parser: the loop thread publishes one derived security byte only after a config
+# load completes; the BT RX thread's debug predicate reads that byte instead of the mutable
+# aggregate. Production parser and predicate are both compiled here.
+add_executable(od_nordic_config_parser_test
+    nordic_config_parser_test.c
+    ../../targets/nordic-zephyr/src/opendisplay_config_parser.c
+    ../../targets/nordic-zephyr/src/od_rxq_app.c)
+target_include_directories(od_nordic_config_parser_test PRIVATE
+    ../../targets/nordic-zephyr/src)
+target_link_libraries(od_nordic_config_parser_test od_session_fake)
+add_test(NAME nordic_config_parser COMMAND od_nordic_config_parser_test)
+
 # nordic_cmd_device: what this target's device commands ANSWER, which dispatch_route_test cannot
 # see -- that suite replaces every hook with a recorder, so it proves routing and nothing about
 # behaviour. Two answers here were decided deliberately and had no other coverage: 0x52's

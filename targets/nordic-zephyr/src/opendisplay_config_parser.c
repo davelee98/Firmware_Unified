@@ -22,6 +22,7 @@
 
 #include "opendisplay_config_parser.h"
 #include "od_log.h"
+#include "od_session.h"
 #include "opendisplay_constants.h"
 #include "opendisplay_config_storage.h"
 #include "opendisplay_device_flags.h"
@@ -37,6 +38,17 @@ static const struct od_config *s_parsed;
  * meaning: no config means no encryption, not "unknown". */
 static const struct SecurityConfig s_no_security;
 
+/* The BT RX thread needs only this derived fact. Publishing one byte after a parse finishes
+ * keeps it away from the loop thread's mutable config aggregate. */
+static uint8_t s_security_enabled_snapshot;
+
+static void publish_security_enabled(const struct od_config *cfg)
+{
+	const bool enabled = cfg != NULL && od_session_security_enabled(&cfg->security);
+
+	__atomic_store_n(&s_security_enabled_snapshot, enabled ? 1u : 0u, __ATOMIC_RELEASE);
+}
+
 const struct SecurityConfig *od_get_parsed_security(void)
 {
 	return (s_parsed != NULL) ? &s_parsed->security : &s_no_security;
@@ -45,6 +57,11 @@ const struct SecurityConfig *od_get_parsed_security(void)
 bool od_security_key_set(void)
 {
 	return od_config_security_key_set(od_get_parsed_security());
+}
+
+bool od_security_enabled_snapshot(void)
+{
+	return __atomic_load_n(&s_security_enabled_snapshot, __ATOMIC_ACQUIRE) != 0u;
 }
 
 static void log_parse_result(const struct od_config *cfg, const struct od_config_report *report)
@@ -99,6 +116,7 @@ bool parseConfigBytes(uint8_t *configData, uint32_t configLen, struct od_config 
 
 	if (globalConfig == NULL || configData == NULL) {
 		od_log_info("Invalid parameters for parseConfigBytes");
+		publish_security_enabled(NULL);
 		return false;
 	}
 
@@ -109,6 +127,7 @@ bool parseConfigBytes(uint8_t *configData, uint32_t configLen, struct od_config 
 	 * the truncation, so `loaded` is what callers must read, not the counts. */
 	walk = od_config_parse(globalConfig, od_span_make(configData, configLen), &report);
 	s_parsed = globalConfig;
+	publish_security_enabled(globalConfig);
 
 	if (walk == OD_CFG_TLV_TOO_SHORT) {
 		od_log_info("Config too short: %u bytes", (unsigned)configLen);
@@ -132,6 +151,7 @@ bool loadGlobalConfig(struct od_config *globalConfig)
 
 	if (globalConfig == NULL) {
 		od_log_info("Invalid parameter for loadGlobalConfig");
+		publish_security_enabled(NULL);
 		return false;
 	}
 
@@ -140,11 +160,13 @@ bool loadGlobalConfig(struct od_config *globalConfig)
 
 	if (!initConfigStorage()) {
 		od_log_info("Failed to initialize config storage");
+		publish_security_enabled(globalConfig);
 		return false;
 	}
 
 	if (!loadConfig(configData, &configLen)) {
 		od_log_info("No config found");
+		publish_security_enabled(globalConfig);
 		return false;
 	}
 
