@@ -72,6 +72,14 @@ if(OD_SHARED_SOURCES)
     target_include_directories(od_xfer_log_debug PUBLIC ${OD_SHARED_INCLUDE_DIRS})
     target_compile_definitions(od_xfer_log_debug PRIVATE OD_LOG_LEVEL=OD_LOG_DEBUG)
 
+    # The parsed config dump is DEBUG-only. Compile both state-owning translation units at that
+    # level so the debug fixture tests the code that target debug profiles actually include.
+    add_library(od_config_log_debug STATIC
+        ${CMAKE_CURRENT_LIST_DIR}/../../shared/core/od_config.c
+        ${CMAKE_CURRENT_LIST_DIR}/../../shared/core/od_config_log.c)
+    target_include_directories(od_config_log_debug PUBLIC ${OD_SHARED_INCLUDE_DIRS})
+    target_compile_definitions(od_config_log_debug PRIVATE OD_LOG_LEVEL=OD_LOG_DEBUG)
+
     # Dispatch-only fixtures define the four promoted od_xfer command entry points so they can
     # observe routing and scripted verdicts. Keep production od_xfer objects out of these archives;
     # otherwise any unrelated state query pulls them in and collides with the fixture definitions.
@@ -248,6 +256,7 @@ add_test(NAME config_store_cap COMMAND od_config_store_cap_test)
 # (PLAN_SENSOR_SEAM_2026-08-23.md staging steps 4, 5 and 9).
 add_executable(od_i2c_contract_ref_test
     i2c_contract_ref_test.c
+    od_log_test_stub.c
     fake_i2c/i2c_wire.c
     fake_i2c/i2c_ref_impl.c)
 target_include_directories(od_i2c_contract_ref_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -276,6 +285,7 @@ add_test(NAME silabs_i2c_trace COMMAND od_silabs_i2c_trace_test)
 # Binds the production od_hal_i2c.c and opendisplay_i2c.c.
 add_executable(od_nordic_i2c_trace_test
     nordic_i2c_trace_test.c
+    od_log_test_stub.c
     fake_nordic_i2c/od_gpio_trace.c
     ../../targets/nordic-zephyr/src/od_hal_i2c.c
     ../../targets/nordic-zephyr/src/opendisplay_i2c.c)
@@ -467,6 +477,11 @@ add_test(NAME config_tlv COMMAND od_config_tlv_test)
 add_executable(od_config_test config_test.c)
 target_link_libraries(od_config_test od_shared)
 add_test(NAME config COMMAND od_config_test)
+
+add_executable(od_config_debug_test config_test.c)
+target_compile_definitions(od_config_debug_test PRIVATE OD_LOG_LEVEL=OD_LOG_DEBUG)
+target_link_libraries(od_config_debug_test od_config_log_debug od_shared)
+add_test(NAME config_debug COMMAND od_config_debug_test)
 
 # txq: the response queue, its capacity reservation and the drain, against a scripted radio.
 #

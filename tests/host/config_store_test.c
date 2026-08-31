@@ -11,9 +11,12 @@
 
 #include "od_config_store.h"
 #include "od_hal_nvs.h"
+#include "od_log.h"
 
 #include "od_check.h"
 
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 /* ------------------------------------------------------------------ the fake medium ------ */
@@ -38,6 +41,51 @@ static int  g_fail_erase;
 static bool g_write_lands_despite_failure;
 
 static unsigned g_reads;
+
+#define LOG_CAP 32u
+#define LOG_TEXT_CAP 128u
+
+struct captured_log {
+    int level;
+    char text[LOG_TEXT_CAP];
+};
+
+static struct captured_log g_logs[LOG_CAP];
+static unsigned g_log_count;
+
+void _od_log(int level, const char *fmt, ...)
+{
+    va_list ap;
+
+    if (g_log_count >= LOG_CAP) {
+        return;
+    }
+    g_logs[g_log_count].level = level;
+    va_start(ap, fmt);
+    (void)vsnprintf(g_logs[g_log_count].text, sizeof(g_logs[g_log_count].text), fmt, ap);
+    va_end(ap);
+    ++g_log_count;
+}
+
+static void logs_reset(void)
+{
+    memset(g_logs, 0, sizeof(g_logs));
+    g_log_count = 0u;
+}
+
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_INFO
+static bool logged_exact(int level, const char *text)
+{
+    unsigned i;
+
+    for (i = 0u; i < g_log_count; ++i) {
+        if (g_logs[i].level == level && strcmp(g_logs[i].text, text) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+#endif
 
 static void medium_reset(void)
 {
@@ -138,6 +186,50 @@ static enum od_config_store_result load(uint32_t cap, uint32_t *out_len)
     enum od_config_store_result r = od_config_store_load(g_out, &n);
     *out_len = n;
     return r;
+}
+
+static void test_store_logging(void)
+{
+    uint32_t len;
+
+    CASE("shared storage reports lifecycle outcomes");
+    medium_reset();
+    fill(g_payload, 64u, 0xA0u);
+    logs_reset();
+    CHECK(save(g_payload, 64u) == OD_CONFIG_STORE_OK);
+    CHECK(load(sizeof(g_out), &len) == OD_CONFIG_STORE_OK);
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_INFO
+    CHECK(logged_exact(OD_LOG_INFO, "Config stored: 64 bytes"));
+    CHECK(logged_exact(OD_LOG_INFO, "Config loaded from storage: 64 bytes"));
+#else
+    CHECK(g_log_count == 0u);
+#endif
+
+    CASE("shared storage reports empty, corrupt, clear, and init failure outcomes");
+    medium_reset();
+    logs_reset();
+    CHECK(load(sizeof(g_out), &len) == OD_CONFIG_STORE_EMPTY);
+    CHECK(od_config_store_clear() == OD_CONFIG_STORE_OK);
+    g_fail_init = 1;
+    CHECK(od_config_store_init() == OD_CONFIG_STORE_IO);
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_INFO
+    CHECK(logged_exact(OD_LOG_INFO, "No stored config found"));
+    CHECK(logged_exact(OD_LOG_INFO, "Stored config cleared"));
+    CHECK(logged_exact(OD_LOG_ERROR, "Config storage initialization failed"));
+#else
+    CHECK(g_log_count == 0u);
+#endif
+
+    medium_reset();
+    CHECK(save(g_payload, 64u) == OD_CONFIG_STORE_OK);
+    g_medium[16u] ^= 0x01u;
+    logs_reset();
+    CHECK(load(sizeof(g_out), &len) == OD_CONFIG_STORE_CORRUPT);
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_INFO
+    CHECK(logged_exact(OD_LOG_ERROR, "Stored config is corrupt: CRC mismatch"));
+#else
+    CHECK(g_log_count == 0u);
+#endif
 }
 
 /* ------------------------------------------------------------------------ the record ----- */
@@ -499,6 +591,7 @@ static void test_header_read_is_not_the_whole_record(void)
 
 int main(void)
 {
+    test_store_logging();
     test_crc32_reference();
     test_record_bytes();
     test_empty_payload();

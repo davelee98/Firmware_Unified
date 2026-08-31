@@ -7,10 +7,9 @@
  * in the memcpy that follows. The ESP32 spelled those checks out fifteen times, once per
  * packet type, each an independent chance to write `<=` where `<` was meant.
  *
- * So the WALK is shared and the COPY is not. This module decides where a packet starts, how
- * long it is, and whether it fits; the target's callback receives a body whose bounds are
- * already guaranteed and puts it wherever that target keeps it. Per-target aggregation
- * structures, instance-count caps and logging stay where they belong.
+ * This module decides where a packet starts, how long it is, and whether it fits; the callback
+ * receives a body whose bounds are already guaranteed. od_config.c owns the shared aggregate,
+ * instance caps and outcome logging above this structural walk.
  *
  * WHAT THIS DELIBERATELY DOES NOT CHANGE. Unknown packet IDs still abandon the rest of the
  * blob (skip-to-CRC), exactly as every shipped target does today. The size-table skip model
@@ -75,10 +74,8 @@ uint16_t od_config_tlv_body_size(uint8_t packet_id);
  * this build does not know is not corrupt, it is newer.
  *
  * unknown_id_out, when supplied, receives the id that ended the walk, or 0 if it ran to the
- * end. It exists so the caller can keep logging WHICH id stopped it: the per-target parser used
- * to warn "Unknown packet ID 0x%02X", and losing that in the promotion would trade a diagnostic
- * for nothing. The walk deliberately does no logging of its own -- shared/ has no log seam and
- * a kernel-free target may have nowhere to send it.
+ * end. The walk deliberately does no logging of its own: od_config_parse() owns the complete
+ * outcome and can report the unknown id alongside its other accounting.
  */
 enum od_config_tlv_result od_config_tlv_walk(od_span_t blob,
                                              od_config_tlv_packet_fn fn, void *ctx,

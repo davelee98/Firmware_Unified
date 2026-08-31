@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "od_hal_nvs.h"
+#include "od_log.h"
 
 /* The header is written and read byte-wise rather than as a struct. The bytes are the same on
  * every target this repo builds -- all little-endian -- but the record is a persistence format
@@ -55,7 +56,12 @@ static enum od_config_store_result from_hal(int rc)
 
 enum od_config_store_result od_config_store_init(void)
 {
-    return from_hal(od_hal_nvs_init());
+    const enum od_config_store_result rc = from_hal(od_hal_nvs_init());
+
+    if (rc != OD_CONFIG_STORE_OK) {
+        od_log_error("Config storage initialization failed");
+    }
+    return rc;
 }
 
 enum od_config_store_result od_config_store_save(void *workspace, uint32_t workspace_cap,
@@ -67,13 +73,18 @@ enum od_config_store_result od_config_store_save(void *workspace, uint32_t works
     uint32_t crc;
 
     if (ws == NULL || payload == NULL) {
+        od_log_error("Config save rejected: invalid arguments");
         return OD_CONFIG_STORE_IO;
     }
     if (len > OD_CONFIG_MAX_SIZE) {
+        od_log_warn("Config save rejected: %u bytes exceed the %u-byte limit",
+                    (unsigned)len, (unsigned)OD_CONFIG_MAX_SIZE);
         return OD_CONFIG_STORE_TOO_BIG;
     }
     total = OD_CONFIG_STORE_HEADER_SIZE + len;
     if (workspace_cap < total) {
+        od_log_error("Config save rejected: workspace is %u bytes, need %u",
+                     (unsigned)workspace_cap, (unsigned)total);
         return OD_CONFIG_STORE_TOO_BIG;
     }
 
@@ -94,7 +105,18 @@ enum od_config_store_result od_config_store_save(void *workspace, uint32_t works
     put_u32le(ws + 8,  crc);
     put_u32le(ws + 12, len);
 
-    return from_hal(od_hal_nvs_write(ws, total));
+    {
+        const enum od_config_store_result rc = from_hal(od_hal_nvs_write(ws, total));
+
+        if (rc == OD_CONFIG_STORE_OK) {
+            od_log_info("Config stored: %u bytes", (unsigned)len);
+        } else if (rc == OD_CONFIG_STORE_TOO_BIG) {
+            od_log_warn("Config storage rejected a %u-byte record", (unsigned)total);
+        } else {
+            od_log_error("Config storage write failed");
+        }
+        return rc;
+    }
 }
 
 enum od_config_store_result od_config_store_load(uint8_t *payload, uint32_t *len)
@@ -106,20 +128,30 @@ enum od_config_store_result od_config_store_load(uint8_t *payload, uint32_t *len
     int rc;
 
     if (len == NULL) {
+        od_log_error("Config load rejected: invalid length pointer");
         return OD_CONFIG_STORE_IO;
     }
     cap = *len;
     *len = 0;
     if (payload == NULL) {
+        od_log_error("Config load rejected: invalid destination");
         return OD_CONFIG_STORE_IO;
     }
 
     rc = od_hal_nvs_size(&stored);
     if (rc != OD_HAL_NVS_OK) {
-        return from_hal(rc);
+        const enum od_config_store_result result = from_hal(rc);
+
+        if (result == OD_CONFIG_STORE_EMPTY) {
+            od_log_info("No stored config found");
+        } else {
+            od_log_error("Config storage size query failed");
+        }
+        return result;
     }
     if (stored < OD_CONFIG_STORE_HEADER_SIZE) {
         /* Too short to carry a header at all: not a record this firmware wrote. */
+        od_log_error("Stored config is corrupt: record is only %u bytes", (unsigned)stored);
         return OD_CONFIG_STORE_CORRUPT;
     }
     if (stored > OD_CONFIG_STORE_MAX_RECORD) {
@@ -129,42 +161,57 @@ enum od_config_store_result od_config_store_load(uint8_t *payload, uint32_t *len
          * how one arrives. Bounding `stored` here is what keeps this decision the core's
          * rather than each medium's: two of the three HALs happen to refuse it first, and
          * BG22's does not. */
+        od_log_warn("Stored config record is too large: %u bytes", (unsigned)stored);
         return OD_CONFIG_STORE_TOO_BIG;
     }
 
     rc = od_hal_nvs_read(0, header, OD_CONFIG_STORE_HEADER_SIZE);
     if (rc != OD_HAL_NVS_OK) {
+        od_log_error("Config storage header read failed");
         return from_hal(rc);
     }
     if (get_u32le(header + 0) != OD_CONFIG_STORE_MAGIC) {
+        od_log_error("Stored config is corrupt: bad magic");
         return OD_CONFIG_STORE_CORRUPT;
     }
     /* header + 4 is `version`, carried and deliberately not checked. */
     data_len = get_u32le(header + 12);
 
     if (data_len > OD_CONFIG_MAX_SIZE || data_len > cap) {
+        od_log_warn("Stored config payload is too large: %u bytes", (unsigned)data_len);
         return OD_CONFIG_STORE_TOO_BIG;
     }
     if (stored - OD_CONFIG_STORE_HEADER_SIZE < data_len) {
         /* The header declares more payload than the medium is holding. */
+        od_log_error("Stored config is corrupt: truncated payload");
         return OD_CONFIG_STORE_CORRUPT;
     }
 
     if (data_len > 0u) {
         rc = od_hal_nvs_read(OD_CONFIG_STORE_HEADER_SIZE, payload, data_len);
         if (rc != OD_HAL_NVS_OK) {
+            od_log_error("Config storage payload read failed");
             return from_hal(rc);
         }
     }
     if (od_config_store_crc32(payload, data_len) != get_u32le(header + 8)) {
+        od_log_error("Stored config is corrupt: CRC mismatch");
         return OD_CONFIG_STORE_CORRUPT;
     }
 
     *len = data_len;
+    od_log_info("Config loaded from storage: %u bytes", (unsigned)data_len);
     return OD_CONFIG_STORE_OK;
 }
 
 enum od_config_store_result od_config_store_clear(void)
 {
-    return from_hal(od_hal_nvs_erase());
+    const enum od_config_store_result rc = from_hal(od_hal_nvs_erase());
+
+    if (rc == OD_CONFIG_STORE_OK) {
+        od_log_info("Stored config cleared");
+    } else {
+        od_log_error("Config storage erase failed");
+    }
+    return rc;
 }

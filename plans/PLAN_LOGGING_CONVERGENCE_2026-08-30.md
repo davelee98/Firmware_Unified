@@ -26,9 +26,9 @@ Verified at merge: `tools/check.sh` 42 passed / 0 failed, and all three target f
 hardware capture in § 8 is still open** — L0a is proven by the modeled host adapter test only, so
 no board has yet shown the CDC ACM and RTT bytes.
 
-**Remaining: Stages 6-9** — config (L5), NFC (L6, needs Q3), dispatch/gate/reply/cmd (L7), and
-the independent ESP32 `ESP_LOGx` cleanup. Q3 and Q4 are still open. Stage 5 transfer's first
-slice and remainder checklist landed on 2026-08-31; see L4.
+**Remaining: Stages 7-9** — NFC (L6), dispatch/gate/reply/cmd (L7), and the independent ESP32
+`ESP_LOGx` cleanup. Q3 and Q4 are resolved. Stage 5 transfer landed and Stage 6 config is
+implemented with remainder checklists on 2026-08-31; see L4-L5.
 
 ## 1. Objective and authority
 
@@ -397,6 +397,43 @@ Same shape as L4: 0 logging in shared config files, 180 calls in `config_parser.
 validate/store outcomes (a field rejected, a bound violated, a record written/reloaded) belong in
 `od_config*.c`; anything naming NVS/filesystem mechanics stays in the target.
 
+**Stage 6 result (2026-08-31).** The audit covered all 180 ESP32 and 18 Nordic sites and checked
+the live sibling implementations. Shared config now owns parse start/result, unknown packet,
+instance-cap, unavailable-subsystem, advisory CRC and malformed-blob records. Shared persistence
+owns initialization failure, save/load/empty/corrupt/oversize/read/write/clear outcomes. The
+target wrappers no longer restate those decisions.
+
+The complete parsed-value dump moved into `od_config_log.c` at DEBUG. It covers every stored
+non-reserved family, including WiFi, security, touch, buzzer, NFC, flash and extended identity
+data. WiFi credentials and server names are represented only by bounded length/presence, and
+security keys only by set/not-set; their bytes are never formatted. Count-driven loops are
+bounded by the aggregate capacities even if a caller presents corrupted state. A dedicated
+DEBUG archive compiles both state-owning translation units at the same level and exact capture
+tests prove the dump, INFO exclusion, outcome wording and credential/key redaction.
+
+ESP32 retains only target-owned application work in this file: LAN endpoint coercion and runtime
+status, LED re-detection, board power initialization and factory-clear orchestration. Nordic has
+no parallel config dump or outcome formatter left. BG22's existing storage failure `printf`
+remains unchanged because its `OD_CAP_LOG=0` profile compiles the shared records away.
+
+Verification: the 80-case host suite and all 42 non-target gates passed under GCC, Clang,
+ASan+UBSan, five fuzz targets and the pinned wire corpus. `tools/check.sh --targets` passed all
+45 gates: all 11 ESP32 fragments, all three Nordic boards and BG22. Separate nRF52840 DEBUG and
+INFO builds proved the dump with the NCS/newlib-nano toolchain; linked-image inspection found the
+summary format only in DEBUG while the bounded parse result remains in both profiles. Leak
+detection alone was disabled because LeakSanitizer cannot run under the verification
+environment's `ptrace`; AddressSanitizer and UndefinedBehaviorSanitizer remained enabled.
+
+Tracked remainder from the callsite triage:
+
+- [ ] Add bounded config-assembly lifecycle diagnostics in `od_config_asm.c` if field debugging
+  shows that START/DATA admission failures need more than their wire result.
+- [ ] Add config-read lifecycle diagnostics in `od_config_read.c` only if a real missing event is
+  identified; Stage 8 owns command routing/refusal logs and must not duplicate them here.
+- [x] Keep NVS/filesystem driver mechanics in target HALs; shared persistence reports only the
+  portable result returned by those drivers.
+- [x] Keep WiFi/LAN coercion, connection state, board setup and factory provisioning target-owned.
+
 ### L6 — NFC (`od_nfc.c`)
 
 ESP32 builds `OD_CAP_NFC=0` — **there is no ESP32 default to defer to for this subsystem.**
@@ -449,10 +486,10 @@ Stage 8.
 3. **[LANDED `54e0663`] Session logging → `od_session.c`; retain BG22 callback** (L2). Self-contained, restores two missing Nordic
    auth cases for free, hoists the duplicated rate-limit throttle into one place.
 4. **[LANDED `6776bbd`] `od_txq_app_dropped`** (L3) — Q2 answered as ESP32 wording at Nordic's INFO level.
-5. **[SUBMITTED PR #79, 2026-08-31] Transfer** (L4) — own audit pass, file-by-file over `display_service.cpp` and
+5. **[LANDED `8be9191`, PR #79] Transfer** (L4) — own audit pass, file-by-file over `display_service.cpp` and
    `opendisplay_display.cpp`/`opendisplay_pipe.c`, starting with the `imageWriteLog*` family as the
    first landed slice so Stage 5 has an early, demonstrable result rather than one giant patch.
-6. **Config** (L5) — same method as Stage 5, applied to `config_parser.cpp` /
+6. **[IMPLEMENTED 2026-08-31] Config** (L5) — same method as Stage 5, applied to `config_parser.cpp` /
    `opendisplay_config_parser.c`.
 7. **NFC** (L6) — after § 9 Q3 is answered.
 8. **Dispatch/gate/reply/cmd** (L7) — design the candidate event list, confirm wording, implement.
@@ -565,10 +602,10 @@ sitting.
 - **[MET]** `od_txq_app_dropped` converged per the § 9 Q2 answer, with the same BG22-callback-only caveat as
   the session seam above (see L3's BG22 note).
 - **[OPEN]** NFC logging exists in `od_nfc.c` per the § 9 Q3 answer.
-- **[MET transfer / OPEN config]** Transfer and config each have an implemented first slice (at minimum:
+- **[MET transfer / config]** Transfer and config each have an implemented first slice (at minimum:
   the `imageWriteLog*` family for transfer) and a tracked checklist for the remainder — not
   required to be 100% complete in one pass given the size (151 + 180 call sites across the two
-  subsystems). Transfer's first slice and checklist were implemented on 2026-08-31.
+  subsystems). Both first slices and their remainder checklists were implemented on 2026-08-31.
 - **[MET]** `tools/check.sh --targets` passes on every stage landed — all three families run
   green at `7d22fa8`.
 - **[MET, one caveat]** The shared CMake selector returns exactly one correct INFO/DEBUG definition and rejects empty,

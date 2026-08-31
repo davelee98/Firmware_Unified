@@ -10,19 +10,11 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ESP32: config lives in NVS, not LittleFS (decided 2026-07-25). The record's framing, CRC and
- * bounds are shared/core's; this file supplies the workspace and the target's log lines. */
+/* ESP32: config lives in NVS. Shared core owns the record framing, bounds, CRC and outcomes;
+ * this file supplies the workspace and applies target-specific runtime state. */
 #include "od_config_store.h"
-/* The one network thing this file needs: the STA address, for a status log line. Included
- * unconditionally rather than under OPENDISPLAY_HAS_WIFI, because the log line itself is not
- * gated on WiFi being compiled in -- on a board without it, the lookup simply returns NULL
- * and the line prints "?". esp_netif is part of IDF regardless. */
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
 #include "esp_netif.h"
-
-#ifndef COMM_MODE_BLE
-#define COMM_MODE_BLE (1 << 0)
-#define COMM_MODE_OEPL (1 << 1)
-#define COMM_MODE_WIFI (1 << 2)
 #endif
 #ifndef DEVICE_FLAG_PWR_PIN
 #define DEVICE_FLAG_PWR_PIN (1 << 0)
@@ -31,10 +23,6 @@
 #define DEVICE_FLAG_BATTERY_LATCH (1 << 3)
 #define DEVICE_FLAG_PWR_LATCH_DFF (1 << 4)
 #endif
-
-// The parse-time dumps and printConfigSummary() are od_log_debug, which the
-// default OD_LOG_LEVEL (INFO) compiles out entirely -- so they no longer cost
-// serial time in the deep-sleep wake window and need no runtime quiet flag.
 
 extern struct od_config globalConfig;
 extern uint8_t activeLedInstance;
@@ -45,8 +33,10 @@ extern bool wifiConfigured;
 extern char wifiServerUrl[65];
 extern uint16_t wifiServerPort;
 // extern bool wifiServerConfigured;  // dead -- see the 0x26 wifi_config parse
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
 extern bool wifiConnected;
 extern bool wifiInitialized;
+#endif
 
 void xiaoinit();
 void powerDownExternalFlashFromConfig(void);
@@ -67,11 +57,7 @@ void resetChunkedWriteState(void) {
 }
 
 bool initConfigStorage(){
-    if (od_config_store_init() != OD_CONFIG_STORE_OK) {
-        od_log_error("Failed to initialise NVS config storage");
-        return false;
-    }
-    return true;
+    return od_config_store_init() == OD_CONFIG_STORE_OK;
 }
 
 void formatConfigStorage(){
@@ -94,24 +80,12 @@ bool saveConfig(uint8_t* configData, uint32_t len){
      * in here -- there is nowhere else it could be assembled contiguously. */
     static uint8_t workspace[OD_CONFIG_STORE_MAX_RECORD];
 
-    if (configData == nullptr) {
-        return false;
-    }
-    switch (od_config_store_save(workspace, sizeof(workspace), configData, len)) {
-    case OD_CONFIG_STORE_OK:
-        return true;
-    case OD_CONFIG_STORE_TOO_BIG:
-        od_log_error("Config data too large (%u bytes)", (unsigned)len);
-        return false;
-    default:
-        od_log_error("Failed to write config to NVS");
-        return false;
-    }
+    return od_config_store_save(workspace, sizeof(workspace), configData, len)
+           == OD_CONFIG_STORE_OK;
 }
 
 bool clearStoredConfig(void) {
     if (od_config_store_clear() != OD_CONFIG_STORE_OK) {
-        od_log_error("Failed to remove stored config");
         return false;
     }
     /* One memset, not two: securityConfig is a member of globalConfig now, so zeroing the
@@ -125,24 +99,7 @@ bool clearStoredConfig(void) {
 }
 
 bool loadConfig(uint8_t* configData, uint32_t* len){
-    if (configData == nullptr || len == nullptr) {
-        return false;
-    }
-    switch (od_config_store_load(configData, len)) {
-    case OD_CONFIG_STORE_OK:
-        return true;
-    case OD_CONFIG_STORE_EMPTY:
-        return false;           /* unprovisioned device -- not an error, just nothing stored */
-    case OD_CONFIG_STORE_TOO_BIG:
-        od_log_error("Stored config larger than this build accepts");
-        return false;
-    case OD_CONFIG_STORE_CORRUPT:
-        od_log_error("Stored config rejected (magic, length or CRC)");
-        return false;
-    default:
-        od_log_error("Failed to read config from NVS");
-        return false;
-    }
+    return od_config_store_load(configData, len) == OD_CONFIG_STORE_OK;
 }
 
 bool hasValidStoredConfig(void) {
@@ -256,43 +213,40 @@ static void applyWifiConfig(const struct WifiConfig &wc) {
     od_log_debug("WiFi configured: true");
 }
 
-/* What the 0x27 arm used to say while it copied. The copy and the zero-key normalisation are
- * od_config_apply_packet()'s now -- reading securityConfig here reads the normalised value,
- * which is the point of storing it inside the config rather than beside it. */
-static void logSecurityConfig() {
-    if (!od_config_security_key_set(&securityConfig)) {
-        od_log_debug("Security config: Encryption disabled (key is all zeros)");
-    } else if (securityConfig.encryption_enabled) {
-        od_log_debug("Security config: Encryption enabled");
-        od_log_debug("Session timeout: %u seconds", securityConfig.session_timeout_seconds);
-    } else {
-        od_log_debug("Security config: Encryption disabled (flag set to 0)");
+static void logWifiRuntimeState() {
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
+    if ((globalConfig.system_config.communication_modes & OD_COMM_MODE_WIFI) == 0u) {
+        return;
     }
-    if (securityConfig.flags & OD_SECURITY_FLAG_REWRITE_ALLOWED) {
-        od_log_debug("Security config: Rewrite allowed (unauthorized config writes permitted)");
+    if (!wifiConfigured) {
+        od_log_debug("WiFi Status: Configured but not loaded");
+        return;
     }
-    if (securityConfig.flags & OD_SECURITY_FLAG_SHOW_KEY_ON_SCREEN) {
-        /* Not a future feature -- the boot screen honours it. It prints the key only when the
-         * key is also in force, so this line alone does not mean the key is on the panel. */
-        od_log_debug("Security config: Show key on screen enabled");
+    if (!wifiInitialized) {
+        od_log_debug("WiFi Status: Not initialized");
+        return;
     }
-    if (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_ENABLED) {
-        od_log_debug("Security config: Reset pin %u enabled (polarity: %s, pullup: %s, pulldown: %s)",
-                   securityConfig.reset_pin,
-                   (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_POLARITY) ? "HIGH" : "LOW",
-                   (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_PULLUP) ? "yes" : "no",
-                   (securityConfig.flags & OD_SECURITY_FLAG_RESET_PIN_PULLDOWN) ? "yes" : "no");
-    } else {
-        od_log_debug("Security config: Reset pin disabled");
+    if (!wifiConnected) {
+        od_log_debug("WiFi Status: Disconnected");
+        return;
     }
+
+    char ipStr[16] = "?";
+    esp_netif_t* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t ipInfo;
+    if (sta != nullptr && esp_netif_get_ip_info(sta, &ipInfo) == ESP_OK) {
+        snprintf(ipStr, sizeof(ipStr), IPSTR, IP2STR(&ipInfo.ip));
+    }
+    od_log_debug("WiFi Status: Connected (IP: %s)", ipStr);
+#endif
 }
 
 /* THE PER-PACKET SWITCH IS GONE, and that is the promotion. It spelled out the instance caps
  * eight times, the DataExtended terminators once more, and the zero-key rule once -- each an
  * independent chance to compare against the wrong bound or normalise nothing. Storage now
  * happens once in shared/core/od_config.c, against the same aggregate every target keeps, and
- * what is left here is this target's own: the LED re-detect, the WiFi apply, and the logging
- * the walk cannot do because shared/ has no log seam.
+ * what is left here is this target's own: the LED re-detect, the WiFi apply, and target-specific
+ * configuration/runtime detail. Shared parsing reports its own outcomes directly.
  */
 bool loadGlobalConfig(){
     wifiConfigured = false;
@@ -310,40 +264,9 @@ bool loadGlobalConfig(){
     /* Resets, walks, stores and computes the advisory CRC. globalConfig.loaded is set only on a
      * clean walk; a blob that truncates half-way keeps the packets that preceded the truncation,
      * so `loaded` is what consumers must read, not the counts. */
-    struct od_config_report report;
     const enum od_config_tlv_result walk =
-        od_config_parse(&globalConfig, od_span_make(configData, configLen), &report);
-
-    if (report.unknown_id != 0) {
-        /* The walk reports the id and this target says it. Losing "Unknown packet ID 0x%02X"
-         * in the promotion would have traded a diagnostic for nothing. */
-        od_log_warn("Unknown packet ID 0x%02X, remainder of config skipped",
-                    report.unknown_id);
-    }
-    if (walk == OD_CFG_TLV_TOO_SHORT) {
-        od_log_error("Config too short");
-        return false;
-    }
-    if (walk != OD_CFG_TLV_OK) {
-        /* A packet claimed more bytes than the blob holds. Reported per packet type before the
-         * walk was shared; the walk cannot name the type, so this is the same information from
-         * one place. */
-        od_log_error("Config truncated -- a packet claims more data than the blob holds");
-        return false;
-    }
-    if (report.dropped_full != 0) {
-        /* Was one "Maximum <type> count reached" per arm. The count is aggregate now; the caps
-         * are identical on every target and a host that hits one has over-sent some type. */
-        od_log_warn("%u config packet(s) dropped at an instance cap",
-                    (unsigned)report.dropped_full);
-    }
-
-    // Advisory (warn-only) validation using CRC-16/CCITT to match the toolbox, nRF and
-    // Silabs firmware. Not enforced: a mismatch logs a warning only.
-    if (report.crc_checked && report.crc_stored != report.crc_computed) {
-        od_log_warn("Config CRC mismatch (given: 0x%04X, calculated: 0x%04X)",
-                    report.crc_stored, report.crc_computed);
-    }
+        od_config_parse(&globalConfig, od_span_make(configData, configLen), nullptr);
+    if (walk != OD_CFG_TLV_OK) return false;
 
     if (globalConfig.led_count > 0) {
         // Re-detect RGB LEDs after a config change.
@@ -352,230 +275,13 @@ bool loadGlobalConfig(){
     if (globalConfig.wifi_config_loaded) {
         applyWifiConfig(globalConfig.wifi_config);
     }
-    if (globalConfig.security_loaded) {
-        logSecurityConfig();
-    }
     return true;
 }
 
-void printConfigSummary(){
-    if (!globalConfig.loaded) {
-        od_log_debug("Config not loaded");
-        return;
-    }
-    od_log_debug("=== Configuration Summary ===");
-    od_log_debug("Version: %u.%u", globalConfig.version, globalConfig.minor_version);
-    od_log_debug("Loaded: %s", globalConfig.loaded ? "Yes" : "No");
-    od_log_debug(" ");
-    od_log_debug("--- System Configuration ---");
-    od_log_debug("IC Type: 0x%04X", globalConfig.system_config.ic_type);
-    od_log_debug("Communication Modes: 0x%02X", globalConfig.system_config.communication_modes);
-    od_log_debug("  BLE: %s", (globalConfig.system_config.communication_modes & COMM_MODE_BLE) ? "enabled" : "disabled");
-    od_log_debug("  OEPL: %s", (globalConfig.system_config.communication_modes & COMM_MODE_OEPL) ? "enabled" : "disabled");
-    od_log_debug("  WiFi: %s", (globalConfig.system_config.communication_modes & COMM_MODE_WIFI) ? "enabled" : "disabled");
-    if (globalConfig.system_config.communication_modes & COMM_MODE_WIFI) {
-        if (wifiConfigured) {
-            od_log_debug("  WiFi SSID: (configured)");  // credential; not logged verbatim
-            if (wifiInitialized) {
-                if (wifiConnected) {
-                    // Was WiFi.localIP().toString(). esp_netif directly: the Arduino
-                    // IPAddress/String round-trip existed only to format four bytes, and this
-                    // file is a config parser -- the pre-auth attack surface heading for
-                    // shared/core, where neither type may appear.
-                    char ipStr[16] = "?";
-                    esp_netif_t* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-                    esp_netif_ip_info_t ipInfo;
-                    if (sta != NULL && esp_netif_get_ip_info(sta, &ipInfo) == ESP_OK) {
-                        snprintf(ipStr, sizeof(ipStr), IPSTR, IP2STR(&ipInfo.ip));
-                    }
-                    od_log_debug("  WiFi Status: Connected (IP: %s)", ipStr);
-                } else {
-                    od_log_debug("  WiFi Status: Disconnected");
-                }
-            } else {
-                od_log_debug("  WiFi Status: Not initialized");
-            }
-        } else {
-            od_log_debug("  WiFi Status: Configured but not loaded");
-        }
-    }
-    od_log_debug("Device Flags: 0x%02X", globalConfig.system_config.device_flags);
-    od_log_debug("  PWR_PIN flag: %s", (globalConfig.system_config.device_flags & DEVICE_FLAG_PWR_PIN) ? "enabled" : "disabled");
-    od_log_debug("  WS_PP_INIT flag: %s", (globalConfig.system_config.device_flags & DEVICE_FLAG_WS_PP_INIT) ? "enabled" : "disabled");
-    od_log_debug("  BATTERY_LATCH flag: %s", (globalConfig.system_config.device_flags & DEVICE_FLAG_BATTERY_LATCH) ? "enabled" : "disabled");
-    od_log_debug("  PWR_LATCH_DFF flag: %s", (globalConfig.system_config.device_flags & DEVICE_FLAG_PWR_LATCH_DFF) ? "enabled" : "disabled");
-    od_log_debug("Power Pin: %u", globalConfig.system_config.pwr_pin);
-    od_log_debug("Power Pin 2: %u", globalConfig.system_config.pwr_pin_2);
-    od_log_debug("Power Pin 3: %u", globalConfig.system_config.pwr_pin_3);
-    od_log_debug(" ");
-    od_log_debug("--- Manufacturer Data ---");
-    od_log_debug("Manufacturer ID: 0x%04X", globalConfig.manufacturer_data.manufacturer_id);
-    od_log_debug("Board Type: %u", globalConfig.manufacturer_data.board_type);
-    od_log_debug("Board Revision: %u", globalConfig.manufacturer_data.board_revision);
-    od_log_debug(" ");
-    od_log_debug("--- Power Configuration ---");
-    od_log_debug("Power Mode: %u", globalConfig.power_option.power_mode);
-    od_log_debug("Battery Capacity: %u %u %u mAh",
-               globalConfig.power_option.battery_capacity_mah[0],
-               globalConfig.power_option.battery_capacity_mah[1],
-               globalConfig.power_option.battery_capacity_mah[2]);
-    od_log_debug("Awake Timeout: %u ms", globalConfig.power_option.sleep_timeout_ms);
-    od_log_debug("Deep Sleep Time: %u seconds", globalConfig.power_option.deep_sleep_time_seconds);
-    od_log_debug("Min Wake Time: %u seconds", globalConfig.power_option.min_wake_time_seconds);
-    od_log_debug("TX Power: %u", globalConfig.power_option.tx_power);
-    od_log_debug("Sleep Flags: 0x%02X", globalConfig.power_option.sleep_flags);
-    od_log_debug("Button Wake: %s (sleep_flags bit0)", (globalConfig.power_option.sleep_flags & OD_SLEEP_FLAG_BUTTON_WAKE_DISABLE) ? "disabled" : "enabled");
-    od_log_debug("Screen Timeout: %u s (EPD keep-alive; 0 = off immediately after refresh)", globalConfig.power_option.screen_timeout_seconds);
-    od_log_debug("Battery Sense Pin: %u", globalConfig.power_option.battery_sense_pin);
-    od_log_debug("Battery Sense Enable Pin: %u", globalConfig.power_option.battery_sense_enable_pin);
-    od_log_debug("Battery Sense Flags: 0x%02X", globalConfig.power_option.battery_sense_flags);
-    od_log_debug("  ENABLE_INVERTED: %s", (globalConfig.power_option.battery_sense_flags & OD_BATTERY_SENSE_FLAG_ENABLE_INVERTED) ? "yes" : "no");
-    od_log_debug("Capacity Estimator: %u", globalConfig.power_option.capacity_estimator);
-    od_log_debug("Voltage Scaling Factor: %u", globalConfig.power_option.voltage_scaling_factor);
-    od_log_debug("Deep Sleep Current: %u uA", (unsigned)globalConfig.power_option.deep_sleep_current_ua);
-    od_log_debug(" ");
-    od_log_debug("--- Display Configurations (%u) ---", globalConfig.display_count);
-    for (int i = 0; i < globalConfig.display_count; i++) {
-        od_log_debug("Display %d:", i);
-        od_log_debug("  Instance: %u", globalConfig.displays[i].instance_number);
-        od_log_debug("  Technology: 0x%02X", globalConfig.displays[i].display_technology);
-        od_log_debug("  Panel IC Type: 0x%04X", globalConfig.displays[i].panel_ic_type);
-        od_log_debug("  Resolution: %ux%u", globalConfig.displays[i].pixel_width, globalConfig.displays[i].pixel_height);
-        od_log_debug("  Size: %ux%u mm", globalConfig.displays[i].active_width_mm, globalConfig.displays[i].active_height_mm);
-        od_log_debug("  Tag Type: 0x%04X", globalConfig.displays[i].legacy_tag_type);
-        od_log_debug("  Rotation: %u degrees", (unsigned)(globalConfig.displays[i].rotation * 90));
-        od_log_debug("  Reset Pin: %u", globalConfig.displays[i].reset_pin);
-        od_log_debug("  Busy Pin: %u", globalConfig.displays[i].busy_pin);
-        od_log_debug("  DC Pin: %u", globalConfig.displays[i].dc_pin);
-        od_log_debug("  CS Pin: %u", globalConfig.displays[i].cs_pin);
-        od_log_debug("  Data Pin: %u", globalConfig.displays[i].data_pin);
-        od_log_debug("  Partial Update: %s", globalConfig.displays[i].partial_update_support ? "Yes" : "No");
-        od_log_debug("  Color Scheme: 0x%02X", globalConfig.displays[i].color_scheme);
-        od_log_debug("  Transmission Modes: 0x%02X", globalConfig.displays[i].transmission_modes);
-        od_log_debug("    ZIPXL: %s", (globalConfig.displays[i].transmission_modes & OD_TRANSMISSION_MODE_STREAMING_DECOMPRESSION) ? "enabled" : "disabled");
-        od_log_debug("    ZIP: %s", (globalConfig.displays[i].transmission_modes & OD_TRANSMISSION_MODE_ZIP) ? "enabled" : "disabled");
-        od_log_debug("    G5: %s", (globalConfig.displays[i].transmission_modes & OD_TRANSMISSION_MODE_G5) ? "enabled" : "disabled");
-        od_log_debug("    DIRECT_WRITE: %s", (globalConfig.displays[i].transmission_modes & OD_TRANSMISSION_MODE_DIRECT_WRITE) ? "enabled" : "disabled");
-        od_log_debug("    CLEAR_ON_BOOT: %s", (globalConfig.displays[i].transmission_modes & OD_TRANSMISSION_MODE_CLEAR_ON_BOOT) ? "enabled" : "disabled");
-        od_log_debug("  Full update energy (mC): %u", globalConfig.displays[i].full_update_mC);
-        od_log_debug(" ");
-    }
-    od_log_debug("--- LED Configurations (%u) ---", globalConfig.led_count);
-    for (int i = 0; i < globalConfig.led_count; i++) {
-        od_log_debug("LED %d:", i);
-        od_log_debug("  Instance: %u", globalConfig.leds[i].instance_number);
-        od_log_debug("  Type: 0x%02X", globalConfig.leds[i].led_type);
-        od_log_debug("  Pins: R=%u G=%u B=%u 4=%u",
-                   globalConfig.leds[i].led_1_r,
-                   globalConfig.leds[i].led_2_g,
-                   globalConfig.leds[i].led_3_b,
-                   globalConfig.leds[i].led_4);
-        od_log_debug("  Flags: 0x%02X", globalConfig.leds[i].led_flags);
-        od_log_debug(" ");
-    }
-    od_log_debug("--- Sensor Configurations (%u) ---", globalConfig.sensor_count);
-    for (int i = 0; i < globalConfig.sensor_count; i++) {
-        od_log_debug("Sensor %d:", i);
-        od_log_debug("  Instance: %u", globalConfig.sensors[i].instance_number);
-        od_log_debug("  Type: 0x%04X", globalConfig.sensors[i].sensor_type);
-        od_log_debug("  Bus ID: %u", globalConfig.sensors[i].bus_id);
-        od_log_debug("  I2C addr (7-bit) / MSD data start byte: %u / %u", globalConfig.sensors[i].i2c_addr_7bit, globalConfig.sensors[i].msd_data_start_byte);
-        od_log_debug(" ");
-    }
-    od_log_debug("--- Data Bus Configurations (%u) ---", globalConfig.data_bus_count);
-    for (int i = 0; i < globalConfig.data_bus_count; i++) {
-        od_log_debug("Data Bus %d:", i);
-        od_log_debug("  Instance: %u", globalConfig.data_buses[i].instance_number);
-        od_log_debug("  Type: 0x%02X", globalConfig.data_buses[i].bus_type);
-        od_log_debug("  Pins: 1=%u 2=%u 3=%u 4=%u 5=%u 6=%u 7=%u",
-                   globalConfig.data_buses[i].pin_1,
-                   globalConfig.data_buses[i].pin_2,
-                   globalConfig.data_buses[i].pin_3,
-                   globalConfig.data_buses[i].pin_4,
-                   globalConfig.data_buses[i].pin_5,
-                   globalConfig.data_buses[i].pin_6,
-                   globalConfig.data_buses[i].pin_7);
-        od_log_debug("  Speed: %u Hz", (unsigned)globalConfig.data_buses[i].bus_speed_hz);
-        od_log_debug("  Flags: 0x%02X", globalConfig.data_buses[i].bus_flags);
-        od_log_debug("  Pullups: 0x%02X", globalConfig.data_buses[i].pullups);
-        od_log_debug("  Pulldowns: 0x%02X", globalConfig.data_buses[i].pulldowns);
-        od_log_debug(" ");
-    }
-    od_log_debug("--- Binary Input Configurations (%u) ---", globalConfig.binary_input_count);
-    for (int i = 0; i < globalConfig.binary_input_count; i++) {
-        od_log_debug("Binary Input %d:", i);
-        od_log_debug("  Instance: %u", globalConfig.binary_inputs[i].instance_number);
-        od_log_debug("  Type: 0x%02X", globalConfig.binary_inputs[i].input_type);
-        od_log_debug("  Display As: 0x%02X", globalConfig.binary_inputs[i].display_as);
-        od_log_debug("  Pins: 1=%u 2=%u 3=%u 4=%u 5=%u 6=%u 7=%u 8=%u",
-                   globalConfig.binary_inputs[i].input_pin_1,
-                   globalConfig.binary_inputs[i].input_pin_2,
-                   globalConfig.binary_inputs[i].input_pin_3,
-                   globalConfig.binary_inputs[i].input_pin_4,
-                   globalConfig.binary_inputs[i].input_pin_5,
-                   globalConfig.binary_inputs[i].input_pin_6,
-                   globalConfig.binary_inputs[i].input_pin_7,
-                   globalConfig.binary_inputs[i].input_pin_8);
-        od_log_debug("  Input Flags: 0x%02X", globalConfig.binary_inputs[i].pins_used);
-        od_log_debug("  Invert: 0x%02X", globalConfig.binary_inputs[i].invert);
-        od_log_debug("  Pullups: 0x%02X", globalConfig.binary_inputs[i].pullups);
-        od_log_debug("  Pulldowns: 0x%02X", globalConfig.binary_inputs[i].pulldowns);
-        if (globalConfig.binary_inputs[i].input_type == 3) {
-            od_log_debug("  ADC Ladder: count=%u idBase=%u byteIdx=%u",
-                        globalConfig.binary_inputs[i].reserved[0],
-                        globalConfig.binary_inputs[i].reserved[1],
-                        globalConfig.binary_inputs[i].button_data_byte_index);
-        }
-        od_log_debug(" ");
-    }
-    od_log_debug("--- Touch Controllers (%u) ---", globalConfig.touch_controller_count);
-    for (int i = 0; i < globalConfig.touch_controller_count; i++) {
-        od_log_debug("Touch %d:", i);
-        od_log_debug("  Instance: %u", globalConfig.touch_controllers[i].instance_number);
-        od_log_debug("  IC type: %u", globalConfig.touch_controllers[i].touch_ic_type);
-        od_log_debug("  Bus ID: %u", globalConfig.touch_controllers[i].bus_id);
-        od_log_debug("  I2C addr (7-bit): 0x%02X", globalConfig.touch_controllers[i].i2c_addr_7bit);
-        od_log_debug("  INT/RST/EN pins: %u / %u / %u",
-                    globalConfig.touch_controllers[i].int_pin,
-                    globalConfig.touch_controllers[i].rst_pin,
-                    globalConfig.touch_controllers[i].enable_pin);
-        od_log_debug("  Display instance: %u", globalConfig.touch_controllers[i].display_instance);
-        od_log_debug("  Flags: 0x%02X", globalConfig.touch_controllers[i].flags);
-        od_log_debug("  Poll ms / MSD start byte: %u / %u", globalConfig.touch_controllers[i].poll_interval_ms, globalConfig.touch_controllers[i].touch_data_start_byte);
-        od_log_debug(" ");
-    }
-    od_log_debug("--- Passive buzzers (%u) ---", globalConfig.passive_buzzer_count);
-    for (int i = 0; i < globalConfig.passive_buzzer_count; i++) {
-        od_log_debug("Buzzer %d:", i);
-        od_log_debug("  Instance: %u", globalConfig.passive_buzzers[i].instance_number);
-        od_log_debug("  Drive / enable pin: %u / %u", globalConfig.passive_buzzers[i].drive_pin, globalConfig.passive_buzzers[i].enable_pin);
-        od_log_debug("  Flags: 0x%02X", globalConfig.passive_buzzers[i].flags);
-        od_log_debug("  Duty %%: %u", globalConfig.passive_buzzers[i].duty_percent);
-        od_log_debug(" ");
-    }
-    if (globalConfig.data_extended_loaded) {
-        od_log_debug("--- Data Extended ---");
-        od_log_debug("  manufacturer_name: %s", (char*)globalConfig.data_extended.manufacturer_name);
-        od_log_debug("  model_name: %s",        (char*)globalConfig.data_extended.model_name);
-        od_log_debug("  serial_number: %s",     (char*)globalConfig.data_extended.serial_number);
-        od_log_debug("  friendly_name: %s",     (char*)globalConfig.data_extended.friendly_name);
-        od_log_debug("  device_location: %s",   (char*)globalConfig.data_extended.device_location);
-        od_log_debug("  device_id: %s",         (char*)globalConfig.data_extended.device_id);
-        od_log_debug("  custom_string_1: %s",   (char*)globalConfig.data_extended.custom_string_1);
-        od_log_debug("  custom_string_2: %s",   (char*)globalConfig.data_extended.custom_string_2);
-        od_log_debug("  custom_string_3: %s",   (char*)globalConfig.data_extended.custom_string_3);
-        od_log_debug(" ");
-    }
-    od_log_debug("=============================");
-}
-
 void full_config_init() {
-    od_log_info("Initializing config storage...");
     if (!initConfigStorage()) {
-        od_log_error("Config storage initialization failed");
         return;
     }
-    od_log_info("Config storage initialized successfully");
 
 #ifdef FACTORY_CLEAR_CONFIG_ON_BOOT
     od_log_info("Factory clear build: erasing stored config");
@@ -584,14 +290,12 @@ void full_config_init() {
     return;
 #endif
 
-    od_log_info("Loading global configuration...");
     bool configLoaded = loadGlobalConfig();
     if (!configLoaded && tryProvisionFactoryEmbed()) {
         configLoaded = loadGlobalConfig();
     }
     if (configLoaded) {
-        od_log_info("Global configuration loaded successfully");
-        printConfigSummary();
+        logWifiRuntimeState();
         clearEncryptionSession();
         encryptionInitialized = true;
         checkResetPin();
@@ -602,7 +306,5 @@ void full_config_init() {
         }
         // Must run after config load: latch pins/flag come from globalConfig.
         powerLatchBegin();
-    } else {
-        od_log_error("Global configuration load failed or no config found");
     }
 }
