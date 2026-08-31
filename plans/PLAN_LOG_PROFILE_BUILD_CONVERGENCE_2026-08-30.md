@@ -76,28 +76,54 @@ PROFILE=quiet OD_LOG_PROFILE=debug ./build.sh
 - Existing debug convenience and flash scripts become thin wrappers that set
   `OD_LOG_PROFILE=debug`. Update checked-in callers together and remove an old spelling only after
   `rg` proves it has no remaining caller.
+- **`PROFILE=quiet OD_LOG_PROFILE=debug` is accepted but is a deliberately silent diagnostic
+  build, and this must be documented at the point of use, not just here.** `prj_quiet.conf` sets
+  `CONFIG_LOG=n`, so Zephyr's logging subsystem is compiled out entirely under `quiet` regardless
+  of `OD_LOG_PROFILE`; `od_log_*` calls compiled in by `OD_LOG_LEVEL=OD_LOG_DEBUG` have nowhere to
+  go and produce no output. Do not re-enable `CONFIG_LOG` for this combination — `quiet`'s purpose
+  is µA power measurement (see `prj_quiet.conf`'s own comment), and turning logging back on for it
+  would defeat that. The combination stays valid because rejecting it would require `OD_LOG_PROFILE`
+  to know about Nordic's transport/power axis, which § 5's whole point is to avoid; instead, the
+  build's own summary output (already itemized in `build.sh`'s per-build banner) must state
+  plainly when `PROFILE=quiet` makes a requested `OD_LOG_PROFILE=debug` a no-op, so this isn't
+  discovered only by an empty log capture.
 
 ## 6. Build-all and release behavior
 
-On both target front doors, `./build.sh --all` is the explicit complete log-profile matrix:
+**`--all`'s existing meaning does not change, and a new `--all-profiles` is added for the
+cross-product.** Conflating the two was an error in an earlier draft of this plan: root
+`build-release.sh` already invokes Nordic as `./build.sh --all` (`build-release.sh`, the
+`nordic) echo "./build.sh --all"` case), meaning "every board, at whichever `PROFILE` is in
+effect" — today that's `PROFILE=battery` by default, and under this plan it's `OD_LOG_PROFILE=info`
+by default. If `--all` were redefined to always mean "every board × both log profiles," root's
+existing unmodified call would silently start producing DEBUG artifacts on every release build,
+directly contradicting § 3's "`--release` and root `build-release.sh` remain shipping-only and
+force `OD_LOG_PROFILE=info`" requirement below. So:
 
-- build every supported physical board once with `OD_LOG_PROFILE=info` and once with
+- **`./build.sh --all`** (both targets) keeps its current meaning: every supported physical board,
+  built once, at whichever `OD_LOG_PROFILE` is currently selected (default `info`). This is
+  exactly Nordic's existing behavior and ESP32's newly-added equivalent — root `build-release.sh`'s
+  existing `./build.sh --all` call for Nordic needs **no change** under this plan.
+- **`./build.sh --all-profiles`** (both targets, new) is the explicit complete log-profile matrix:
+  build every supported physical board once with `OD_LOG_PROFILE=info` and once with
   `OD_LOG_PROFILE=debug`;
-- publish both successful artifact sets into the repository's top-level `release/` directory;
-- use the shipping filename for INFO and insert `-debug` before each DEBUG extension;
-- use distinct build directories for every `(board, log profile)` pair;
-- validate the complete requested matrix before starting a vendor build;
-- continue after a pair fails, then exit nonzero after attempting the remaining pairs;
-- remove the exact expected artifact for a pair before building, so a failed pair cannot leave a
-  stale artifact presented as current.
+  - publish both successful artifact sets into the repository's top-level `release/` directory;
+  - use the shipping filename for INFO and insert `-debug` before each DEBUG extension;
+  - use distinct build directories for every `(board, log profile)` pair;
+  - validate the complete requested matrix before starting a vendor build;
+  - continue after a pair fails, then exit nonzero after attempting the remaining pairs;
+  - remove the exact expected artifact for a pair before building, so a failed pair cannot leave a
+    stale artifact presented as current.
 
-This standardizes only `--all`'s log-profile expansion. Other no-argument, explicit-board and clean
-semantics remain target-local. Because ESP32 does not currently have `--all`, add it explicitly;
-do not silently redefine bare `./build.sh` as part of this work.
+This standardizes only `--all-profiles`'s log-profile expansion; `--all` and every other
+no-argument, explicit-board and clean semantic remain target-local and unchanged. Because ESP32
+does not currently have `--all`, add it with Nordic's existing single-profile meaning, not
+`--all-profiles`'s meaning.
 
 `--release` and root `build-release.sh` remain shipping-only and force `OD_LOG_PROFILE=info`; an
 ambient environment value must not turn a release build into diagnostic firmware. A separately
-requested diagnostic operation may call target `--all`, but it is not a release-mode override.
+requested diagnostic operation may call target `--all-profiles`, but it is not a release-mode
+override, and root `build-release.sh` must not gain a code path that calls `--all-profiles`.
 
 ## 7. Manifest contract
 
@@ -109,8 +135,8 @@ changing its schema:
    artifact name; otherwise version the manifest format or update every reader atomically.
 3. Record, directly or unambiguously through a versioned filename, board, log profile, compiled
    `OD_LOG_LEVEL`, artifact path and size.
-4. Replace the manifest atomically for an `--all` run. Failed pairs get no success row and no stale
-   artifact.
+4. Replace the manifest atomically for an `--all-profiles` run. Failed pairs get no success row and
+   no stale artifact.
 
 Do not treat a manifest schema change as an incidental logging edit.
 
@@ -124,8 +150,9 @@ Do not treat a manifest schema change as an incidental logging edit.
    translation.
 4. Remove ESP32 logging-only pseudo-boards and migrate checked-in callers to physical board plus
    `OD_LOG_PROFILE=debug`.
-5. Add target `--all` board × `{info,debug}` expansion, collision-free build/artifact naming,
-   continue-on-failure behavior and stale-artifact removal.
+5. Add target `--all-profiles` board × `{info,debug}` expansion, collision-free build/artifact
+   naming, continue-on-failure behavior and stale-artifact removal, without changing `--all`'s
+   existing single-profile meaning.
 6. Resolve the manifest compatibility audit, update it only as required, and wire both successful
    profile sets into `release/`.
 7. Update root release and validation paths, then run the fake-toolchain suite and full target gate.
@@ -138,13 +165,16 @@ Add Bash-3.2-compatible shell fixtures with fake `idf.py` and `west` executors p
 - invalid `OD_LOG_PROFILE` rejection before vendor execution;
 - exactly one emitted `-DOD_LOG_LEVEL`, with the expected value;
 - Nordic legacy mapping and contradictory-legacy rejection;
-- `battery|uart|quiet` × `info|debug` composition;
+- `battery|uart|quiet` × `info|debug` composition, including that `quiet`+`debug` compiles but
+  the build's own output states plainly that Zephyr logging is off for it;
 - distinct build and artifact paths for INFO and DEBUG;
-- a two-board `--all` fixture invokes all four board/profile pairs;
+- `--all` still builds every board at one profile only (regression-proving it against today's
+  Nordic behavior and root `build-release.sh`'s existing unmodified call);
+- a two-board `--all-profiles` fixture invokes all four board/profile pairs;
 - both successful profile sets land in `release/` and are represented correctly in the manifest;
 - one failed pair does not stop later pairs, yields a nonzero final status and retains no stale
   output or success row;
-- `--release` and root `build-release.sh` force INFO.
+- `--release` and root `build-release.sh` force INFO and never invoke `--all-profiles`.
 
 Then run `tools/check.sh --targets`. A skip is not a pass. Inspect representative ESP32 and Nordic
 compile commands and artifacts rather than relying only on CMake source greps.
@@ -163,8 +193,10 @@ compile commands and artifacts rather than relying only on CMake source greps.
 - Both targets accept `OD_LOG_PROFILE=info|debug` and emit exactly one matching compile definition.
 - Nordic transport/power and logging profiles compose independently.
 - ESP32's logging-only pseudo-boards are gone without losing debug builds for those boards.
-- `--all` publishes successful INFO and DEBUG artifacts for every supported physical board into
-  `release/`, with collision-free names and no failed pair represented by stale output.
-- Release entry points force INFO.
+- `--all` still builds every supported physical board at one selected log profile only, matching
+  today's Nordic behavior and requiring no change to root `build-release.sh`'s existing call.
+- `--all-profiles` publishes successful INFO and DEBUG artifacts for every supported physical board
+  into `release/`, with collision-free names and no failed pair represented by stale output.
+- Release entry points force INFO and never invoke `--all-profiles`.
 - Manifest compatibility is audited and any required reader/schema changes land atomically.
 - Fake-toolchain fixtures and `tools/check.sh --targets` pass with no skips.
