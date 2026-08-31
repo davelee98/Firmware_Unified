@@ -504,7 +504,12 @@ add_test(NAME config_read COMMAND od_config_read_test)
 # cannot then report; defer after decrypt advances the replay window so the re-dispatched frame is
 # refused the second time; and a late producer-conflict check splices two configs into one
 # CRC-valid read-back.
-add_library(od_session_fake_dispatch STATIC session_fake.c aes128.c)
+# od_log_test_stub.c defines _od_log, so od_log.c is never pulled out of od_shared and no
+# od_hal_log_* transport is needed. Shared modules that log -- od_session.c does -- reach every
+# consumer of these fixtures, so the stub belongs here rather than in each executable. An
+# executable that lists the stub itself still links: its own object defines the symbol first, so
+# this archive member is simply not extracted.
+add_library(od_session_fake_dispatch STATIC session_fake.c aes128.c od_log_test_stub.c)
 target_link_libraries(od_session_fake_dispatch PUBLIC od_shared_dispatch_fixture)
 add_library(od_session_fake_dispatch_silabs STATIC session_fake.c aes128.c)
 target_link_libraries(od_session_fake_dispatch_silabs PUBLIC od_shared_dispatch_fixture_silabs)
@@ -557,7 +562,7 @@ add_test(NAME core_reset COMMAND od_core_reset_test)
 # session_fake is its own library because tests/fuzz/ links the SAME fake. A second, subtly
 # different fake would make a fuzz finding unreproducible in this suite -- which is where a
 # finding has to land to stay fixed.
-add_library(od_session_fake STATIC session_fake.c aes128.c)
+add_library(od_session_fake STATIC session_fake.c aes128.c od_log_test_stub.c)
 target_link_libraries(od_session_fake PUBLIC od_shared)
 target_include_directories(od_session_fake PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 
@@ -722,6 +727,7 @@ if(Python3_FOUND)
     add_executable(od_dispatch_corpus_portable_test
         corpus_runner.c
         corpus_profile_portable.c
+        od_log_test_stub.c
         ../../shared/core/od_nfc.c
         ${OD_VEC_INC})
     # PER-TARGET, not per-source: set_source_files_properties is DIRECTORY-scoped, so setting the

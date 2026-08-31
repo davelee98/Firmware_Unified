@@ -1,14 +1,19 @@
-/* od_session.c -- see od_session.h. Plain C99, no HAL beyond od_hal_crypto, no allocation,
- * no logging.
+/* od_session.c -- see od_session.h. Plain C99, no HAL beyond od_hal_crypto, no allocation.
  *
  * Written against ../Firmware/src/encryption.cpp @ 64184bb -- the sibling repo, NOT this repo's
  * targets/esp32-idf/src/ snapshot, which is older (CLAUDE.md, "Migration constraints"). The
  * replay window is shared/core/od_nonce_window.h, a verbatim port of upstream's.
+ *
+ * The three public entry points log their own outcome. od_log.h is shared/core and pure, so this
+ * needs no seam; od_session_app_report() survives alongside it purely because BG22 implements
+ * that callback with printf and it is that target's only auth and decrypt diagnostic. Levels and
+ * wording follow the ESP32 forms, which are the fleet default for log text.
  */
 
 #include "od_session.h"
 
 #include "od_config.h"
+#include "od_log.h"
 #include "od_nonce_window.h"
 
 #include <string.h>
@@ -283,7 +288,7 @@ static void challenge_consume(struct od_session *s)
     od_secure_zero(s->pending_server_nonce, OD_SESSION_NONCE_LEN);
 }
 
-enum od_session_auth od_session_authenticate(struct od_session *s,
+static enum od_session_auth session_authenticate(struct od_session *s,
         const struct SecurityConfig *sec,
         const uint8_t device_id[OD_SESSION_DEVICE_ID_LEN],
         od_span_t body, uint32_t now_ms,
@@ -515,7 +520,7 @@ static void strike(struct od_session *s, struct od_session_report *report)
     }
 }
 
-enum od_session_open od_session_open(struct od_session *s, uint16_t cmd, od_span_t envelope,
+static enum od_session_open session_open(struct od_session *s, uint16_t cmd, od_span_t envelope,
         uint8_t *out, size_t out_cap, uint16_t *out_len,
         uint32_t now_ms, struct od_session_report *report)
 {
@@ -624,7 +629,7 @@ enum od_session_open od_session_open(struct od_session *s, uint16_t cmd, od_span
     return OD_SESSION_OPEN_OK;
 }
 
-enum od_session_seal od_session_seal(struct od_session *s, od_span_t plain_frame,
+static enum od_session_seal session_seal(struct od_session *s, od_span_t plain_frame,
         uint8_t *out, size_t out_cap, uint16_t *out_len,
         uint32_t now_ms, struct od_session_report *report)
 {
@@ -718,4 +723,143 @@ bool od_session_derive_tls_psk(const struct SecurityConfig *sec, uint8_t psk_out
     }
     return od_hal_crypto_cmac(sec->encryption_key, (const uint8_t *)label,
                               (uint32_t)(sizeof label - 1u), psk_out) == OD_HAL_CRYPTO_OK;
+}
+
+/* --------------------------------------------------------------------- outcome reporting --- */
+
+/* Nonce rejections are throttled at five seconds, in two buckets rather than one per specific
+ * reason. Replay and out-of-window travel together because both mean frames were lost or
+ * duplicated; everything else -- wrong session, bad tag, malformed, engine fault -- travels
+ * together because it means a broken or hostile peer. Keeping the two apart is the point: a
+ * stale client spamming session-id mismatches must not be able to silence the out-of-window
+ * line, which is the one that reports real transfer loss. Nothing else throttles a peer that
+ * drives these, because nonce failures deliberately do not count as integrity strikes.
+ *
+ * The clock is the now_ms the caller already supplies for the session's own timing, so there is
+ * no second time source here to disagree with the one the timeout reads. */
+static uint32_t s_log_window_ms;   /* replay / out-of-window */
+static uint32_t s_log_other_ms;    /* wrong session, bad tag, malformed, engine fault */
+
+static bool budget_allows(uint32_t *last_ms, uint32_t now_ms)
+{
+    if (*last_ms != 0u && (uint32_t)(now_ms - *last_ms) < 5000u) {
+        return false;
+    }
+    *last_ms = now_ms;
+    return true;
+}
+
+static void log_auth(enum od_session_auth rc, const struct od_session_report *report)
+{
+    switch (rc) {
+    case OD_SESSION_AUTH_CHALLENGE:
+        od_log_info("Authentication challenge sent");
+        break;
+    case OD_SESSION_AUTH_ESTABLISHED:
+        od_log_info("Authentication successful, session established");
+        break;
+    case OD_SESSION_AUTH_REJECTED:
+        od_log_error("ERROR: Authentication failed (wrong key)");
+        break;
+    case OD_SESSION_AUTH_RATE_LIMITED:
+        od_log_warn("Authentication rate limited (%u attempts in the window)",
+                    (unsigned)(report != NULL ? report->attempts : 0u));
+        break;
+    case OD_SESSION_AUTH_NOT_CONFIGURED:
+        od_log_error("ERROR: Authentication requested but encryption is not configured");
+        break;
+    case OD_SESSION_AUTH_EXPIRED:
+        od_log_error("ERROR: Server nonce expired");
+        break;
+    case OD_SESSION_AUTH_CRYPTO_ERROR:
+        od_log_error("ERROR: Crypto engine failure during authentication (status %d)",
+                     (int)(report != NULL ? report->crypto_status : OD_HAL_CRYPTO_OK));
+        break;
+    default:
+        /* status_byte is the AUTH_STATUS_* actually placed in the reply, so it names which
+         * refusal the host will see -- the one thing an unrecognised rc cannot say by itself. */
+        od_log_error("ERROR: Invalid authentication request (rc=%d, status 0x%02X)", (int)rc,
+                     (unsigned)(report != NULL ? report->status_byte : 0u));
+        break;
+    }
+}
+
+static void log_open(enum od_session_open rc, uint16_t cmd,
+                     const struct od_session_report *report, uint32_t now_ms)
+{
+    uint8_t reason;
+    bool nonce_loss;
+
+    if (rc == OD_SESSION_OPEN_OK) {
+        return;
+    }
+    reason = (report != NULL) ? report->nonce_reason : 0u;
+    nonce_loss = (reason == (uint8_t)NONCE_OUT_OF_WINDOW || reason == (uint8_t)NONCE_REPLAY);
+    if (budget_allows(nonce_loss ? &s_log_window_ms : &s_log_other_ms, now_ms)) {
+        od_log_error("ERROR: Decryption failed (0x%04X, rc=%d, nonce_reason=%u)",
+                     (unsigned)cmd, (int)rc, (unsigned)reason);
+    }
+}
+
+/* The opcode the seal was attempted for, read from the frame the same way od_reply.c reads it
+ * for the seam call: the two leading bytes are the cmd. Under two bytes there is no opcode, and
+ * that is also the TOO_SHORT case. */
+static uint16_t seal_cmd(od_span_t plain_frame)
+{
+    if (plain_frame.p == NULL || plain_frame.n == 0u) {
+        return 0u;
+    }
+    return (uint16_t)(((uint16_t)plain_frame.p[0] << 8) |
+                      (plain_frame.n > 1u ? plain_frame.p[1] : 0u));
+}
+
+static void log_seal(enum od_session_seal rc, uint16_t cmd)
+{
+    if (rc != OD_SESSION_SEAL_OK) {
+        od_log_warn("Response seal failed (0x%04X, rc=%d)", (unsigned)cmd, (int)rc);
+    }
+}
+
+/* The public entry points: run the operation, then say what it decided.
+ *
+ * Logging here rather than at the call sites is what makes one wording serve every target, and
+ * it keeps the ordering the PIPE path depends on -- a replay draws no response, so a line
+ * emitted after the decision to stay silent would vanish on exactly the path that produces it
+ * routinely. od_gate.c and od_reply.c still call od_session_app_report() alongside these; that
+ * seam is BG22's only auth and decrypt diagnostic and is not this file's to retire. */
+
+enum od_session_auth od_session_authenticate(struct od_session *s,
+        const struct SecurityConfig *sec,
+        const uint8_t device_id[OD_SESSION_DEVICE_ID_LEN],
+        od_span_t body, uint32_t now_ms,
+        uint8_t *rsp, size_t rsp_cap, uint16_t *rsp_len,
+        struct od_session_report *report)
+{
+    const enum od_session_auth rc = session_authenticate(s, sec, device_id, body, now_ms,
+                                                         rsp, rsp_cap, rsp_len, report);
+
+    log_auth(rc, report);
+    return rc;
+}
+
+enum od_session_open od_session_open(struct od_session *s, uint16_t cmd, od_span_t envelope,
+        uint8_t *out, size_t out_cap, uint16_t *out_len,
+        uint32_t now_ms, struct od_session_report *report)
+{
+    const enum od_session_open rc = session_open(s, cmd, envelope, out, out_cap, out_len,
+                                                 now_ms, report);
+
+    log_open(rc, cmd, report, now_ms);
+    return rc;
+}
+
+enum od_session_seal od_session_seal(struct od_session *s, od_span_t plain_frame,
+        uint8_t *out, size_t out_cap, uint16_t *out_len,
+        uint32_t now_ms, struct od_session_report *report)
+{
+    const enum od_session_seal rc = session_seal(s, plain_frame, out, out_cap, out_len,
+                                                 now_ms, report);
+
+    log_seal(rc, seal_cmd(plain_frame));
+    return rc;
 }

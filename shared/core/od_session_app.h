@@ -6,10 +6,12 @@
  * a seam each would have to be threaded through every call as parameters, and the dispatcher would
  * carry a session pointer it has no business owning.
  *
- * THE REPORT CALLBACK IS THE POINT OF THE FILE. Every target logged from inside the session code
- * before the promotion, and shared/ may not include a target log header (CLAUDE.md, "the one
- * rule"). So the core calls back with what happened and the target decides how to say it -- which
- * also keeps the per-site five-second rate limiting on the target, where the clock is.
+ * THE REPORT CALLBACK IS NO LONGER WHERE THE WORDING LIVES. It was built on the premise that
+ * shared/ may not include a log header; that premise was wrong -- od_log.h is shared/core and
+ * pure -- so od_session.c logs each outcome itself, with one text and one five-second throttle
+ * for every target. What survives here is a callback BG22 implements with printf, that target's
+ * only auth and decrypt diagnostic, which is why od_gate.c and od_reply.c still call it
+ * unconditionally and why ESP32 and Nordic implement it as empty stubs rather than deleting it.
  *
  * IT IS CALLED BEFORE THE CALLER ACTS ON THE RESULT, and on the PIPE path that ordering is the
  * whole point: a replay or out-of-window 0x81 draws no response, so if telemetry came after the
@@ -56,10 +58,12 @@ uint32_t od_session_app_now_ms(void);
  * different packing is a different device to the host. */
 void od_session_app_device_id(uint8_t out[OD_SESSION_DEVICE_ID_LEN]);
 
-/* Tell the target what happened. `cmd` is the opcode in play, or 0 where none applies. `report`
- * may be NULL. MUST NOT emit a frame, mutate the session, or block -- it is a logging seam, and a
- * target that answers the wire from here reintroduces exactly the "handler that sends behind the
- * dispatcher's back" problem od_session_authenticate was shaped to avoid. */
+/* Tell the target what happened, IN ADDITION to the line od_session.c has already logged. `cmd`
+ * is the opcode in play, or 0 where none applies. `report` may be NULL. A target that has no
+ * transport of its own outside od_log implements this empty. MUST NOT emit a frame, mutate the
+ * session, or block -- it is a logging seam, and a target that answers the wire from here
+ * reintroduces exactly the "handler that sends behind the dispatcher's back" problem
+ * od_session_authenticate was shaped to avoid. */
 void od_session_app_report(enum od_session_app_op op, int result, uint16_t cmd,
                            const struct od_session_report *report);
 
