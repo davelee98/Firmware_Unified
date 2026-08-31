@@ -986,9 +986,19 @@ log_hal_structure() {
         rc=1
     fi
 
+    # Both submission paths hand Zephyr a whole mutable NUL-terminated buffer as "%s": the log
+    # package ignores width and precision for strings, and a const cast would instead identify
+    # retained read-only storage.
     if grep -q '%\.\*s' targets/nordic-zephyr/src/od_hal_log.c ||
        grep -qE '\(const[[:space:]]+char[[:space:]]*\*\)' targets/nordic-zephyr/src/od_hal_log.c; then
-        echo "Nordic logger must submit the mutable transient record as LOG_RAW(\"%s\", record)"
+        echo "Nordic logger must submit whole mutable buffers as LOG_PRINTK/LOG_RAW(\"%s\", ...)"
+        rc=1
+    fi
+    # A complete record cannot go out with its CR still on it. Zephyr writes a CR ahead of every
+    # LF it forwards -- LOG_RAW's raw-string marker does not survive source resolution, so it
+    # converts too -- and CR CR LF makes terminals overprint the previous line.
+    if ! grep -q 'LOG_PRINTK' targets/nordic-zephyr/src/od_hal_log.c; then
+        echo "Nordic logger must submit complete records through LOG_PRINTK with the CR removed"
         rc=1
     fi
 
@@ -1011,6 +1021,18 @@ log_hal_structure() {
     return $rc
 }
 check "structure: shared logging ownership" log_hal_structure
+
+# The compile-time log level has one mapping from a profile name to OD_LOG_LEVEL. Its refusals
+# are the half worth proving: a selector that returns nothing for an unknown profile hands the
+# build od_log.h's implicit INFO default and looks like it worked.
+log_profile_selector() {
+    if ! grep -q '^function(od_select_log_profile' shared/profiles.cmake; then
+        echo "shared/profiles.cmake no longer defines od_select_log_profile"
+        return 1
+    fi
+    tests/cmake/run_log_profile_test.sh
+}
+check "log profile: one compile-time selector" log_profile_selector
 
 nordic_epd_spi_ownership() {
     local rc=0 hits count

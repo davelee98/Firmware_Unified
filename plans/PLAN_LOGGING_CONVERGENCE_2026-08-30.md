@@ -52,6 +52,16 @@ same claim (`od_session_app.c`:8, both targets, near-identical wording). **That 
 `od_touch_gt911.c`/`od_pipe.c`/`od_sensor_*.c` already call it directly with zero seam. Once this
 is corrected, both report seams lose their stated reason to exist.
 
+There is also one hardware-proven transport defect at the Nordic HAL boundary. A raw-mode capture
+from the `xiao_nrf52840` USB CDC ACM device contained 28 `CR CR LF` terminators and zero ordinary
+`CR LF` terminators. `od_log.c` supplies the first `CR LF`; Zephyr's deferred text formatter adds
+the second `CR` before the CDC ACM driver, whose `poll_out` implementation is byte-transparent.
+The ESPHome web console removes only one carriage return and treats the remaining one as an
+overwrite command, so lines render on top of one another. The relevant `LOG_RAW` formatter path is
+unchanged between the repo's pinned NCS 3.3.1 (`docs/TOOLCHAINS.md`) and the NCS 3.4.0 migration
+target; the SDK migration therefore does not retire this defect. L0a below makes the correction
+part of this refactor rather than a separate temporary patch.
+
 ## 3. Scope boundary
 
 **In scope (converge into `shared/core/`):** dispatch/gate routing and refusal decisions, session
@@ -65,6 +75,10 @@ lifecycle and TLS, deep-sleep/RTC, watchdog subsystem specifics, panel/display d
 (FastEPD/bb_epaper), individual `od_cmd_app_*` command-handler *bodies* (the header says outright:
 "a target supplies the BEHAVIOUR of a command" — logging about a handler's own decision, e.g.
 device_control.cpp's `CMD_DEEP_SLEEP` rejections, is part of that behavior and stays put).
+**One deliberate exception:** `targets/nordic-zephyr/src/od_hal_log.c` is otherwise the same kind
+of target-owned HAL file, but its terminal-newline correction (L0a) is in scope — this plan is
+what hardware-verifies converged log output on Nordic, and doing that against a transport known to
+corrupt every line would defeat the verification. No other HAL file gets this exception.
 
 **Adjacent, not part of this plan:** ESP32's HAL layer still has 22 raw `ESP_LOGx` call sites
 that bypass `od_log` entirely (`od_hal_crypto.c`, `od_hal_nvs.c`, `od_hal_adc.c`,
@@ -78,10 +92,58 @@ lost, but it doesn't block or depend on anything below.
 `od_log_info` directly at the point it detects the event, using its own text. Its seam header
 (`od_touch_app.h`) keeps only what's genuinely per-target (GPIO pins, reset delays, IRQ mask) —
 nothing about logging. `od_session_app.h`'s other three accessors (`_state`, `_security`,
-`_device_id`) are the same kind of genuinely-per-target fact and should **stay** seams; only the
-*report* function is the anomaly to remove.
+`_device_id`) are the same kind of genuinely-per-target fact and should **stay** seams. The two
+*report* functions get different treatment, not one blanket "remove the anomaly": `od_rxq_app_report()`
+(L1) has no BG22 consumer and is removed outright. `od_session_app_report()` (L2) does have a live
+BG22 consumer — its text/level logic moves into `od_session.c` like the others, but the callback
+itself stays, as a BG22-only compatibility seam with trivial ESP32/Nordic stubs (see L2's "Land
+as, and where" and BG22 note).
 
 ## 5. Conversion candidates
+
+### L0a — Nordic terminal newline contract
+
+Make the Nordic HAL own the adaptation between shared complete records and Zephyr's terminal
+newline policy. `od_log.c` continues to produce complete records ending in `CR LF`, preserving the
+shared and ESP32 contract. `shared/hal/od_hal_log.h:21` is explicit that `od_hal_log_write()`
+"must not mutate or retain record" — so `targets/nordic-zephyr/src/od_hal_log.c` must **not**
+edit the caller's buffer in place. Instead, when the record ends in a terminal `CR LF`, copy it
+into a bounded local buffer (sized from the `len` argument `od_hal_log_write()` already receives,
+capped at `OD_LOG_TEXT_MAX`/`OD_LOG_RAW_TEXT_MAX` — the same 253/255-byte constants
+`zephyr/CMakeLists.txt` already defines for this target) with that trailing `CR` dropped, and
+submit the copy through `LOG_PRINTK`, whose explicit
+contract owns `LF`-to-`CR LF` conversion. The original `record` passed in is read-only throughout.
+This is an exact two-way split, not a choice left to the implementation: a record ending in a
+terminal `CR LF` takes the bounded-copy-then-`LOG_PRINTK` path above; everything else — including
+every `od_log_raw()` call, which is unterminated by contract — keeps going through `LOG_RAW`
+unchanged, exactly as today. Do not route unterminated data through `LOG_PRINTK`: Zephyr's public
+logging header documents `LOG_RAW` as emitting the supplied string without appending characters,
+while `LOG_PRINTK` carries `printk`-style semantics — mixing the two paths for the "everything
+else" case would reintroduce exactly the kind of behavior-depends-on-which-macro-was-used
+ambiguity this section exists to eliminate, and would make the host test's byte-exact assertions
+non-deterministic.
+
+```text
+shared complete record:  CR LF
+Nordic HAL adaptation:      LF
+Zephyr terminal output:  CR LF
+```
+
+This avoids relying on `LOG_RAW` behaving differently in a later SDK and avoids duplicating
+Zephyr's backend selection, deferred copying and serialization with direct CDC/UART writes. Keep
+it as a distinct commit within the logging refactor so the behavior remains independently
+reviewable and revertible.
+
+Extend the existing Nordic production-adapter host test so its fake logger distinguishes
+`LOG_PRINTK` from `LOG_RAW` and models the documented newline conversion. It must prove that a
+complete record reaches the modeled transport with exactly one terminal `CR LF`, that no
+`CR CR LF` occurs, that unterminated raw data remains unterminated, and that clobbering the
+caller's mutable stack record after submission does not alter queued bytes.
+
+Hardware qualification is required on both Nordic backend profiles: capture raw CDC ACM bytes on
+`xiao_nrf52840`, and raw RTT bytes on one nRF54 board. The online ESPHome console must also show
+successive Nordic records on separate lines without overwrite. Preserve the captures or exact byte
+counts in the implementation evidence.
 
 ### L0 — Shared compile-time log-level selector contract
 
@@ -124,7 +186,7 @@ Per-event comparison (ESP32 is `targets/esp32-idf/src/od_rxq_app.cpp`, Nordic is
 | `OD_RXQ_DROP_EMPTY` | `warn`, "WARNING: Empty BLE frame received, dropping" | `info`, "rx dropped: empty frame" | Adopt ESP32 text + level |
 | `OD_RXQ_DROP_TOO_LARGE` | `warn`, includes byte counts | `info`, includes byte counts; Nordic's comment notes this is now unreachable there because GATT already refuses over-length writes at ATT with `0x0D` | Adopt ESP32 text + level. Note (not in scope): ESP32 has no equivalent pre-filter, so this line *is* reachable there — a possible follow-up, not a logging question |
 | `OD_RXQ_DROP_FULL` | `error` | `info` | Adopt ESP32's `error` — a full ring is more severe than a malformed frame |
-| `OD_RXQ_ARRIVED` | `debug`, full hex dump (32 B) + `[BLE][Q:n] ERX/URX 0x%04X (n B):` label + per-frame encrypted/plaintext token | `debug`, one-line `rx cmd=0x%04X len=%u q=%u`, no hex, no encrypted token | See § 9 Q1 |
+| `OD_RXQ_ARRIVED` | `debug`, full hex dump (32 B) + `[BLE][Q:n] ERX/URX 0x%04X (n B):` label + per-frame encrypted/plaintext token | **`info`** (not `debug` — corrected from an earlier draft of this table), one-line `rx cmd=0x%04X len=%u q=%u`, no hex, no encrypted token | See § 9 Q1 |
 | Quiet-frame suppression | `imageWriteLogQuietFrame()` — checks a live streaming-image state machine (`imgLogChunks`, `imageWriteFramesMayStillArrive()`) to silence *only while a stream is actually mid-flight* | hardcoded: always silent for `CMD_DIRECT_WRITE_DATA`/`CMD_PIPE_WRITE_DATA`, regardless of state | Adopt ESP32's state-aware version — see L4, this becomes the first concrete item there |
 
 Land as: `od_rxq.c` calls `od_log_*` directly for all four cases using ESP32's text/levels. The
@@ -178,20 +240,38 @@ Per-case comparison (ESP32: `targets/esp32-idf/src/od_session_app.cpp`, Nordic:
 
 `OD_SESSION_APP_OPEN` (decrypt failed) and `OD_SESSION_APP_SEAL` are functionally identical
 already — text differs only in capitalization/prefix; adopt ESP32's. The rate-limit throttle
-(`budgetAllows`/`budget_allows`, `s_logWindowMs`/`s_log_window_ms`, 5 s-per-reason window) is
-**duplicated near-verbatim** in both files — hoist it into `od_session.c` as one static
-implementation instead of two.
+(`budgetAllows`/`budget_allows`) is **duplicated near-verbatim** in both files — hoist it into
+`od_session.c` as one static implementation instead of two. It is two independently-throttled
+buckets, not one per specific nonce reason: `s_logWindowMs`/`s_log_window_ms` covers replay and
+out-of-window rejections, `s_logOtherMs`/`s_log_other_ms` covers every other rejection (wrong
+session, bad tag, malformed, engine fault), each at a 5 s minimum interval.
 
-**Land as:** `od_session.c` logs directly at each detection point (ESP32 text/levels, plus
-Nordic's two missing cases restored for both targets since there's now only one implementation).
-The four accessor functions (`_state`, `_security`, `_now_ms`, `_device_id`) stay exactly where
-they are — they're genuinely per-target facts, not logging.
+**Land as, and where — corrected; an earlier draft of this section wrongly located the existing
+call inside `od_session.c`.** `od_session_app_report()` is not called from `od_session.c` today —
+`shared/core/od_gate.c:37` and `:96` call it for the `AUTH` and `OPEN` cases, and
+`shared/core/od_reply.c:61` calls it for `SEAL`. "Inline into `od_session.c`" means the new direct
+`od_log_*` text/level logic moves into `od_session.c`'s own functions (`od_session_authenticate()`,
+`od_session_open()`, `od_session_seal()` or equivalent), at the point each one determines its
+result code — using ESP32's text/levels, plus Nordic's two missing cases restored for both targets
+since there's now only one implementation. The **existing** calls to `od_session_app_report()` in
+`od_gate.c` and `od_reply.c` are left exactly as they are today — not moved into `od_session.c`,
+and not duplicated by a second call from inside it. The four accessor functions (`_state`,
+`_security`, `_now_ms`, `_device_id`) also stay exactly where they are — they're genuinely
+per-target facts, not logging.
 
-**BG22 note:** `targets/efr32bg22-slc/od_session_app.c` also implements
-`od_session_app_report()`. If `od_session.c` stops calling that function, BG22's copy becomes an
-unreferenced `extern` — harmless in C (no error, and `--gc-sections` drops it from the link), so
-**no BG22 edit is required** to keep it building. Confirm this against `tools/check.sh`'s ratchets
-before landing (none currently target this function by name, but verify) — see § 9 Q5.
+**BG22 note — corrected; the earlier draft of this plan wrongly called this a harmless no-op.**
+`targets/efr32bg22-slc/od_session_app.c` implements `od_session_app_report()` with direct
+`printf()` calls (`"[OD] auth session established\r\n"`, `"[OD] auth refused rc=%d..."`,
+`"[OD] decrypt failed cmd=0x%04X..."`) — this is BG22's *only* auth/decrypt diagnostic output, and
+it bypasses `od_log`/`OD_CAP_LOG` entirely, so it is not compiled out. Had the existing calls in
+`od_gate.c`/`od_reply.c` been removed (the original plan), those `printf` lines would have stopped
+firing — not "become unreferenced dead code," a real loss of BG22's only diagnostic for this path.
+Leaving `od_gate.c`/`od_reply.c` untouched (see "Land as, and where" above) avoids that exactly
+once per event, with no duplication: BG22's implementation and its output are untouched, per the
+original instruction that BG22 stays untouched this round. The cost is that ESP32's and Nordic's
+`od_session_app_report()` implementations become trivial (empty) stubs once their text moves into
+`od_session.c` directly, rather than being deleted outright — an acceptable one-seam-call cost to
+avoid a BG22 behavior change.
 
 ### L3 — `od_txq_app_dropped` (queued response dropped, TX)
 
@@ -207,6 +287,13 @@ something ESP32 structurally can't (no generation counter). Do not default here 
 Regardless of the level decision, the message itself should converge into one place: `od_txq.h`
 already declares this as a seam (`od_txq.h:135`) parallel to `od_rxq_app_report`, so it should
 follow the same L1/L2 pattern once § 9 Q2 is answered.
+
+**Same BG22 caveat as L2.** `targets/efr32bg22-slc/od_hal_radio.c:56-60` implements
+`od_txq_app_dropped()` with its own direct `printf("[OD] TX dropped len=%u tag=%lu reason=%d\r\n",
+...)`, BG22's only diagnostic for this event. Whatever L3 converges into `od_txq.c`, the call to
+`od_txq_app_dropped()` must remain unconditional (same reasoning as L2's "Land as, and where") so BG22's
+`printf` keeps firing unchanged; only ESP32's and Nordic's implementations of the seam become
+trivial once their text moves into `od_txq.c` directly.
 
 ### L4 — Transfer (`od_xfer.c`, `od_xfer_direct.c`, `od_xfer_partial.c`, `od_pipe.c`)
 
@@ -272,6 +359,9 @@ Stage 8.
 
 ## 7. Implementation stages
 
+0a. **Nordic newline correction (L0a).** Normalize only terminal `CR LF` to `LF` in the Nordic
+   HAL, submit through `LOG_PRINTK`, and land the modeled production-adapter regressions. Keep
+   this as a distinct commit within the refactor; it does not wait for the NCS 3.4.0 migration.
 0. **Compile-time selector contract (L0).** Add the shared CMake selector and isolated configure-time
    fixtures proving valid INFO/DEBUG output plus rejection of empty, unknown and duplicate
    `OD_LOG_LEVEL` selections. Target integration belongs to the build-profile plan.
@@ -285,7 +375,7 @@ Stage 8.
 2. **`od_rxq_app_report` → `od_rxq.c`** (L1). Self-contained, four events, both target
    implementations are ~40-70 lines each and disposable once the quiet-frame predicate is
    extracted to its own tiny seam.
-3. **`od_session_app_report` → `od_session.c`** (L2). Self-contained, restores two missing Nordic
+3. **Session logging → `od_session.c`; retain BG22 callback** (L2). Self-contained, restores two missing Nordic
    auth cases for free, hoists the duplicated rate-limit throttle into one place.
 4. **`od_txq_app_dropped`** (L3) — after § 9 Q2 is answered.
 5. **Transfer** (L4) — own audit pass, file-by-file over `display_service.cpp` and
@@ -306,6 +396,12 @@ sitting.
 
 ## 8. Verification
 
+- For L0a, run the Nordic production-adapter host test with exact-byte assertions: one terminal
+  `CR LF`, no `CR CR LF`, no terminator added to raw unterminated data, and queued data surviving
+  source-stack clobbering.
+- Hardware-capture exact bytes from both Nordic logging backends: USB CDC ACM on `xiao_nrf52840`
+  and RTT on an nRF54 board. Confirm the ESPHome web console renders CDC records on distinct lines.
+  This is a logging-transport hardware gate, not a protocol wire-format gate.
 - `tools/check.sh` (host suite, gcc + clang, ASan/UBSan) after every stage — pure C, no new vendor
   dependency, should be clean.
 - `tools/check.sh --targets` after every stage — this is a `shared/` change, so it relinks every
@@ -325,8 +421,14 @@ sitting.
 ## 9. Explicit questions for the user
 
 - **Q1 (L1).** Keep the 32-byte hex dump + ERX/URX token on the RXQ arrival line for both targets
-  (ESP32's richer default), or drop it to match Nordic's terser one-liner? Nordic's omission may be
-  a deliberate transport-cost call (RTT/UART budget) rather than an oversight.
+  (ESP32's richer default), or drop it to match Nordic's terser one-liner? Note the stakes on both
+  sides of this choice precisely: Nordic's current arrival line is `od_log_info` (not `debug` as
+  an earlier draft of this plan's L1 table said), so it is visible in Nordic's default INFO build
+  today. Adopting ESP32's version changes both the *content* (adds the hex dump and ERX/URX token)
+  and the *default-build visibility* (ESP32's version is `debug`-gated, so it would stop appearing
+  in a normal-profile Nordic build and only show up under `OD_LOG_PROFILE=debug`). Nordic's
+  omission may be a deliberate transport-cost call (RTT/UART budget) rather than an oversight, and
+  losing default-build visibility for arrivals is a second, separate cost from the content change.
 - **Q2 (L3).** For `od_txq_app_dropped`: adopt ESP32's `warn` + origin/tag content wholesale, adopt
   ESP32's wording at Nordic's `info` level (Nordic's rationale — this fires routinely on normal
   disconnect — reads as correct), or keep the two targets structurally different because their
@@ -337,14 +439,22 @@ sitting.
 - **Q4 (§ 6).** Drop the redundant `ERROR:`/`WARNING:` text prefix repo-wide (the level letter
   already carries this), even though that's a wording change to ESP32's own text, not just
   Nordic's?
-- **Q5 (L2).** Confirm no `tools/check.sh` ratchet targets `od_session_app_report` by name before
-  it goes unreferenced on BG22.
+- ~~**Q5 (L2).** Confirm no `tools/check.sh` ratchet targets `od_session_app_report` by name before
+  it goes unreferenced on BG22.~~ **Resolved:** `grep -n od_session_app_report tools/check.sh`
+  returns nothing — no ratchet names it. Moot regardless, since L2 now keeps the call to
+  `od_session_app_report()` live for BG22's sake (see L2's "Land as" and BG22 note above), so the
+  function never goes unreferenced in the first place.
 
 ## 10. Out of scope, deliberately
 
-- **BG22 logging content and wording** — not touched this round, per instruction. The only
-  possible BG22-visible effect of this plan is `od_session_app_report()` becoming dead code after
-  L2 (§ 9 Q5 covers verifying that's harmless); nothing about BG22's actual log output changes.
+- **BG22 logging content and wording** — not touched this round, per instruction, and this plan
+  now verifies that in both L2 and L3: the existing calls to `od_session_app_report()`
+  (`od_gate.c`/`od_reply.c`) and `od_txq_app_dropped()` (`od_txq.c`) stay exactly where they are
+  and keep firing unconditionally, so BG22's `printf`-based auth/decrypt/TX-drop diagnostics are
+  untouched byte-for-byte. (An earlier draft of this plan claimed these functions would become
+  harmless dead code on BG22 — that was wrong; they are BG22's only diagnostic output for these
+  events, not unreferenced code, which is why the call is
+  kept rather than removed.)
 - **HAL implementation internals** (`od_hal_crypto.c`, `od_hal_nvs.c`, `od_hal_adc.c`,
   `od_hal_radio.c`, `od_hal_gpio.c`, `od_hal_wdt.c`) — stay target-owned by architecture (decision
   1 in `CLAUDE.md`: HAL implementations are per-target by construction).
@@ -354,10 +464,19 @@ sitting.
 
 ## 11. Definition of done
 
-- `od_rxq.c` and `od_session.c` own their logging directly; the two `_app_report` seams are gone
-  (or reduced to the minimal quiet-frame predicate noted in L1) from both `targets/esp32-idf/` and
-  `targets/nordic-zephyr/`.
-- `od_txq_app_dropped` converged per the § 9 Q2 answer.
+- Nordic CDC ACM and RTT each emit exactly one terminal `CR LF` for a normal complete record;
+  `od_log_raw()` remains unterminated unless its caller supplies a terminator, and the ESPHome web
+  console no longer overwrites adjacent Nordic records.
+- `od_rxq.c` and `od_session.c` own their logging directly. The RXQ report seam
+  (`od_rxq_app_report()`) is gone from ESP32 and Nordic (or reduced to the minimal quiet-frame
+  predicate noted in L1) — it has no BG22 consumer since BG22 doesn't take `APP_RXQ`. **The
+  session report seam (`od_session_app_report()`) is deliberately not removed** — it stays
+  callback-only, called unconditionally from `od_gate.c`/`od_reply.c` exactly as today, with
+  trivial empty ESP32/Nordic implementations, solely so BG22's existing `printf` diagnostics keep
+  firing unchanged (see L2's BG22 note). Do not read this bullet as requiring the session seam
+  gone — that would either strand BG22 without its auth/decrypt diagnostics or duplicate them.
+- `od_txq_app_dropped` converged per the § 9 Q2 answer, with the same BG22-callback-only caveat as
+  the session seam above (see L3's BG22 note).
 - NFC logging exists in `od_nfc.c` per the § 9 Q3 answer.
 - Transfer and config each have a landed first slice (at minimum: the `imageWriteLog*` family for
   transfer) and a tracked checklist for the remainder — not required to be 100% complete in one

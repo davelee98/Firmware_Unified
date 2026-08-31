@@ -125,10 +125,13 @@ uint16_t od_txq_process(void);
  * waiting in the loop that also feeds the watchdog. */
 od_txq_status_t od_txq_flush(uint32_t now_ms, uint32_t deadline_ms);
 
-/* IMPLEMENTED BY THE TARGET. Called when the drain discards an entry that can never be sent --
- * a permanent radio refusal, or a link that died with frames still queued. shared/ may not include
- * a target log header (CLAUDE.md, "the one rule"), so the core reports the loss and the target
- * decides how to say it. MUST NOT queue, block, or re-enter od_txq.
+/* IMPLEMENTED BY THE TARGET, IN ADDITION to the line od_txq.c has already logged. Called when
+ * the drain discards an entry that can never be sent -- a permanent radio refusal, or a link that
+ * died with frames still queued. MUST NOT queue, block, or re-enter od_txq.
+ *
+ * It was built on the belief that shared/ may not include a log header, which was wrong. What
+ * keeps it is BG22, which implements it with printf and has no other diagnostic for this event;
+ * a target whose only transport is od_log implements this empty.
  *
  * A dropped response is invisible from the wire -- the host simply waits -- so without this the
  * only symptom of a permanently refusing transport is a client timing out for no stated reason. */

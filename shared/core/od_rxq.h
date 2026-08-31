@@ -18,10 +18,11 @@
  * head at link-down: that boundary lived in the departing instance's slot and was lost whenever
  * the stack reissued the handle before the loop scanned it.
  *
- * THIS MODULE DOES NOT LOG. od_log.h is target-local and shared/ may not include it, so arrivals
- * and drops are reported through od_rxq_app_report() -- one site for both targets. A copy of that
- * logic in each transport callback is exactly how the two targets drifted before: one reported a
- * malformed frame as "queue full".
+ * THIS MODULE LOGS ARRIVALS AND DROPS ITSELF, one text for both targets. It used to report them
+ * through a target callback on the belief that shared/ may not include od_log.h; that was wrong,
+ * od_log.h is shared/core and pure. A copy of the wording in each transport callback is exactly
+ * how the two targets drifted before: one reported a malformed frame as "queue full". The two
+ * genuinely per-target facts the arrival line needs are in od_rxq_app.h.
  */
 
 #ifndef OD_RXQ_H
@@ -64,21 +65,7 @@ typedef struct {
     uint32_t tag;
 } od_rxq_item_t;
 
-/* What happened to one inbound frame. Reported rather than logged; the target decides the wording,
- * whether to suppress mid-stream image data, and how to spell the encrypted/plaintext token. */
-typedef enum {
-    OD_RXQ_ARRIVED = 0,     /* queued; `depth` is the pre-push occupancy */
-    OD_RXQ_DROP_EMPTY,      /* len == 0 or a NULL pointer */
-    OD_RXQ_DROP_TOO_LARGE,  /* len > OD_RXQ_VALUE_MAX_BLE -- above transport admission */
-    OD_RXQ_DROP_FULL        /* the ring is full; the OLDEST frames are kept, this one is refused */
-} od_rxq_event_t;
-
-/* IMPLEMENTED BY THE TARGET. Called from the STACK CALLBACK TASK, so it must not block, must not
- * take a lock the loop holds, and must not dispatch. `frame`/`len` are the arriving bytes, valid
- * only for the duration of the call. */
-void od_rxq_app_report(od_rxq_event_t ev, const uint8_t *frame, uint16_t len, uint8_t depth);
-
-/* Producer side, stack callback task only. False means dropped, and the reason has been reported. */
+/* Producer side, stack callback task only. False means dropped, and the reason has been logged. */
 bool od_rxq_push(const uint8_t *data, uint16_t len, uint32_t tag);
 
 /* Consumer side, loop/main thread only. */

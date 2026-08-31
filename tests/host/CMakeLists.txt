@@ -366,6 +366,10 @@ add_executable(od_nordic_log_hal_test
 target_include_directories(od_nordic_log_hal_test PRIVATE
     ${OD_SHARED_INCLUDE_DIRS}
     ${CMAKE_CURRENT_LIST_DIR}/fake_zephyr)
+# The record bounds the Nordic firmware is built with, so the terminator rewrite is exercised at
+# the sizes it actually sees (targets/nordic-zephyr/zephyr/CMakeLists.txt).
+target_compile_definitions(od_nordic_log_hal_test PRIVATE
+    OD_LOG_TEXT_MAX=253u OD_LOG_RAW_TEXT_MAX=255u)
 add_test(NAME nordic_log_hal COMMAND od_nordic_log_hal_test)
 
 # Nordic EPD GPIO fallback: compile the production direct-register writer over a fake nRF GPIO
@@ -453,12 +457,25 @@ add_test(NAME config COMMAND od_config_test)
 # order of the survivors, and ERROR must retire exactly one entry -- retrying a permanent refusal
 # is how a drain becomes a spin. Plus the reservation property the token exists for: one dispatch
 # cannot spend another dispatch's capacity.
-add_executable(od_txq_test txq_test.c)
+# od_txq.c logs its own drop line now; the stub keeps od_log.c out of the link. The suite's
+# assertions still run through od_txq_app_dropped(), which stays live for BG22's sake.
+add_executable(od_txq_test txq_test.c od_log_test_stub.c)
 target_link_libraries(od_txq_test od_shared)
 add_test(NAME txq COMMAND od_txq_test)
 
-add_executable(od_rxq_test rxq_test.c)
-target_link_libraries(od_rxq_test od_shared Threads::Threads)
+# DEBUG, deliberately, and od_rxq.c/od_log.c are compiled INTO the executable rather than taken
+# from od_shared -- that archive is built at the default INFO, and a define applied only to the
+# test TU would leave the code under test compiled at the other level (CLAUDE.md decision 12).
+# It matters here because od_rxq.c's arrival line and both od_rxq_app.h predicates sit behind
+# OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG: at INFO this suite would assert nothing about either
+# and would link with the seam unimplemented. This is also the link proof that an APP_RXQ
+# consumer supplies both functions.
+add_executable(od_rxq_test rxq_test.c
+    ../../shared/core/od_rxq.c
+    ../../shared/core/od_log.c)
+target_compile_definitions(od_rxq_test PRIVATE OD_LOG_LEVEL=OD_LOG_DEBUG)
+target_include_directories(od_rxq_test PRIVATE ${OD_SHARED_INCLUDE_DIRS})
+target_link_libraries(od_rxq_test Threads::Threads)
 add_test(NAME rxq COMMAND od_rxq_test)
 
 # reply: the seal-or-plain decision, against a fake radio AND a fake od_session_app seam.
@@ -468,7 +485,7 @@ add_test(NAME rxq COMMAND od_rxq_test)
 # host then decrypted and validated as an ACK for a command the device refused. The load-bearing
 # cases are the ones where the bytes would mislead: a {0x00,cmd,0xFF} rejection, a TLS-LAN frame
 # that must not be double-wrapped, and a live session with no security configured.
-add_executable(od_reply_test reply_test.c)
+add_executable(od_reply_test reply_test.c od_log_test_stub.c)
 target_link_libraries(od_reply_test od_session_fake)
 add_test(NAME reply COMMAND od_reply_test)
 
@@ -479,7 +496,7 @@ add_test(NAME reply COMMAND od_reply_test)
 # member maps to the right action, which is where the consequences are: 0xFE advances the link's
 # auth-abuse run and 0xFF does not, and a replayed PIPE frame must draw SILENCE because the 0x81
 # NACK is fatal to the client's upload loop.
-add_executable(od_gate_test gate_test.c)
+add_executable(od_gate_test gate_test.c od_log_test_stub.c)
 target_link_libraries(od_gate_test od_session_fake)
 add_test(NAME gate COMMAND od_gate_test)
 
@@ -489,7 +506,7 @@ add_test(NAME gate COMMAND od_gate_test)
 # every chunk in one call and drained the ring between them, which only worked because it could
 # block the loop task it ran on. The reassembly check is what makes a dropped or repeated chunk
 # visible -- a count alone would not.
-add_executable(od_config_read_test config_read_test.c)
+add_executable(od_config_read_test config_read_test.c od_log_test_stub.c)
 target_link_libraries(od_config_read_test od_session_fake)
 add_test(NAME config_read COMMAND od_config_read_test)
 
@@ -500,12 +517,18 @@ add_test(NAME config_read COMMAND od_config_read_test)
 # cannot then report; defer after decrypt advances the replay window so the re-dispatched frame is
 # refused the second time; and a late producer-conflict check splices two configs into one
 # CRC-valid read-back.
+# od_log_test_stub.c defines _od_log for suites that only need od_session.c's log calls to land
+# somewhere. It goes on the EXECUTABLE, never inside a fake archive: an archive member is
+# extracted only to satisfy a symbol that is already undefined when the linker reaches it, and no
+# executable object references _od_log, so a stub sitting in the archive is skipped and od_log.c
+# is pulled from od_shared instead -- dragging in the od_hal_log_* transport nothing supplies. A
+# suite that defines its own _od_log to count records just omits the stub.
 add_library(od_session_fake_dispatch STATIC session_fake.c aes128.c)
 target_link_libraries(od_session_fake_dispatch PUBLIC od_shared_dispatch_fixture)
 add_library(od_session_fake_dispatch_silabs STATIC session_fake.c aes128.c)
 target_link_libraries(od_session_fake_dispatch_silabs PUBLIC od_shared_dispatch_fixture_silabs)
 
-add_executable(od_dispatch_test dispatch_test.c)
+add_executable(od_dispatch_test dispatch_test.c od_log_test_stub.c)
 target_link_libraries(od_dispatch_test od_session_fake_dispatch)
 add_test(NAME dispatch COMMAND od_dispatch_test)
 
@@ -525,7 +548,7 @@ add_test(NAME dispatch_silabs COMMAND od_dispatch_silabs_test)
 # The map used to be a switch inside each target, where an opcode could be routed on one target and
 # unknown on the other with nothing to say so -- and "unknown" is wire-visible, since it carries no
 # activity stamp. A new opcode must fail here until its route and capability behaviour are chosen.
-add_executable(od_dispatch_route_test dispatch_route_test.c)
+add_executable(od_dispatch_route_test dispatch_route_test.c od_log_test_stub.c)
 target_link_libraries(od_dispatch_route_test od_session_fake_dispatch)
 add_test(NAME dispatch_route COMMAND od_dispatch_route_test)
 
@@ -557,7 +580,7 @@ add_library(od_session_fake STATIC session_fake.c aes128.c)
 target_link_libraries(od_session_fake PUBLIC od_shared)
 target_include_directories(od_session_fake PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 
-add_executable(od_session_test session_test.c)
+add_executable(od_session_test session_test.c od_log_test_stub.c)
 target_link_libraries(od_session_test od_session_fake)
 add_test(NAME session COMMAND od_session_test)
 
@@ -718,6 +741,7 @@ if(Python3_FOUND)
     add_executable(od_dispatch_corpus_portable_test
         corpus_runner.c
         corpus_profile_portable.c
+        od_log_test_stub.c
         ../../shared/core/od_nfc.c
         ${OD_VEC_INC})
     # PER-TARGET, not per-source: set_source_files_properties is DIRECTORY-scoped, so setting the
@@ -768,7 +792,7 @@ if(Python3_FOUND)
     add_test(NAME nfc_fake COMMAND od_nfc_fake_test)
 
     # nfc: the shared 0x0083 machine at OD_CAP_NFC=1, over the programmable tag.
-    add_executable(od_nfc_test nfc_test.c)
+    add_executable(od_nfc_test nfc_test.c od_log_test_stub.c)
     target_link_libraries(od_nfc_test od_fake_nfc_tag od_session_fake)
     add_test(NAME nfc COMMAND od_nfc_test)
 
@@ -776,7 +800,7 @@ if(Python3_FOUND)
     # than taken from od_shared, because neither shared archive carries this profile -- od_shared is
     # capability-on and od_shared_silabs is BG22, which has NFC. Defining OD_CAP_NFC=0 on an
     # executable that linked a capability-on archive would prove nothing and still pass.
-    add_executable(od_nfc_off_test nfc_off_test.c ../../shared/core/od_nfc.c)
+    add_executable(od_nfc_off_test nfc_off_test.c od_log_test_stub.c ../../shared/core/od_nfc.c)
     target_compile_definitions(od_nfc_off_test PRIVATE OD_CAP_NFC=0)
     target_link_libraries(od_nfc_off_test od_session_fake)
     add_test(NAME nfc_off COMMAND od_nfc_off_test)

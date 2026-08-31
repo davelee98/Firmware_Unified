@@ -2,6 +2,8 @@
 
 #include "od_txq.h"
 
+#include "od_log.h"
+
 #include <string.h>
 
 struct od_txq_entry {
@@ -137,6 +139,22 @@ od_txq_status_t od_txq_commit(od_tx_reservation_t *r, const od_reply_t *rp,
     return OD_TXQ_OK;
 }
 
+/* One line per discarded entry, and INFO rather than warn or error on purpose: a normal
+ * disconnect mid-upload discards every frame still queued for that link, so a louder level would
+ * make a routine event look like a fault. What it exists to make visible is the abnormal case --
+ * entries discarded while a link is up, which means a reply's tag stopped matching the live owner
+ * and points at an identity bug rather than a departed peer.
+ *
+ * Deliberately not throttled: unlike the nonce lines in od_session.c a peer cannot drive this at
+ * will, and losing one of these hides the cause of a client-side timeout. */
+static void log_dropped(const od_reply_t *rp, uint16_t len, od_radio_result_t why)
+{
+    od_log_info("TX dropped: origin=%u tag=%08lX len=%u reason=%d",
+                (unsigned)(rp != NULL ? (unsigned)rp->origin : 0u),
+                (unsigned long)(rp != NULL ? rp->tag : 0u), (unsigned)len, (int)why);
+    od_txq_app_dropped(rp, len, why);
+}
+
 /* Tell the target about every entry a tag teardown is about to discard, before they are gone. */
 static void report_dropped_tag(od_origin_t origin, uint32_t tag, od_radio_result_t why)
 {
@@ -145,7 +163,7 @@ static void report_dropped_tag(od_origin_t origin, uint32_t tag, od_radio_result
     while (i != s_tail) {
         if (s_ring[i].origin == origin && s_ring[i].tag == tag) {
             const od_reply_t rp = { origin, tag };
-            od_txq_app_dropped(&rp, s_ring[i].len, why);
+            log_dropped(&rp, s_ring[i].len, why);
         }
         i = ring_next(i);
     }
@@ -194,10 +212,10 @@ uint16_t od_txq_process(void)
             continue;
         }
         if (rc == OD_RADIO_ERROR) {
-            /* Reported, because a dropped response is invisible from the wire: the host just
+            /* Logged, because a dropped response is invisible from the wire: the host just
              * waits. Without this the only symptom is a client timing out for no stated reason. */
             const od_reply_t rp = { e->origin, e->tag };
-            od_txq_app_dropped(&rp, e->len, OD_RADIO_ERROR);
+            log_dropped(&rp, e->len, OD_RADIO_ERROR);
         }
         /* SENT and ERROR both retire this entry: one succeeded, the other can never succeed. */
         s_head = ring_next(s_head);

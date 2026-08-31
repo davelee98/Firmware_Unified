@@ -2,6 +2,13 @@
 
 #include "od_rxq.h"
 
+#include "od_log.h"
+
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
+#include "od_rxq_app.h"
+#endif
+
+#include <stdio.h>
 #include <string.h>
 
 /* One ring, never one per connection. Per-frame identity (`tag`) is what distinguishes instances,
@@ -18,6 +25,49 @@ static uint8_t occupancy(uint8_t head, uint8_t tail)
     return (uint8_t)((head - tail + OD_RXQ_SLOTS) % OD_RXQ_SLOTS);
 }
 
+/* The per-frame arrival line, DEBUG only.
+ *
+ * Debug-gated rather than merely level-filtered: at INFO the whole body preprocesses away, so a
+ * normal build spends nothing on the 192-byte record, the hex formatting or the two seam calls.
+ * The runtime level test inside od_log_debug() would have skipped only the emit.
+ *
+ * Depth is the PRE-push count, matching the TX line's pre-enqueue depth, so a healthy path reads
+ * [BLE][Q:0] and a rising Q means arrivals are outrunning the drain. */
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
+static void log_arrival(const uint8_t *data, uint16_t len, uint8_t depth)
+{
+    uint16_t cmd;
+    bool encrypted;
+    char label[48];
+    char line[192];
+
+    cmd = (len >= 2u) ? (uint16_t)(((uint16_t)data[0] << 8) | data[1]) : data[0];
+    if (od_rxq_app_quiet(cmd)) {
+        return;
+    }
+    /* ERX / URX: does this frame carry the app-layer CCM envelope? Mirrors the dispatcher's gate
+     * -- the two handshake opcodes are answered before it, and a frame too short to hold
+     * nonce+tag cannot be wrapped. ORIGIN_LAN_TLS is omitted deliberately: this ring is BLE only,
+     * LAN frames never reach it. So the token reports the frame's FORM, not its intent; anything
+     * URX while encryption is on is rejected by the dispatcher. */
+    encrypted = od_rxq_app_encryption_enabled() &&
+                cmd != CMD_AUTHENTICATE && cmd != CMD_FIRMWARE_VERSION &&
+                len >= BLE_CMD_HEADER_SIZE + ENCRYPTION_NONCE_SIZE + ENCRYPTION_TAG_SIZE;
+
+    (void)snprintf(label, sizeof(label), "[BLE][Q:%u] %s 0x%04X (%u B): ",
+                   (unsigned)depth, encrypted ? "ERX" : "URX", cmd, (unsigned)len);
+    od_log_hex_line(line, sizeof(line), label, data, len);
+    od_log_debug("%s", line);
+}
+#else
+static void log_arrival(const uint8_t *data, uint16_t len, uint8_t depth)
+{
+    (void)data;
+    (void)len;
+    (void)depth;
+}
+#endif
+
 bool od_rxq_push(const uint8_t *data, uint16_t len, uint32_t tag)
 {
     uint8_t head;
@@ -25,11 +75,12 @@ bool od_rxq_push(const uint8_t *data, uint16_t len, uint32_t tag)
     uint8_t next;
 
     if (data == NULL || len == 0u) {
-        od_rxq_app_report(OD_RXQ_DROP_EMPTY, data, len, 0u);
+        od_log_warn("WARNING: Empty BLE frame received, dropping");
         return false;
     }
     if (len > OD_RXQ_VALUE_MAX_BLE) {
-        od_rxq_app_report(OD_RXQ_DROP_TOO_LARGE, data, len, 0u);
+        od_log_warn("WARNING: Command too large for queue (%u > %u), dropping",
+                    (unsigned)len, (unsigned)OD_RXQ_VALUE_MAX_BLE);
         return false;
     }
 
@@ -40,14 +91,16 @@ bool od_rxq_push(const uint8_t *data, uint16_t len, uint32_t tag)
         /* THE OLDEST FRAMES WIN. Overwriting the tail to admit this one would drop a frame the
          * consumer is about to dispatch, and under a PIPE window that is the frame whose ACK
          * refunds the slot -- so the transfer would stall rather than merely lose a chunk. */
-        od_rxq_app_report(OD_RXQ_DROP_FULL, data, len, occupancy(head, tail));
+        /* error, not warn: a full ring is resource exhaustion, not one malformed frame. */
+        od_log_error("ERROR: Command queue full, dropping command (%u slots)",
+                     (unsigned)OD_RXQ_SLOTS);
         return false;
     }
 
-    /* Reported BEFORE the payload is committed, while `depth` still describes what the frame
+    /* Logged BEFORE the payload is committed, while `depth` still describes what the frame
      * arrived into: a rising depth is the diagnostic, and reading it after the push would report
      * the frame's own arrival as backlog. */
-    od_rxq_app_report(OD_RXQ_ARRIVED, data, len, occupancy(head, tail));
+    log_arrival(data, len, occupancy(head, tail));
 
     memcpy(s_rx[head].data, data, len);
     s_rx[head].len = len;

@@ -28,3 +28,44 @@ set(OD_PROFILE_SILABS
     OD_CONFIG_WITH_BUZZER=0
     OD_CONFIG_WITH_WIFI=0
     OD_CONFIG_WITH_DATA_EXTENDED=0)
+
+# Compile-time log level, one selector for every target.
+#
+# The two targets reached the same level by different routes: ESP32's debug board fragments put
+# OD_LOG_LEVEL=OD_LOG_DEBUG straight into OD_BOARD_DEFINES and ordinary boards fell through to
+# od_log.h's INFO default, while Nordic turned PROFILE=debug into OD_DEBUG_BUILD and then named
+# OD_LOG_LEVEL itself. Two directives that agree today drift independently, so the mapping from
+# a profile name to the definition lives here and the front doors only supply the name.
+#
+#   profile  exactly "info" or "debug"; anything else, including empty, is an error.
+#   out_var  name of a definition list. Exactly one OD_LOG_LEVEL=... is appended, so an empty
+#            destination comes back holding exactly that definition.
+#
+# A destination that already carries an OD_LOG_LEVEL entry is rejected rather than appended to:
+# two of them is a silent precedence question at the compiler, which is the drift this exists to
+# stop, and the last one winning is not a contract anybody wrote down. The match covers every
+# spelling the compiler would honour, not just the one this function emits -- a leading -D, which
+# CMake tolerates in a definition list, and a bare valueless OD_LOG_LEVEL, which both compilers
+# define as 1. That is OD_LOG_WARN, so it builds clean and silently drops every info and debug
+# record; a spelling that cannot fail loudly is exactly the one worth refusing here.
+function(od_select_log_profile profile out_var)
+  if("${profile}" STREQUAL "")
+    message(FATAL_ERROR "od_select_log_profile: no log profile selected; expected info or debug")
+  elseif("${profile}" STREQUAL "info")
+    set(_definition OD_LOG_LEVEL=OD_LOG_INFO)
+  elseif("${profile}" STREQUAL "debug")
+    set(_definition OD_LOG_LEVEL=OD_LOG_DEBUG)
+  else()
+    message(FATAL_ERROR
+            "od_select_log_profile: unknown log profile '${profile}'; expected info or debug")
+  endif()
+
+  foreach(_existing IN LISTS ${out_var})
+    if(_existing MATCHES "^(-D)?OD_LOG_LEVEL($|=)")
+      message(FATAL_ERROR
+              "od_select_log_profile: ${out_var} already carries ${_existing}")
+    endif()
+  endforeach()
+
+  set(${out_var} ${${out_var}} ${_definition} PARENT_SCOPE)
+endfunction()

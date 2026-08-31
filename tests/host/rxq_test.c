@@ -1,12 +1,21 @@
 /* rxq_test.c -- shared/core/od_rxq.c
  *
- * The reporting callback is also a deterministic pre-publication barrier for the reset race: the
- * producer has selected a slot but has not copied or release-published it when the consumer resets.
- * That pins the legal concurrent case without a timing-dependent stress loop. The suite otherwise
- * covers FIFO discipline, full-ring refusal, stale-tag discard, and the reporting seam.
+ * BUILT AT OD_LOG_DEBUG, which is what makes the arrival line and od_rxq_app.h's two predicates
+ * live at all; at INFO the whole block preprocesses away and a missing seam implementation would
+ * link clean. The suite drives the real od_log.c and captures complete records through the log
+ * HAL, so what it asserts is the text and level that reach a transport -- the drop reasons being
+ * distinguishable is the whole point, and Nordic used to report all three as "pipe queue full".
+ *
+ * od_rxq_app_quiet() is also a deterministic pre-publication barrier for the reset race: it runs
+ * after the producer has selected a slot but before the copy and the release-publish. That pins
+ * the legal concurrent case without a timing-dependent stress loop. The suite otherwise covers
+ * FIFO discipline, full-ring refusal and stale-tag discard.
  */
 
 #include "od_rxq.h"
+
+#include "od_log.h"
+#include "od_rxq_app.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -26,16 +35,15 @@ static unsigned g_fails;
     } while (0)
 #define CASE(name) (g_case = (name))
 
-/* ------------------------------------------------------------------- the reporting seam --- */
+/* ------------------------------------------------------- the shared lines, as records --- */
 
 #define REPORT_MAX 128
 static struct {
-    od_rxq_event_t ev;
-    uint16_t       len;
-    uint8_t        depth;
-    uint8_t        first;      /* frame[0], to prove the report sees the arriving bytes */
+    char text[224];
 } g_rep[REPORT_MAX];
 static unsigned g_rep_n;
+
+static bool g_encryption_on;
 
 static pthread_mutex_t g_arrival_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_arrival_cond = PTHREAD_COND_INITIALIZER;
@@ -43,26 +51,66 @@ static bool g_block_arrival;
 static bool g_arrival_entered;
 static bool g_release_arrival;
 
-void od_rxq_app_report(od_rxq_event_t ev, const uint8_t *frame, uint16_t len, uint8_t depth)
+/* The log HAL, so od_log.c runs for real: prefix, level letter, CR LF and all. Capturing at the
+ * transport rather than stubbing _od_log is what lets the assertions below name the level. */
+static bool g_log_open;
+
+void od_hal_log_open(void) { g_log_open = true; }
+bool od_hal_log_is_open(void) { return g_log_open; }
+uint32_t od_hal_log_cycle_count(void) { return 0u; }
+void od_hal_log_flush(void) { }
+uint32_t od_hal_uptime_ms(void) { return 0u; }
+void od_hal_delay_us(uint32_t us) { (void)us; }
+
+void od_hal_log_write(char *record, size_t len)
 {
-    if (ev == OD_RXQ_ARRIVED) {
-        (void)pthread_mutex_lock(&g_arrival_lock);
-        if (g_block_arrival) {
-            g_arrival_entered = true;
-            (void)pthread_cond_broadcast(&g_arrival_cond);
-            while (!g_release_arrival) {
-                (void)pthread_cond_wait(&g_arrival_cond, &g_arrival_lock);
-            }
+    (void)len;
+    if (g_rep_n >= REPORT_MAX || record == NULL) {
+        return;
+    }
+    (void)snprintf(g_rep[g_rep_n].text, sizeof(g_rep[g_rep_n].text), "%s", record);
+    ++g_rep_n;
+}
+
+static bool said(unsigned i, const char *needle)
+{
+    return i < g_rep_n && strstr(g_rep[i].text, needle) != NULL;
+}
+
+static unsigned said_count(const char *needle)
+{
+    unsigned i;
+    unsigned n = 0u;
+
+    for (i = 0u; i < g_rep_n; ++i) {
+        if (strstr(g_rep[i].text, needle) != NULL) {
+            ++n;
         }
-        (void)pthread_mutex_unlock(&g_arrival_lock);
     }
-    if (g_rep_n < REPORT_MAX) {
-        g_rep[g_rep_n].ev = ev;
-        g_rep[g_rep_n].len = len;
-        g_rep[g_rep_n].depth = depth;
-        g_rep[g_rep_n].first = (frame != NULL && len > 0u) ? frame[0] : 0xEEu;
-        ++g_rep_n;
+    return n;
+}
+
+/* ------------------------------------------------------------------- od_rxq_app.h seam --- */
+
+bool od_rxq_app_encryption_enabled(void)
+{
+    return g_encryption_on;
+}
+
+/* Called at the pre-publication point, which is why the race barrier lives here. */
+bool od_rxq_app_quiet(uint16_t cmd)
+{
+    (void)cmd;
+    (void)pthread_mutex_lock(&g_arrival_lock);
+    if (g_block_arrival) {
+        g_arrival_entered = true;
+        (void)pthread_cond_broadcast(&g_arrival_cond);
+        while (!g_release_arrival) {
+            (void)pthread_cond_wait(&g_arrival_cond, &g_arrival_lock);
+        }
     }
+    (void)pthread_mutex_unlock(&g_arrival_lock);
+    return false;
 }
 
 /* ------------------------------------------------------------------------------ helpers --- */
@@ -186,16 +234,9 @@ static void test_full_ring_keeps_the_oldest(void)
     item = od_rxq_peek();
     CHECK(item != NULL && item->data[0] == 1u);
 
-    CASE("a full ring reports DROP_FULL, once per refused frame");
-    {
-        unsigned fulls = 0u;
-        for (i = 0u; i < g_rep_n; ++i) {
-            if (g_rep[i].ev == OD_RXQ_DROP_FULL) {
-                ++fulls;
-            }
-        }
-        CHECK(fulls == 5u);              /* SLOTS + 4 offered, SLOTS - 1 admitted */
-    }
+    CASE("a full ring says so once per refused frame, at ERROR");
+    CHECK(said_count("Command queue full") == 5u);   /* SLOTS + 4 offered, SLOTS - 1 admitted */
+    CHECK(said_count("] E: ") == 5u);
 
     CASE("consuming one frame frees exactly one slot");
     od_rxq_consume();
@@ -207,32 +248,37 @@ static void test_admission(void)
 {
     static uint8_t big[OD_RXQ_FRAME_MAX + 1u];
 
-    CASE("an empty frame is refused and reported as EMPTY, not as a full ring");
+    CASE("an empty frame is refused and named as empty, not as a full ring");
     reset_all();
     memset(big, 0x5Au, sizeof big);
     CHECK(!od_rxq_push(big, 0u, 1u));
-    CHECK(g_rep_n == 1u && g_rep[0].ev == OD_RXQ_DROP_EMPTY);
+    CHECK(g_rep_n == 1u);
+    CHECK(said(0u, "Empty BLE frame received"));
+    CHECK(said(0u, "] W: "));
 
     CASE("a NULL frame is refused the same way rather than crashing");
     reset_all();
     CHECK(!od_rxq_push(NULL, 8u, 1u));
-    CHECK(g_rep_n == 1u && g_rep[0].ev == OD_RXQ_DROP_EMPTY);
+    CHECK(g_rep_n == 1u);
+    CHECK(said(0u, "Empty BLE frame received"));
 
-    CASE("a frame above the admission bound is TOO_LARGE, distinctly from a full ring");
+    CASE("a frame above the admission bound says too large, distinctly from a full ring");
     reset_all();
     CHECK(!od_rxq_push(big, (uint16_t)(OD_RXQ_VALUE_MAX_BLE + 1u), 1u));
-    CHECK(g_rep_n == 1u && g_rep[0].ev == OD_RXQ_DROP_TOO_LARGE);
-    CHECK(g_rep[0].len == (uint16_t)(OD_RXQ_VALUE_MAX_BLE + 1u));
+    CHECK(g_rep_n == 1u);
+    CHECK(said(0u, "Command too large for queue (254 > 253)"));
+    CHECK(said(0u, "] W: "));
 
-    /* The three reasons being distinguishable is the whole point of the seam: Nordic reported all
-     * of them as "pipe queue full", so a malformed frame looked like backpressure. */
+    /* The three reasons being distinguishable is the whole point of one shared line: Nordic
+     * reported all of them as "pipe queue full", so a malformed frame looked like
+     * backpressure. */
     CASE("253 value bytes are admitted while the storage slot remains 256 bytes wide");
     reset_all();
     CHECK(OD_RXQ_FRAME_MAX == 256u);
     CHECK(OD_RXQ_VALUE_MAX_BLE == 253u);
     CHECK(od_rxq_push(big, (uint16_t)OD_RXQ_VALUE_MAX_BLE, 1u));
     CHECK(od_rxq_peek() != NULL && od_rxq_peek()->len == (uint16_t)OD_RXQ_VALUE_MAX_BLE);
-    CHECK(g_rep_n == 1u && g_rep[0].ev == OD_RXQ_ARRIVED);
+    CHECK(g_rep_n == 1u && said(0u, "[BLE][Q:0]"));
 }
 
 static void test_stale_tags_are_discarded(void)
@@ -295,15 +341,34 @@ static void test_report_depth_is_pre_push(void)
     CASE("depth is reported PRE-push, so a frame never reports its own arrival as backlog");
     reset_all();
     CHECK(push_marked(0xD0u, 4u, 1u));
-    CHECK(g_rep_n == 1u && g_rep[0].ev == OD_RXQ_ARRIVED && g_rep[0].depth == 0u);
+    CHECK(g_rep_n == 1u && said(0u, "[BLE][Q:0]"));
     CHECK(push_marked(0xD1u, 4u, 1u));
-    CHECK(g_rep_n == 2u && g_rep[1].depth == 1u);
+    CHECK(g_rep_n == 2u && said(1u, "[BLE][Q:1]"));
     CHECK(push_marked(0xD2u, 4u, 1u));
-    CHECK(g_rep_n == 3u && g_rep[2].depth == 2u);
+    CHECK(g_rep_n == 3u && said(2u, "[BLE][Q:2]"));
 
-    CASE("and the report sees the arriving bytes, not the stored copy");
-    CHECK(g_rep[0].first == 0xD0u);
-    CHECK(g_rep[2].first == 0xD2u);
+    CASE("and the line sees the arriving bytes, not the stored copy");
+    CHECK(said(0u, "0xD0D0"));   /* push_marked fills every byte, so cmd is mark repeated */
+    CHECK(said(2u, "0xD2D2"));
+
+    CASE("the arrival line is DEBUG, so a default build carries none of this");
+    CHECK(said_count("] D: ") == 3u);
+
+    CASE("URX while encryption is off, ERX once a key is configured and the frame can hold one");
+    reset_all();
+    g_encryption_on = false;
+    CHECK(push_marked(0xD3u, 60u, 1u));
+    CHECK(said(0u, " URX "));
+    reset_all();
+    g_encryption_on = true;
+    CHECK(push_marked(0xD3u, 60u, 1u));
+    CHECK(said(0u, " ERX "));
+
+    CASE("but a frame too short to hold nonce and tag is URX whatever the key state");
+    reset_all();
+    CHECK(push_marked(0xD4u, 4u, 1u));
+    CHECK(said(0u, " URX "));
+    g_encryption_on = false;
 }
 
 static void test_reset(void)
@@ -336,7 +401,7 @@ static void test_reset(void)
     CHECK(push_marked(0x77u, 4u, 1u));
     CHECK(od_rxq_peek() != NULL && od_rxq_peek()->data[0] == 0x77u);
 
-    CASE("reset does not report -- it is consumer-side bookkeeping, not a frame event");
+    CASE("reset says nothing -- it is consumer-side bookkeeping, not a frame event");
     reset_all();
     CHECK(push_marked(0x01u, 4u, 1u));
     g_rep_n = 0u;
@@ -447,6 +512,9 @@ static void test_wraparound(void)
 
 int main(void)
 {
+    od_hal_log_open();
+    od_log_init();
+
     test_order();
     test_the_slot_is_writable();
     test_full_ring_keeps_the_oldest();
