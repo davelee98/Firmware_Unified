@@ -461,8 +461,19 @@ add_executable(od_txq_test txq_test.c)
 target_link_libraries(od_txq_test od_shared)
 add_test(NAME txq COMMAND od_txq_test)
 
-add_executable(od_rxq_test rxq_test.c)
-target_link_libraries(od_rxq_test od_shared Threads::Threads)
+# DEBUG, deliberately, and od_rxq.c/od_log.c are compiled INTO the executable rather than taken
+# from od_shared -- that archive is built at the default INFO, and a define applied only to the
+# test TU would leave the code under test compiled at the other level (CLAUDE.md decision 12).
+# It matters here because od_rxq.c's arrival line and both od_rxq_app.h predicates sit behind
+# OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG: at INFO this suite would assert nothing about either
+# and would link with the seam unimplemented. This is also the link proof that an APP_RXQ
+# consumer supplies both functions.
+add_executable(od_rxq_test rxq_test.c
+    ../../shared/core/od_rxq.c
+    ../../shared/core/od_log.c)
+target_compile_definitions(od_rxq_test PRIVATE OD_LOG_LEVEL=OD_LOG_DEBUG)
+target_include_directories(od_rxq_test PRIVATE ${OD_SHARED_INCLUDE_DIRS})
+target_link_libraries(od_rxq_test Threads::Threads)
 add_test(NAME rxq COMMAND od_rxq_test)
 
 # reply: the seal-or-plain decision, against a fake radio AND a fake od_session_app seam.

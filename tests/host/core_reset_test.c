@@ -20,6 +20,7 @@
 #include "od_cmd_test_ctx.h"
 #include "od_reply.h"
 #include "od_rxq.h"
+#include "od_rxq_app.h"
 #include "od_session.h"
 #include "od_session_app.h"
 #include "od_txq.h"
@@ -81,10 +82,11 @@ void od_txq_app_dropped(const od_reply_t *rp, uint16_t len, od_radio_result_t wh
     (void)rp; (void)len; (void)why;
 }
 
-void od_rxq_app_report(od_rxq_event_t ev, const uint8_t *frame, uint16_t len, uint8_t depth)
-{
-    (void)ev; (void)frame; (void)len; (void)depth;
-}
+/* Built at the default INFO level, where od_rxq.c's arrival block preprocesses away and neither
+ * predicate is referenced. Defined anyway so this fixture keeps linking if the suite is ever
+ * compiled at DEBUG. */
+bool od_rxq_app_encryption_enabled(void) { return false; }
+bool od_rxq_app_quiet(uint16_t cmd) { (void)cmd; return false; }
 
 /* ------------------------------------------------------------------------- fake app session --- */
 

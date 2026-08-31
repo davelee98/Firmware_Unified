@@ -274,8 +274,8 @@ endif()
 # why it lives there, not in a separate hal/od_hal_adv.c). Fixes the confirmed-on-hardware
 # advertising-does-not-resume-after-disconnect bug: disconnect handling now reconciles through
 # od_adv_control every opendisplay_ble_process() pass instead of a blind 150ms k_work_delayable.
-# APP_RXQ joins at C9: the inbound ring is shared, and this target implements its one seam in
-# src/od_rxq_app.c. It needs no HAL -- only od_rxq_app_report().
+# APP_RXQ joins at C9: the inbound ring is shared, and this target implements its two seam
+# predicates in src/od_rxq_app.c. It needs no HAL -- the ring logs its own arrivals and drops.
 # C10 adds HAL_RADIO and APP_SESSION: this target now implements od_hal_radio (src/od_hal_radio.c)
 # and the od_session_app seam (src/od_session_app.c), so it takes the shared egress, gate,
 # dispatcher and config-read producer rather than its own copies.
