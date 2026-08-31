@@ -75,11 +75,11 @@ bool od_rxq_push(const uint8_t *data, uint16_t len, uint32_t tag)
     uint8_t next;
 
     if (data == NULL || len == 0u) {
-        od_log_warn("WARNING: Empty BLE frame received, dropping");
+        od_log_warn("Empty BLE frame received, dropping");
         return false;
     }
     if (len > OD_RXQ_VALUE_MAX_BLE) {
-        od_log_warn("WARNING: Command too large for queue (%u > %u), dropping",
+        od_log_warn("Command too large for queue (%u > %u), dropping",
                     (unsigned)len, (unsigned)OD_RXQ_VALUE_MAX_BLE);
         return false;
     }
@@ -92,7 +92,7 @@ bool od_rxq_push(const uint8_t *data, uint16_t len, uint32_t tag)
          * consumer is about to dispatch, and under a PIPE window that is the frame whose ACK
          * refunds the slot -- so the transfer would stall rather than merely lose a chunk. */
         /* error, not warn: a full ring is resource exhaustion, not one malformed frame. */
-        od_log_error("ERROR: Command queue full, dropping command (%u slots)",
+        od_log_error("Command queue full, dropping command (%u slots)",
                      (unsigned)OD_RXQ_SLOTS);
         return false;
     }

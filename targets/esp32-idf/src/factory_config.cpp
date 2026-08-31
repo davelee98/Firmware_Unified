@@ -54,7 +54,7 @@ bool tryProvisionFactoryEmbed(void) {
         return true;
     }
 
-    od_log_error("ERROR: Factory embed present but saveConfig failed");
+    od_log_error("Factory embed present but saveConfig failed");
 #endif
     return false;
 }

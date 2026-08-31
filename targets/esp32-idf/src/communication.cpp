@@ -177,7 +177,7 @@ void serviceBleAuthAbuseDisconnect(void) {
 
 static void reloadConfigAfterSave(void) {
     if (!loadGlobalConfig()) {
-        od_log_warn("WARNING: Config was saved but reload from storage failed (see errors above). "
+        od_log_warn("Config was saved but reload from storage failed (see errors above). "
                     "Reboot may be required.");
         return;
     }
@@ -490,7 +490,7 @@ od_cmd_result_t handleWriteConfig(const od_cmd_ctx_t *ctx, uint8_t* data, uint16
     default:
         /* NOTHING WAS STORED. That is guaranteed by construction: the assembler has no
          * storage symbol to reach, so a rejection cannot have altered NVS. */
-        od_log_error("ERROR: [%s] malformed CONFIG_WRITE (%u B) -- nothing stored",
+        od_log_error("[%s] malformed CONFIG_WRITE (%u B) -- nothing stored",
                      originTag(ctx->rp.origin), (unsigned)len);
         (void)od_cmd_reply_plain(ctx, responseErr, sizeof(responseErr));
         return OD_CMD_NACK;
@@ -556,7 +556,7 @@ od_cmd_result_t handleWriteConfigChunk(const od_cmd_ctx_t *ctx, uint8_t* data, u
     case OD_CONFIG_ASM_SINGLE:
     case OD_CONFIG_ASM_REJECTED:
     default:
-        od_log_error("ERROR: [%s] bad CONFIG_CHUNK (%u B) -- transfer dropped, nothing stored",
+        od_log_error("[%s] bad CONFIG_CHUNK (%u B) -- transfer dropped, nothing stored",
                      originTag(ctx->rp.origin), (unsigned)len);
         (void)od_cmd_reply_plain(ctx, err_resp, sizeof(err_resp));
         return OD_CMD_NACK;
@@ -641,7 +641,7 @@ od_frame_outcome_t od_dispatch_app_frame(const od_reply_t *rp, uint8_t* data, ui
     // log their own banner. Carries no encryption token: the ERX/URX line from od_rxq_push()
     // already reports it for this frame, and stating it twice is how the two spellings drift.
     if (len < 2) {
-        od_log_error("ERROR: Command too short (%u bytes)", len);
+        od_log_error("Command too short (%u bytes)", len);
     } else {
         const uint16_t command = (uint16_t)((data[0] << 8) | data[1]);
         // Silence the per-frame command spam for image-write data once the stream is past its
@@ -666,7 +666,7 @@ od_frame_outcome_t od_dispatch_app_frame(const od_reply_t *rp, uint8_t* data, ui
      * handler: releasing an exhausted token leaves zero either way. That is what the per-opcode
      * budget cases in dispatch_test.c are for. */
     if (od_txq_reserved() != 0u) {
-        od_log_error("ERROR: %u reservation unit(s) leaked by 0x%04X",
+        od_log_error("%u reservation unit(s) leaked by 0x%04X",
                      (unsigned)od_txq_reserved(),
                      (unsigned)(len >= 2 ? ((data[0] << 8) | data[1]) : 0));
         od_txq_reset();
