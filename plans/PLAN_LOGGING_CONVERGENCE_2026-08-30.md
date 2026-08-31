@@ -489,7 +489,7 @@ Stage 8.
 5. **[LANDED `8be9191`, PR #79] Transfer** (L4) — own audit pass, file-by-file over `display_service.cpp` and
    `opendisplay_display.cpp`/`opendisplay_pipe.c`, starting with the `imageWriteLog*` family as the
    first landed slice so Stage 5 has an early, demonstrable result rather than one giant patch.
-6. **[IMPLEMENTED 2026-08-31] Config** (L5) — same method as Stage 5, applied to `config_parser.cpp` /
+6. **[SUBMITTED PR #80, 2026-08-31] Config** (L5) — same method as Stage 5, applied to `config_parser.cpp` /
    `opendisplay_config_parser.c`.
 7. **NFC** (L6) — after § 9 Q3 is answered.
 8. **Dispatch/gate/reply/cmd** (L7) — design the candidate event list, confirm wording, implement.
