@@ -49,11 +49,20 @@ void od_hal_log_write(char *record, size_t len)
 	 * both why that copy may live in this frame and why neither path may pass a const pointer
 	 * (a const cast would instead identify retained read-only storage). Width and precision are
 	 * not supported for strings, so both paths supply a NUL-terminated buffer. */
-	if (len >= 2u && len <= sizeof(line) && record[len - 2u] == '\r' &&
-	    record[len - 1u] == '\n') {
-		memcpy(line, record, len - 2u);
-		line[len - 2u] = '\n';
-		line[len - 1u] = '\0';
+	if (len >= 2u && record[len - 2u] == '\r' && record[len - 1u] == '\n') {
+		size_t body = len - 2u;
+
+		/* Every terminal CR LF takes this path, including a record longer than od_log.c can
+		 * build -- od_hal_log.h states no maximum, and falling back to LOG_RAW would put the
+		 * doubled carriage return back on the wire for exactly the records nobody inspects.
+		 * An over-long record loses its tail instead: a truncated line is still legible,
+		 * whereas a CR CR LF line overprints the one before it. */
+		if (body > sizeof(line) - 2u) {
+			body = sizeof(line) - 2u;
+		}
+		memcpy(line, record, body);
+		line[body] = '\n';
+		line[body + 1u] = '\0';
 		LOG_PRINTK("%s", line);
 		return;
 	}

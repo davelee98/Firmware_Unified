@@ -214,6 +214,38 @@ int main(void)
     check(!wire_contains("\r\r\n"), "longest record produces no CR CR LF");
     wire_reset();
 
+    /* A record past the adapter's own buffer -- od_log.c cannot build one, and od_hal_log.h
+     * names no maximum. It must still lose the surplus CR, not fall back to raw: the tail is
+     * what gets dropped, never the terminator handling. */
+    {
+        char over[OD_LOG_TEXT_MAX + 8u];
+        char want[OD_LOG_TEXT_MAX + 3u];
+        size_t over_len = sizeof(over) - 1u;
+
+        for (i = 0u; i < over_len - 2u; ++i) {
+            over[i] = 'b';
+        }
+        over[over_len - 2u] = '\r';
+        over[over_len - 1u] = '\n';
+        over[over_len] = '\0';
+
+        for (i = 0u; i < OD_LOG_TEXT_MAX; ++i) {
+            want[i] = 'b';
+        }
+        want[OD_LOG_TEXT_MAX] = '\r';
+        want[OD_LOG_TEXT_MAX + 1u] = '\n';
+        want[OD_LOG_TEXT_MAX + 2u] = '\0';
+
+        s_printk_submits = 0u;
+        s_raw_submits = 0u;
+        od_hal_log_write(over, over_len);
+        check(s_printk_submits == 1u, "an over-long complete record takes the printk path");
+        check(s_raw_submits == 0u, "an over-long complete record does not fall back to raw");
+        check(!wire_contains("\r\r\n"), "an over-long record produces no CR CR LF");
+        check(wire_equals(want), "an over-long record is truncated, keeping one terminator");
+        wire_reset();
+    }
+
     /* Degenerate lengths must not index before the buffer. A lone LF is the one case the two
      * models disagree on, so it is asserted against each rather than through wire_equals(). */
     {
