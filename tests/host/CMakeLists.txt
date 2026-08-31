@@ -457,7 +457,9 @@ add_test(NAME config COMMAND od_config_test)
 # order of the survivors, and ERROR must retire exactly one entry -- retrying a permanent refusal
 # is how a drain becomes a spin. Plus the reservation property the token exists for: one dispatch
 # cannot spend another dispatch's capacity.
-add_executable(od_txq_test txq_test.c)
+# od_txq.c logs its own drop line now; the stub keeps od_log.c out of the link. The suite's
+# assertions still run through od_txq_app_dropped(), which stays live for BG22's sake.
+add_executable(od_txq_test txq_test.c od_log_test_stub.c)
 target_link_libraries(od_txq_test od_shared)
 add_test(NAME txq COMMAND od_txq_test)
 
