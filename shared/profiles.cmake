@@ -43,7 +43,11 @@ set(OD_PROFILE_SILABS
 #
 # A destination that already carries an OD_LOG_LEVEL entry is rejected rather than appended to:
 # two of them is a silent precedence question at the compiler, which is the drift this exists to
-# stop, and the last one winning is not a contract anybody wrote down.
+# stop, and the last one winning is not a contract anybody wrote down. The match covers every
+# spelling the compiler would honour, not just the one this function emits -- a leading -D, which
+# CMake tolerates in a definition list, and a bare valueless OD_LOG_LEVEL, which both compilers
+# define as 1. That is OD_LOG_WARN, so it builds clean and silently drops every info and debug
+# record; a spelling that cannot fail loudly is exactly the one worth refusing here.
 function(od_select_log_profile profile out_var)
   if("${profile}" STREQUAL "")
     message(FATAL_ERROR "od_select_log_profile: no log profile selected; expected info or debug")
@@ -57,7 +61,7 @@ function(od_select_log_profile profile out_var)
   endif()
 
   foreach(_existing IN LISTS ${out_var})
-    if(_existing MATCHES "^OD_LOG_LEVEL=")
+    if(_existing MATCHES "^(-D)?OD_LOG_LEVEL($|=)")
       message(FATAL_ERROR
               "od_select_log_profile: ${out_var} already carries ${_existing}")
     endif()

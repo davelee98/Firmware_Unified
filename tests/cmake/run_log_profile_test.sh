@@ -43,6 +43,8 @@ run_case empty     refuse
 run_case unknown   refuse
 run_case wrong-case refuse
 run_case duplicate refuse
+run_case duplicate-bare  refuse
+run_case duplicate-dashd refuse
 
 echo "log profile selector: $checks cases, $failures failures"
 [ "$failures" -eq 0 ]

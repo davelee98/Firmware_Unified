@@ -60,6 +60,23 @@ elseif("${CASE}" STREQUAL "duplicate")
   message(FATAL_ERROR
           "${reached}: a destination already carrying OD_LOG_LEVEL was appended to")
 
+elseif("${CASE}" STREQUAL "duplicate-bare")
+  # Valueless, which CMake turns into -DOD_LOG_LEVEL. GCC and Clang both define that as 1, which
+  # is OD_LOG_WARN -- so it builds clean at the wrong level rather than failing, and nothing
+  # downstream says the requested profile was overruled.
+  set(defines OD_LOG_LEVEL)
+  od_select_log_profile(debug defines)
+  message(FATAL_ERROR
+          "${reached}: a destination carrying a bare OD_LOG_LEVEL was appended to")
+
+elseif("${CASE}" STREQUAL "duplicate-dashd")
+  # CMake tolerates a -D prefix in a definition list and strips it, so this reaches the compiler
+  # as the same macro the selector is about to emit.
+  set(defines -DOD_LOG_LEVEL=OD_LOG_INFO)
+  od_select_log_profile(debug defines)
+  message(FATAL_ERROR
+          "${reached}: a destination carrying -DOD_LOG_LEVEL was appended to")
+
 else()
   message(FATAL_ERROR "unknown fixture case '${CASE}'")
 endif()
