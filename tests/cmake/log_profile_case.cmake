@@ -77,6 +77,24 @@ elseif("${CASE}" STREQUAL "duplicate-dashd")
   message(FATAL_ERROR
           "${reached}: a destination carrying -DOD_LOG_LEVEL was appended to")
 
+elseif("${CASE}" STREQUAL "duplicate-conditional-genex")
+  set(defines "$<$<CONFIG:Debug>:OD_LOG_LEVEL=OD_LOG_DEBUG>")
+  od_select_log_profile(info defines)
+  message(FATAL_ERROR
+          "${reached}: a conditional OD_LOG_LEVEL generator expression was appended to")
+
+elseif("${CASE}" STREQUAL "duplicate-if-genex")
+  set(defines "$<IF:$<CONFIG:Debug>,OD_LOG_LEVEL=OD_LOG_DEBUG,OD_LOG_LEVEL=OD_LOG_INFO>")
+  od_select_log_profile(info defines)
+  message(FATAL_ERROR
+          "${reached}: an IF OD_LOG_LEVEL generator expression was appended to")
+
+elseif("${CASE}" STREQUAL "similar-name")
+  # A definition that merely contains the token as part of a larger identifier is unrelated.
+  set(defines MY_OD_LOG_LEVEL=1)
+  od_select_log_profile(info defines)
+  expect_list(defines MY_OD_LOG_LEVEL=1 OD_LOG_LEVEL=OD_LOG_INFO)
+
 else()
   message(FATAL_ERROR "unknown fixture case '${CASE}'")
 endif()

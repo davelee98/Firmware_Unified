@@ -45,6 +45,9 @@ run_case wrong-case refuse
 run_case duplicate refuse
 run_case duplicate-bare  refuse
 run_case duplicate-dashd refuse
+run_case duplicate-conditional-genex refuse
+run_case duplicate-if-genex refuse
+run_case similar-name accept
 
 echo "log profile selector: $checks cases, $failures failures"
 [ "$failures" -eq 0 ]
