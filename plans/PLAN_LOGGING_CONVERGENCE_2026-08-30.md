@@ -449,7 +449,7 @@ Stage 8.
 3. **[LANDED `54e0663`] Session logging → `od_session.c`; retain BG22 callback** (L2). Self-contained, restores two missing Nordic
    auth cases for free, hoists the duplicated rate-limit throttle into one place.
 4. **[LANDED `6776bbd`] `od_txq_app_dropped`** (L3) — Q2 answered as ESP32 wording at Nordic's INFO level.
-5. **[IMPLEMENTED 2026-08-31] Transfer** (L4) — own audit pass, file-by-file over `display_service.cpp` and
+5. **[SUBMITTED PR #79, 2026-08-31] Transfer** (L4) — own audit pass, file-by-file over `display_service.cpp` and
    `opendisplay_display.cpp`/`opendisplay_pipe.c`, starting with the `imageWriteLog*` family as the
    first landed slice so Stage 5 has an early, demonstrable result rather than one giant patch.
 6. **Config** (L5) — same method as Stage 5, applied to `config_parser.cpp` /
