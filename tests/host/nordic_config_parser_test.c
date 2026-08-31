@@ -10,6 +10,14 @@
 #include <stdio.h>
 #include <string.h>
 
+/* od_rxq_app.c delegates quiet-frame policy to the transfer owner. This parser fixture does not
+ * link transfer state; the real target does. */
+bool od_xfer_log_quiet(uint16_t opcode)
+{
+    (void)opcode;
+    return false;
+}
+
 static unsigned g_checks;
 static unsigned g_failures;
 static const char *g_case = "(none)";

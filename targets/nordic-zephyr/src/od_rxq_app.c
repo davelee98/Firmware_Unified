@@ -9,8 +9,8 @@
 
 #include "od_rxq_app.h"
 
+#include "od_xfer.h"
 #include "opendisplay_config_parser.h"
-#include "opendisplay_protocol.h"
 
 bool od_rxq_app_encryption_enabled(void)
 {
@@ -19,8 +19,5 @@ bool od_rxq_app_encryption_enabled(void)
 
 bool od_rxq_app_quiet(uint16_t cmd)
 {
-  /* Unconditional for these two opcodes, where ESP32 also requires a stream to be mid-flight.
-   * This target has no chunk counter to consult yet; it gains one when the transfer logging
-   * converges into od_xfer.c, at which point this becomes the same state-aware test. */
-  return cmd == CMD_DIRECT_WRITE_DATA || cmd == CMD_PIPE_WRITE_DATA;
+  return od_xfer_log_quiet(cmd);
 }

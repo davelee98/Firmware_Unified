@@ -60,6 +60,10 @@ void od_xfer_reply_partial_error(const od_cmd_ctx_t *ctx, uint8_t opcode, uint8_
 
 void od_xfer_stream_reset(uint32_t expected_bytes);
 bool od_xfer_stream_push(od_span_t input, bool final);
+void od_xfer_log_start(void);
+void od_xfer_log_chunk(od_span_t payload);
+void od_xfer_log_progress(void);
+void od_xfer_log_finish(void);
 
 /* Reply-free PIPE operations. od_pipe owns every wire byte; this module owns the transfer,
  * accounting, inflater, panel lifecycle and etag. */

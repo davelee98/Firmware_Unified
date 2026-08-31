@@ -10,12 +10,7 @@
 #include "od_rxq_app.h"
 
 #include "encryption.h"   // isEncryptionEnabled()
-#include "opendisplay_protocol.h"
-
-// Defined in display_service.cpp. True while an image stream is actually mid-flight, which is
-// what makes the suppression state-aware rather than a blanket opcode filter: outside a stream
-// these frames are worth a line.
-bool imageWriteLogQuietCmd(void);
+#include "od_xfer.h"
 
 extern "C" bool od_rxq_app_encryption_enabled(void)
 {
@@ -24,6 +19,5 @@ extern "C" bool od_rxq_app_encryption_enabled(void)
 
 extern "C" bool od_rxq_app_quiet(uint16_t cmd)
 {
-    return (cmd == CMD_DIRECT_WRITE_DATA || cmd == CMD_PIPE_WRITE_DATA) &&
-           imageWriteLogQuietCmd();
+    return od_xfer_log_quiet(cmd);
 }

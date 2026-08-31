@@ -26,8 +26,9 @@ Verified at merge: `tools/check.sh` 42 passed / 0 failed, and all three target f
 hardware capture in § 8 is still open** — L0a is proven by the modeled host adapter test only, so
 no board has yet shown the CDC ACM and RTT bytes.
 
-**Remaining: Stages 5-9** — transfer (L4), config (L5), NFC (L6, needs Q3), dispatch/gate/reply/
-cmd (L7), and the independent ESP32 `ESP_LOGx` cleanup. Q3 and Q4 are still open.
+**Remaining: Stages 6-9** — config (L5), NFC (L6, needs Q3), dispatch/gate/reply/cmd (L7), and
+the independent ESP32 `ESP_LOGx` cleanup. Q3 and Q4 are still open. Stage 5 transfer's first
+slice and remainder checklist landed on 2026-08-31; see L4.
 
 ## 1. Objective and authority
 
@@ -342,8 +343,51 @@ target-specific driver/timing detail (FastEPD, panel busy pin, SPI), it stays. T
 `imageWriteLog*` family above is the first concrete item: it depends only on byte counts and a
 timestamp, both of which `od_xfer.c` already has or can trivially track, and its output (percent
 milestones + KB/s summary) is exactly the kind of diagnostic Nordic is currently missing entirely
-— recommend porting it to `od_xfer.c` essentially as-is, gated by `OD_LOG_LEVEL >= OD_LOG_DEBUG`
-same as today.
+— recommend porting it to `od_xfer.c` essentially as-is. Keep frame heads and percentage progress
+gated by `OD_LOG_LEVEL >= OD_LOG_DEBUG`; retain the completion summary at its declared INFO level
+so normal target profiles receive one bounded record per transfer.
+
+**Stage 5 result (2026-08-31).** The audit covered the 151 ESP32 sites present before this slice
+and all 29 Nordic sites, checking the live sibling implementations as well as the imported target
+snapshots. The first slice moved the complete image-write family into shared transfer ownership:
+raw/zlib START mode, first and final DATA frame heads, 5% progress, compressed on-wire byte ratio,
+completion throughput, and state-aware RX/command/TX suppression. DATA frames are counted where
+shared parsing accepts them, before inflation, so compressed transfers report logical progress
+without losing wire-byte accounting. The quiet flag is a release/acquire publication because RX
+logging runs on a radio callback while transfer parsing runs on the loop thread.
+
+The raw/zlib START wording and compressed on-wire ratio deliberately follow the live `../Firmware`
+authority and are richer than this repository's imported ESP32 snapshot. Detailed frame/progress
+records are DEBUG-only; the `DW complete` record remains INFO so shipping Nordic and ESP32 profiles
+gain the transfer summary. Formatting uses only `%u` conversions because Nordic routes `od_log`
+through newlib-nano `vsnprintf`, not Zephyr `cbprintf`. The log counters and frame-head cache are
+file-static in `od_xfer.c`, keeping `od_xfer_state_t` ABI-invariant across the host fixture's mixed
+INFO/DEBUG archives.
+
+Verification: the 79-case host suite and all 42 non-target gates passed (GCC, Clang, ASan+UBSan,
+five fuzz targets and the pinned wire corpus), as did every ESP32 fragment, all three Nordic
+boards, and BG22. After the review fixes, the ESP32 INFO/DEBUG fragments, Nordic nRF52840
+INFO/DEBUG profiles, and BG22 were rebuilt. Inspection of the linked images confirmed that
+Nordic INFO contains only the completion formats, Nordic DEBUG also contains the detailed
+formats, and BG22 contains none. Leak detection alone was disabled for the sanitizer rerun
+because LeakSanitizer cannot run under the verification environment's `ptrace`; AddressSanitizer
+and UndefinedBehaviorSanitizer remained enabled.
+
+Tracked remainder from the callsite triage:
+
+- [ ] Move target-level transfer timeout/replacement/abort reason lines into the shared lifecycle
+  owner; retain only the target watchdog scheduling mechanism.
+- [ ] Add shared START admission/refusal diagnostics for geometry, size, flags, etag and panel-start
+  outcomes.
+- [ ] Add shared DATA/END diagnostics for owner mismatch, overflow, inflate/write failure,
+  incomplete streams, reply/barrier refusal and refresh outcome.
+- [ ] Audit and converge PIPE arm/window/reorder/SACK/fatal/end state diagnostics in `od_pipe.c`;
+  keep BLE notification/subscription mechanics in the targets.
+- [x] Keep panel power, controller-plane switching, busy-pin, SPI, FastEPD and physical refresh
+  timing logs target-owned; those sites name hardware state the shared transfer machine does not
+  own.
+- [x] Keep transport connection/subscription and unknown-transport-command logs target-owned;
+  those are transport lifecycle, not transfer policy.
 
 ### L5 — Config (`od_config.c`, `od_config_read.c`, `od_config_asm.c`, `od_config_tlv.c`,
 `od_config_store.c`)
@@ -405,7 +449,7 @@ Stage 8.
 3. **[LANDED `54e0663`] Session logging → `od_session.c`; retain BG22 callback** (L2). Self-contained, restores two missing Nordic
    auth cases for free, hoists the duplicated rate-limit throttle into one place.
 4. **[LANDED `6776bbd`] `od_txq_app_dropped`** (L3) — Q2 answered as ESP32 wording at Nordic's INFO level.
-5. **Transfer** (L4) — own audit pass, file-by-file over `display_service.cpp` and
+5. **[SUBMITTED PR #79, 2026-08-31] Transfer** (L4) — own audit pass, file-by-file over `display_service.cpp` and
    `opendisplay_display.cpp`/`opendisplay_pipe.c`, starting with the `imageWriteLog*` family as the
    first landed slice so Stage 5 has an early, demonstrable result rather than one giant patch.
 6. **Config** (L5) — same method as Stage 5, applied to `config_parser.cpp` /
@@ -521,9 +565,10 @@ sitting.
 - **[MET]** `od_txq_app_dropped` converged per the § 9 Q2 answer, with the same BG22-callback-only caveat as
   the session seam above (see L3's BG22 note).
 - **[OPEN]** NFC logging exists in `od_nfc.c` per the § 9 Q3 answer.
-- **[OPEN]** Transfer and config each have a landed first slice (at minimum: the `imageWriteLog*` family for
-  transfer) and a tracked checklist for the remainder — not required to be 100% complete in one
-  pass given the size (151 + 180 call sites across the two subsystems).
+- **[MET transfer / OPEN config]** Transfer and config each have an implemented first slice (at minimum:
+  the `imageWriteLog*` family for transfer) and a tracked checklist for the remainder — not
+  required to be 100% complete in one pass given the size (151 + 180 call sites across the two
+  subsystems). Transfer's first slice and checklist were implemented on 2026-08-31.
 - **[MET]** `tools/check.sh --targets` passes on every stage landed — all three families run
   green at `7d22fa8`.
 - **[MET, one caveat]** The shared CMake selector returns exactly one correct INFO/DEBUG definition and rejects empty,

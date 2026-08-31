@@ -61,6 +61,17 @@ if(OD_SHARED_SOURCES)
         OD_PIPE_MAX_W=16u
         OD_PIPE_MAX_N=16u)
 
+    # Per-frame transfer progress is DEBUG-only; completion remains visible at INFO. Compile the
+    # three state-owning translation units at that level so xfer_test exercises the code that
+    # ships in debug target profiles. Executable-local definitions cannot alter objects already
+    # compiled into od_shared.
+    add_library(od_xfer_log_debug STATIC
+        ${CMAKE_CURRENT_LIST_DIR}/../../shared/core/od_xfer.c
+        ${CMAKE_CURRENT_LIST_DIR}/../../shared/core/od_xfer_direct.c
+        ${CMAKE_CURRENT_LIST_DIR}/../../shared/core/od_xfer_partial.c)
+    target_include_directories(od_xfer_log_debug PUBLIC ${OD_SHARED_INCLUDE_DIRS})
+    target_compile_definitions(od_xfer_log_debug PRIVATE OD_LOG_LEVEL=OD_LOG_DEBUG)
+
     # Dispatch-only fixtures define the four promoted od_xfer command entry points so they can
     # observe routing and scripted verdicts. Keep production od_xfer objects out of these archives;
     # otherwise any unrelated state query pulls them in and collides with the fixture definitions.
@@ -146,9 +157,16 @@ add_executable(od_zlib_pump_test zlib_pump_test.c)
 target_link_libraries(od_zlib_pump_test od_shared)
 add_test(NAME zlib_pump COMMAND od_zlib_pump_test)
 
-add_executable(od_xfer_test xfer_test.c od_log_test_stub.c)
-target_link_libraries(od_xfer_test od_shared)
+add_executable(od_xfer_test xfer_test.c)
+target_compile_definitions(od_xfer_test PRIVATE OD_LOG_LEVEL=OD_LOG_DEBUG)
+target_link_libraries(od_xfer_test od_xfer_log_debug od_shared)
 add_test(NAME xfer COMMAND od_xfer_test)
+
+# The completion summary is INFO even though frame heads and progress are DEBUG. Build the same
+# behavioral suite against the ordinary shared archive to pin that shipping-profile distinction.
+add_executable(od_xfer_info_test xfer_test.c)
+target_link_libraries(od_xfer_info_test od_shared)
+add_test(NAME xfer_info COMMAND od_xfer_info_test)
 
 add_executable(od_xfer_silabs_test xfer_silabs_test.c od_log_test_stub.c)
 target_link_libraries(od_xfer_silabs_test od_shared_silabs)

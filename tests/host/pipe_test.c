@@ -421,13 +421,16 @@ static void test_reorder_owner_and_origin(void)
     CASE("ahead frame SACKs, owner closes the gap, other owner is inert");
     setup();
     CHECK(od_pipe_start(&start, start_body(sb, 0u, 4u, 4u, 244u, 32u)) == OD_CMD_OK);
+    CHECK(!od_xfer_log_quiet(CMD_PIPE_WRITE_DATA));
     CHECK(od_pipe_data(&owner_data, od_span_make(seq1, sizeof seq1)) == OD_CMD_OK);
     CHECK(g_reply_n == 2u && g_replies[1].bytes[1] == 0x81u);
     CHECK(g_written == 0u);
+    CHECK(!od_xfer_log_quiet(CMD_PIPE_WRITE_DATA));
     CHECK(od_pipe_data(&other_data, od_span_make(seq0, sizeof seq0)) == OD_CMD_NACK);
     CHECK(g_reply_n == 2u && g_written == 0u);
     CHECK(od_pipe_data(&owner_data, od_span_make(seq0, sizeof seq0)) == OD_CMD_OK);
     CHECK(g_written == 16u);
+    CHECK(od_xfer_log_quiet(CMD_PIPE_WRITE_DATA));
 
     CASE("non-BLE refusal is inert even while BLE owns a transfer");
     CHECK(od_pipe_data(&lan_data, od_span_make(seq0, sizeof seq0)) == OD_CMD_NACK);

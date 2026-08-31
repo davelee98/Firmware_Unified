@@ -29,6 +29,7 @@
 #include "od_session.h"
 #include "od_session_app.h"
 #include "od_span.h"
+#include "od_xfer.h"
 #include "encryption_state.h"
 
 #include "link_owner.h"
@@ -646,8 +647,7 @@ od_frame_outcome_t od_dispatch_app_frame(const od_reply_t *rp, uint8_t* data, ui
         const uint16_t command = (uint16_t)((data[0] << 8) | data[1]);
         // Silence the per-frame command spam for image-write data once the stream is past its
         // first chunk; the display handler's 5% meter reports it.
-        const bool quietCmd = (command == CMD_DIRECT_WRITE_DATA || command == CMD_PIPE_WRITE_DATA) &&
-                              imageWriteLogQuietCmd();
+        const bool quietCmd = od_xfer_log_quiet(command);
         if (!quietCmd) {
             const char* name = commandName(command);
             if (name != nullptr) {
