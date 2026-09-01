@@ -27,11 +27,9 @@
  */
 
 #include "od_hal_crypto.h"
+#include "od_log.h"
 
-#include "esp_log.h"
 #include "psa/crypto.h"
-
-static const char *s_tag = "od_crypto";
 
 /* PSA's init brings up the key store and driver dispatch. Cached, like every other od_hal_crypto
  * entry point's backend hook: a per-draw init would pay that cost on every challenge. */
@@ -46,7 +44,7 @@ static enum od_hal_crypto_status psa_init_once(void)
     }
     status = psa_crypto_init();
     if (status != PSA_SUCCESS) {
-        ESP_LOGE(s_tag, "PSA init failed: %d", (int)status);
+        od_log_error("PSA init failed: %d", (int)status);
         return OD_HAL_CRYPTO_ERROR;
     }
     s_psa_ready = true;
@@ -65,7 +63,7 @@ enum od_hal_crypto_status od_hal_crypto_random(uint8_t *buf, uint16_t len)
     }
     status = psa_generate_random(buf, len);
     if (status != PSA_SUCCESS) {
-        ESP_LOGE(s_tag, "PSA random failed: %d", (int)status);
+        od_log_error("PSA random failed: %d", (int)status);
         return OD_HAL_CRYPTO_ERROR;
     }
     return OD_HAL_CRYPTO_OK;

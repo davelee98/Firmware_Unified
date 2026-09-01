@@ -930,7 +930,15 @@ silabs_profile_single_definer() {
 check "silabs: one profile definer" silabs_profile_single_definer
 
 log_hal_structure() {
-    local rc=0 hits count
+    local rc=0 hits count grep_rc
+    local esp32_converged_files=(
+        targets/esp32-idf/hal/od_hal_adc.c
+        targets/esp32-idf/hal/od_hal_crypto.c
+        targets/esp32-idf/hal/od_hal_crypto_random.c
+        targets/esp32-idf/hal/od_hal_nvs.c
+        targets/esp32-idf/hal/od_hal_nvs_secure.c
+        targets/esp32-idf/src/ble_transport_esp32.cpp
+    )
 
     hits=$(find targets \( -name od_log.c -o -name od_log.cpp -o -name od_log.h \
              -o -name od_hal_log.h \) \
@@ -938,6 +946,18 @@ log_hal_structure() {
     if [ -n "$hits" ]; then
         echo "$hits"
         echo "target-local logger API or implementation shadows shared ownership"
+        rc=1
+    fi
+
+    hits=$(grep -nHE '\bESP_LOG[EWIDV][[:space:]]*\(' "${esp32_converged_files[@]}" 2>&1)
+    grep_rc=$?
+    if [ "$grep_rc" -eq 0 ]; then
+        echo "$hits"
+        echo "ESP32 application diagnostics returned to the raw ESP_LOG transport"
+        rc=1
+    elif [ "$grep_rc" -gt 1 ]; then
+        echo "$hits"
+        echo "could not scan every converged ESP32 logging file"
         rc=1
     fi
 

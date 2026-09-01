@@ -5,14 +5,12 @@
 
 #include "od_hal_nvs.h"
 #include "od_hal_nvs_esp.h"
+#include "od_log.h"
 
 #include <string.h>
 
 #include "nvs.h"
 #include "esp_err.h"
-#include "esp_log.h"
-
-static const char *TAG = "od_nvs_sec";
 
 int od_hal_nvs_secure_erase(void)
 {
@@ -68,6 +66,6 @@ int od_hal_nvs_secure_erase(void)
         return OD_HAL_NVS_EIO;
     }
 
-    ESP_LOGI(TAG, "config record zero-written and erased (%u B)", (unsigned)stored);
+    od_log_info("config record zero-written and erased (%u B)", (unsigned)stored);
     return OD_HAL_NVS_OK;
 }

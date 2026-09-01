@@ -1,6 +1,6 @@
 # Converge debug logging onto shared/core, ESP32 wording as default
 
-## 0. Status — Stages 0a-7 landed; Stage 8 submitted as PR #82
+## 0. Status — Stages 0a-8 landed; Stage 9 implemented
 
 Merged as PR #76 (`7d22fa8`). Everything below this section is the plan as written; the stage
 list in § 7 marks what is done, and Q1, Q2 and Q5 in § 9 are answered by what shipped.
@@ -12,6 +12,10 @@ list in § 7 marks what is done, and Q1, Q2 and Q5 in § 9 are answered by what 
 | 3 (L2) | `54e0663` | Session auth/decrypt/seal wording in `od_session.c` |
 | 2 (L1) | `6cb49cb` | `od_rxq.c` logs its own arrivals and drops; `od_rxq_app_report()` gone |
 | 4 (L3) | `6776bbd` | One dropped-response line in `od_txq.c`, at INFO |
+| 5 (L4) | `8be9191` (PR #79) | Transfer progress and outcome diagnostics in shared core |
+| 6 (L5) | `38f0e24` (PR #80) | Config parse, redacted dump and storage diagnostics in shared core |
+| 7 (L6) | `439f5e9` (PR #81) | Shared NFC wording and severity over a typed target event seam |
+| 8 (L7) | `6b22dbf` (PR #82) | Bounded dispatch, gate and reply diagnostics |
 
 Four defects found reviewing those commits landed with them: the host log stub sat inside the
 fake archives where archive-extraction order never pulled it, so a *fresh* configure failed to
@@ -26,9 +30,8 @@ Verified at merge: `tools/check.sh` 42 passed / 0 failed, and all three target f
 hardware capture in § 8 is still open** — L0a is proven by the modeled host adapter test only, so
 no board has yet shown the CDC ACM and RTT bytes.
 
-**Remaining: Stage 9** — the independent ESP32 `ESP_LOGx` cleanup. Q3 and Q4 are resolved.
-Stages 5-7 landed, and Stage 8 is submitted as PR #82 and fully verified on 2026-08-31; see
-L4-L7.
+**No implementation stage remains.** Stage 9 is implemented and fully verified on 2026-08-31;
+the Nordic CDC ACM and RTT hardware captures in § 8 remain open qualification work.
 
 ## 1. Objective and authority
 
@@ -110,11 +113,17 @@ of target-owned HAL file, but its terminal-newline correction (L0a) is in scope 
 what hardware-verifies converged log output on Nordic, and doing that against a transport known to
 corrupt every line would defeat the verification. No other HAL file gets this exception.
 
-**Adjacent, not part of this plan:** ESP32's HAL layer still has 22 raw `ESP_LOGx` call sites
-that bypass `od_log` entirely (`od_hal_crypto.c`, `od_hal_nvs.c`, `od_hal_adc.c`,
-`ble_transport_esp32.cpp:328`). Converting those to `od_log_error/warn` is a separate, small,
-independent cleanup (unifies the *transport*, not the *ownership*) — listed as Stage 9 so it isn't
-lost, but it doesn't block or depend on anything below.
+**Adjacent cleanup, implemented as Stage 9:** ESP32 had 21 raw `ESP_LOGx` call sites bypassing
+`od_log` in `od_hal_crypto.c`, `od_hal_crypto_random.c`, `od_hal_nvs.c`,
+`od_hal_nvs_secure.c`, `od_hal_adc.c` and `ble_transport_esp32.cpp`. They now use the shared
+transport without moving ownership out of the target. The earlier count of 22 was stale.
+
+This is deliberately not a repository-wide ban on `ESP_LOGx`. NimBLE callback-task evidence writes
+directly to IDF because the application logger can drop such a record under load, while the rest
+of that adapter's stack lifecycle remains outside Stage 9. Panel driver timing, the FastEPD adapter
+and the vendored mDNS component also remain target/vendor internals outside this cleanup. The
+structural ratchet therefore names the six converged files rather than pretending those distinct
+transports can be collapsed safely.
 
 ## 4. The pattern to replicate
 
@@ -496,6 +505,17 @@ RXQ admission warnings remain unchanged. They run on the producer thread and hav
 seam, so giving them equivalent throttling needs a separate cross-thread-safe design rather than a
 file-local Stage 8 state bucket.
 
+**Stage 9 result (2026-08-31).** All 21 scoped ESP32 calls now use `od_log_error`, `od_log_warn`
+or `od_log_info` at their existing severity, with their wording and target ownership unchanged.
+The obsolete IDF log tags and includes are gone. `tools/check.sh` prevents raw `ESP_LOGx` calls
+from returning in those six files while retaining the explicit NimBLE, panel, FastEPD and mDNS
+exceptions above.
+
+The production ESP32 RNG fixture now supplies its executable-local `_od_log` stub directly, so
+the new application-log reference does not accidentally pull the full logger from `od_shared`
+without a host log HAL. Verification passed all 42 non-target gates and all 45 all-target gates:
+every configured ESP32 fragment, all three Nordic boards and BG22.
+
 ## 6. Style conventions established by this pass
 
 - **Full-sentence, capitalized text** ("Authentication challenge sent"), not terse tag-prefixed
@@ -535,11 +555,11 @@ file-local Stage 8 state bucket.
 6. **[LANDED `38f0e24`, PR #80] Config** (L5) — same method as Stage 5, applied to `config_parser.cpp` /
    `opendisplay_config_parser.c`.
 7. **[LANDED `439f5e9`, PR #81] NFC** (L6) — Q3's seven events are shared and fully verified.
-8. **[SUBMITTED PR #82, 2026-08-31] Dispatch/gate/reply/cmd** (L7) — the bounded event set above
-   is implemented and fully verified.
-9. **(Independent, can run any time) ESP32 HAL `ESP_LOGx` → `od_log_*`** — the 22 sites named in
-   § 3. Not a convergence step (HAL stays target-owned either way), just closes the transport gap
-   from the earlier finding in this conversation.
+8. **[LANDED `6b22dbf`, PR #82] Dispatch/gate/reply/cmd** (L7) — the bounded event set above is
+   implemented and fully verified.
+9. **[IMPLEMENTED 2026-08-31] ESP32 `ESP_LOGx` → `od_log_*`** — the 21 sites named in § 3.
+   Not an ownership convergence step (the HAL and BLE lifecycle code remain target-owned), just
+   the independent transport cleanup.
 
 Stages 1-3 are small enough to land and verify together; 5-6 are the bulk of the effort and should
 be tracked as their own checklist (either an appendix to this plan or a follow-on
@@ -654,7 +674,10 @@ sitting.
   the `imageWriteLog*` family for transfer) and a tracked checklist for the remainder — not
   required to be 100% complete in one pass given the size (151 + 180 call sites across the two
   subsystems). Both first slices and their remainder checklists were implemented on 2026-08-31.
-- **[MET]** `tools/check.sh --targets` passes through Stage 8 — 45 passed, 0 failed, 0 skipped on
+- **[MET]** The 21 scoped ESP32 HAL/transport diagnostics use `od_log_*`; the structural ratchet
+  prevents those six files from returning to raw `ESP_LOGx` without imposing that rule on the
+  documented NimBLE host-task, panel and vendor exceptions.
+- **[MET]** `tools/check.sh --targets` passes through Stage 9 — 45 passed, 0 failed, 0 skipped on
   2026-08-31.
 - **[MET, one caveat]** The shared CMake selector returns exactly one correct INFO/DEBUG definition and rejects empty,
   unknown or duplicate selections in its isolated configure fixture. Target consumption is not
