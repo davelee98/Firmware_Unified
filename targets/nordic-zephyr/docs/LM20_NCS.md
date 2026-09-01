@@ -96,9 +96,30 @@ Seeed ePaper breakout (BUSY on **D5**, same as L15 `nrf54l15-xiao` preset):
 | CLK | D8 | P1.4 | `0x14` |
 | DATA | D10 | P1.6 | `0x16` |
 
-Driver Board V2 uses BUSY on **D2** (`P1.30` → `0xBE`) instead of D5.
-
 Use toolbox preset `nrf54lm20-xiao` — do not reuse L15 pin bytes.
+
+### The carrier board changes BUSY, and nothing else
+
+**ePaper Driver Board V2 (p-6374) puts BUSY on D2 — `P1.30` → `0xBE`.** The ePaper Breakout
+Board (p-5804) puts it on D5. Every other signal is identical on the two carriers, and the
+toolbox ships only the breakout preset (`busy = 0x17`).
+
+So a V2 board running the stock preset **renders perfectly and never sees BUSY**: SPI, reset and
+DC are all correct, while `wait_for_refresh()` burns its full timeout on every refresh and logs
+`refresh: BUSY NEVER ASSERTED in <n> ms`, then
+`boot display: still running after 30000 ms - advertising anyway`. Nothing in the symptom points
+at the pin map. Check the carrier before suspecting the panel, the rail, or the GPIO.
+
+Pins are runtime config, so the correction is a config write (`busy = 0xBE`), not a rebuild.
+`docs/FOLLOWUPS.md` § 26 tracks the missing toolbox preset.
+
+Two things that are *not* the cause of a dead BUSY here, already checked:
+
+- `i2c22` is `xiao_i2c` and its `TWIM_SCL` psel is P1.07 — the D5 BUSY line — but
+  `zephyr/boards/xiao_nrf54lm20a_nrf54lm20a_cpuapp.overlay` disables the node, and it is the
+  only pinctrl node claiming that pin.
+- Polarity is right for `ic=0x0027`: both 800x480 entries in `bb_ep.inl` are `BBEP_CHIP_SSD16xx`,
+  so `bbepIsBusy()` treats busy as active-HIGH.
 
 ## Advertising / low power
 

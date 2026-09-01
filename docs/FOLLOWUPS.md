@@ -1477,3 +1477,58 @@ working; and none of `repeat pairing`, `encryption change` or `passkey action`
 stale-bond class that `:750-772` exists to fix.
 
 Not fixable from this repo — sibling repositories are read-only references.
+
+---
+
+## 26. `opendisplay.org` — no LM20A preset for the ePaper Driver Board V2, whose only difference is BUSY
+
+**Status: verified 2026-09-01, on hardware.** Found while debugging a XIAO nRF54LM20A that
+refreshed its panel correctly but timed out every refresh wait.
+
+The toolbox ships exactly one LM20A preset,
+`nrf54lm20-xiao` / "Seeed XIAO ePaper Breakout nRF54LM20A"
+(`opendisplay.org/httpdocs/firmware/toolbox/simple-config-presets.json`), with
+`displayPins.busy = 0x17`. There is no preset for the **ePaper Driver Board V2**
+(Seeed p-6374), which is a different carrier from the ePaper Breakout Board (p-5804).
+
+The two boards differ in **exactly one pin**:
+
+| Signal | Breakout (p-5804) | Driver Board V2 (p-6374) |
+|---|---|---|
+| RST / CS / DC / SCK / MOSI | D0 / D1 / D3 / D8 / D10 | identical |
+| **BUSY** | **D5** → P1.7 → `0x17` | **D2** → P1.30 → `0xBE` |
+
+That single difference is what makes this expensive to diagnose. Every line that carries data
+is correct on both boards, so a V2 board running the breakout preset **renders perfectly** —
+SPI, reset and DC all work — while `wait_for_refresh()`
+(`targets/nordic-zephyr/src/opendisplay_display.cpp:226`) never sees BUSY assert and burns its
+full timeout on every refresh. The device reports
+`refresh: BUSY NEVER ASSERTED in <n> ms` and, at boot,
+`boot display: still running after 30000 ms - advertising anyway`. Nothing in the symptom
+points at the pin map; the display looks healthy.
+
+Two nearby facts that are *not* the cause, both checked so they are not re-litigated:
+
+- **The `i2c22` collision is already fixed.** `i2c22` is `xiao_i2c` on this board and its
+  `TWIM_SCL` psel is P1.07 — the D5 BUSY line — but
+  `targets/nordic-zephyr/zephyr/boards/xiao_nrf54lm20a_nrf54lm20a_cpuapp.overlay:45-53`
+  disables the node, and the generated `zephyr.dts` of the flashed build carries
+  `status = "disabled"` attributed to that line. `i2c22` is also the only node in the board
+  pinctrl with a psel on P1.07.
+- **Polarity is correct.** `ic=0x0027` is 800x480, and both 800x480 entries in
+  `third_party/bb_epaper/src/bb_ep.inl:4118-4147` are `BBEP_CHIP_SSD16xx`, so
+  `bbepIsBusy()` (`:4339-4347`) uses `busy_idle = LOW` — busy is active-HIGH, which is right
+  for SSD16xx.
+
+**Fix shape (sibling repo, not this one):** add a second LM20A preset for the Driver Board V2
+that is `nrf54lm20-xiao` with `displayPins.busy = 0xBE`, named so the carrier is
+unambiguous, and rename the existing one so "Breakout" versus "Driver Board" is a choice the
+user makes deliberately rather than a default they inherit. P1.30 is free: no board pinctrl
+node claims it, and it is outside the reserved `port 1, pins 10-14` mic/UART range that
+`od_board_epd_pin_reserved()` enforces
+(`targets/nordic-zephyr/src/platform/nrf54/od_board_nrf54lm20a.c:42`).
+
+Because the pins are runtime config, a V2 board needs no firmware change — only a config
+write with `busy = 0xBE`. This is a toolbox data gap, not a firmware defect.
+
+Not fixable from this repo — sibling repositories are read-only references.
