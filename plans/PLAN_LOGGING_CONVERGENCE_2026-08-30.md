@@ -1,6 +1,6 @@
 # Converge debug logging onto shared/core, ESP32 wording as default
 
-## 0. Status — Stages 0a-6 landed; Stage 7 implemented 2026-08-31
+## 0. Status — Stages 0a-6 landed; Stage 7 submitted as PR #81
 
 Merged as PR #76 (`7d22fa8`). Everything below this section is the plan as written; the stage
 list in § 7 marks what is done, and Q1, Q2 and Q5 in § 9 are answered by what shipped.
@@ -28,7 +28,7 @@ no board has yet shown the CDC ACM and RTT bytes.
 
 **Remaining: Stages 8-9** — dispatch/gate/reply/cmd (L7) and the independent ESP32 `ESP_LOGx`
 cleanup. Q3 and Q4 are resolved. Stages 5-6 landed with remainder checklists, and Stage 7 is
-implemented and fully verified on 2026-08-31; see L4-L6.
+submitted as PR #81 and fully verified on 2026-08-31; see L4-L6.
 
 ## 1. Objective and authority
 
@@ -509,7 +509,7 @@ Stage 8.
    first landed slice so Stage 5 has an early, demonstrable result rather than one giant patch.
 6. **[LANDED `38f0e24`, PR #80] Config** (L5) — same method as Stage 5, applied to `config_parser.cpp` /
    `opendisplay_config_parser.c`.
-7. **[IMPLEMENTED 2026-08-31] NFC** (L6) — Q3's seven events are shared and fully verified.
+7. **[SUBMITTED PR #81, 2026-08-31] NFC** (L6) — Q3's seven events are shared and fully verified.
 8. **Dispatch/gate/reply/cmd** (L7) — design the candidate event list, confirm wording, implement.
 9. **(Independent, can run any time) ESP32 HAL `ESP_LOGx` → `od_log_*`** — the 22 sites named in
    § 3. Not a convergence step (HAL stays target-owned either way), just closes the transport gap
