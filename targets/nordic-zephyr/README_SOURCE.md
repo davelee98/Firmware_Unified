@@ -101,11 +101,15 @@ References: [NCS RAS reflector sample](https://github.com/nrfconnect/sdk-nrf/tre
 Seeed XIAO nRF54LM20A board DTS is vendored under `boards/seeed/xiao_nrf54lm20a/`.
 
 ```bash
-BOARD=xiao_nrf54lm20a/nrf54lm20a/cpuapp BUILD_DIR=build-lm20 ./build.sh
-BOARD=xiao_nrf54lm20a/nrf54lm20a/cpuapp BUILD_DIR=build-lm20 ./flash.sh
+./build-nrf54.sh lm20            # add -debug.sh for PROFILE=debug
+./flash-nrf54lm20.sh update      # factory to chip-erase; -debug.sh for the debug build
 # advertising-current tests:
 PROFILE=quiet BOARD=xiao_nrf54lm20a/nrf54lm20a/cpuapp BUILD_DIR=build-lm20 ./build.sh
 ```
+
+Flash this board only through `flash-nrf54lm20*.sh`, which uses OpenOCD. `flash.sh` refuses it:
+pyocd times out partway through programming its RRAM, with the erase already done, leaving the
+primary slot blank and the board unbootable until it is recovered over SWD.
 
 See [docs/LM20_NCS.md](docs/LM20_NCS.md). Default `./build.sh` remains L15.
 

@@ -8,15 +8,24 @@ CMake sets `BOARD_ROOT` so west finds it without an external Board Roots path.
 ## Build / flash
 
 ```bash
-cd Firmware_NRF54
-BOARD=xiao_nrf54lm20a/nrf54lm20a/cpuapp BUILD_DIR=build-lm20 ./build.sh
-BOARD=xiao_nrf54lm20a/nrf54lm20a/cpuapp BUILD_DIR=build-lm20 ./flash.sh
+./build-nrf54.sh lm20
+./flash-nrf54lm20.sh update      # or: factory
 ```
 
-`flash.sh` uses **pyocd chip-erase + flash** of `merged.hex` (target
-`nrf54lm20a`). Do not rely on plain `west flash` on the Seeed CMSIS-DAP probe:
-it can leave the last bytes unwritten, which faults inside `net_buf` during
-`bt_enable` so the device never advertises. Chip erase also clears NVS config.
+`flash-nrf54lm20.sh` uses **OpenOCD**, which puts RRAMC into write mode and
+programs via `load_image`. That is the only working path for this board:
+
+- **pyocd cannot program it.** It times out partway through the write
+  (`flash program page timeout`) with the erase already done, leaving the
+  primary slot blank and the part hardfaulting inside MCUboot. `flash.sh`
+  refuses the LM20A for this reason. pyocd remains fine for *reading* — RTT
+  and memory dumps — just not for flashing.
+- **Plain `west flash`** on the Seeed CMSIS-DAP probe can leave the last bytes
+  unwritten, which faults inside `net_buf` during `bt_enable` so the device
+  never advertises.
+
+`update` writes the signed primary slot only and keeps NVS config; `factory`
+mass-erases and clears it.
 
 RTT console (reset + dump):
 
@@ -155,7 +164,7 @@ lives in RAM until rewritten (not stored on an external tag IC).
 ```bash
 # Quieter build for advertising-current (LOG off, no heartbeat / MSD dump prints)
 PROFILE=quiet BOARD=xiao_nrf54lm20a/nrf54lm20a/cpuapp BUILD_DIR=build-lm20 ./build.sh
-BOARD=xiao_nrf54lm20a/nrf54lm20a/cpuapp BUILD_DIR=build-lm20 ./flash.sh
+BUILD_DIR=build-lm20 ./flash-nrf54lm20.sh factory
 ```
 
 1. Write config from `nrf54lm20-xiao` (defaults to power preset `battery-2000`;
