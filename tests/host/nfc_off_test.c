@@ -13,6 +13,7 @@
 
 #include "od_nfc.h"
 #include "od_nfc_app.h"
+#include "od_log.h"
 #include "od_cmd_test_ctx.h"
 #include "od_reply.h"
 #include "od_session.h"
@@ -39,6 +40,14 @@ static const char *g_case = "(none)";
 
 static unsigned g_sent_n;
 static unsigned g_seam_calls;
+static unsigned g_log_calls;
+
+void _od_log(int level, const char *fmt, ...)
+{
+    (void)level;
+    (void)fmt;
+    ++g_log_calls;
+}
 
 od_radio_result_t od_hal_radio_send(od_origin_t origin, uint32_t tag,
                                     const uint8_t *frame, uint16_t len)
@@ -118,6 +127,16 @@ int main(void)
 
     CASE("the reset is callable and does nothing");
     od_nfc_reset();
+
+    CASE("lifecycle reporting is compiled out with the capability");
+    od_nfc_log_event(OD_NFC_LOG_PAYLOAD_SET_FAILED, -1);
+    od_nfc_log_event(OD_NFC_LOG_EMULATION_START_FAILED, -2);
+    od_nfc_log_event(OD_NFC_LOG_CONFIG_ABSENT, 0);
+    od_nfc_log_event(OD_NFC_LOG_CONFIG_DISABLED, 0);
+    od_nfc_log_event(OD_NFC_LOG_IC_UNSUPPORTED, 9);
+    od_nfc_log_event(OD_NFC_LOG_T2T_SETUP_FAILED, -3);
+    od_nfc_log_event(OD_NFC_LOG_T2T_ACTIVE, 1);
+    CHECK(g_log_calls == 0u);
 
     CASE("no sub-command reached the tag seam");
     CHECK(g_seam_calls == 0u);

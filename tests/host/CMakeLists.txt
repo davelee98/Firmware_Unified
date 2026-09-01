@@ -837,7 +837,9 @@ if(Python3_FOUND)
     add_test(NAME nfc_fake COMMAND od_nfc_fake_test)
 
     # nfc: the shared 0x0083 machine at OD_CAP_NFC=1, over the programmable tag.
-    add_executable(od_nfc_test nfc_test.c od_log_test_stub.c)
+    # This suite captures the shared lifecycle records exactly as well as exercising the wire
+    # machine, so it supplies _od_log itself.
+    add_executable(od_nfc_test nfc_test.c)
     target_link_libraries(od_nfc_test od_fake_nfc_tag od_session_fake)
     add_test(NAME nfc COMMAND od_nfc_test)
 
@@ -845,7 +847,7 @@ if(Python3_FOUND)
     # than taken from od_shared, because neither shared archive carries this profile -- od_shared is
     # capability-on and od_shared_silabs is BG22, which has NFC. Defining OD_CAP_NFC=0 on an
     # executable that linked a capability-on archive would prove nothing and still pass.
-    add_executable(od_nfc_off_test nfc_off_test.c od_log_test_stub.c ../../shared/core/od_nfc.c)
+    add_executable(od_nfc_off_test nfc_off_test.c ../../shared/core/od_nfc.c)
     target_compile_definitions(od_nfc_off_test PRIVATE OD_CAP_NFC=0)
     target_link_libraries(od_nfc_off_test od_session_fake)
     add_test(NAME nfc_off COMMAND od_nfc_off_test)

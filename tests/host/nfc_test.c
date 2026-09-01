@@ -12,6 +12,7 @@
 
 #include "fake_nfc_tag.h"
 #include "od_hal_radio.h"
+#include "od_log.h"
 #include "od_nfc.h"
 #include "od_nfc_app.h"
 #include "od_cmd_test_ctx.h"
@@ -21,12 +22,34 @@
 #include "od_txq.h"
 #include "session_fake.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 static unsigned g_checks;
 static unsigned g_failures;
 static const char *g_case = "(none)";
+
+#define LOG_MAX 8u
+static struct {
+    int level;
+    char text[128];
+} g_logs[LOG_MAX];
+static unsigned g_log_n;
+
+void _od_log(int level, const char *fmt, ...)
+{
+    va_list ap;
+
+    if (g_log_n >= LOG_MAX) {
+        return;
+    }
+    g_logs[g_log_n].level = level;
+    va_start(ap, fmt);
+    (void)vsnprintf(g_logs[g_log_n].text, sizeof g_logs[g_log_n].text, fmt, ap);
+    va_end(ap);
+    ++g_log_n;
+}
 
 #define CHECK(cond)                                                            \
     do {                                                                       \
@@ -731,6 +754,44 @@ static void test_reset(void)
     CHECK(fake_nfc_write_calls == 0u);
 }
 
+static void test_lifecycle_logging(void)
+{
+    static const struct {
+        enum od_nfc_log_event event;
+        int detail;
+        int level;
+        const char *text;
+    } cases[] = {
+        { OD_NFC_LOG_PAYLOAD_SET_FAILED, -5, OD_LOG_ERROR,
+          "NFC payload setup failed: -5" },
+        { OD_NFC_LOG_EMULATION_START_FAILED, -6, OD_LOG_ERROR,
+          "NFC emulation start failed: -6" },
+        { OD_NFC_LOG_CONFIG_ABSENT, 0, OD_LOG_INFO,
+          "No NFC configuration; SoC NFCT is idle" },
+        { OD_NFC_LOG_CONFIG_DISABLED, 0, OD_LOG_INFO,
+          "NFC configurations are present but none are enabled" },
+        { OD_NFC_LOG_IC_UNSUPPORTED, 7, OD_LOG_WARN,
+          "Unsupported NFC IC type 7; expected auto or SoC NFCT" },
+        { OD_NFC_LOG_T2T_SETUP_FAILED, -8, OD_LOG_ERROR,
+          "NFC Type 2 Tag setup failed: -8" },
+        { OD_NFC_LOG_T2T_ACTIVE, 4, OD_LOG_INFO,
+          "SoC NFCT Type 2 Tag is active; advertising byte 4" },
+    };
+    unsigned i;
+
+    CASE("NFC lifecycle records have shared wording and severity");
+    memset(g_logs, 0, sizeof g_logs);
+    g_log_n = 0u;
+    for (i = 0u; i < sizeof cases / sizeof cases[0]; ++i) {
+        od_nfc_log_event(cases[i].event, cases[i].detail);
+    }
+    CHECK(g_log_n == sizeof cases / sizeof cases[0]);
+    for (i = 0u; i < g_log_n; ++i) {
+        CHECK(g_logs[i].level == cases[i].level);
+        CHECK(strcmp(g_logs[i].text, cases[i].text) == 0);
+    }
+}
+
 int main(void)
 {
     test_dispatch_and_unknowns();
@@ -746,6 +807,7 @@ int main(void)
     test_ownership();
     test_reply_failure();
     test_reset();
+    test_lifecycle_logging();
 
     printf("nfc: %u checks, %u failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
