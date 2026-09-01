@@ -5,8 +5,8 @@
  * translation-unit-local state, one file each. */
 
 #include "od_hal_crypto.h"
+#include "od_log.h"
 
-#include "esp_log.h"
 #include "mbedtls/aes.h"
 #include "mbedtls/ccm.h"
 #include "mbedtls/cipher.h"
@@ -14,7 +14,6 @@
 
 static mbedtls_ccm_context s_slots[OD_HAL_CRYPTO_KEY_SLOTS];
 static bool s_slot_ready[OD_HAL_CRYPTO_KEY_SLOTS];
-static const char *s_tag = "od_crypto";
 
 /* mbedTLS needs per-context initialisation but has no process-wide crypto init. Keeping the
  * idempotent backend hook explicit makes every public entry point satisfy the shared contract. */
@@ -44,7 +43,7 @@ enum od_hal_crypto_status od_hal_crypto_key_set(od_hal_crypto_slot_t slot,
     mbedtls_ccm_init(&s_slots[slot]);
     ret = mbedtls_ccm_setkey(&s_slots[slot], MBEDTLS_CIPHER_ID_AES, key, 128);
     if (ret != 0) {
-        ESP_LOGE(s_tag, "mbedTLS CCM setkey failed: %d", ret);
+        od_log_error("mbedTLS CCM setkey failed: %d", ret);
         mbedtls_ccm_free(&s_slots[slot]);
         return OD_HAL_CRYPTO_ERROR;
     }
@@ -81,7 +80,7 @@ enum od_hal_crypto_status od_hal_crypto_ccm_encrypt(od_hal_crypto_slot_t slot,
                                       aad, aad_len, plain, ct, &ct[plain_len],
                                       OD_HAL_CRYPTO_TAG_LEN);
     if (ret != 0) {
-        ESP_LOGE(s_tag, "mbedTLS CCM encrypt failed: %d", ret);
+        od_log_error("mbedTLS CCM encrypt failed: %d", ret);
         return OD_HAL_CRYPTO_ERROR;
     }
     *ct_len = (uint16_t)required;
@@ -115,7 +114,7 @@ enum od_hal_crypto_status od_hal_crypto_ccm_decrypt(od_hal_crypto_slot_t slot,
         return OD_HAL_CRYPTO_AUTH_FAILED;
     }
     if (ret != 0) {
-        ESP_LOGE(s_tag, "mbedTLS CCM decrypt failed: %d", ret);
+        od_log_error("mbedTLS CCM decrypt failed: %d", ret);
         return OD_HAL_CRYPTO_ERROR;
     }
     *plain_len = cipher_len;
@@ -135,7 +134,7 @@ enum od_hal_crypto_status od_hal_crypto_cmac(const uint8_t key[16], const uint8_
     }
     cipher_info = mbedtls_cipher_info_from_type(MBEDTLS_CIPHER_AES_128_ECB);
     if (cipher_info == NULL) {
-        ESP_LOGE(s_tag, "AES-128-ECB cipher info unavailable");
+        od_log_error("AES-128-ECB cipher info unavailable");
         return OD_HAL_CRYPTO_ERROR;
     }
 
@@ -152,7 +151,7 @@ enum od_hal_crypto_status od_hal_crypto_cmac(const uint8_t key[16], const uint8_
     }
     mbedtls_cipher_free(&ctx);
     if (ret != 0) {
-        ESP_LOGE(s_tag, "mbedTLS CMAC failed: %d", ret);
+        od_log_error("mbedTLS CMAC failed: %d", ret);
         return OD_HAL_CRYPTO_ERROR;
     }
     return OD_HAL_CRYPTO_OK;
@@ -174,7 +173,7 @@ enum od_hal_crypto_status od_hal_crypto_aes_ecb(const uint8_t key[16], const uin
     }
     mbedtls_aes_free(&aes);
     if (ret != 0) {
-        ESP_LOGE(s_tag, "mbedTLS AES-ECB failed: %d", ret);
+        od_log_error("mbedTLS AES-ECB failed: %d", ret);
         return OD_HAL_CRYPTO_ERROR;
     }
     return OD_HAL_CRYPTO_OK;

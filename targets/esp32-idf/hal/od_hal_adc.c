@@ -9,11 +9,9 @@
  */
 
 #include "od_hal_adc.h"
+#include "od_log.h"
 
 #include "esp_adc/adc_oneshot.h"
-#include "esp_log.h"
-
-static const char *ADC_TAG = "od_adc";
 
 static adc_oneshot_unit_handle_t s_adc1 = NULL;
 static int  s_adc_bits = 12;                        /* the SoC's native width */
@@ -93,9 +91,9 @@ int od_hal_adc_read(uint8_t pin)
         static uint64_t s_warned = 0;   /* bitmap, one bit per GPIO */
         if (pin < 64 && !(s_warned & (1ULL << pin))) {
             s_warned |= (1ULL << pin);
-            ESP_LOGW(ADC_TAG, "GPIO %u is not an ADC1 input; read returns 0 "
-                              "(pin 0 usually means no battery_sense_pin is configured)",
-                     (unsigned)pin);
+            od_log_warn("GPIO %u is not an ADC1 input; read returns 0 "
+                        "(pin 0 usually means no battery_sense_pin is configured)",
+                        (unsigned)pin);
         }
         return 0;
     }

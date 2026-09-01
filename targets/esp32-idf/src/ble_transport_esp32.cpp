@@ -36,7 +36,6 @@
 #include "od_rxq.h"
 #include "link_owner.h"
 #include "structs.h"
-#include "esp_log.h"   /* OD-INSTRUMENTATION 2026-08-05, temporary */
 #include "od_log.h"
 
 BleTransport ble;
@@ -325,7 +324,7 @@ bool BleTransport::begin(const char* deviceName) {
     /* OD-INSTRUMENTATION 2026-08-05 -- TEMPORARY. Marks the instant od_gap_event is live and
      * the GATT server is registered. A GAP CONNECT stamped BEFORE this line would confirm the
      * "link formed during bring-up" hypothesis for the first connection after a wake. */
-    ESP_LOGW("od_ble", "[instr] BleTransport::begin() complete -- gap callback live");
+    od_log_warn("[instr] BleTransport::begin() complete -- gap callback live");
     return true;
 }
 
@@ -626,4 +625,3 @@ const char* BleTransport::addressString() {
              addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
     return cached;
 }
-

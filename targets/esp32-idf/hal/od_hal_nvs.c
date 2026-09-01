@@ -2,15 +2,13 @@
 
 #include "od_hal_nvs.h"
 #include "od_hal_nvs_esp.h"
+#include "od_log.h"
 
 #include <string.h>
 
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_err.h"
-#include "esp_log.h"
-
-static const char *TAG = "od_nvs";
 
 static bool s_ready = false;
 
@@ -36,15 +34,15 @@ int od_hal_nvs_init(void)
          * fleet status"), so a unit arriving in this state is one that is about to be
          * reconfigured from the host anyway. Log it loudly: a device that silently forgets
          * its panel type looks like a hardware fault. */
-        ESP_LOGW(TAG, "NVS unusable (%s) -- erasing partition; config will be lost",
-                 esp_err_to_name(err));
+        od_log_warn("NVS unusable (%s) -- erasing partition; config will be lost",
+                    esp_err_to_name(err));
         err = nvs_flash_erase();
         if (err == ESP_OK) {
             err = nvs_flash_init();
         }
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_flash_init failed: %s", esp_err_to_name(err));
+        od_log_error("nvs_flash_init failed: %s", esp_err_to_name(err));
         return OD_HAL_NVS_EIO;
     }
 
@@ -62,7 +60,7 @@ static int nvs_stored_size(nvs_handle_t h, size_t *stored)
         return OD_HAL_NVS_ENOENT;
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_get_blob(size) failed: %s", esp_err_to_name(err));
+        od_log_error("nvs_get_blob(size) failed: %s", esp_err_to_name(err));
         return OD_HAL_NVS_EIO;
     }
     return OD_HAL_NVS_OK;
@@ -84,7 +82,7 @@ int od_hal_nvs_size(uint32_t *len_out)
         return OD_HAL_NVS_ENOENT;   /* namespace absent = never provisioned */
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_open(read) failed: %s", esp_err_to_name(err));
+        od_log_error("nvs_open(read) failed: %s", esp_err_to_name(err));
         return OD_HAL_NVS_EIO;
     }
 
@@ -97,8 +95,8 @@ int od_hal_nvs_size(uint32_t *len_out)
     if (stored > sizeof(s_cache)) {
         /* Reachable only from a record written by other firmware or a larger build. Report
          * the medium's answer; refusing it is the core's decision, not this layer's. */
-        ESP_LOGE(TAG, "stored record is %u B, this build caps at %u B",
-                 (unsigned)stored, (unsigned)sizeof(s_cache));
+        od_log_error("stored record is %u B, this build caps at %u B",
+                     (unsigned)stored, (unsigned)sizeof(s_cache));
     }
     *len_out = (uint32_t)stored;
     return OD_HAL_NVS_OK;
@@ -119,7 +117,7 @@ static int cache_fill(void)
         return OD_HAL_NVS_ENOENT;
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_open(read) failed: %s", esp_err_to_name(err));
+        od_log_error("nvs_open(read) failed: %s", esp_err_to_name(err));
         return OD_HAL_NVS_EIO;
     }
 
@@ -130,8 +128,8 @@ static int cache_fill(void)
         return rc;
     }
     if (stored > sizeof(s_cache)) {
-        ESP_LOGE(TAG, "stored record is %u B, buffer is %u B",
-                 (unsigned)stored, (unsigned)sizeof(s_cache));
+        od_log_error("stored record is %u B, buffer is %u B",
+                     (unsigned)stored, (unsigned)sizeof(s_cache));
         nvs_close(h);
         return OD_HAL_NVS_E2BIG;
     }
@@ -139,7 +137,7 @@ static int cache_fill(void)
     err = nvs_get_blob(h, OD_NVS_KEY, s_cache, &stored);
     nvs_close(h);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_get_blob failed: %s", esp_err_to_name(err));
+        od_log_error("nvs_get_blob failed: %s", esp_err_to_name(err));
         return OD_HAL_NVS_EIO;
     }
 
@@ -187,7 +185,7 @@ int od_hal_nvs_write(const void *record, uint32_t len)
     nvs_handle_t h;
     esp_err_t err = nvs_open(OD_NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_open(write) failed: %s", esp_err_to_name(err));
+        od_log_error("nvs_open(write) failed: %s", esp_err_to_name(err));
         return OD_HAL_NVS_EIO;
     }
 
@@ -200,7 +198,7 @@ int od_hal_nvs_write(const void *record, uint32_t len)
     nvs_close(h);
 
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "config save failed: %s", esp_err_to_name(err));
+        od_log_error("config save failed: %s", esp_err_to_name(err));
         /* The medium may hold either record now: nvs_set_blob writes the new entry and only
          * then erases the old one, so ESP_ERR_NVS_REMOVE_FAILED arrives after the new bytes
          * are already visible. Drop the cache rather than guess -- the next read re-fills
