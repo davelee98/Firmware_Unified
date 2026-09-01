@@ -414,10 +414,10 @@ static void test_transfer_logging(void)
     g_panel.geometry.total_bytes = sizeof raw;
     CHECK(!od_xfer_log_quiet(CMD_DIRECT_WRITE_DATA));
     CHECK(od_xfer_direct_start(&owner, od_span_none()) == OD_CMD_OK);
-#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
-    CHECK(logged(OD_LOG_DEBUG, "DW start: 100 bytes expected, raw (uncompressed)"));
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_INFO
+    CHECK(logged(OD_LOG_INFO, "DW start: 100 bytes expected, raw (uncompressed)"));
 #else
-    CHECK(!logged(OD_LOG_DEBUG, "DW start:"));
+    CHECK(!logged(OD_LOG_INFO, "DW start:"));
 #endif
     CHECK(!od_xfer_log_quiet(CMD_DIRECT_WRITE_DATA));
     CHECK(od_xfer_data(&owner, od_span_make(raw, 6u)) == OD_CMD_OK);
@@ -452,8 +452,8 @@ static void test_transfer_logging(void)
     compressed_n = make_stored(od_span_make(plain, sizeof plain), compressed);
     CHECK(compressed_n == 15u);
     CHECK(od_xfer_direct_start(&owner, od_span_make(start, sizeof start)) == OD_CMD_OK);
-#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
-    CHECK(logged(OD_LOG_DEBUG, "DW start: 4 bytes expected, zlib streaming"));
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_INFO
+    CHECK(logged(OD_LOG_INFO, "DW start: 4 bytes expected, zlib streaming"));
 #endif
     CHECK(od_xfer_data(&owner, od_span_make(compressed, compressed_n)) == OD_CMD_OK);
     g_now_ms = 2234u;
