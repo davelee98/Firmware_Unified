@@ -1,6 +1,6 @@
 # Converge debug logging onto shared/core, ESP32 wording as default
 
-## 0. Status — Stages 0a-8 landed; Stage 9 implemented
+## 0. Status — Stages 0a-9 landed; transfer remainder implemented
 
 Merged as PR #76 (`7d22fa8`). Everything below this section is the plan as written; the stage
 list in § 7 marks what is done, and Q1, Q2 and Q5 in § 9 are answered by what shipped.
@@ -16,6 +16,7 @@ list in § 7 marks what is done, and Q1, Q2 and Q5 in § 9 are answered by what 
 | 6 (L5) | `38f0e24` (PR #80) | Config parse, redacted dump and storage diagnostics in shared core |
 | 7 (L6) | `439f5e9` (PR #81) | Shared NFC wording and severity over a typed target event seam |
 | 8 (L7) | `6b22dbf` (PR #82) | Bounded dispatch, gate and reply diagnostics |
+| 9 | `42ecda0` (PR #83) | ESP32 HAL diagnostics use the shared logging transport |
 
 Four defects found reviewing those commits landed with them: the host log stub sat inside the
 fake archives where archive-extraction order never pulled it, so a *fresh* configure failed to
@@ -30,8 +31,12 @@ Verified at merge: `tools/check.sh` 42 passed / 0 failed, and all three target f
 hardware capture in § 8 is still open** — L0a is proven by the modeled host adapter test only, so
 no board has yet shown the CDC ACM and RTT bytes.
 
-**No implementation stage remains.** Stage 9 is implemented and fully verified on 2026-08-31;
-the Nordic CDC ACM and RTT hardware captures in § 8 remain open qualification work.
+**No original implementation stage remains.** Stage 9 is implemented and fully verified on
+2026-08-31; the Nordic CDC ACM and RTT hardware captures in § 8 remain open qualification work.
+The transfer remainder is implemented in `4cf7c2d`, fully verified on 2026-09-01 and submitted as
+PR #84. Its design and implementation record live in
+[PLAN_TRANSFER_LOGGING_REMAINDER_2026-08-31.md](PLAN_TRANSFER_LOGGING_REMAINDER_2026-08-31.md);
+it is not an original convergence stage.
 
 ## 1. Objective and authority
 
@@ -391,13 +396,13 @@ and UndefinedBehaviorSanitizer remained enabled.
 
 Tracked remainder from the callsite triage:
 
-- [ ] Move target-level transfer timeout/replacement/abort reason lines into the shared lifecycle
+- [x] Move target-level transfer timeout/replacement/abort reason lines into the shared lifecycle
   owner; retain only the target watchdog scheduling mechanism.
-- [ ] Add shared START admission/refusal diagnostics for geometry, size, flags, etag and panel-start
+- [x] Add shared START admission/refusal diagnostics for geometry, size, flags, etag and panel-start
   outcomes.
-- [ ] Add shared DATA/END diagnostics for owner mismatch, overflow, inflate/write failure,
+- [x] Add shared DATA/END diagnostics for owner mismatch, overflow, inflate/write failure,
   incomplete streams, reply/barrier refusal and refresh outcome.
-- [ ] Audit and converge PIPE arm/window/reorder/SACK/fatal/end state diagnostics in `od_pipe.c`;
+- [x] Audit and converge PIPE arm/window/reorder/SACK/fatal/end state diagnostics in `od_pipe.c`;
   keep BLE notification/subscription mechanics in the targets.
 - [x] Keep panel power, controller-plane switching, busy-pin, SPI, FastEPD and physical refresh
   timing logs target-owned; those sites name hardware state the shared transfer machine does not
@@ -687,3 +692,9 @@ sitting.
 - **[MET]** `shared/core/od_rxq.h`, `shared/sources.cmake`, and `od_session_app.h`/`.c` comments
   updated to match the new ownership.
 - **[MET]** No change to any `docs/HARDWARE_VERIFICATION_CHECKLIST.md` row.
+
+## 12. Transfer logging remainder
+
+The follow-on design and R0-R3 implementation status live in
+[PLAN_TRANSFER_LOGGING_REMAINDER_2026-08-31.md](PLAN_TRANSFER_LOGGING_REMAINDER_2026-08-31.md).
+This convergence plan remains the record for completed Stages 0a-9 and the original L4 audit.

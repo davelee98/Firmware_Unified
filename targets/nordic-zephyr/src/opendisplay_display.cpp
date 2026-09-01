@@ -686,7 +686,6 @@ extern "C" bool od_xfer_app_begin_full(const od_color_geometry_t *geometry)
     return false;
   }
 
-  od_log_info("dw init begin");
   if (!display_power_set(true)) {
     return false;
   }

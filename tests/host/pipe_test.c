@@ -1,12 +1,15 @@
 #include "od_cmd_test_ctx.h"
 #include "od_inflate_app.h"
+#include "od_log.h"
 #include "od_pipe.h"
 #include "od_reply.h"
 #include "od_xfer.h"
 #include "od_xfer_app.h"
+#include "od_xfer_internal.h"
 #include "od_zlib_inflate.h"
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 
 typedef struct {
@@ -42,6 +45,14 @@ static uint32_t g_etag;
 static uint8_t g_scratch[64];
 static uint8_t g_written_data[512];
 static od_tx_reservation_t g_reservation;
+static uint32_t g_now_ms;
+
+#define LOG_MAX 64u
+static struct {
+    int level;
+    char text[256];
+} g_logs[LOG_MAX];
+static unsigned g_log_n;
 
 #define CASE(name) (g_case = (name))
 #define CHECK(cond) do {                                                        \
@@ -51,6 +62,59 @@ static od_tx_reservation_t g_reservation;
         printf("FAIL %s:%d [%s] %s\n", __FILE__, __LINE__, g_case, #cond);    \
     }                                                                          \
 } while (0)
+
+void _od_log(int level, const char *fmt, ...)
+{
+    va_list ap;
+
+    if (g_log_n >= LOG_MAX) {
+        return;
+    }
+    g_logs[g_log_n].level = level;
+    va_start(ap, fmt);
+    (void)vsnprintf(g_logs[g_log_n].text, sizeof g_logs[g_log_n].text, fmt, ap);
+    va_end(ap);
+    ++g_log_n;
+}
+
+static unsigned log_count_prefix(int level, const char *prefix)
+{
+    unsigned count = 0u;
+    unsigned i;
+
+    for (i = 0u; i < g_log_n; ++i) {
+        if (g_logs[i].level == level
+            && strncmp(g_logs[i].text, prefix, strlen(prefix)) == 0) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+static bool log_contains(int level, const char *text)
+{
+    unsigned i;
+
+    for (i = 0u; i < g_log_n; ++i) {
+        if (g_logs[i].level == level && strstr(g_logs[i].text, text) != NULL) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char *log_with_prefix(int level, const char *prefix)
+{
+    unsigned i;
+
+    for (i = 0u; i < g_log_n; ++i) {
+        if (g_logs[i].level == level
+            && strncmp(g_logs[i].text, prefix, strlen(prefix)) == 0) {
+            return g_logs[i].text;
+        }
+    }
+    return NULL;
+}
 
 static od_txq_status_t record(bool plain, const uint8_t *frame, uint16_t len)
 {
@@ -142,7 +206,7 @@ bool od_xfer_app_refresh(uint8_t mode, bool *completed)
 }
 uint32_t od_xfer_app_displayed_etag(void) { return g_etag; }
 void od_xfer_app_set_displayed_etag(uint32_t etag) { g_etag = etag; }
-uint32_t od_xfer_app_now_ms(void) { return 1234u; }
+uint32_t od_xfer_app_now_ms(void) { return g_now_ms; }
 
 static void setup(void)
 {
@@ -170,6 +234,9 @@ static void setup(void)
     g_etag = 0x11223344u;
     memset(g_written_data, 0, sizeof g_written_data);
     memset(&g_reservation, 0, sizeof g_reservation);
+    memset(g_logs, 0, sizeof g_logs);
+    g_log_n = 0u;
+    g_now_ms = 1234u;
 }
 
 static od_span_t start_body(uint8_t out[22], uint8_t flags, uint8_t w, uint8_t n,
@@ -269,6 +336,13 @@ static void test_start_and_auto_end(void)
     CHECK(g_replies[2].bytes[1] == 0x82u);
     CHECK(g_replies[3].bytes[1] == RESP_DIRECT_WRITE_REFRESH_SUCCESS);
     CHECK(g_barrier == 1u && g_refresh == 1u && !od_xfer_frames_may_arrive());
+    CHECK(log_count_prefix(OD_LOG_INFO, "DW complete:") == 1u);
+    CHECK(log_contains(OD_LOG_INFO, "PIPE full rx=0.0KB wr=0.0/0.0KB n=1"));
+    CHECK(log_contains(OD_LOG_INFO, "p[f=1 a=1 r=0 d=0 q=0]"));
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
+    CHECK(log_contains(OD_LOG_DEBUG,
+                       "PIPE started: full, window=32, ack every=32, frame=244 B"));
+#endif
 }
 
 static void test_start_validation(void)
@@ -340,8 +414,11 @@ static void test_bounds_and_fatal_reset(void)
     CHECK(g_reply_n == 2u && g_replies[1].plain && g_replies[1].bytes[0] == 0xFFu
           && g_replies[1].bytes[1] == 0x81u && g_replies[1].bytes[2] == 0x03u);
     CHECK(!od_xfer_owns_hardware() && od_xfer_frames_may_arrive() && g_abort == 1u);
+    CHECK(log_count_prefix(OD_LOG_WARN, "DW failed: cause=frame exceeds negotiated size")
+          == 1u);
     od_xfer_reset();
     CHECK(!od_xfer_frames_may_arrive() && g_abort == 1u);
+    CHECK(log_count_prefix(OD_LOG_WARN, "DW failed:") == 1u);
 
     CASE("START minimum is protection-aware");
     setup();
@@ -481,6 +558,8 @@ static void test_cadence_sack_reorder_and_wrap(void)
     memset(payload, 3u, sizeof payload);
     CHECK(send_data(&owner, 3u, payload, sizeof payload) == OD_CMD_OK);
     CHECK(g_written == 32u && g_refresh == 1u);
+    CHECK(log_count_prefix(OD_LOG_INFO, "DW complete:") == 1u);
+    CHECK(log_contains(OD_LOG_INFO, "p[f=4 a=4 r=2 d=1 q=2]"));
 
     CASE("sequence arithmetic crosses 255 to 0 without losing the transfer");
     setup();
@@ -522,6 +601,7 @@ static void test_consume_and_reply_failures(void)
     CHECK(g_written == 0u && g_abort == 1u
           && g_abort_reason == OD_XFER_ABORT_STREAM_FAILED);
     CHECK(g_replies[1].plain && g_replies[1].bytes[2] == 0x03u && g_etag == 0u);
+    CHECK(log_contains(OD_LOG_WARN, "cause=size limit exceeded"));
 
     CASE("raw sink refusal selects fatal 0x03");
     setup();
@@ -529,6 +609,14 @@ static void test_consume_and_reply_failures(void)
     CHECK(od_pipe_start(&start, start_body(sb, 0u, 4u, 4u, 244u, 32u)) == OD_CMD_OK);
     CHECK(send_data(&owner, 0u, payload, 8u) == OD_CMD_NACK);
     CHECK(g_replies[1].plain && g_replies[1].bytes[2] == 0x03u && g_abort == 1u);
+    CHECK(log_contains(OD_LOG_ERROR, "cause=panel write failed"));
+    {
+        const char *failure = log_with_prefix(OD_LOG_ERROR,
+                                              "DW failed: cause=panel write failed");
+        CHECK(failure != NULL && strlen(failure) <= 203u);
+        CHECK(strstr(failure, " p[e=") != NULL);
+        CHECK(strstr(failure, " phase=") == NULL && strstr(failure, " offset=") == NULL);
+    }
 
     CASE("compressed stream failure selects fatal 0x02");
     setup();
@@ -537,6 +625,7 @@ static void test_consume_and_reply_failures(void)
           == OD_CMD_OK);
     CHECK(send_data(&owner, 0u, payload, 3u) == OD_CMD_NACK);
     CHECK(g_replies[1].plain && g_replies[1].bytes[2] == 0x02u && g_abort == 1u);
+    CHECK(log_contains(OD_LOG_WARN, "cause=malformed compressed stream"));
 
     CASE("cadence, gap and duplicate SACK substitution each release hardware once");
     setup();
@@ -661,6 +750,7 @@ static void test_completion_failures(void)
         CHECK(od_pipe_end(&end, od_span_make(end_body, sizeof end_body)) == OD_CMD_NACK);
         CHECK(g_abort == 1u && g_abort_reason == OD_XFER_ABORT_PIPE_INCOMPLETE
               && !od_xfer_frames_may_arrive());
+        CHECK(log_count_prefix(OD_LOG_WARN, "DW failed: cause=incomplete stream") == 1u);
     }
 
     CASE("END ACK substitution aborts before barrier and refresh");
@@ -678,6 +768,7 @@ static void test_completion_failures(void)
     CHECK(od_pipe_end(&end, od_span_make(end_body, sizeof end_body)) == OD_CMD_NACK);
     CHECK(g_reply_n == 4u && g_barrier == 1u && g_refresh == 0u && g_abort == 1u
           && g_etag == 0u && !od_xfer_frames_may_arrive());
+    CHECK(log_count_prefix(OD_LOG_WARN, "DW failed: cause=refresh barrier aborted") == 1u);
 
     CASE("refresh failure follows END ACK with plaintext END NACK and clears etag");
     setup();
@@ -696,6 +787,7 @@ static void test_completion_failures(void)
     CHECK(g_reply_n == 5u && !g_replies[4].plain && g_replies[4].bytes[0] == RESP_ACK
           && g_replies[4].bytes[1] == RESP_DIRECT_WRITE_REFRESH_TIMEOUT
           && g_etag == 0u && !od_xfer_frames_may_arrive());
+    CHECK(log_count_prefix(OD_LOG_WARN, "DW failed: cause=refresh did not complete") == 1u);
 
     CASE("substituted refresh status makes the END verdict a NACK");
     setup();
@@ -703,6 +795,67 @@ static void test_completion_failures(void)
     g_fail_reply = 4;
     CHECK(od_pipe_end(&end, od_span_make(end_body, sizeof end_body)) == OD_CMD_NACK);
     CHECK(g_reply_n == 5u && g_refresh == 1u && !od_xfer_frames_may_arrive());
+    CHECK(log_count_prefix(OD_LOG_ERROR, "DW failed: cause=response delivery failed") == 1u);
+}
+
+static void test_summary_width_contract(void)
+{
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_INFO
+    const od_reply_t owner = { OD_ORIGIN_BLE, 7u };
+    od_cmd_ctx_t start = od_test_cmd_ctx(owner, &g_reservation, 12u, false);
+    od_xfer_terminal_snapshot_t snapshot;
+    const char *success_tail = "p[f=65535 a=65535 r=65535 d=65535 q=33]";
+    const char *failure_tail = "p[e=255 h=255 q=33 w=32]";
+    uint8_t sb[22];
+    uint8_t payload = 0xA5u;
+
+    CASE("production PIPE sequence failure keeps its state suffix");
+    setup();
+    CHECK(od_pipe_start(&start,
+                        start_body(sb, PIPE_FLAG_COMPRESSED, 4u, 4u, 244u, 32u))
+          == OD_CMD_OK);
+    CHECK(send_data(&owner, 100u, &payload, 1u) == OD_CMD_NACK);
+    {
+        const char *failure = log_with_prefix(
+            OD_LOG_WARN, "DW failed: cause=sequence outside negotiated window");
+        CHECK(failure != NULL && strlen(failure) <= 203u);
+        CHECK(strstr(failure, " error=0x04 zlib p[e=") != NULL);
+        CHECK(strstr(failure, " phase=") == NULL);
+    }
+
+    CASE("maximum-width PIPE summaries retain their final field");
+    setup();
+    memset(&snapshot, 0, sizeof snapshot);
+    snapshot.mode = OD_XFER_PIPE_PARTIAL;
+    snapshot.received_bytes = UINT32_MAX;
+    snapshot.written_bytes = UINT32_MAX;
+    snapshot.expected_bytes = UINT32_MAX;
+    snapshot.chunks = UINT32_MAX;
+    snapshot.elapsed_ms = UINT32_MAX;
+    snapshot.rate_tenths = UINT32_MAX;
+    snapshot.ratio_hundredths = UINT32_MAX;
+    snapshot.compressed = true;
+    (void)snprintf(snapshot.pipe_suffix, sizeof snapshot.pipe_suffix, " %s", success_tail);
+    od_xfer_terminal_complete(&snapshot);
+    CHECK(g_log_n == 1u && strlen(g_logs[0].text) == 164u);
+    CHECK(strstr(g_logs[0].text, success_tail) != NULL);
+
+    g_log_n = 0u;
+    (void)snprintf(snapshot.pipe_suffix, sizeof snapshot.pipe_suffix, " %s", failure_tail);
+    od_xfer_terminal_failure(&snapshot, OD_XFER_TERM_SEQUENCE_WINDOW,
+                             "DATA", 0xFF, 0u, 0u);
+    CHECK(g_log_n == 1u && strlen(g_logs[0].text) == 194u);
+    CHECK(strstr(g_logs[0].text, failure_tail) != NULL);
+    CHECK(strstr(g_logs[0].text, " phase=") == NULL);
+
+    g_log_n = 0u;
+    od_xfer_terminal_failure(&snapshot, OD_XFER_TERM_PANEL_WRITE,
+                             "DATA", 0xFF, UINT32_MAX, UINT32_MAX);
+    CHECK(g_log_n == 1u && strlen(g_logs[0].text) == 178u);
+    CHECK(strstr(g_logs[0].text, failure_tail) != NULL);
+    CHECK(strstr(g_logs[0].text, " phase=") == NULL
+          && strstr(g_logs[0].text, " offset=") == NULL);
+#endif
 }
 
 int main(void)
@@ -717,6 +870,7 @@ int main(void)
     test_compressed_full();
     test_start_failures_and_partial();
     test_completion_failures();
+    test_summary_width_contract();
     printf("pipe: %u checks, %u failures\n", g_checks, g_failures);
     return g_failures == 0u ? 0 : 1;
 }

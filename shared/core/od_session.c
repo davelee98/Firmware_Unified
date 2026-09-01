@@ -14,6 +14,7 @@
 
 #include "od_config.h"
 #include "od_log.h"
+#include "od_log_budget.h"
 #include "od_nonce_window.h"
 
 #include <string.h>
@@ -755,23 +756,8 @@ static uint16_t seal_cmd(od_span_t plain_frame)
  * The window is armed by a separate flag rather than by a zero timestamp: now_ms is uptime, so
  * zero is a reachable instant, and a first record at that instant would leave the bucket looking
  * unused and throttle nothing for the whole window that follows. */
-struct log_budget {
-    uint32_t last_ms;
-    bool     armed;
-};
-
-static struct log_budget s_log_window;   /* replay / out-of-window */
-static struct log_budget s_log_other;    /* wrong session, bad tag, malformed, engine fault */
-
-static bool budget_allows(struct log_budget *b, uint32_t now_ms)
-{
-    if (b->armed && (uint32_t)(now_ms - b->last_ms) < 5000u) {
-        return false;
-    }
-    b->last_ms = now_ms;
-    b->armed = true;
-    return true;
-}
+static od_log_budget_t s_log_window;   /* replay / out-of-window */
+static od_log_budget_t s_log_other;    /* wrong session, bad tag, malformed, engine fault */
 
 static void log_auth(enum od_session_auth rc, const struct od_session_report *report)
 {
@@ -819,7 +805,7 @@ static void log_open(enum od_session_open rc, uint16_t cmd,
     }
     reason = (report != NULL) ? report->nonce_reason : 0u;
     nonce_loss = (reason == (uint8_t)NONCE_OUT_OF_WINDOW || reason == (uint8_t)NONCE_REPLAY);
-    if (budget_allows(nonce_loss ? &s_log_window : &s_log_other, now_ms)) {
+    if (od_log_budget_allows(nonce_loss ? &s_log_window : &s_log_other, now_ms, 5000u)) {
         od_log_error("Decryption failed (0x%04X, rc=%d, nonce_reason=%u)",
                      (unsigned)cmd, (int)rc, (unsigned)reason);
     }

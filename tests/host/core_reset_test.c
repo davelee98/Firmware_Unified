@@ -141,7 +141,7 @@ static void start_an_owned_transfer(void)
     od_cmd_ctx_t ctx = od_test_cmd_ctx(BLE, &reservation, 12u, false);
 
     od_test_xfer_app_set_panel_ready(true);
-    CHECK(od_xfer_pipe_arm_full(&ctx, 32u, false));
+    CHECK(od_xfer_pipe_arm_full(&ctx, 32u, false) == OD_XFER_START_OK);
     CHECK(od_xfer_pipe_activate());
     CHECK(od_xfer_owns_hardware());
 }

@@ -526,6 +526,14 @@ pipe_target_machine_absent() {
 }
 check "transfer: no target PIPE machine" pipe_target_machine_absent
 
+transfer_logging_target_strings_absent() {
+    absent_or_fail "retired target-owned transfer diagnostic returned" \
+        'Shared transfer timeout - aborting session|dw init begin|Refresh timed out' \
+        targets/esp32-idf/src/display_service.cpp \
+        targets/nordic-zephyr/src/opendisplay_display.cpp
+}
+check "transfer: retired target logging strings absent" transfer_logging_target_strings_absent
+
 # The 0x0083 machine is shared/core/od_nfc.c's. A target that grows its own assembler, its own
 # record-type table or its own hook is the divergence Phase 4 closed, so the symbols that carried
 # it on each port are named here rather than the behaviour, which no grep can see.
@@ -1157,7 +1165,8 @@ check "host: logging capability-off link proof" log_off_link_proof
 # The _? in these patterns tolerates Mach-O's leading underscore on every C symbol (nm reports
 # _od_pipe_start, not od_pipe_start) so the ratchet means the same thing on macOS as on Linux.
 pipe_off_link_proof() {
-    local binary="$BUILD_ROOT/host-gcc/od_pipe_off_test" hits entry_count
+    local binary="$BUILD_ROOT/host-gcc/od_pipe_off_test" hits entry_count obj obj_count refs
+    local xfer_objs
 
     [ -x "$binary" ] || { echo "capability-off PIPE fixture was not built"; return 1; }
     hits=$(nm -a "$binary" | grep -E '\b_?(s_pipe|s_reorder|od_pipe_reorder_slot_t)\b' || true)
@@ -1166,9 +1175,46 @@ pipe_off_link_proof() {
         echo "OD_CAP_PIPE=0 retained PIPE sequencing or reorder storage"
         return 1
     fi
-    entry_count=$(nm -g "$binary" | grep -Ec '\b_?od_pipe_(start|data|end)$' || true)
-    if [ "$entry_count" -ne 3 ]; then
-        echo "OD_CAP_PIPE=0 must retain exactly the three dispatch entry points (found $entry_count)"
+    entry_count=$(nm -g "$binary" | grep -Ec '\b_?od_pipe_(start|data|end|log_suffix)$' || true)
+    if [ "$entry_count" -ne 4 ]; then
+        echo "OD_CAP_PIPE=0 must retain its three dispatch entries and empty suffix formatter (found $entry_count)"
+        return 1
+    fi
+    obj=$(find "$BUILD_ROOT/host-gcc/CMakeFiles/od_shared_silabs.dir" -name 'od_pipe.c.o' \
+          2>/dev/null)
+    obj_count=$(printf '%s\n' "$obj" | grep -c . || true)
+    if [ "$obj_count" -ne 1 ] || [ ! -r "$obj" ]; then
+        echo "expected exactly one readable capability-off od_pipe.c.o, found $obj_count"
+        return 1
+    fi
+    refs=$(nm -u "$obj" | grep -Ec '_od_log' || true)
+    if [ "$refs" -ne 0 ]; then
+        echo "OD_CAP_PIPE=0 still references the logger ($refs undefined log symbols)"
+        return 1
+    fi
+    xfer_objs=$(find "$BUILD_ROOT/host-gcc/CMakeFiles/od_shared_silabs.dir" \
+        \( -name 'od_xfer.c.o' -o -name 'od_xfer_direct.c.o' -o -name 'od_xfer_partial.c.o' \) \
+        2>/dev/null)
+    obj_count=$(printf '%s\n' "$xfer_objs" | grep -c . || true)
+    if [ "$obj_count" -ne 3 ]; then
+        echo "expected three readable capability-off transfer objects, found $obj_count"
+        return 1
+    fi
+    refs=$(nm -u $xfer_objs | grep -Ec '_od_log' || true)
+    if [ "$refs" -ne 0 ]; then
+        echo "OD_CAP_LOG=0 transfer objects still reference the logger ($refs symbols)"
+        return 1
+    fi
+    hits=$(nm -a $xfer_objs "$obj" | grep -E '\b_?(s_peer_warning_budget|s_xfer_diag|s_pipe_log)\b' || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "OD_CAP_LOG=0 retained transfer diagnostic state"
+        return 1
+    fi
+    hits=$(strings $xfer_objs "$obj" | grep -E 'DW (complete|failed|ended)|PIPE started|Transfer frame refused' || true)
+    if [ -n "$hits" ]; then
+        echo "$hits"
+        echo "OD_CAP_LOG=0 retained transfer logging format strings"
         return 1
     fi
 }
