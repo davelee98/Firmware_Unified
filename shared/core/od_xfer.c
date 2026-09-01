@@ -115,9 +115,13 @@ void od_xfer_clear_state(void)
 
 void od_xfer_log_start(void)
 {
-#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
-    od_log_debug("DW start: %u bytes expected, %s", (unsigned)s_xfer.expected_bytes,
-                 s_xfer.compressed ? "zlib streaming" : "raw (uncompressed)");
+    /* INFO, not DEBUG: this is the one line that says a transfer was admitted and on what
+     * terms. The sender decides compression per transfer via the START header flag, so the
+     * boot-time transmission_modes dump cannot answer it -- without the mode here a slow push
+     * is ambiguous between "sent raw" and "compressed, link-limited". */
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_INFO
+    od_log_info("DW start: %u bytes expected, %s", (unsigned)s_xfer.expected_bytes,
+                s_xfer.compressed ? "zlib streaming" : "raw (uncompressed)");
 #endif
 }
 

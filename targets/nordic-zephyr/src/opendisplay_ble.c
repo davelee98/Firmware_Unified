@@ -722,8 +722,30 @@ static void apply_tx_power(uint8_t handle_type, uint16_t handle)
 		return;
 	}
 	rp = (struct bt_hci_rp_vs_write_tx_power_level *)rsp->data;
-	od_log_info("tx_power type=%u requested=%d selected=%d dBm",
-	       (unsigned)handle_type, (int)requested, (int)rp->selected_tx_power);
+	/* Advertising: reported on CHANGE, not on every apply. The MSD refresh restarts the
+	 * advertiser once per sleep_timeout_ms and every restart re-applies TX power, so an
+	 * unconditional line turns a static config fact into a periodic message. A first apply, a
+	 * config write that moves the level, or the controller clamping to something new all still
+	 * print. Connections are deliberately exempt: that apply happens once per link, so it is
+	 * per-link evidence rather than repetition. */
+	{
+		int8_t selected = (int8_t)rp->selected_tx_power;
+		bool is_adv = (handle_type == BT_HCI_VS_LL_HANDLE_TYPE_ADV);
+		static bool s_adv_tx_reported;
+		static int8_t s_adv_tx_requested;
+		static int8_t s_adv_tx_selected;
+
+		if (!is_adv || !s_adv_tx_reported || s_adv_tx_requested != requested ||
+		    s_adv_tx_selected != selected) {
+			od_log_info("tx_power type=%u requested=%d selected=%d dBm",
+			       (unsigned)handle_type, (int)requested, (int)selected);
+		}
+		if (is_adv) {
+			s_adv_tx_reported = true;
+			s_adv_tx_requested = requested;
+			s_adv_tx_selected = selected;
+		}
+	}
 	net_buf_unref(rsp);
 #else
 	ARG_UNUSED(handle_type);

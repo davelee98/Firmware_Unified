@@ -144,12 +144,12 @@ static bool npm1300_sample(const struct SensorData *s)
 	int32_t mv = (int32_t)code * 5000 / 1024;
 
 	s_batt_v = (float)mv / 1000.0f;
+	/* Below threshold is a successfully measured steady state -- no battery fitted, or a flat
+	 * one -- not a fault, so it is not logged at any level. It repeats on every retry of every
+	 * poll, and npm1300_publish_msd() already reports it on the wire as 0xFF. */
 	s_gauge_ok = s_batt_v > 0.5f;
 	s_charging = ((chg_stat & 0x0Fu) == 0x0Cu || (chg_stat & 0x0Fu) == 0x0Du ||
 		      (chg_stat & 0x0Fu) == 0x0Fu);
-	if (!s_gauge_ok) {
-		od_log_info("nPM1300: VBAT code=%u -> %d mV", (unsigned)code, (int)mv);
-	}
 	return s_gauge_ok;
 }
 
@@ -247,7 +247,8 @@ void opendisplay_sensor_npm1300_poll(void)
 	have_polled = true;
 
 	if (!npm1300_sample_retries(s, 3u)) {
-		od_log_info("nPM1300: sample failed, keeping last reading");
+		/* Silent for the same reason as the threshold above: the common cause is an absent
+		 * battery, a standing condition that would otherwise reprint every poll forever. */
 		npm1300_publish_msd(s);
 		return;
 	}

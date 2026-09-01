@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Flash OpenDisplay nRF54 firmware.
+# Flash OpenDisplay nRF54L15 firmware over pyocd. The nRF54LM20A is refused below and has
+# its own front door; see the refusal for why.
 #
 # Modes:
 #   factory (default) — chip erase + merged.hex (MCUboot + primary app).
@@ -24,8 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # xiao_nrf54lm20a / build-lm20 while build.sh defaulted to xiao_nrf54l15 / build -- so a plain
 # `./build.sh && ./flash.sh` built one board and tried to flash a DIFFERENT one from a directory
 # that did not exist. Inherited from the source repo, and exactly the kind of thing that eats
-# the first hour of a bench session. Override both together for the LM20:
-#   BOARD=xiao_nrf54lm20a/nrf54lm20a/cpuapp BUILD_DIR=build-lm20 ./flash.sh
+# the first hour of a bench session. There is no LM20A override: that board is refused below.
 BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/build}"
 BOARD="${BOARD:-xiao_nrf54l15/nrf54l15/cpuapp}"
 
@@ -52,13 +52,32 @@ case "${MODE}" in
     ;;
 esac
 
-pyocd_target() {
+# The nRF54LM20A must never be programmed through pyocd. Its RRAM writes time out partway
+# ("flash program page timeout") with the erase already done, which leaves the primary slot
+# blank and the part hardfaulting inside MCUboot with no application to boot. Recovery needs
+# SWD and the OpenOCD engine, which drives RRAMC directly -- so route there in the first place.
+#
+# Decided from the build's own CONFIG_SOC as well as the two names: BUILD_DIR can be spelled
+# anything, and a directory name is not evidence of which SoC the image inside targets.
+od_is_lm20a() {
   if [[ "${BOARD}" == *lm20* || "${BUILD_DIR}" == *lm20* ]]; then
-    echo nrf54lm20a
-  else
-    echo nrf54l
+    return 0
   fi
+  local cfg="${BUILD_DIR}/zephyr/zephyr/.config"
+  if [[ -f "${cfg}" ]] && grep -q '^CONFIG_SOC="nrf54lm20a"$' "${cfg}"; then
+    return 0
+  fi
+  return 1
 }
+
+if od_is_lm20a; then
+  echo "Refusing nRF54LM20A: pyocd cannot program its RRAM. It times out mid-write with the" >&2
+  echo "erase already done, leaving the primary slot blank and the board unbootable." >&2
+  echo "Use the OpenOCD front door instead:" >&2
+  echo "  ./flash-nrf54lm20.sh ${MODE}         # default profile" >&2
+  echo "  ./flash-nrf54lm20-debug.sh ${MODE}   # PROFILE=debug build" >&2
+  exit 2
+fi
 
 find_pyocd() {
   local candidate
@@ -100,7 +119,8 @@ resolve_image
 # west flash via Seeed CMSIS-DAP can leave the last bytes unprogrammed; that
 # shows up as a BUS FAULT in net_buf during bt_enable (no advertising).
 if PYOCD="$(find_pyocd)"; then
-  TARGET="$(pyocd_target)"
+  # Only the L15 reaches here: xiao_ble and the LM20A are refused above.
+  TARGET=nrf54l
   echo "Mode:   ${MODE}"
   echo "Image:  ${HEX}"
   echo "Erase:  ${ERASE}"
