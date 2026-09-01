@@ -33,8 +33,8 @@ no board has yet shown the CDC ACM and RTT bytes.
 
 **No original implementation stage remains.** Stage 9 is implemented and fully verified on
 2026-08-31; the Nordic CDC ACM and RTT hardware captures in § 8 remain open qualification work.
-The transfer remainder is implemented and fully verified on 2026-09-01, and awaits commit. Its
-design and implementation record live in
+The transfer remainder is implemented in `4cf7c2d`, fully verified on 2026-09-01 and submitted as
+PR #84. Its design and implementation record live in
 [PLAN_TRANSFER_LOGGING_REMAINDER_2026-08-31.md](PLAN_TRANSFER_LOGGING_REMAINDER_2026-08-31.md);
 it is not an original convergence stage.
 

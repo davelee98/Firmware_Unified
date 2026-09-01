@@ -1,7 +1,7 @@
 # Transfer Logging Remainder Plan
 
 **Date:** 2026-08-31  
-**Status:** IMPLEMENTED and verified; awaiting commit
+**Status:** IMPLEMENTED and verified; submitted as PR #84
 **Parent:** [Logging Convergence Plan](PLAN_LOGGING_CONVERGENCE_2026-08-30.md)
 
 This document is the sole implementation and status record for the transfer-logging remainder.
@@ -9,8 +9,8 @@ The parent plan retains the completed Stages 0a-9 and its original L4 audit chec
 
 ## 1. Status and authority
 
-**Status: IMPLEMENTED and verified on 2026-09-01; awaiting commit.** This follow-on closes the
-four formerly unchecked L4 items in the parent convergence plan's § 5.
+**Status: IMPLEMENTED and verified on 2026-09-01; submitted as PR #84.** This follow-on closes
+the four formerly unchecked L4 items in the parent convergence plan's § 5.
 It is not a Stage 10 of the original convergence sequence: Stages 0a-9 remain complete, while the
 steps below are named R0-R3 (remainder) so their status cannot be confused with what already
 landed.
@@ -595,7 +595,7 @@ If run, record the board, opcode, transport, encryption/compression mode and res
 ## 7. Definition of done
 
 - [ ] R0-R3 landed independently with their exact-capture tests. Implementation and verification
-  are complete in the working tree; this remains open until the changes are committed.
+  are committed in `4cf7c2d` and submitted as PR #84; this remains open until merge.
 - [x] G0 satisfied: every admitted upload emits exactly one comprehensive terminal summary on
   success, failure, replacement or active reset; pre-admission refusals emit none; PIPE contributes
   fields rather than a second terminal record.
@@ -626,7 +626,8 @@ If run, record the board, opcode, transport, encryption/compression mode and res
 
 ## 8. Implementation record
 
-Implemented and verified on 2026-09-01. R0 replaced the session and dispatch budget copies with
+Implemented in `4cf7c2d`, submitted as PR #84 and verified on 2026-09-01. R0 replaced the session
+and dispatch budget copies with
 `od_log_budget.h`; R1 replaced boolean stream outcomes and the target timeout query; R2 merged
 direct/partial failure handling around typed causes; R3 kept PIPE counters private and exposed
 only the bounded suffix formatter authorized by G0. No event-matrix row was dropped.
