@@ -80,6 +80,13 @@ if(OD_SHARED_SOURCES)
     target_include_directories(od_config_log_debug PUBLIC ${OD_SHARED_INCLUDE_DIRS})
     target_compile_definitions(od_config_log_debug PRIVATE OD_LOG_LEVEL=OD_LOG_DEBUG)
 
+    # Deferral records are DEBUG-only and carry episode-suppression state in od_dispatch.c. Compile
+    # that translation unit at the deployed debug level so the ordering fixture exercises both.
+    add_library(od_dispatch_log_debug STATIC
+        ${CMAKE_CURRENT_LIST_DIR}/../../shared/core/od_dispatch.c)
+    target_include_directories(od_dispatch_log_debug PUBLIC ${OD_SHARED_INCLUDE_DIRS})
+    target_compile_definitions(od_dispatch_log_debug PRIVATE OD_LOG_LEVEL=OD_LOG_DEBUG)
+
     # Dispatch-only fixtures define the four promoted od_xfer command entry points so they can
     # observe routing and scripted verdicts. Keep production od_xfer objects out of these archives;
     # otherwise any unrelated state query pulls them in and collides with the fixture definitions.
@@ -518,7 +525,7 @@ add_test(NAME rxq COMMAND od_rxq_test)
 # host then decrypted and validated as an ACK for a command the device refused. The load-bearing
 # cases are the ones where the bytes would mislead: a {0x00,cmd,0xFF} rejection, a TLS-LAN frame
 # that must not be double-wrapped, and a live session with no security configured.
-add_executable(od_reply_test reply_test.c od_log_test_stub.c)
+add_executable(od_reply_test reply_test.c)
 target_link_libraries(od_reply_test od_session_fake)
 add_test(NAME reply COMMAND od_reply_test)
 
@@ -529,7 +536,7 @@ add_test(NAME reply COMMAND od_reply_test)
 # member maps to the right action, which is where the consequences are: 0xFE advances the link's
 # auth-abuse run and 0xFF does not, and a replayed PIPE frame must draw SILENCE because the 0x81
 # NACK is fatal to the client's upload loop.
-add_executable(od_gate_test gate_test.c od_log_test_stub.c)
+add_executable(od_gate_test gate_test.c)
 target_link_libraries(od_gate_test od_session_fake)
 add_test(NAME gate COMMAND od_gate_test)
 
@@ -550,19 +557,16 @@ add_test(NAME config_read COMMAND od_config_read_test)
 # cannot then report; defer after decrypt advances the replay window so the re-dispatched frame is
 # refused the second time; and a late producer-conflict check splices two configs into one
 # CRC-valid read-back.
-# od_log_test_stub.c defines _od_log for suites that only need od_session.c's log calls to land
-# somewhere. It goes on the EXECUTABLE, never inside a fake archive: an archive member is
-# extracted only to satisfy a symbol that is already undefined when the linker reaches it, and no
-# executable object references _od_log, so a stub sitting in the archive is skipped and od_log.c
-# is pulled from od_shared instead -- dragging in the od_hal_log_* transport nothing supplies. A
-# suite that defines its own _od_log to count records just omits the stub.
+# The ordinary fixture remains INFO for route/corpus consumers. The ordering executable puts the
+# DEBUG od_dispatch object first and captures records itself; the archive copy then stays unpulled.
 add_library(od_session_fake_dispatch STATIC session_fake.c aes128.c)
 target_link_libraries(od_session_fake_dispatch PUBLIC od_shared_dispatch_fixture)
 add_library(od_session_fake_dispatch_silabs STATIC session_fake.c aes128.c)
 target_link_libraries(od_session_fake_dispatch_silabs PUBLIC od_shared_dispatch_fixture_silabs)
 
-add_executable(od_dispatch_test dispatch_test.c od_log_test_stub.c)
-target_link_libraries(od_dispatch_test od_session_fake_dispatch)
+add_executable(od_dispatch_test dispatch_test.c)
+target_compile_definitions(od_dispatch_test PRIVATE OD_LOG_LEVEL=OD_LOG_DEBUG)
+target_link_libraries(od_dispatch_test od_dispatch_log_debug od_session_fake_dispatch)
 add_test(NAME dispatch COMMAND od_dispatch_test)
 
 # The same ordering suite against BG22's actual shared ABI: 2 KB config buffer, three TX slots,

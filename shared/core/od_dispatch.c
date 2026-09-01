@@ -6,6 +6,7 @@
 #include "od_dispatch_ops.h"
 #include "od_config_read.h"
 #include "od_gate.h"
+#include "od_log.h"
 #include "od_nfc.h"
 #include "od_pipe.h"
 #include "od_reply.h"
@@ -19,6 +20,93 @@
  * it and the body handed to a handler points into it, so it must outlive the handler and must not
  * be shared with anything that runs inside one. */
 static uint8_t s_plain[OD_SESSION_PLAIN_MAX];
+
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
+/* A deferred frame is re-offered on every loop pass. One flag per cause keeps the first command
+ * visible without turning an episode -- including alternating opcodes -- into per-frame output. */
+static bool s_config_defer_logged;
+static bool s_capacity_defer_logged;
+
+static void log_config_deferred(uint16_t cmd)
+{
+    if (!s_config_defer_logged) {
+        od_log_debug("Command 0x%04X deferred while configuration read is active",
+                     (unsigned)cmd);
+        s_config_defer_logged = true;
+    }
+}
+
+static void log_capacity_deferred(uint16_t cmd, uint8_t budget)
+{
+    if (!s_capacity_defer_logged) {
+        od_log_debug("Command 0x%04X deferred for response capacity (budget=%u)",
+                     (unsigned)cmd, (unsigned)budget);
+        s_capacity_defer_logged = true;
+    }
+}
+
+static void clear_config_deferred(void) { s_config_defer_logged = false; }
+static void clear_capacity_deferred(void) { s_capacity_defer_logged = false; }
+#else
+#define log_config_deferred(cmd_)          ((void)(cmd_))
+#define log_capacity_deferred(cmd_, budget_) ((void)(cmd_), (void)(budget_))
+#define clear_config_deferred()            ((void)0)
+#define clear_capacity_deferred()          ((void)0)
+#endif
+
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_WARN
+#define OD_DISPATCH_WARN_INTERVAL_MS 5000u
+
+/* The peer controls all three malformed-input paths. Separate budgets prevent one class from
+ * silencing another; `armed` keeps uptime zero from looking like an unused timestamp. */
+struct dispatch_log_budget {
+    uint32_t last_ms;
+    bool armed;
+};
+
+static struct dispatch_log_budget s_short_budget;
+static struct dispatch_log_budget s_oversize_budget;
+static struct dispatch_log_budget s_unknown_budget;
+
+static bool warning_allowed(struct dispatch_log_budget *budget)
+{
+    const uint32_t now_ms = od_session_app_now_ms();
+
+    if (budget->armed && (uint32_t)(now_ms - budget->last_ms) < OD_DISPATCH_WARN_INTERVAL_MS) {
+        return false;
+    }
+    budget->last_ms = now_ms;
+    budget->armed = true;
+    return true;
+}
+
+static void log_short_frame(unsigned len)
+{
+    if (warning_allowed(&s_short_budget)) {
+        od_log_warn("Command frame is too short (%u B)", (unsigned)len);
+    }
+}
+
+static void log_oversize_frame(uint16_t cmd, unsigned len, uint16_t ceiling)
+{
+    if (warning_allowed(&s_oversize_budget)) {
+        od_log_warn("Command 0x%04X exceeds dispatch limit (%u > %u B)", (unsigned)cmd,
+                    (unsigned)len, (unsigned)ceiling);
+    }
+}
+
+static void log_unknown_command(uint16_t cmd)
+{
+    if (warning_allowed(&s_unknown_budget)) {
+        od_log_warn("Unknown command 0x%04X", (unsigned)cmd);
+    }
+}
+#else
+#define log_short_frame(len_)                    ((void)(len_))
+#define log_oversize_frame(cmd_, len_, ceiling_) \
+    ((void)(cmd_), (void)(len_), (void)(ceiling_))
+#define log_unknown_command(cmd_)                ((void)(cmd_))
+#endif
 
 /* Dispatcher ceilings, per origin. BLE's is below the 253-byte value admission so the
  * 245..253 band is a dispatcher NACK rather than a silent transport drop -- a host can discover
@@ -138,13 +226,15 @@ static od_cmd_result_t dispatch_plain(const od_cmd_ctx_t *ctx, uint16_t cmd, od_
 /* Turn a handler's verdict into the dispatcher's conclusion. One place, because the mapping is
  * policy: UNKNOWN is NOT folded into NACK -- an unrecognised opcode must not stamp activity, or
  * unknown-command traffic keeps an exclusive link alive. */
-static od_frame_outcome_t outcome_of(od_cmd_result_t rc)
+static od_frame_outcome_t outcome_of(uint16_t cmd, od_cmd_result_t rc)
 {
     switch (rc) {
     case OD_CMD_OK:            return OD_FRAME_ACCEPTED;
     case OD_CMD_NACK:          return OD_FRAME_HANDLER_NACK;
     case OD_CMD_AUTH_REJECTED: return OD_FRAME_AUTH_REQUIRED;
-    case OD_CMD_UNKNOWN:       return OD_FRAME_UNKNOWN_OPCODE;
+    case OD_CMD_UNKNOWN:
+        log_unknown_command(cmd);
+        return OD_FRAME_UNKNOWN_OPCODE;
     }
     /* No default above, so -Wswitch fails the build on a new od_cmd_result_t. Unreachable. */
     return OD_FRAME_HANDLER_NACK;
@@ -156,18 +246,26 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
     od_frame_outcome_t outcome;
     od_span_t body;
     bool was_protected = false;
+    uint16_t ceiling;
     uint16_t cmd;
 
-    if (rp == NULL || !od_span_has(frame, 2u)) {
+    if (rp == NULL) {
+        od_log_error("Command frame has no reply target");
+        return OD_FRAME_REJECTED_FRAME;
+    }
+    if (!od_span_has(frame, 2u)) {
+        log_short_frame((unsigned)frame.n);
         return OD_FRAME_REJECTED_FRAME;   /* no opcode: nothing to echo, nothing to answer */
     }
     cmd = (uint16_t)(((uint16_t)frame.p[0] << 8) | frame.p[1]);
     body = od_span_drop(frame, 2u);
+    ceiling = origin_ceiling(rp->origin);
 
     /* ---- structural ---- */
-    if (frame.n > origin_ceiling(rp->origin)) {
+    if (frame.n > ceiling) {
         /* Refused by the DISPATCHER, deliberately, rather than dropped by the transport: the band
          * between this and the 253-byte value admission tells a host its frame was too big. */
+        log_oversize_frame(cmd, (unsigned)frame.n, ceiling);
         refuse_oversize(rp, cmd);
         return OD_FRAME_REJECTED_FRAME;
     }
@@ -175,6 +273,7 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
     /* ---- tag liveness ---- */
     if (!od_hal_radio_tag_is_live(rp->origin, rp->tag)) {
         /* The peer that sent this is gone. Answering would deliver to whoever inherited the slot. */
+        od_log_debug("Command 0x%04X ignored because its reply target is stale", (unsigned)cmd);
         return OD_FRAME_STALE_TAG;
     }
 
@@ -185,15 +284,25 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
      * reason this check cannot move below the gate. */
     if (od_config_read_active() &&
         (cmd == CMD_CONFIG_READ || od_cmd_mutates_config(cmd))) {
+        log_config_deferred(cmd);
         return OD_FRAME_DEFERRED;
+    }
+    if (!od_config_read_active()) {
+        clear_config_deferred();
     }
 
     /* ---- budget and reserve ---- */
-    if (od_txq_reserve(od_dispatch_budget(cmd), &r) != OD_TXQ_OK) {
-        /* No capacity to answer, so the handler must not run: it would mutate state and then be
-         * unable to say so. Deferred rather than refused -- the frame is still good. */
-        return OD_FRAME_DEFERRED;
+    {
+        const uint8_t budget = od_dispatch_budget(cmd);
+
+        if (od_txq_reserve(budget, &r) != OD_TXQ_OK) {
+            /* No capacity to answer, so the handler must not run: it would mutate state and then
+             * be unable to say so. Deferred rather than refused -- the frame is still good. */
+            log_capacity_deferred(cmd, budget);
+            return OD_FRAME_DEFERRED;
+        }
     }
+    clear_capacity_deferred();
 
     /* ---- gate ----
      * Everything below has a slot, including the gate's own FE/FF answers. */
@@ -212,7 +321,7 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
         const od_cmd_ctx_t ctx = { *rp, &r, (uint16_t)frame.n, false };
         const od_cmd_result_t rc = od_cmd_app_firmware_version(&ctx, body);
         od_txq_release(&r);
-        return (rc == OD_CMD_OK) ? OD_FRAME_DISCOVERY : outcome_of(rc);
+        return (rc == OD_CMD_OK) ? OD_FRAME_DISCOVERY : outcome_of(cmd, rc);
     }
 
     /* ORIGIN-GATED DECRYPT, SECTION 9 rule 4. A frame on the TLS-PSK LAN channel is already
@@ -240,6 +349,6 @@ od_frame_outcome_t od_dispatch_frame(const od_reply_t *rp, od_span_t frame)
         const od_cmd_ctx_t ctx = { *rp, &r, (uint16_t)frame.n, was_protected };
         const od_cmd_result_t rc = dispatch_plain(&ctx, cmd, body);
         od_txq_release(&r);
-        return outcome_of(rc);
+        return outcome_of(cmd, rc);
     }
 }

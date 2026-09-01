@@ -14,6 +14,7 @@
 
 #include "od_caps.h"
 #include "od_cmd_app.h"
+#include "od_log.h"
 #include "od_pipe.h"
 #include "od_config_read.h"
 #include "od_reply.h"
@@ -22,12 +23,55 @@
 #include "od_xfer.h"
 #include "session_fake.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 static unsigned g_checks;
 static unsigned g_failures;
 static const char *g_case = "(none)";
+
+#define LOG_CAP 32u
+static struct {
+    int level;
+    char text[160];
+} g_logs[LOG_CAP];
+static unsigned g_log_count;
+
+void _od_log(int level, const char *fmt, ...)
+{
+    va_list ap;
+
+    if (g_log_count >= LOG_CAP) {
+        return;
+    }
+    g_logs[g_log_count].level = level;
+    va_start(ap, fmt);
+    (void)vsnprintf(g_logs[g_log_count].text, sizeof g_logs[g_log_count].text, fmt, ap);
+    va_end(ap);
+    ++g_log_count;
+}
+
+static void logs_reset(void)
+{
+    memset(g_logs, 0, sizeof g_logs);
+    g_log_count = 0u;
+}
+
+#if OD_CAP_LOG
+static unsigned log_count_exact(int level, const char *text)
+{
+    unsigned count = 0u;
+    unsigned i;
+
+    for (i = 0u; i < g_log_count; ++i) {
+        if (g_logs[i].level == level && strcmp(g_logs[i].text, text) == 0) {
+            ++count;
+        }
+    }
+    return count;
+}
+#endif
 
 #define CHECK(cond)                                                            \
     do {                                                                       \
@@ -219,6 +263,7 @@ static void setup(bool security_on, bool open_session)
         CHECK(handshake(&g_app_session, g_now_ms, server_nonce, false)
               == OD_SESSION_AUTH_ESTABLISHED);
     }
+    logs_reset();
 }
 
 /* Build [cmd:2][sealed envelope] as the wire carries it. */
@@ -366,6 +411,14 @@ static void test_structural_and_liveness(void)
     CASE("a frame with no opcode is rejected and answers nothing");
     setup(false, false);
     CHECK(od_dispatch_frame(&BLE, od_span_make(one, 1u)) == OD_FRAME_REJECTED_FRAME);
+#if OD_CAP_LOG
+    CHECK(log_count_exact(OD_LOG_WARN, "Command frame is too short (1 B)") == 1u);
+    CHECK(od_dispatch_frame(&BLE, od_span_make(one, 1u)) == OD_FRAME_REJECTED_FRAME);
+    CHECK(log_count_exact(OD_LOG_WARN, "Command frame is too short (1 B)") == 1u);
+    g_now_ms += 5000u;
+    CHECK(od_dispatch_frame(&BLE, od_span_make(one, 1u)) == OD_FRAME_REJECTED_FRAME);
+    CHECK(log_count_exact(OD_LOG_WARN, "Command frame is too short (1 B)") == 2u);
+#endif
     CHECK(g_handler_calls == 0u);
     (void)od_txq_process();
     CHECK(g_sent_n == 0u);                 /* nothing to echo, so nothing is said */
@@ -377,6 +430,10 @@ static void test_structural_and_liveness(void)
     CASE("a BLE frame above 244 is refused by the DISPATCHER with the donors' [FF][cmd][FE]");
     setup(false, false);
     CHECK(od_dispatch_frame(&BLE, od_span_make(big, 245u)) == OD_FRAME_REJECTED_FRAME);
+#if OD_CAP_LOG
+    CHECK(log_count_exact(OD_LOG_WARN,
+                          "Command 0x0077 exceeds dispatch limit (245 > 244 B)") == 1u);
+#endif
     CHECK(g_handler_calls == 0u);
     (void)od_txq_process();
     CHECK(g_sent_n == 1u);
@@ -386,20 +443,37 @@ static void test_structural_and_liveness(void)
     CHECK(g_sent[0].data[2] == 0xFEu);
     /* And it must NOT be the decrypt-failure frame, which is the collision this shape avoids. */
     CHECK(!(g_sent[0].data[0] == RESP_ACK && g_sent[0].data[2] == RESP_NACK));
+#if OD_CAP_LOG
+    CHECK(od_dispatch_frame(&BLE, od_span_make(big, 245u)) == OD_FRAME_REJECTED_FRAME);
+    CHECK(log_count_exact(OD_LOG_WARN,
+                          "Command 0x0077 exceeds dispatch limit (245 > 244 B)") == 1u);
+#endif
 
     CASE("a dead tag is STALE_TAG and answers nothing");
     setup(false, false);
     g_tag_live = false;
     CHECK(od_dispatch_frame(&BLE, od_span_make(frame, sizeof frame)) == OD_FRAME_STALE_TAG);
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
+    CHECK(log_count_exact(OD_LOG_DEBUG,
+                          "Command 0x0077 ignored because its reply target is stale") == 1u);
+#endif
     CHECK(g_handler_calls == 0u);
     (void)od_txq_process();
     CHECK(g_sent_n == 0u);
+
+    CASE("a missing reply target is an internal frame error");
+    setup(false, false);
+    CHECK(od_dispatch_frame(NULL, od_span_make(frame, sizeof frame)) == OD_FRAME_REJECTED_FRAME);
+#if OD_CAP_LOG
+    CHECK(log_count_exact(OD_LOG_ERROR, "Command frame has no reply target") == 1u);
+#endif
 }
 
 static void test_reserve_precedes_the_handler(void)
 {
     od_tx_reservation_t hog;
     uint8_t frame[4] = { 0x00u, 0x77u, 1u, 2u };
+    uint8_t other[4] = { 0x00u, 0x78u, 1u, 2u };
 
     CASE("a full queue DEFERS and the handler never runs");
     /* This is the ordering property: a handler that mutates state and then cannot answer looks to
@@ -408,6 +482,12 @@ static void test_reserve_precedes_the_handler(void)
     setup(false, false);
     CHECK(od_txq_reserve((uint8_t)(OD_TXQ_SLOTS - 1u), &hog) == OD_TXQ_OK);
     CHECK(od_dispatch_frame(&BLE, od_span_make(frame, sizeof frame)) == OD_FRAME_DEFERRED);
+    CHECK(od_dispatch_frame(&BLE, od_span_make(frame, sizeof frame)) == OD_FRAME_DEFERRED);
+    CHECK(od_dispatch_frame(&BLE, od_span_make(other, sizeof other)) == OD_FRAME_DEFERRED);
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
+    CHECK(log_count_exact(OD_LOG_DEBUG,
+                          "Command 0x0077 deferred for response capacity (budget=1)") == 1u);
+#endif
     CHECK(g_handler_calls == 0u);
     od_txq_release(&hog);
 
@@ -477,6 +557,7 @@ static void test_producer_conflict_defers_before_decrypt(void)
 {
     od_tx_reservation_t r;
     uint8_t wire[OD_SESSION_SEALED_MAX];
+    uint8_t alternate[OD_SESSION_SEALED_MAX];
     const uint8_t payload[2] = { 1u, 2u };
     uint16_t n;
     uint64_t rx_before;
@@ -494,6 +575,14 @@ static void test_producer_conflict_defers_before_decrypt(void)
     CHECK(n > 0u);
     rx_before = g_app_session.rx_last;
     CHECK(od_dispatch_frame(&BLE, od_span_make(wire, n)) == OD_FRAME_DEFERRED);
+    CHECK(od_dispatch_frame(&BLE, od_span_make(wire, n)) == OD_FRAME_DEFERRED);
+    memcpy(alternate, wire, n);
+    alternate[1] ^= 0x01u;
+    CHECK(od_dispatch_frame(&BLE, od_span_make(alternate, n)) == OD_FRAME_DEFERRED);
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
+    CHECK(log_count_exact(OD_LOG_DEBUG,
+                          "Command 0x0041 deferred while configuration read is active") == 1u);
+#endif
     CHECK(g_handler_calls == 0u);
     CHECK(g_app_session.rx_last == rx_before);      /* untouched: it never reached the cipher */
 
@@ -566,6 +655,11 @@ static void test_handler_results_map(void)
     setup(false, false);
     g_handler_result = OD_CMD_UNKNOWN;
     CHECK(od_dispatch_frame(&BLE, od_span_make(frame, sizeof frame)) == OD_FRAME_UNKNOWN_OPCODE);
+#if OD_CAP_LOG
+    CHECK(log_count_exact(OD_LOG_WARN, "Unknown command 0x0077") == 1u);
+    CHECK(od_dispatch_frame(&BLE, od_span_make(frame, sizeof frame)) == OD_FRAME_UNKNOWN_OPCODE);
+    CHECK(log_count_exact(OD_LOG_WARN, "Unknown command 0x0077") == 1u);
+#endif
     {
         const od_frame_policy_t p = od_frame_policy(OD_FRAME_UNKNOWN_OPCODE);
         CHECK(!p.stamp_activity);

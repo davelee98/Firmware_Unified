@@ -8,16 +8,58 @@
 
 #include "od_reply.h"
 
+#include "od_log.h"
 #include "od_session.h"
 #include "od_session_app.h"
 #include "session_fake.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 static unsigned g_checks;
 static unsigned g_failures;
 static const char *g_case = "(none)";
+
+#define LOG_CAP 16u
+static struct {
+    int level;
+    char text[160];
+} g_logs[LOG_CAP];
+static unsigned g_log_count;
+
+void _od_log(int level, const char *fmt, ...)
+{
+    va_list ap;
+
+    if (g_log_count >= LOG_CAP) {
+        return;
+    }
+    g_logs[g_log_count].level = level;
+    va_start(ap, fmt);
+    (void)vsnprintf(g_logs[g_log_count].text, sizeof g_logs[g_log_count].text, fmt, ap);
+    va_end(ap);
+    ++g_log_count;
+}
+
+static void logs_reset(void)
+{
+    memset(g_logs, 0, sizeof g_logs);
+    g_log_count = 0u;
+}
+
+static unsigned log_count_exact(int level, const char *text)
+{
+    unsigned count = 0u;
+    unsigned i;
+
+    for (i = 0u; i < g_log_count; ++i) {
+        if (g_logs[i].level == level && strcmp(g_logs[i].text, text) == 0) {
+            ++count;
+        }
+    }
+    return count;
+}
 
 #define CHECK(cond)                                                            \
     do {                                                                       \
@@ -121,6 +163,7 @@ static void setup(bool security_on, bool open_session)
         CHECK(handshake(&g_app_session, g_now_ms, server_nonce, false)
               == OD_SESSION_AUTH_ESTABLISHED);
     }
+    logs_reset();
 }
 
 /* [cmd:2][payload] -- what od_session_seal takes and what a handler produces. */
@@ -283,6 +326,18 @@ static void test_argument_and_accounting(void)
     CHECK(od_reply(&r, NULL, FRAME, sizeof FRAME) == OD_TXQ_INVARIANT);
     CHECK(od_reply(&r, &BLE, NULL, 4u) == OD_TXQ_INVARIANT);
     CHECK(od_reply(&r, &BLE, FRAME, 0u) == OD_TXQ_INVARIANT);
+    CHECK(log_count_exact(OD_LOG_ERROR,
+          "Application response arguments are invalid (reservation=0, target=1, frame=1, len=6)")
+          == 1u);
+    CHECK(log_count_exact(OD_LOG_ERROR,
+          "Application response arguments are invalid (reservation=1, target=0, frame=1, len=6)")
+          == 1u);
+    CHECK(log_count_exact(OD_LOG_ERROR,
+          "Application response arguments are invalid (reservation=1, target=1, frame=0, len=4)")
+          == 1u);
+    CHECK(log_count_exact(OD_LOG_ERROR,
+          "Application response arguments are invalid (reservation=1, target=1, frame=1, len=0)")
+          == 1u);
     CHECK(r.remaining == 1u);
     CHECK(od_txq_depth() == 0u);
 
@@ -296,6 +351,48 @@ static void test_argument_and_accounting(void)
     CHECK(g_sent_n == 0u);
 }
 
+static void test_nack_substitution_failure_is_visible(void)
+{
+    od_tx_reservation_t r;
+
+    CASE("a seal-failure NACK that cannot spend its reservation is diagnosed");
+    setup(true, false);
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    od_txq_release(&r);
+    CHECK(od_reply(&r, &BLE, FRAME, sizeof FRAME) == OD_TXQ_INVARIANT);
+    CHECK(log_count_exact(OD_LOG_ERROR,
+                          "Response NACK could not be queued (cmd=0x71, rc=7)") == 1u);
+
+    CASE("a seal-failure NACK for a departed target is an informational loss");
+    setup(true, false);
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    g_tag_live = false;
+    CHECK(od_reply(&r, &BLE, FRAME, sizeof FRAME) == OD_TXQ_GONE);
+    CHECK(log_count_exact(OD_LOG_INFO,
+          "Response NACK was not queued because the reply target is gone (cmd=0x71)") == 1u);
+}
+
+static void test_queue_failure_is_visible(void)
+{
+    od_tx_reservation_t r;
+
+    CASE("an application response without reservation capacity is diagnosed");
+    setup(false, false);
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    od_txq_release(&r);
+    CHECK(od_reply(&r, &BLE, FRAME, sizeof FRAME) == OD_TXQ_INVARIANT);
+    CHECK(log_count_exact(OD_LOG_ERROR,
+                          "Response could not be queued (cmd=0x0071, rc=7)") == 1u);
+
+    CASE("a plain response for a departed target is an informational loss");
+    setup(false, false);
+    CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
+    g_tag_live = false;
+    CHECK(od_reply_plain(&r, &BLE, FRAME, sizeof FRAME) == OD_TXQ_GONE);
+    CHECK(log_count_exact(OD_LOG_INFO,
+          "Response was not queued because the reply target is gone (cmd=0x0071)") == 1u);
+}
+
 int main(void)
 {
     test_plain_when_security_is_off();
@@ -306,6 +403,8 @@ int main(void)
     test_oversized_becomes_a_nack();
     test_counter_exhaustion_clears_the_session();
     test_argument_and_accounting();
+    test_nack_substitution_failure_is_visible();
+    test_queue_failure_is_visible();
 
     printf("reply: %u checks, %u failures\n", g_checks, g_failures);
     return g_failures == 0u ? 0 : 1;
