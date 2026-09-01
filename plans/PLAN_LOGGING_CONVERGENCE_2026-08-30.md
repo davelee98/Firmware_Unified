@@ -30,8 +30,11 @@ Verified at merge: `tools/check.sh` 42 passed / 0 failed, and all three target f
 hardware capture in § 8 is still open** — L0a is proven by the modeled host adapter test only, so
 no board has yet shown the CDC ACM and RTT bytes.
 
-**No implementation stage remains.** Stage 9 is implemented and fully verified on 2026-08-31;
-the Nordic CDC ACM and RTT hardware captures in § 8 remain open qualification work.
+**No original implementation stage remains.** Stage 9 is implemented and fully verified on
+2026-08-31; the Nordic CDC ACM and RTT hardware captures in § 8 remain open qualification work.
+The transfer remainder is planned separately in
+[PLAN_TRANSFER_LOGGING_REMAINDER_2026-08-31.md](PLAN_TRANSFER_LOGGING_REMAINDER_2026-08-31.md);
+it is not implemented.
 
 ## 1. Objective and authority
 
@@ -687,3 +690,9 @@ sitting.
 - **[MET]** `shared/core/od_rxq.h`, `shared/sources.cmake`, and `od_session_app.h`/`.c` comments
   updated to match the new ownership.
 - **[MET]** No change to any `docs/HARDWARE_VERIFICATION_CHECKLIST.md` row.
+
+## 12. Transfer logging remainder
+
+The follow-on design and R0-R3 implementation status live in
+[PLAN_TRANSFER_LOGGING_REMAINDER_2026-08-31.md](PLAN_TRANSFER_LOGGING_REMAINDER_2026-08-31.md).
+This convergence plan remains the record for completed Stages 0a-9 and the original L4 audit.
