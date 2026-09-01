@@ -11,6 +11,7 @@
 
 #include "od_nfc.h"
 
+#include "od_log.h"
 #include "od_nfc_app.h"
 #include "od_reply.h"
 
@@ -19,6 +20,42 @@
 /* Both derived constants are asserted HERE rather than in the header -- see od_nfc.h for why. */
 OD_STATIC_ASSERT(OD_NFC_READ_MAX == 218u, "NFC read cap is wire-visible");
 OD_STATIC_ASSERT(OD_NFC_ASSEMBLY_MAX == 512u, "NFC assembly limit is the wire's, not a target's");
+
+void od_nfc_log_event(enum od_nfc_log_event event, int detail)
+{
+#if OD_CAP_NFC
+    switch (event) {
+    case OD_NFC_LOG_PAYLOAD_SET_FAILED:
+        od_log_error("NFC payload setup failed: %d", detail);
+        break;
+    case OD_NFC_LOG_EMULATION_START_FAILED:
+        od_log_error("NFC emulation start failed: %d", detail);
+        break;
+    case OD_NFC_LOG_CONFIG_ABSENT:
+        od_log_info("No NFC configuration; SoC NFCT is idle");
+        break;
+    case OD_NFC_LOG_CONFIG_DISABLED:
+        od_log_info("NFC configurations are present but none are enabled");
+        break;
+    case OD_NFC_LOG_IC_UNSUPPORTED:
+        od_log_warn("Unsupported NFC IC type %u; expected auto or SoC NFCT",
+                    (unsigned)detail);
+        break;
+    case OD_NFC_LOG_T2T_SETUP_FAILED:
+        od_log_error("NFC Type 2 Tag setup failed: %d", detail);
+        break;
+    case OD_NFC_LOG_T2T_ACTIVE:
+        od_log_info("SoC NFCT Type 2 Tag is active; advertising byte %u",
+                    (unsigned)detail);
+        break;
+    default:
+        break;
+    }
+#else
+    (void)event;
+    (void)detail;
+#endif
+}
 
 #if OD_CAP_NFC
 

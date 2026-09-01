@@ -1,14 +1,13 @@
 #include "opendisplay_nfc.h"
-#include "od_log.h"
 #include "opendisplay_ble.h"
 #include "od_adv_app.h"
+#include "od_nfc.h"
 #include "od_nfc_app.h"
 #include "opendisplay_constants.h"
 /* OD_NFC_IC_SOC_NFCT (2) is not in the canonical contract yet -- see the header. */
 #include "protocol_pending.h"
 #include "od_runtime_types.h"
 
-#include <stdio.h>
 #include <string.h>
 #include <zephyr/kernel.h>
 
@@ -133,13 +132,13 @@ static bool nfc_apply_payload(void)
 
 	err = nfc_t2t_payload_set(s_ndef, s_ndef_len);
 	if (err != 0) {
-		od_log_info("[OD][NFC] payload_set failed: %d", err);
+		od_nfc_log_event(OD_NFC_LOG_PAYLOAD_SET_FAILED, err);
 		return false;
 	}
 
 	err = nfc_t2t_emulation_start();
 	if (err != 0) {
-		od_log_info("[OD][NFC] emulation_start failed: %d", err);
+		od_nfc_log_event(OD_NFC_LOG_EMULATION_START_FAILED, err);
 		return false;
 	}
 
@@ -415,7 +414,7 @@ void opendisplay_nfc_apply_config(const struct od_config *cfg)
 
 	if (cfg == NULL || !cfg->loaded || cfg->nfc_config_count == 0u) {
 		nfc_stop();
-		od_log_info("[OD][NFC] no nfc_config (0x2A); SoC NFCT idle");
+		od_nfc_log_event(OD_NFC_LOG_CONFIG_ABSENT, 0);
 		return;
 	}
 
@@ -427,13 +426,12 @@ void opendisplay_nfc_apply_config(const struct od_config *cfg)
 	}
 	if (nfc_cfg == NULL) {
 		nfc_stop();
-		od_log_info("[OD][NFC] configs present but none enabled");
+		od_nfc_log_event(OD_NFC_LOG_CONFIG_DISABLED, 0);
 		return;
 	}
 	if (!nfc_ic_is_soc(nfc_cfg->nfc_ic_type)) {
 		nfc_stop();
-		od_log_info("[OD][NFC] unsupported nfc_ic_type=%u (need auto/soc_nfct)",
-		       (unsigned)nfc_cfg->nfc_ic_type);
+		od_nfc_log_event(OD_NFC_LOG_IC_UNSUPPORTED, (int)nfc_cfg->nfc_ic_type);
 		return;
 	}
 
@@ -445,7 +443,7 @@ void opendisplay_nfc_apply_config(const struct od_config *cfg)
 	if (!s_t2t_setup_done) {
 		err = nfc_t2t_setup(nfc_callback, NULL);
 		if (err != 0) {
-			od_log_info("[OD][NFC] t2t_setup failed: %d", err);
+			od_nfc_log_event(OD_NFC_LOG_T2T_SETUP_FAILED, err);
 			nfc_stop();
 			return;
 		}
@@ -458,8 +456,7 @@ void opendisplay_nfc_apply_config(const struct od_config *cfg)
 		return;
 	}
 
-	od_log_info("[OD][NFC] SoC NFCT T2T active (adv_byte=%u)",
-	       (unsigned)s_adv_byte_index);
+	od_nfc_log_event(OD_NFC_LOG_T2T_ACTIVE, (int)s_adv_byte_index);
 }
 
 bool od_nfc_app_read(uint8_t *type_out, uint8_t *data_out, uint16_t *data_len_io,

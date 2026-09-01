@@ -1,6 +1,6 @@
 # Converge debug logging onto shared/core, ESP32 wording as default
 
-## 0. Status — Stages 0a-4 landed on main 2026-08-31
+## 0. Status — Stages 0a-6 landed; Stage 7 submitted as PR #81
 
 Merged as PR #76 (`7d22fa8`). Everything below this section is the plan as written; the stage
 list in § 7 marks what is done, and Q1, Q2 and Q5 in § 9 are answered by what shipped.
@@ -26,9 +26,9 @@ Verified at merge: `tools/check.sh` 42 passed / 0 failed, and all three target f
 hardware capture in § 8 is still open** — L0a is proven by the modeled host adapter test only, so
 no board has yet shown the CDC ACM and RTT bytes.
 
-**Remaining: Stages 7-9** — NFC (L6), dispatch/gate/reply/cmd (L7), and the independent ESP32
-`ESP_LOGx` cleanup. Q3 and Q4 are resolved. Stage 5 transfer landed and Stage 6 config is
-implemented with remainder checklists on 2026-08-31; see L4-L5.
+**Remaining: Stages 8-9** — dispatch/gate/reply/cmd (L7) and the independent ESP32 `ESP_LOGx`
+cleanup. Q3 and Q4 are resolved. Stages 5-6 landed with remainder checklists, and Stage 7 is
+submitted as PR #81 and fully verified on 2026-08-31; see L4-L6.
 
 ## 1. Objective and authority
 
@@ -128,6 +128,13 @@ nothing about logging. `od_session_app.h`'s other three accessors (`_state`, `_s
 BG22 consumer — its text/level logic moves into `od_session.c` like the others, but the callback
 itself stays, as a BG22-only compatibility seam with trivial ESP32/Nordic stubs (see L2's "Land
 as, and where" and BG22 note).
+
+Stage 7's `od_nfc_log_event()` is the deliberate inverse boundary, not another target-formatting
+callback. Nordic alone can observe NFCT setup, payload and emulation driver results, so the target
+passes only a typed fact into shared code; `od_nfc.c` then owns the level and text. Moving those
+detection points into the shared wire assembler would pull target hardware lifecycle into protocol
+code, while leaving formatted calls in the target would preserve the duplication this plan is
+removing. The event API carries no formatting, state ownership or wire-policy decision outward.
 
 ## 5. Conversion candidates
 
@@ -437,10 +444,20 @@ Tracked remainder from the callsite triage:
 ### L6 — NFC (`od_nfc.c`)
 
 ESP32 builds `OD_CAP_NFC=0` — **there is no ESP32 default to defer to for this subsystem.**
-Nordic's `opendisplay_nfc.c` is the only existing NFC logging in the tree. § 9 Q3 asks how to
-handle this: adopt Nordic's wording as-is (restyled to match the ESP32 conventions established
-above — full-sentence text, `ERROR:`/`WARNING:` style — for consistency with everything else
-converged in this pass), since there is nothing else to choose from.
+Nordic's `opendisplay_nfc.c` is the only existing NFC logging in the tree. Per the resolved § 9
+Q3/Q4 decisions, promote its seven events with full-sentence text, no bracket tag and no redundant
+severity prefix.
+
+**Stage 7 result (2026-08-31).** `od_nfc.c` now owns the wording and severity for all seven NFC
+lifecycle records through a typed event API. Nordic still detects its target-specific config and
+NFCT driver outcomes, but no longer formats or levels them. Payload setup, emulation start and
+Type 2 Tag setup failures are ERROR; absent/disabled config remains INFO; unsupported IC type is
+WARN; successful activation remains INFO. No per-frame assembly commentary was added.
+
+Exact-capture host cases pin every record and severity. The capability-off fixture calls every
+event and proves no record is emitted, while the binary ratchet proves the NFC state, formatting
+and tag seam remain absent at `OD_CAP_NFC=0`. Verification passed all 42 non-target gates and all
+45 all-target gates: every configured ESP32 fragment, all three Nordic boards and BG22.
 
 ### L7 — Dispatch/gate/reply/cmd plumbing (`od_dispatch.c`, `od_gate.c`, `od_reply.c`, `od_cmd.c`,
 `od_core.c`)
@@ -449,7 +466,8 @@ Zero logging on **either** target today at this level — not a convergence-of-e
 question, a genuine gap. These are the busiest decision points in the whole stack (opcode
 unrecognized, budget/reservation denied, gate refusal reason, frame deferred) and currently
 produce no diagnostic trace anywhere. Treat as new logging, written fresh in the ESP32 conventions
-established by L1/L2 (full sentences, `ERROR:`/`WARNING:` prefix, level choice matching severity).
+established by L1/L2 (full sentences with level choice matching severity and no textual severity
+prefix).
 Needs its own short design pass (candidate event list, chosen wording) before implementation —
 Stage 8.
 
@@ -489,9 +507,9 @@ Stage 8.
 5. **[LANDED `8be9191`, PR #79] Transfer** (L4) — own audit pass, file-by-file over `display_service.cpp` and
    `opendisplay_display.cpp`/`opendisplay_pipe.c`, starting with the `imageWriteLog*` family as the
    first landed slice so Stage 5 has an early, demonstrable result rather than one giant patch.
-6. **[SUBMITTED PR #80, 2026-08-31] Config** (L5) — same method as Stage 5, applied to `config_parser.cpp` /
+6. **[LANDED `38f0e24`, PR #80] Config** (L5) — same method as Stage 5, applied to `config_parser.cpp` /
    `opendisplay_config_parser.c`.
-7. **NFC** (L6) — after § 9 Q3 is answered.
+7. **[SUBMITTED PR #81, 2026-08-31] NFC** (L6) — Q3's seven events are shared and fully verified.
 8. **Dispatch/gate/reply/cmd** (L7) — design the candidate event list, confirm wording, implement.
 9. **(Independent, can run any time) ESP32 HAL `ESP_LOGx` → `od_log_*`** — the 22 sites named in
    § 3. Not a convergence step (HAL stays target-owned either way), just closes the transport gap
@@ -601,13 +619,14 @@ sitting.
   gone — that would either strand BG22 without its auth/decrypt diagnostics or duplicate them.
 - **[MET]** `od_txq_app_dropped` converged per the § 9 Q2 answer, with the same BG22-callback-only caveat as
   the session seam above (see L3's BG22 note).
-- **[OPEN]** NFC logging exists in `od_nfc.c` per the § 9 Q3 answer.
+- **[MET]** NFC logging exists in `od_nfc.c` per the § 9 Q3 answer; Nordic reports typed outcomes
+  without target-local formatting, and `OD_CAP_NFC=0` retains no logging work or strings.
 - **[MET transfer / config]** Transfer and config each have an implemented first slice (at minimum:
   the `imageWriteLog*` family for transfer) and a tracked checklist for the remainder — not
   required to be 100% complete in one pass given the size (151 + 180 call sites across the two
   subsystems). Both first slices and their remainder checklists were implemented on 2026-08-31.
-- **[MET]** `tools/check.sh --targets` passes on every stage landed — all three families run
-  green at `7d22fa8`.
+- **[MET]** `tools/check.sh --targets` passes through Stage 7 — 45 passed, 0 failed, 0 skipped on
+  2026-08-31.
 - **[MET, one caveat]** The shared CMake selector returns exactly one correct INFO/DEBUG definition and rejects empty,
   unknown or duplicate selections in its isolated configure fixture. Target consumption is not
   part of this plan's definition of done. Caveat: the fixture runs in cmake **script** mode, not
