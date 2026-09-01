@@ -1,6 +1,6 @@
 # Converge debug logging onto shared/core, ESP32 wording as default
 
-## 0. Status — Stages 0a-6 landed; Stage 7 submitted as PR #81
+## 0. Status — Stages 0a-7 landed; Stage 8 implemented 2026-08-31
 
 Merged as PR #76 (`7d22fa8`). Everything below this section is the plan as written; the stage
 list in § 7 marks what is done, and Q1, Q2 and Q5 in § 9 are answered by what shipped.
@@ -26,9 +26,8 @@ Verified at merge: `tools/check.sh` 42 passed / 0 failed, and all three target f
 hardware capture in § 8 is still open** — L0a is proven by the modeled host adapter test only, so
 no board has yet shown the CDC ACM and RTT bytes.
 
-**Remaining: Stages 8-9** — dispatch/gate/reply/cmd (L7) and the independent ESP32 `ESP_LOGx`
-cleanup. Q3 and Q4 are resolved. Stages 5-6 landed with remainder checklists, and Stage 7 is
-submitted as PR #81 and fully verified on 2026-08-31; see L4-L6.
+**Remaining: Stage 9** — the independent ESP32 `ESP_LOGx` cleanup. Q3 and Q4 are resolved.
+Stages 5-7 landed, and Stage 8 is implemented and fully verified on 2026-08-31; see L4-L7.
 
 ## 1. Objective and authority
 
@@ -462,7 +461,8 @@ and tag seam remain absent at `OD_CAP_NFC=0`. Verification passed all 42 non-tar
 ### L7 — Dispatch/gate/reply/cmd plumbing (`od_dispatch.c`, `od_gate.c`, `od_reply.c`, `od_cmd.c`,
 `od_core.c`)
 
-Zero logging on **either** target today at this level — not a convergence-of-existing-text
+At planning time there was zero logging on **either** target at this level — not a
+convergence-of-existing-text
 question, a genuine gap. These are the busiest decision points in the whole stack (opcode
 unrecognized, budget/reservation denied, gate refusal reason, frame deferred) and currently
 produce no diagnostic trace anywhere. Treat as new logging, written fresh in the ESP32 conventions
@@ -470,6 +470,30 @@ established by L1/L2 (full sentences with level choice matching severity and no 
 prefix).
 Needs its own short design pass (candidate event list, chosen wording) before implementation —
 Stage 8.
+
+**Stage 8 result (2026-08-31).** The candidate pass kept only silent decisions whose absence
+obscures a refusal or timeout. Dispatch now warns on incomplete, oversize and unknown commands;
+reports a missing reply target as an internal error; and emits DEBUG detail for stale targets and
+config-read/response-capacity deferrals. Each deferral reason logs once per consecutive episode,
+across all opcodes, so an alternating or re-offered frame stream does not become a running
+commentary. The three peer-controlled WARN classes have independent five-second budgets, retaining
+each signal without allowing malformed or version-skewed traffic to flood the transport.
+
+The gate adds one ERROR for its unreachable missing/undersized decrypt scratch. Reply records
+invalid application arguments and failures to queue either a normal response or the hard NACK
+substituted after a seal failure; a departed target is INFO rather than an error. Authentication,
+decrypt and seal outcomes were not restated because `od_session.c` already owns them. `od_cmd.c`
+remains a pure policy table and `od_core.c` a reset composition function, neither of which detects
+a new event worth logging.
+
+Exact-capture tests pin text, level and deferral suppression. A dedicated DEBUG dispatch object
+tests the state at the same level as debug firmware, while the BG22-profile dispatch fixture proves
+the same source with logging capability off. Verification passed all 42 non-target gates and all
+45 all-target gates: every configured ESP32 fragment, all three Nordic boards and BG22.
+
+RXQ admission warnings remain unchanged. They run on the producer thread and have no shared clock
+seam, so giving them equivalent throttling needs a separate cross-thread-safe design rather than a
+file-local Stage 8 state bucket.
 
 ## 6. Style conventions established by this pass
 
@@ -509,8 +533,9 @@ Stage 8.
    first landed slice so Stage 5 has an early, demonstrable result rather than one giant patch.
 6. **[LANDED `38f0e24`, PR #80] Config** (L5) — same method as Stage 5, applied to `config_parser.cpp` /
    `opendisplay_config_parser.c`.
-7. **[SUBMITTED PR #81, 2026-08-31] NFC** (L6) — Q3's seven events are shared and fully verified.
-8. **Dispatch/gate/reply/cmd** (L7) — design the candidate event list, confirm wording, implement.
+7. **[LANDED `439f5e9`, PR #81] NFC** (L6) — Q3's seven events are shared and fully verified.
+8. **[IMPLEMENTED 2026-08-31] Dispatch/gate/reply/cmd** (L7) — the bounded event set above is
+   implemented and fully verified.
 9. **(Independent, can run any time) ESP32 HAL `ESP_LOGx` → `od_log_*`** — the 22 sites named in
    § 3. Not a convergence step (HAL stays target-owned either way), just closes the transport gap
    from the earlier finding in this conversation.
@@ -621,11 +646,14 @@ sitting.
   the session seam above (see L3's BG22 note).
 - **[MET]** NFC logging exists in `od_nfc.c` per the § 9 Q3 answer; Nordic reports typed outcomes
   without target-local formatting, and `OD_CAP_NFC=0` retains no logging work or strings.
+- **[MET]** Dispatch, gate and reply own the bounded Stage 8 event set directly. Deferral detail is
+  DEBUG-only and episode-suppressed; session outcomes are not duplicated; `od_cmd.c` and
+  `od_core.c` remain event-free by design.
 - **[MET transfer / config]** Transfer and config each have an implemented first slice (at minimum:
   the `imageWriteLog*` family for transfer) and a tracked checklist for the remainder — not
   required to be 100% complete in one pass given the size (151 + 180 call sites across the two
   subsystems). Both first slices and their remainder checklists were implemented on 2026-08-31.
-- **[MET]** `tools/check.sh --targets` passes through Stage 7 — 45 passed, 0 failed, 0 skipped on
+- **[MET]** `tools/check.sh --targets` passes through Stage 8 — 45 passed, 0 failed, 0 skipped on
   2026-08-31.
 - **[MET, one caveat]** The shared CMake selector returns exactly one correct INFO/DEBUG definition and rejects empty,
   unknown or duplicate selections in its isolated configure fixture. Target consumption is not

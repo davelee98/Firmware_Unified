@@ -2,10 +2,51 @@
 
 #include "od_reply.h"
 
+#include "od_log.h"
 #include "od_session.h"
 #include "od_session_app.h"
 
 #include <string.h>
+
+#if OD_CAP_LOG
+static void log_queue_result(od_txq_status_t rc, const uint8_t *frame, uint16_t len)
+{
+    const uint16_t cmd = (frame != NULL && len >= 2u)
+        ? (uint16_t)(((uint16_t)frame[0] << 8) | frame[1]) : 0u;
+
+    if (rc == OD_TXQ_GONE) {
+        od_log_info("Response was not queued because the reply target is gone (cmd=0x%04X)",
+                    (unsigned)cmd);
+    } else if (rc != OD_TXQ_OK) {
+        od_log_error("Response could not be queued (cmd=0x%04X, rc=%d)",
+                     (unsigned)cmd, (int)rc);
+    }
+}
+
+static void log_nack_queue_result(od_txq_status_t rc, uint8_t cmd_low)
+{
+    if (rc == OD_TXQ_GONE) {
+        od_log_info("Response NACK was not queued because the reply target is gone (cmd=0x%02X)",
+                    (unsigned)cmd_low);
+    } else if (rc != OD_TXQ_OK) {
+        od_log_error("Response NACK could not be queued (cmd=0x%02X, rc=%d)",
+                     (unsigned)cmd_low, (int)rc);
+    }
+}
+#else
+#define log_queue_result(rc_, frame_, len_) \
+    ((void)(rc_), (void)(frame_), (void)(len_))
+#define log_nack_queue_result(rc_, cmd_) ((void)(rc_), (void)(cmd_))
+#endif
+
+static od_txq_status_t queue_response(od_tx_reservation_t *r, const od_reply_t *rp,
+                                      const uint8_t *frame, uint16_t len)
+{
+    const od_txq_status_t rc = od_txq_commit(r, rp, frame, len);
+
+    log_queue_result(rc, frame, len);
+    return rc;
+}
 
 /* The one substitution this file makes. When a response cannot be sealed, sending it in the clear
  * would hand the host payload it expected protected, and sending nothing would hang a client
@@ -22,6 +63,7 @@ static od_txq_status_t queue_hard_nack(od_tx_reservation_t *r, const od_reply_t 
     nack[1] = cmd_low;
     nack[2] = 0x00u;
     rc = od_txq_commit(r, rp, nack, sizeof nack);
+    log_nack_queue_result(rc, cmd_low);
     /* The substitution's own failure wins: the caller needs to know nothing was queued at all,
      * which is a different situation from "your response became a NACK". */
     return (rc == OD_TXQ_OK) ? why : rc;
@@ -30,7 +72,7 @@ static od_txq_status_t queue_hard_nack(od_tx_reservation_t *r, const od_reply_t 
 od_txq_status_t od_reply_plain(od_tx_reservation_t *r, const od_reply_t *rp,
                                const uint8_t *frame, uint16_t len)
 {
-    return od_txq_commit(r, rp, frame, len);
+    return queue_response(r, rp, frame, len);
 }
 
 od_txq_status_t od_reply(od_tx_reservation_t *r, const od_reply_t *rp,
@@ -43,16 +85,20 @@ od_txq_status_t od_reply(od_tx_reservation_t *r, const od_reply_t *rp,
     enum od_session_seal rc;
 
     if (r == NULL || rp == NULL || frame == NULL || len == 0u) {
+        od_log_error("Application response arguments are invalid "
+                     "(reservation=%u, target=%u, frame=%u, len=%u)",
+                     r != NULL ? 1u : 0u, rp != NULL ? 1u : 0u,
+                     frame != NULL ? 1u : 0u, (unsigned)len);
         return OD_TXQ_INVARIANT;
     }
     /* TLS already protects this frame; a second envelope would leave the host unable to decode
      * either layer. SECTION 9 rule 4. */
     if (rp->origin == OD_ORIGIN_LAN_TLS) {
-        return od_txq_commit(r, rp, frame, len);
+        return queue_response(r, rp, frame, len);
     }
     /* No security configured is ordinary unencrypted operation, not a failure to protect. */
     if (!od_session_security_enabled(od_session_app_security())) {
-        return od_txq_commit(r, rp, frame, len);
+        return queue_response(r, rp, frame, len);
     }
 
     s = od_session_app_state();
@@ -63,7 +109,7 @@ od_txq_status_t od_reply(od_tx_reservation_t *r, const od_reply_t *rp,
 
     switch (rc) {
     case OD_SESSION_SEAL_OK:
-        return od_txq_commit(r, rp, sealed, sealed_len);
+        return queue_response(r, rp, sealed, sealed_len);
 
     case OD_SESSION_SEAL_TOO_SHORT:
         /* Under two bytes there is no opcode to echo, so no honest NACK can be built. Emit

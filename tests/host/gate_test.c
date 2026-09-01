@@ -9,15 +9,57 @@
 
 #include "od_gate.h"
 
+#include "od_log.h"
 #include "od_session_app.h"
 #include "session_fake.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 static unsigned g_checks;
 static unsigned g_failures;
 static const char *g_case = "(none)";
+
+#define LOG_CAP 16u
+static struct {
+    int level;
+    char text[128];
+} g_logs[LOG_CAP];
+static unsigned g_log_count;
+
+void _od_log(int level, const char *fmt, ...)
+{
+    va_list ap;
+
+    if (g_log_count >= LOG_CAP) {
+        return;
+    }
+    g_logs[g_log_count].level = level;
+    va_start(ap, fmt);
+    (void)vsnprintf(g_logs[g_log_count].text, sizeof g_logs[g_log_count].text, fmt, ap);
+    va_end(ap);
+    ++g_log_count;
+}
+
+static void logs_reset(void)
+{
+    memset(g_logs, 0, sizeof g_logs);
+    g_log_count = 0u;
+}
+
+static unsigned log_count_exact(int level, const char *text)
+{
+    unsigned count = 0u;
+    unsigned i;
+
+    for (i = 0u; i < g_log_count; ++i) {
+        if (g_logs[i].level == level && strcmp(g_logs[i].text, text) == 0) {
+            ++count;
+        }
+    }
+    return count;
+}
 
 #define CHECK(cond)                                                            \
     do {                                                                       \
@@ -112,6 +154,7 @@ static void setup(bool open_session)
         CHECK(handshake(&g_app_session, g_now_ms, server_nonce, false)
               == OD_SESSION_AUTH_ESTABLISHED);
     }
+    logs_reset();
 }
 
 /* Seal a frame through the live session so the gate has something valid to open. Returns the
@@ -289,12 +332,16 @@ static void test_bad_scratch(void)
     CHECK(g.outcome == OD_FRAME_CRYPTO_FAILED);
     CHECK(g.body.n == 0u);
     CHECK(g_open_reports == 0u);              /* the session was never even asked */
+    CHECK(log_count_exact(OD_LOG_ERROR,
+                          "Session gate scratch is unavailable for command 0x0071") == 1u);
 
     CASE("a NULL scratch likewise");
     setup(true);
     CHECK(od_txq_reserve(1u, &r) == OD_TXQ_OK);
     g = od_gate_open(&r, &BLE, 0x0071u, od_span_make(env, sizeof env), NULL, OD_SESSION_PLAIN_MAX);
     CHECK(g.outcome == OD_FRAME_CRYPTO_FAILED);
+    CHECK(log_count_exact(OD_LOG_ERROR,
+                          "Session gate scratch is unavailable for command 0x0071") == 1u);
 }
 
 /* ---------------------------------------------------------------------------- the handshake --- */

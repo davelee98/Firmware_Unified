@@ -2,6 +2,7 @@
 
 #include "od_gate.h"
 
+#include "od_log.h"
 #include "od_nonce_window.h"
 #include "od_reply.h"
 #include "od_session_app.h"
@@ -84,6 +85,7 @@ od_gate_result_t od_gate_open(od_tx_reservation_t *r, const od_reply_t *rp, uint
     out.body = od_span_none();
 
     if (scratch == NULL || scratch_cap < OD_SESSION_PLAIN_MAX) {
+        od_log_error("Session gate scratch is unavailable for command 0x%04X", (unsigned)cmd);
         queue_status(r, rp, cmd, RESP_NACK);
         return out;
     }
