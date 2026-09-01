@@ -22,7 +22,9 @@ bool od_xfer_active(void);
 bool od_xfer_owns_hardware(void);
 bool od_xfer_frames_may_arrive(void);
 bool od_xfer_owner(od_reply_t *out);
-bool od_xfer_started_ms(uint32_t *out);
+/* Reports a strict elapsed > limit timeout without clearing state. A true result must be followed
+ * immediately by the caller's existing full teardown path. */
+bool od_xfer_report_timeout(uint32_t now_ms, uint32_t limit_ms);
 
 /* True once an active transfer has begun consuming DATA frames. Safe to call from a radio
  * callback while the loop task owns the transfer state. */

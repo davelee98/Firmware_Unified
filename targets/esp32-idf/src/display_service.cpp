@@ -474,10 +474,7 @@ void checkTransferTimeouts(void) {
         (lanOwnsTransfer && owner.who == OWNER_LAN) ||
         (!lanOwnsTransfer && owner.who == OWNER_BLE);
 
-    uint32_t xferStarted = 0u;
-    if (od_xfer_started_ms(&xferStarted) &&
-        (od_hal_uptime_ms() - xferStarted) > TRANSFER_WATCHDOG_MS) {
-        od_log_error("Shared transfer timeout - aborting session");
+    if (od_xfer_report_timeout(od_hal_uptime_ms(), TRANSFER_WATCHDOG_MS)) {
         abortToKnownState("shared transfer watchdog", dropOwnersLink, owner);
         return;
     }
@@ -640,7 +637,7 @@ bool waitforrefresh(int timeout){
             return true;
         }
     }
-    od_log_warn("Refresh timed out");
+    od_log_warn("Refresh busy remained asserted at timeout");
     return false;
 }
 

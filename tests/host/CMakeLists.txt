@@ -72,6 +72,14 @@ if(OD_SHARED_SOURCES)
     target_include_directories(od_xfer_log_debug PUBLIC ${OD_SHARED_INCLUDE_DIRS})
     target_compile_definitions(od_xfer_log_debug PRIVATE OD_LOG_LEVEL=OD_LOG_DEBUG)
 
+    # PIPE owns its negotiation record and INFO summary counters. Compile that translation unit
+    # at DEBUG separately; od_xfer_state_t is log-level invariant, so it safely consumes the
+    # ordinary INFO transfer archive while exercising the deployed DEBUG branch.
+    add_library(od_pipe_log_debug STATIC
+        ${CMAKE_CURRENT_LIST_DIR}/../../shared/core/od_pipe.c)
+    target_include_directories(od_pipe_log_debug PUBLIC ${OD_SHARED_INCLUDE_DIRS})
+    target_compile_definitions(od_pipe_log_debug PRIVATE OD_LOG_LEVEL=OD_LOG_DEBUG)
+
     # The parsed config dump is DEBUG-only. Compile both state-owning translation units at that
     # level so the debug fixture tests the code that target debug profiles actually include.
     add_library(od_config_log_debug STATIC
@@ -183,7 +191,7 @@ add_executable(od_xfer_info_test xfer_test.c)
 target_link_libraries(od_xfer_info_test od_shared)
 add_test(NAME xfer_info COMMAND od_xfer_info_test)
 
-add_executable(od_xfer_silabs_test xfer_silabs_test.c od_log_test_stub.c)
+add_executable(od_xfer_silabs_test xfer_silabs_test.c)
 target_link_libraries(od_xfer_silabs_test od_shared_silabs)
 add_test(NAME xfer_silabs COMMAND od_xfer_silabs_test)
 
@@ -201,16 +209,21 @@ add_executable(od_xfer_reply_session_test xfer_reply_session_test.c od_log_test_
 target_link_libraries(od_xfer_reply_session_test od_session_fake)
 add_test(NAME xfer_reply_session COMMAND od_xfer_reply_session_test)
 
-add_executable(od_pipe_test pipe_test.c od_log_test_stub.c)
+add_executable(od_pipe_test pipe_test.c)
 target_link_libraries(od_pipe_test od_shared)
 add_test(NAME pipe COMMAND od_pipe_test)
 
-add_executable(od_pipe_w16_test pipe_test.c od_log_test_stub.c)
+add_executable(od_pipe_debug_test pipe_test.c)
+target_compile_definitions(od_pipe_debug_test PRIVATE OD_LOG_LEVEL=OD_LOG_DEBUG)
+target_link_libraries(od_pipe_debug_test od_pipe_log_debug od_shared)
+add_test(NAME pipe_debug COMMAND od_pipe_debug_test)
+
+add_executable(od_pipe_w16_test pipe_test.c)
 target_link_libraries(od_pipe_w16_test od_shared_pipe_w16)
 add_test(NAME pipe_w16 COMMAND od_pipe_w16_test)
 
 add_executable(od_pipe_off_test
-    pipe_off_test.c od_xfer_app_test_stub.c od_log_test_stub.c)
+    pipe_off_test.c od_xfer_app_test_stub.c)
 target_link_libraries(od_pipe_off_test od_shared_silabs)
 add_test(NAME pipe_off COMMAND od_pipe_off_test)
 
@@ -617,7 +630,7 @@ add_library(od_session_fake STATIC session_fake.c aes128.c)
 target_link_libraries(od_session_fake PUBLIC od_shared)
 target_include_directories(od_session_fake PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 
-add_executable(od_session_test session_test.c od_log_test_stub.c)
+add_executable(od_session_test session_test.c)
 target_link_libraries(od_session_test od_session_fake)
 add_test(NAME session COMMAND od_session_test)
 

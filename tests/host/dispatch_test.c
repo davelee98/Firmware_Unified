@@ -429,6 +429,7 @@ static void test_structural_and_liveness(void)
      * [FF][cmd_lo][FE] and the corpus records it. */
     CASE("a BLE frame above 244 is refused by the DISPATCHER with the donors' [FF][cmd][FE]");
     setup(false, false);
+    g_now_ms = 0u;
     CHECK(od_dispatch_frame(&BLE, od_span_make(big, 245u)) == OD_FRAME_REJECTED_FRAME);
 #if OD_CAP_LOG
     CHECK(log_count_exact(OD_LOG_WARN,
@@ -447,8 +448,11 @@ static void test_structural_and_liveness(void)
     CHECK(od_dispatch_frame(&BLE, od_span_make(big, 245u)) == OD_FRAME_REJECTED_FRAME);
     CHECK(log_count_exact(OD_LOG_WARN,
                           "Command 0x0077 exceeds dispatch limit (245 > 244 B)") == 1u);
+    g_now_ms = 5000u;
+    CHECK(od_dispatch_frame(&BLE, od_span_make(big, 245u)) == OD_FRAME_REJECTED_FRAME);
+    CHECK(log_count_exact(OD_LOG_WARN,
+                          "Command 0x0077 exceeds dispatch limit (245 > 244 B)") == 2u);
 #endif
-
     CASE("a dead tag is STALE_TAG and answers nothing");
     setup(false, false);
     g_tag_live = false;
@@ -654,11 +658,18 @@ static void test_handler_results_map(void)
      * movement, so the two halves have to agree. */
     setup(false, false);
     g_handler_result = OD_CMD_UNKNOWN;
+    g_now_ms = UINT32_MAX - 2u;
     CHECK(od_dispatch_frame(&BLE, od_span_make(frame, sizeof frame)) == OD_FRAME_UNKNOWN_OPCODE);
 #if OD_CAP_LOG
     CHECK(log_count_exact(OD_LOG_WARN, "Unknown command 0x0077") == 1u);
     CHECK(od_dispatch_frame(&BLE, od_span_make(frame, sizeof frame)) == OD_FRAME_UNKNOWN_OPCODE);
     CHECK(log_count_exact(OD_LOG_WARN, "Unknown command 0x0077") == 1u);
+    g_now_ms = 1u;
+    CHECK(od_dispatch_frame(&BLE, od_span_make(frame, sizeof frame)) == OD_FRAME_UNKNOWN_OPCODE);
+    CHECK(log_count_exact(OD_LOG_WARN, "Unknown command 0x0077") == 1u);
+    g_now_ms = 4997u;
+    CHECK(od_dispatch_frame(&BLE, od_span_make(frame, sizeof frame)) == OD_FRAME_UNKNOWN_OPCODE);
+    CHECK(log_count_exact(OD_LOG_WARN, "Unknown command 0x0077") == 2u);
 #endif
     {
         const od_frame_policy_t p = od_frame_policy(OD_FRAME_UNKNOWN_OPCODE);

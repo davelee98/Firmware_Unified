@@ -1,7 +1,7 @@
 # Transfer Logging Remainder Plan
 
 **Date:** 2026-08-31  
-**Status:** PLANNED, not implemented  
+**Status:** IMPLEMENTED and verified; awaiting commit
 **Parent:** [Logging Convergence Plan](PLAN_LOGGING_CONVERGENCE_2026-08-30.md)
 
 This document is the sole implementation and status record for the transfer-logging remainder.
@@ -9,8 +9,8 @@ The parent plan retains the completed Stages 0a-9 and its original L4 audit chec
 
 ## 1. Status and authority
 
-**Status: PLANNED, not implemented.** This follow-on closes the four unchecked L4 items in the
-parent convergence plan's § 5.
+**Status: IMPLEMENTED and verified on 2026-09-01; awaiting commit.** This follow-on closes the
+four formerly unchecked L4 items in the parent convergence plan's § 5.
 It is not a Stage 10 of the original convergence sequence: Stages 0a-9 remain complete, while the
 steps below are named R0-R3 (remainder) so their status cannot be confused with what already
 landed.
@@ -293,18 +293,27 @@ widths, `_od_log()`'s prefix consumes 29 bytes, leaving at most 203 bytes for th
 `OD_LOG_TEXT_MAX`. The longest permitted forms are deliberately compact:
 
 ```text
-DW complete: mode=PIPE partial rx=4294967295 written=4294967295/4294967295 chunks=4294967295 elapsed=4294967295 ms rate=429496729.5 KB/s zlib=42949672.95x p[f=65535 a=65535 r=65535 d=65535 q=33]
+DW complete: PIPE partial rx=4194304.0KB wr=4194304.0/4194304.0KB n=4294967295 t=4294967.2s r=429496729.5KB/s z=42949672.95x p[f=65535 a=65535 r=65535 d=65535 q=33]
 DW failed: cause=sequence outside negotiated window mode=PIPE partial rx=4294967295 written=4294967295/4294967295 chunks=4294967295 elapsed=4294967295 ms error=0xFF zlib p[e=255 h=255 q=33 w=32]
 ```
 
-They are 194 bytes each, leaving nine bytes of message headroom. `DW complete` already states the
-successful outcome, so success does not spend another 18 bytes on `outcome=complete`. The PIPE
+They are 164 and 194 bytes respectively, leaving at least nine bytes of message headroom.
+`DW complete` already states the successful outcome, so success uses terse field names and does
+not spend another 18 bytes on `outcome=complete`. The PIPE
 success legend is fixed as frames/SACKs/reordered/duplicates/max-queued; the failure legend is
 expected/highest/queued/window. Raw, direct and non-PIPE forms omit only inapplicable suffixes and
 are therefore shorter. Other failure-detail variants, including panel offset/offered bytes, must
 prove they fit the same 203-byte ceiling.
 
-The width contract is explicit: core byte/chunk/elapsed fields are `uint32_t` (10 digits); mode is
+For a PIPE failure, the state suffix replaces redundant branch detail: omit `phase=DATA` because
+all PIPE fatal data causes originate in DATA, and omit `offset=`/`offered=` for a PIPE panel-write
+failure because the failure suffix is the bounded localization record. Non-PIPE failures retain
+those fields. This keeps the actual call shapes, not only synthetic snapshots, within the ceiling.
+
+The width contract is explicit: core byte/chunk/failure-elapsed fields are `uint32_t` (10 digits).
+Successful `rx=` and `wr=` fields convert bytes to binary KB, rounded to one decimal digit, and
+are at most `4194304.0KB`; the successful `t=` field converts milliseconds to seconds with one
+decimal digit and is at most `4294967.2s`; mode is
 at most `direct partial` (14 characters), while the longest PIPE mode that carries the `p[...]`
 suffix is `PIPE partial` (12 characters); the longest cause is
 `sequence outside negotiated window` (34 characters); fixed-point rate is a `uint32_t` tenths
@@ -319,8 +328,10 @@ Host fixtures set each field to its documented printable bound, then assert the 
 at most 203 bytes, the complete captured record retains its final named field and CRLF, and the
 text before CRLF is at most 232 bytes. Exercise `direct partial` as the 14-character global mode
 maximum and `PIPE partial` as the 12-character suffix-bearing maximum. The PIPE suffix fixture also
-asserts its formatter reports a fit in the supplied buffer. A format change that can silently
-truncate fails this test; relying on `od_log.c`'s unmarked truncation is not acceptable.
+asserts its formatter reports a fit in the supplied buffer. Production-path fixtures drive both a
+sequence-window NACK and a PIPE panel-write failure through `pipe_send_data_nack()` and assert the
+same ceiling and retained suffix. A format change that can silently truncate fails this test;
+relying on `od_log.c`'s unmarked truncation is not acceptable.
 
 ### R-D6 — Log state is private and capability-gated
 
@@ -427,7 +438,7 @@ Each stage is independently revertible. Because R0-R3 touch `shared/`, each runs
 all-target gate before submission. Each stage also names, in its commit message, the code it
 removed or merged (G1) and any matrix row it decided not to implement (G2).
 
-### R0 — One log-budget primitive
+### R0 — One log-budget primitive — IMPLEMENTED
 
 - Add `od_log_budget.h` as pure C99, header-only code.
 - Replace the private budget structs/helpers in `od_session.c` and `od_dispatch.c` without changing
@@ -436,7 +447,7 @@ removed or merged (G1) and any matrix row it decided not to implement (G2).
   re-arm and unsigned wrap still behave identically.
 - Add no transfer records yet.
 
-### R1 — Lifecycle, timeout and stream classification
+### R1 — Lifecycle, timeout and stream classification — IMPLEMENTED
 
 - Add `od_xfer_report_timeout()` and the replacement/timeout G0 outcomes without moving cleanup
   ahead of ESP32's existing teardown sequence.
@@ -449,7 +460,7 @@ removed or merged (G1) and any matrix row it decided not to implement (G2).
   replacement, timeout, wrap, zero-limit, inflate-failure and sink-failure text/counts in
   `xfer_test.c` under INFO and DEBUG builds.
 
-### R2 — Direct and partial START/DATA/END outcomes
+### R2 — Direct and partial START/DATA/END outcomes — IMPLEMENTED
 
 - Add the private admission-cause enum/mapping and use it without changing wire error bytes.
 - Add branch-specific admission records in `od_xfer_direct.c` and `od_xfer_partial.c`.
@@ -462,7 +473,7 @@ removed or merged (G1) and any matrix row it decided not to implement (G2).
 - Add a fail-closed target-string ratchet for the two removed target policy lines and the one
   superseded generic refresh-timeout string.
 
-### R3 — PIPE negotiation and terminal diagnostics
+### R3 — PIPE negotiation and terminal diagnostics — IMPLEMENTED
 
 - Return the private admission cause from full/partial PIPE arm helpers while preserving their
   existing wire-error mapping.
@@ -583,31 +594,59 @@ If run, record the board, opcode, transport, encryption/compression mode and res
 
 ## 7. Definition of done
 
-- [ ] R0-R3 landed independently with their exact-capture tests.
-- [ ] G0 satisfied: every admitted upload emits exactly one comprehensive terminal summary on
+- [ ] R0-R3 landed independently with their exact-capture tests. Implementation and verification
+  are complete in the working tree; this remains open until the changes are committed.
+- [x] G0 satisfied: every admitted upload emits exactly one comprehensive terminal summary on
   success, failure, replacement or active reset; pre-admission refusals emit none; PIPE contributes
   fields rather than a second terminal record.
-- [ ] G1 satisfied: each stage deleted or merged more than it duplicated, no struct widened for a
+- [x] G1 satisfied: each stage deleted or merged more than it duplicated, no struct widened for a
   log, the sole log-only seam is G0's bounded `od_pipe_log_suffix()`, and
   `od_xfer_started_ms()` and the two private budget helpers are gone.
-- [ ] G2 satisfied: every record in the merged set is justified by a § 2 question, no success path
+- [x] G2 satisfied: every record in the merged set is justified by a § 2 question, no success path
   outside the named summaries logs, and no per-frame/per-SACK/per-gap record exists at any level.
-- [ ] The four unchecked L4 remainder boxes in the parent convergence plan's § 5 are marked
+- [x] The four unchecked L4 remainder boxes in the parent convergence plan's § 5 are marked
   complete.
-- [ ] Every portable START/DATA/END/timeout/PIPE terminal decision in the matrix has one shared
+- [x] Every portable START/DATA/END/timeout/PIPE terminal decision in the matrix has one shared
   diagnostic owner.
-- [ ] Pre-admission/nonterminal peer WARN traffic is bounded by one shared transfer budget; the G0
+- [x] Pre-admission/nonterminal peer WARN traffic is bounded by one shared transfer budget; the G0
   summary bypasses that budget and is structurally once per admitted transfer.
-- [ ] INFO builds retain the PIPE summary counters, and maximum-width direct/partial/PIPE G0
+- [x] INFO builds retain the PIPE summary counters, and maximum-width direct/partial/PIPE G0
   records prove their final field survives within the 232-byte text ceiling.
-- [ ] The success summary's move from before refresh to after the final response outcome is pinned
+- [x] The success summary's move from before refresh to after the final response outcome is pinned
   as a deliberate capture-ordering change; wire response order remains unchanged.
-- [ ] `od_reply`, target session teardown and target panel/transport logs are not duplicated.
-- [ ] ESP32's timeout behavior, including owner selection, force-off and link teardown, is
+- [x] `od_reply`, target session teardown and target panel/transport logs are not duplicated.
+- [x] ESP32's timeout behavior, including owner selection, force-off and link teardown, is
   unchanged apart from which layer emits the timeout record.
-- [ ] Direct, partial and PIPE ACK/NACK bytes and ordering are unchanged in host fixtures and the
+- [x] Direct, partial and PIPE ACK/NACK bytes and ordering are unchanged in host fixtures and the
   pinned corpus.
-- [ ] BG22 retains no logging code, strings, state or `_od_log` linkage from the new paths.
-- [ ] `tools/check.sh --targets` passes with zero failures and zero skips.
-- [ ] The original plan status continues to distinguish complete Stages 0a-9 from this follow-on;
+- [x] BG22 retains no logging code, strings, state or `_od_log` linkage from the new paths.
+- [x] `tools/check.sh --targets` passes with zero failures and zero skips.
+- [x] The original plan status continues to distinguish complete Stages 0a-9 from this follow-on;
   Nordic CDC ACM/RTT newline capture remains a separate open qualification item.
+
+## 8. Implementation record
+
+Implemented and verified on 2026-09-01. R0 replaced the session and dispatch budget copies with
+`od_log_budget.h`; R1 replaced boolean stream outcomes and the target timeout query; R2 merged
+direct/partial failure handling around typed causes; R3 kept PIPE counters private and exposed
+only the bounded suffix formatter authorized by G0. No event-matrix row was dropped.
+
+Exact-capture host fixtures cover once-only success, failure, replacement, reset and timeout
+summaries; budget zero/re-arm/wrap behavior; classified inflater and sink failures; PIPE
+negotiation/counters/fatal paths; refresh ordering; and maximum-width 164-byte success and
+194-byte failure PIPE summaries.
+`tools/check.sh --targets --fuzz-time 1` passed 46 checks with zero failures and zero skips,
+including GCC, Clang, ASan/UBSan, five fuzz surfaces, the pinned py-opendisplay corpus, ten ESP32
+fragments, all three Nordic boards and the BG22 headless build. No hardware capture was run.
+
+Review correction on 2026-09-01: production PIPE fatal calls supplied details that the original
+maximum-width fixture omitted. PIPE summaries now suppress redundant phase and sink-offset fields,
+and production-path tests retain the final PIPE suffix within the 203-byte message ceiling. The
+refresh snapshot pointer is unconditional across translation units, and direct-partial failure
+tests pin the original etag-clear-before-abort callback order. The same 46-check all-target gate
+was rerun after these corrections with zero failures and zero skips.
+
+The successful completion form was shortened on 2026-09-01 without dropping fields: `wr`, `n`,
+`t`, `r` and `z` abbreviate written bytes, chunks, elapsed time, rate and compression ratio. Its
+maximum-width PIPE form is 164 bytes; failure wording remains explicit. The 46-check all-target
+gate remained green.

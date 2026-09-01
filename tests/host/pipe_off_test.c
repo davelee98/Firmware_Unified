@@ -1,6 +1,7 @@
 #include "od_cmd_test_ctx.h"
 #include "od_pipe.h"
 #include "od_reply.h"
+#include "od_xfer_internal.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -48,6 +49,7 @@ int main(void)
     od_cmd_ctx_t ctx = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_BLE, 1u },
                                         &reservation, 2u, false);
     const uint8_t expected[] = { 0xFFu, 0x80u, 0x04u, 0x00u };
+    char suffix[8] = "dirty";
 
     memset(&reservation, 0, sizeof reservation);
     CHECK(od_pipe_start(&ctx, od_span_none()) == OD_CMD_NACK);
@@ -56,6 +58,7 @@ int main(void)
     CHECK(od_pipe_data(&ctx, od_span_none()) == OD_CMD_UNKNOWN);
     CHECK(od_pipe_end(&ctx, od_span_none()) == OD_CMD_UNKNOWN);
     CHECK(g_replies == 1u);
+    CHECK(od_pipe_log_suffix(suffix, sizeof suffix) == 0u && suffix[0] == '\0');
 
     printf("pipe_off: %u checks, %u failures\n", g_checks, g_failures);
     return g_failures == 0u ? 0 : 1;

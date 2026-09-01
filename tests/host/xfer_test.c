@@ -56,6 +56,9 @@ static uint32_t g_offsets[16];
 static uint32_t g_lengths[16];
 static uint32_t g_consume_limit;
 static uint32_t g_etag;
+static unsigned g_callback_sequence;
+static unsigned g_etag_clear_sequence;
+static unsigned g_abort_sequence;
 static uint8_t g_scratch[64];
 static uint8_t g_written[256];
 static size_t g_written_n;
@@ -67,7 +70,7 @@ static const od_reply_t OTHER = { OD_ORIGIN_LAN_PLAIN, 9u };
 #define LOG_MAX 32u
 static struct {
     int level;
-    char text[192];
+    char text[256];
 } g_logs[LOG_MAX];
 static unsigned g_log_n;
 
@@ -95,6 +98,33 @@ static bool logged(int level, const char *needle)
         }
     }
     return false;
+}
+
+static unsigned log_count_exact(int level, const char *text)
+{
+    unsigned count = 0u;
+    unsigned i;
+
+    for (i = 0u; i < g_log_n; ++i) {
+        if (g_logs[i].level == level && strcmp(g_logs[i].text, text) == 0) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+static unsigned log_count_prefix(int level, const char *prefix)
+{
+    unsigned count = 0u;
+    unsigned i;
+
+    for (i = 0u; i < g_log_n; ++i) {
+        if (g_logs[i].level == level
+            && strncmp(g_logs[i].text, prefix, strlen(prefix)) == 0) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 static od_txq_status_t record_reply(bool plain, const uint8_t *frame, uint16_t len)
@@ -208,6 +238,7 @@ od_mut_span_t od_xfer_app_inflate_scratch(void)
 
 void od_xfer_app_abort(od_xfer_abort_reason_t reason)
 {
+    g_abort_sequence = ++g_callback_sequence;
     if (g_abort_calls < sizeof g_abort_reasons / sizeof g_abort_reasons[0]) {
         g_abort_reasons[g_abort_calls] = reason;
     }
@@ -218,6 +249,7 @@ od_xfer_barrier_t od_xfer_app_before_refresh(const od_reply_t *owner)
 {
     ++g_barrier_calls;
     CHECK(owner != NULL && owner->origin == OWNER.origin && owner->tag == OWNER.tag);
+    CHECK(log_count_prefix(OD_LOG_INFO, "DW complete:") == 0u);
     return g_barrier;
 }
 
@@ -234,6 +266,7 @@ bool od_xfer_app_refresh(uint8_t mode, bool *completed)
     }
     ++g_refresh_calls;
     CHECK(mode <= 2u);
+    CHECK(log_count_prefix(OD_LOG_INFO, "DW complete:") == 0u);
     if (completed != NULL) {
         *completed = g_refresh_completed;
     }
@@ -241,7 +274,13 @@ bool od_xfer_app_refresh(uint8_t mode, bool *completed)
 }
 
 uint32_t od_xfer_app_displayed_etag(void) { return g_etag; }
-void od_xfer_app_set_displayed_etag(uint32_t etag) { g_etag = etag; }
+void od_xfer_app_set_displayed_etag(uint32_t etag)
+{
+    if (etag == 0u) {
+        g_etag_clear_sequence = ++g_callback_sequence;
+    }
+    g_etag = etag;
+}
 uint32_t od_xfer_app_now_ms(void) { return g_now_ms; }
 
 static void setup(void)
@@ -280,6 +319,9 @@ static void setup(void)
     g_pipe_active = false;
     g_consume_limit = UINT32_MAX;
     g_etag = 0x11223344u;
+    g_callback_sequence = 0u;
+    g_etag_clear_sequence = 0u;
+    g_abort_sequence = 0u;
     g_written_n = 0u;
     g_now_ms = 1234u;
     g_log_n = 0u;
@@ -325,7 +367,6 @@ static void test_raw_direct(void)
     od_cmd_ctx_t crosslink = od_test_cmd_ctx((od_reply_t){ OD_ORIGIN_LAN_PLAIN, OWNER.tag },
                                              &g_reservation, 2u, false);
     od_reply_t recorded_owner;
-    uint32_t started_ms = 0u;
     uint8_t tolerated[3] = { 1u, 2u, 3u };
     uint8_t data[6] = { 10u, 11u, 12u, 13u, 14u, 15u };
     uint8_t end[5] = { 1u, 0xAAu, 0xBBu, 0xCCu, 0xDDu };
@@ -338,7 +379,6 @@ static void test_raw_direct(void)
     CHECK(!g_pipe_active && g_pipe_cancel_calls == 1u);
     CHECK(od_xfer_owner(&recorded_owner) && recorded_owner.origin == OWNER.origin
           && recorded_owner.tag == OWNER.tag);
-    CHECK(od_xfer_started_ms(&started_ms) && started_ms == 1234u);
     CHECK(g_begin_full_calls == 1u && g_reply_n == 1u && !g_replies[0].plain);
     CHECK(od_xfer_data(&other, od_span_make(data, 2u)) == OD_CMD_OK);
     CHECK(g_write_calls == 0u && g_reply_n == 1u);
@@ -354,7 +394,6 @@ static void test_raw_direct(void)
     CHECK(od_xfer_end(&owner, od_span_make(end, sizeof end)) == OD_CMD_OK);
     CHECK(g_barrier_calls == 1u && g_refresh_calls == 1u && !od_xfer_active());
     CHECK(!od_xfer_owner(&recorded_owner));
-    CHECK(!od_xfer_started_ms(&started_ms));
     CHECK(g_etag == 0xAABBCCDDu);
     CHECK(g_reply_n == 4u && !g_replies[1].plain && !g_replies[2].plain
           && !g_replies[3].plain);
@@ -397,7 +436,7 @@ static void test_transfer_logging(void)
     CHECK(logged(OD_LOG_DEBUG, "DW 15% (2 chunks, 15/100 bytes)"));
 #endif
     CHECK(od_xfer_data(&owner, od_span_make(raw + 15u, 85u)) == OD_CMD_OK);
-    g_now_ms = 2234u;
+    g_now_ms = 2468u;
     CHECK(od_xfer_end(&owner, od_span_none()) == OD_CMD_OK);
 #if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
     CHECK(logged(OD_LOG_DEBUG, "DW final frame 3: 85 bytes"));
@@ -405,7 +444,7 @@ static void test_transfer_logging(void)
     CHECK(!logged(OD_LOG_DEBUG, "DW final frame"));
 #endif
     CHECK(logged(OD_LOG_INFO,
-                 "DW complete: 3 chunks, 100/100 bytes, raw, 1.00 s, 0.1 KB/s"));
+                 "DW complete: direct full rx=0.1KB wr=0.1/0.1KB n=3 t=1.2s r=0.1KB/s"));
     CHECK(!od_xfer_log_quiet(CMD_DIRECT_WRITE_DATA));
 
     CASE("shared compressed transfer records on-wire bytes");
@@ -419,7 +458,8 @@ static void test_transfer_logging(void)
     CHECK(od_xfer_data(&owner, od_span_make(compressed, compressed_n)) == OD_CMD_OK);
     g_now_ms = 2234u;
     CHECK(od_xfer_end(&owner, od_span_none()) == OD_CMD_OK);
-    CHECK(logged(OD_LOG_INFO, "4/4 bytes, zlib 15 B on wire (0.27x), 1.00 s"));
+    CHECK(logged(OD_LOG_INFO,
+                 "direct full rx=0.0KB wr=0.0/0.0KB n=1 t=1.0s r=0.0KB/s z=0.27x"));
 }
 
 static void test_start_boundaries(void)
@@ -642,6 +682,7 @@ static void test_partial(void)
     CHECK(od_xfer_end(&owner, od_span_none()) == OD_CMD_NACK);
     CHECK(g_etag == 0u && g_abort_calls == 1u);
     CHECK(g_abort_reasons[0] == OD_XFER_ABORT_INCOMPLETE);
+    CHECK(g_etag_clear_sequence != 0u && g_etag_clear_sequence < g_abort_sequence);
     CHECK(g_replies[g_reply_n - 1u].plain);
 }
 
@@ -770,6 +811,98 @@ static void test_reset_and_geometry(void)
     CHECK(g_abort_reasons[0] == OD_XFER_ABORT_RESET);
 }
 
+static void test_terminal_outcomes_and_timeout(void)
+{
+    od_cmd_ctx_t owner = od_test_cmd_ctx(OWNER, &g_reservation, 2u, false);
+    uint8_t data[2] = { 1u, 2u };
+    uint8_t compressed_start[4] = { 4u, 0u, 0u, 0u };
+    uint8_t invalid_stream[3] = { 0u, 0u, 0u };
+
+    CASE("replacement and reset each summarize an admitted episode once");
+    setup();
+    CHECK(od_xfer_direct_start(&owner, od_span_none()) == OD_CMD_OK);
+    CHECK(od_xfer_data(&owner, od_span_make(data, sizeof data)) == OD_CMD_OK);
+    g_now_ms = 2234u;
+    CHECK(od_xfer_direct_start(&owner, od_span_none()) == OD_CMD_OK);
+    CHECK(log_count_exact(OD_LOG_INFO,
+          "DW ended: outcome=replaced mode=direct full rx=2 written=2/4 chunks=1 "
+          "elapsed=1000 ms") == 1u);
+    od_xfer_reset();
+    CHECK(log_count_prefix(OD_LOG_INFO, "DW ended: outcome=aborted cause=reset") == 1u);
+    od_xfer_reset();
+    CHECK(log_count_prefix(OD_LOG_INFO, "DW ended: outcome=aborted cause=reset") == 1u);
+
+    CASE("timeout is strict, wrap-safe, reporting-only and terminal-once");
+    setup();
+    g_now_ms = 100u;
+    CHECK(od_xfer_direct_start(&owner, od_span_none()) == OD_CMD_OK);
+    CHECK(!od_xfer_report_timeout(5099u, 5000u));
+    CHECK(!od_xfer_report_timeout(5100u, 5000u));
+    CHECK(!od_xfer_report_timeout(5101u, 0u));
+    CHECK(od_xfer_report_timeout(5101u, 5000u));
+    CHECK(od_xfer_active() && g_abort_calls == 0u);
+    CHECK(log_count_prefix(OD_LOG_ERROR, "DW failed: cause=timeout") == 1u);
+    CHECK(od_xfer_report_timeout(5102u, 5000u));
+    CHECK(log_count_prefix(OD_LOG_ERROR, "DW failed: cause=timeout") == 1u);
+    od_xfer_reset();
+    CHECK(!od_xfer_active() && g_abort_calls == 1u);
+    CHECK(log_count_prefix(OD_LOG_INFO, "DW ended:") == 0u);
+
+    setup();
+    g_now_ms = UINT32_MAX - 10u;
+    CHECK(od_xfer_direct_start(&owner, od_span_none()) == OD_CMD_OK);
+    CHECK(!od_xfer_report_timeout(9u, 20u));
+    CHECK(od_xfer_report_timeout(10u, 20u));
+    od_xfer_reset();
+
+    CASE("stream and sink failures have distinct terminal causes");
+    setup();
+    CHECK(od_xfer_direct_start(&owner, od_span_none()) == OD_CMD_OK);
+    g_consume_limit = 1u;
+    CHECK(od_xfer_data(&owner, od_span_make(data, sizeof data)) == OD_CMD_NACK);
+    CHECK(log_count_exact(OD_LOG_ERROR,
+          "DW failed: cause=panel write failed mode=direct full rx=2 written=0/4 chunks=1 "
+          "elapsed=0 ms phase=DATA offset=0 offered=2") == 1u);
+
+    setup();
+    CHECK(od_xfer_direct_start(&owner,
+                               od_span_make(compressed_start, sizeof compressed_start))
+          == OD_CMD_OK);
+    CHECK(od_xfer_data(&owner, od_span_make(invalid_stream, sizeof invalid_stream))
+          == OD_CMD_NACK);
+    CHECK(log_count_exact(OD_LOG_WARN,
+          "DW failed: cause=malformed compressed stream mode=direct full rx=3 written=0/4 "
+          "chunks=1 elapsed=0 ms phase=DATA zlib") == 1u);
+}
+
+static void test_admission_warning_budget(void)
+{
+    od_cmd_ctx_t owner = od_test_cmd_ctx(OWNER, &g_reservation, 2u, false);
+    uint8_t direct[4] = { 5u, 0u, 0u, 0u };
+    uint8_t partial[17];
+
+    CASE("transfer peer warnings share one five-second budget");
+    setup();
+    g_now_ms = 100000u;
+    CHECK(od_xfer_direct_start(&owner, od_span_make(direct, sizeof direct)) == OD_CMD_NACK);
+    CHECK(log_count_exact(OD_LOG_WARN,
+          "Direct write START refused: declared size mismatch") == 1u);
+    make_partial_start(partial, 0x80u, g_etag, 0x55667788u);
+    CHECK(od_xfer_partial_start(&owner, od_span_make(partial, sizeof partial)) == OD_CMD_NACK);
+    CHECK(log_count_prefix(OD_LOG_WARN, "Partial write START refused:") == 0u);
+    g_now_ms += 5000u;
+    CHECK(od_xfer_partial_start(&owner, od_span_make(partial, sizeof partial)) == OD_CMD_NACK);
+    CHECK(log_count_exact(OD_LOG_WARN,
+          "Partial write START refused: unsupported flags") == 1u);
+
+    CASE("local admission failures bypass the peer budget");
+    setup();
+    g_panel_info_ok = false;
+    CHECK(od_xfer_direct_start(&owner, od_span_none()) == OD_CMD_NACK);
+    CHECK(log_count_exact(OD_LOG_ERROR,
+          "Direct write START failed: panel geometry unavailable") == 1u);
+}
+
 int main(void)
 {
     test_raw_direct();
@@ -784,6 +917,8 @@ int main(void)
     test_partial_end_boundaries();
     test_partial_compressed_and_boundaries();
     test_reset_and_geometry();
+    test_terminal_outcomes_and_timeout();
+    test_admission_warning_budget();
     printf("xfer: %u checks, %u failures\n", g_checks, g_failures);
     return g_failures == 0u ? 0 : 1;
 }

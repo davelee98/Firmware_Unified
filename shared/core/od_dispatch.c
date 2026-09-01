@@ -7,6 +7,7 @@
 #include "od_config_read.h"
 #include "od_gate.h"
 #include "od_log.h"
+#include "od_log_budget.h"
 #include "od_nfc.h"
 #include "od_pipe.h"
 #include "od_reply.h"
@@ -59,25 +60,14 @@ static void clear_capacity_deferred(void) { s_capacity_defer_logged = false; }
 
 /* The peer controls all three malformed-input paths. Separate budgets prevent one class from
  * silencing another; `armed` keeps uptime zero from looking like an unused timestamp. */
-struct dispatch_log_budget {
-    uint32_t last_ms;
-    bool armed;
-};
+static od_log_budget_t s_short_budget;
+static od_log_budget_t s_oversize_budget;
+static od_log_budget_t s_unknown_budget;
 
-static struct dispatch_log_budget s_short_budget;
-static struct dispatch_log_budget s_oversize_budget;
-static struct dispatch_log_budget s_unknown_budget;
-
-static bool warning_allowed(struct dispatch_log_budget *budget)
+static bool warning_allowed(od_log_budget_t *budget)
 {
-    const uint32_t now_ms = od_session_app_now_ms();
-
-    if (budget->armed && (uint32_t)(now_ms - budget->last_ms) < OD_DISPATCH_WARN_INTERVAL_MS) {
-        return false;
-    }
-    budget->last_ms = now_ms;
-    budget->armed = true;
-    return true;
+    return od_log_budget_allows(budget, od_session_app_now_ms(),
+                                OD_DISPATCH_WARN_INTERVAL_MS);
 }
 
 static void log_short_frame(unsigned len)

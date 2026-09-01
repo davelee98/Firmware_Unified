@@ -11,6 +11,7 @@
 #include "session_fake.h"
 #include "aes128.h"   /* the KDF differential drives the AES core directly */
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -19,6 +20,18 @@
 static unsigned g_checks;
 static unsigned g_failures;
 static const char *g_case = "(none)";
+static unsigned g_log_n;
+
+void _od_log(int level, const char *fmt, ...)
+{
+    va_list ap;
+
+    (void)level;
+    (void)fmt;
+    va_start(ap, fmt);
+    va_end(ap);
+    ++g_log_n;
+}
 
 #define CHECK(cond)                                                            \
     do {                                                                       \
@@ -1163,10 +1176,16 @@ static void test_integrity_strikes(void)
                           1000u, NULL) == OD_SESSION_SEAL_OK);
     CHECK(od_session_open(&s, 0x0070u, od_span_make(sealed + 2, (size_t)(sealed_len - 2)),
                           out, sizeof out, &out_len, 1000u, NULL) == OD_SESSION_OPEN_OK);
-    for (i = 0; i < 3u; ++i) {
-        CHECK(od_session_open(&s, 0x0070u, od_span_make(sealed + 2, (size_t)(sealed_len - 2)),
-                              out, sizeof out, &out_len, 1000u, NULL) == OD_SESSION_OPEN_REPLAY);
-    }
+    g_log_n = 0u;
+    CHECK(od_session_open(&s, 0x0070u, od_span_make(sealed + 2, (size_t)(sealed_len - 2)),
+                          out, sizeof out, &out_len, 0u, NULL) == OD_SESSION_OPEN_REPLAY);
+    CHECK(g_log_n == 1u);
+    CHECK(od_session_open(&s, 0x0070u, od_span_make(sealed + 2, (size_t)(sealed_len - 2)),
+                          out, sizeof out, &out_len, 0u, NULL) == OD_SESSION_OPEN_REPLAY);
+    CHECK(g_log_n == 1u);
+    CHECK(od_session_open(&s, 0x0070u, od_span_make(sealed + 2, (size_t)(sealed_len - 2)),
+                          out, sizeof out, &out_len, 5000u, NULL) == OD_SESSION_OPEN_REPLAY);
+    CHECK(g_log_n == 2u);
     CHECK(od_session_authenticated(&s));
     CHECK(s.integrity_failures == 0u);
 
@@ -1176,11 +1195,19 @@ static void test_integrity_strikes(void)
     CHECK(od_session_seal(&s, od_span_make(plain, 6), sealed, sizeof sealed, &sealed_len,
                           1000u, NULL) == OD_SESSION_SEAL_OK);
     g_force_status = OD_HAL_CRYPTO_ERROR;
-    for (i = 0; i < 3u; ++i) {
-        CHECK(od_session_open(&s, 0x0070u, od_span_make(sealed + 2, (size_t)(sealed_len - 2)),
-                              out, sizeof out, &out_len, 1000u, NULL)
-              == OD_SESSION_OPEN_CRYPTO_ERROR);
-    }
+    g_log_n = 0u;
+    CHECK(od_session_open(&s, 0x0070u, od_span_make(sealed + 2, (size_t)(sealed_len - 2)),
+                          out, sizeof out, &out_len, UINT32_MAX - 2u, NULL)
+          == OD_SESSION_OPEN_CRYPTO_ERROR);
+    CHECK(g_log_n == 1u);
+    CHECK(od_session_open(&s, 0x0070u, od_span_make(sealed + 2, (size_t)(sealed_len - 2)),
+                          out, sizeof out, &out_len, 1u, NULL)
+          == OD_SESSION_OPEN_CRYPTO_ERROR);
+    CHECK(g_log_n == 1u);
+    CHECK(od_session_open(&s, 0x0070u, od_span_make(sealed + 2, (size_t)(sealed_len - 2)),
+                          out, sizeof out, &out_len, 4997u, NULL)
+          == OD_SESSION_OPEN_CRYPTO_ERROR);
+    CHECK(g_log_n == 2u);
     g_force_status = OD_HAL_CRYPTO_OK;
     CHECK(od_session_authenticated(&s));
 }

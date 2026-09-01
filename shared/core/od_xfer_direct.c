@@ -33,6 +33,7 @@ od_cmd_result_t od_xfer_direct_start(const od_cmd_ctx_t *ctx, od_span_t body)
     const uint8_t ack[] = { RESP_ACK, RESP_DIRECT_WRITE_START_ACK };
 
     if (ctx == NULL || !od_span_valid(body) || body.n > UINT32_MAX) {
+        od_xfer_log_start_refused("Direct write", OD_XFER_START_MALFORMED, -1, false);
         od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_START_ACK);
         return OD_CMD_NACK;
     }
@@ -40,14 +41,19 @@ od_cmd_result_t od_xfer_direct_start(const od_cmd_ctx_t *ctx, od_span_t body)
     od_xfer_replace_active();
     od_xfer_app_prepare_start();
     memset(&panel, 0, sizeof panel);
-    if (!od_xfer_app_panel_info(&panel)
-        || panel.geometry.total_bytes == 0u
-        || panel.geometry.layout == OD_COLOR_LAYOUT_SPLIT_HALVES) {
+    if (!od_xfer_app_panel_info(&panel) || panel.geometry.total_bytes == 0u) {
+        od_xfer_log_start_refused("Direct write", OD_XFER_START_PANEL_GEOMETRY, -1, true);
+        od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_START_ACK);
+        return OD_CMD_NACK;
+    }
+    if (panel.geometry.layout == OD_COLOR_LAYOUT_SPLIT_HALVES) {
+        od_xfer_log_start_refused("Direct write", OD_XFER_START_SPLIT_LAYOUT, -1, true);
         od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_START_ACK);
         return OD_CMD_NACK;
     }
     expected = panel.geometry.total_bytes;
     if (compressed && read_le32(body.p) != expected) {
+        od_xfer_log_start_refused("Direct write", OD_XFER_START_SIZE_MISMATCH, -1, false);
         od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_START_ACK);
         return OD_CMD_NACK;
     }
@@ -62,7 +68,8 @@ od_cmd_result_t od_xfer_direct_start(const od_cmd_ctx_t *ctx, od_span_t body)
 
     od_xfer_log_start();
     if (!od_xfer_app_begin_full(&state->geometry)) {
-        od_xfer_abort_active(OD_XFER_ABORT_START_FAILED, false);
+        od_xfer_fail_active(OD_XFER_TERM_PANEL_PREPARATION, "START", -1, 0u, 0u,
+                            OD_XFER_ABORT_START_FAILED, false);
         od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_START_ACK);
         return OD_CMD_NACK;
     }
@@ -70,16 +77,21 @@ od_cmd_result_t od_xfer_direct_start(const od_cmd_ctx_t *ctx, od_span_t body)
         od_span_t inline_input = od_span_drop(body, 4u);
         od_xfer_stream_reset(expected);
         if (inline_input.n > 0u) {
+            od_xfer_stream_result_t result;
             state->received_bytes = (uint32_t)inline_input.n;
-            if (!od_xfer_stream_push(inline_input, false)) {
-                od_xfer_abort_active(OD_XFER_ABORT_START_FAILED, false);
+            result = od_xfer_stream_push(inline_input, false);
+            if (result != OD_XFER_STREAM_OK) {
+                od_xfer_fail_active(od_xfer_stream_cause(result), "START", -1,
+                                    state->written_bytes, (uint32_t)inline_input.n,
+                                    OD_XFER_ABORT_START_FAILED, false);
                 od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_START_ACK);
                 return OD_CMD_NACK;
             }
         }
     }
     if (od_xfer_reply_app(ctx, ack, (uint16_t)sizeof ack) != OD_TXQ_OK) {
-        od_xfer_abort_active(OD_XFER_ABORT_REPLY_FAILED, false);
+        od_xfer_fail_active(OD_XFER_TERM_REPLY_DELIVERY, "START", -1, 0u, 0u,
+                            OD_XFER_ABORT_REPLY_FAILED, false);
         return OD_CMD_NACK;
     }
     return OD_CMD_OK;
@@ -90,24 +102,33 @@ od_cmd_result_t od_xfer_direct_data_impl(const od_cmd_ctx_t *ctx, od_span_t body
     od_xfer_state_t *state = od_xfer_state();
     const uint8_t ack[] = { RESP_ACK, RESP_DIRECT_WRITE_DATA_ACK };
 
-    if (!od_xfer_owner_matches(ctx) || body.n == 0u) {
+    if (!od_xfer_owner_matches(ctx)) {
+        od_xfer_log_owner_mismatch(CMD_DIRECT_WRITE_DATA);
+        return OD_CMD_OK;
+    }
+    if (body.n == 0u) {
         return OD_CMD_OK;
     }
     if (body.n > UINT32_MAX) {
-        od_xfer_abort_active(OD_XFER_ABORT_STREAM_FAILED, false);
+        od_xfer_fail_active(OD_XFER_TERM_SIZE_EXCEEDED, "DATA", -1, 0u, UINT32_MAX,
+                            OD_XFER_ABORT_STREAM_FAILED, false);
         od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_DATA_ACK);
         return OD_CMD_NACK;
     }
     od_xfer_log_chunk(body);
+    if (body.n > UINT32_MAX - state->received_bytes) {
+        od_xfer_fail_active(OD_XFER_TERM_SIZE_EXCEEDED, "DATA", -1, 0u,
+                            (uint32_t)body.n, OD_XFER_ABORT_STREAM_FAILED, false);
+        od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_DATA_ACK);
+        return OD_CMD_NACK;
+    }
+    state->received_bytes += (uint32_t)body.n;
     if (state->compressed) {
-        if (body.n > UINT32_MAX - state->received_bytes) {
-            od_xfer_abort_active(OD_XFER_ABORT_STREAM_FAILED, false);
-            od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_DATA_ACK);
-            return OD_CMD_NACK;
-        }
-        state->received_bytes += (uint32_t)body.n;
-        if (!od_xfer_stream_push(body, false)) {
-            od_xfer_abort_active(OD_XFER_ABORT_STREAM_FAILED, false);
+        const od_xfer_stream_result_t result = od_xfer_stream_push(body, false);
+        if (result != OD_XFER_STREAM_OK) {
+            od_xfer_fail_active(od_xfer_stream_cause(result), "DATA", -1,
+                                state->written_bytes, (uint32_t)body.n,
+                                OD_XFER_ABORT_STREAM_FAILED, false);
             od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_DATA_ACK);
             return OD_CMD_NACK;
         }
@@ -119,9 +140,11 @@ od_cmd_result_t od_xfer_direct_data_impl(const od_cmd_ctx_t *ctx, od_span_t body
 
         if (offered > 0u) {
             const od_span_t prefix = od_span_take(body, offered);
+            const uint32_t offset = state->written_bytes;
             const uint32_t consumed = od_xfer_app_write(state->written_bytes, prefix);
             if (consumed != offered) {
-                od_xfer_abort_active(OD_XFER_ABORT_STREAM_FAILED, false);
+                od_xfer_fail_active(OD_XFER_TERM_PANEL_WRITE, "DATA", -1, offset, offered,
+                                    OD_XFER_ABORT_STREAM_FAILED, false);
                 od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_DATA_ACK);
                 return OD_CMD_NACK;
             }
@@ -135,7 +158,8 @@ od_cmd_result_t od_xfer_direct_data_impl(const od_cmd_ctx_t *ctx, od_span_t body
 #endif
     }
     if (od_xfer_reply_app(ctx, ack, (uint16_t)sizeof ack) != OD_TXQ_OK) {
-        od_xfer_abort_active(OD_XFER_ABORT_REPLY_FAILED, false);
+        od_xfer_fail_active(OD_XFER_TERM_REPLY_DELIVERY, "DATA", -1, 0u, 0u,
+                            OD_XFER_ABORT_REPLY_FAILED, false);
         return OD_CMD_NACK;
     }
     return OD_CMD_OK;
@@ -153,20 +177,33 @@ static od_cmd_result_t finish_refresh(const od_cmd_ctx_t *ctx, od_span_t body)
     const uint8_t refresh_mode = body.n > 0u && body.p[0] == OD_REFRESH_FAST
         ? OD_REFRESH_FAST : OD_REFRESH_FULL;
     bool completed = false;
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_ERROR
+    od_xfer_terminal_snapshot_t snapshot;
+#endif
 
     if (od_xfer_reply_app(ctx, ack, (uint16_t)sizeof ack) != OD_TXQ_OK) {
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_ERROR
+        od_xfer_terminal_capture(&snapshot);
+        od_xfer_terminal_failure(&snapshot, OD_XFER_TERM_REPLY_DELIVERY,
+                                 "END", -1, 0u, 0u);
+#endif
         od_xfer_clear_state();
         od_xfer_app_barrier_abort(&owner);
         return OD_CMD_NACK;
     }
-    od_xfer_log_finish();
     if (od_xfer_app_before_refresh(&owner) != OD_XFER_BARRIER_PROCEED) {
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_ERROR
+        od_xfer_terminal_capture(&snapshot);
+        od_xfer_terminal_failure(&snapshot, OD_XFER_TERM_BARRIER_ABORTED,
+                                 "END", -1, 0u, 0u);
+#endif
         od_xfer_clear_state();
         od_xfer_app_barrier_abort(&owner);
         return OD_CMD_NACK;
     }
     if (!od_xfer_app_refresh(refresh_mode, &completed)) {
-        od_xfer_abort_active(OD_XFER_ABORT_REFRESH_FAILED, false);
+        od_xfer_fail_active(OD_XFER_TERM_REFRESH_FAILED, "END", -1, 0u, 0u,
+                            OD_XFER_ABORT_REFRESH_FAILED, false);
         od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_END_ACK);
         return OD_CMD_NACK;
     }
@@ -180,11 +217,26 @@ static od_cmd_result_t finish_refresh(const od_cmd_ctx_t *ctx, od_span_t body)
     (void)has_etag;
     (void)new_etag;
 #endif
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_ERROR
+    od_xfer_terminal_capture(&snapshot);
+#endif
     od_xfer_clear_state();
     if (od_xfer_reply_app(ctx, completed ? success : timeout,
                           (uint16_t)(completed ? sizeof success : sizeof timeout)) != OD_TXQ_OK) {
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_ERROR
+        od_xfer_terminal_failure(&snapshot, OD_XFER_TERM_REPLY_DELIVERY,
+                                 "END", -1, 0u, 0u);
+#endif
         return OD_CMD_NACK;
     }
+#if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_ERROR
+    if (completed) {
+        od_xfer_terminal_complete(&snapshot);
+    } else {
+        od_xfer_terminal_failure(&snapshot, OD_XFER_TERM_REFRESH_INCOMPLETE,
+                                 "END", -1, 0u, 0u);
+    }
+#endif
     return OD_CMD_OK;
 }
 
@@ -193,17 +245,22 @@ od_cmd_result_t od_xfer_direct_end_impl(const od_cmd_ctx_t *ctx, od_span_t body)
     od_xfer_state_t *state = od_xfer_state();
 
     if (!od_xfer_owner_matches(ctx)) {
+        od_xfer_log_owner_mismatch(CMD_DIRECT_WRITE_END);
         return OD_CMD_OK;
     }
     if (state->compressed) {
-        if (!od_xfer_stream_push(od_span_none(), true)) {
-            od_xfer_abort_active(OD_XFER_ABORT_STREAM_FAILED, false);
+        const od_xfer_stream_result_t result = od_xfer_stream_push(od_span_none(), true);
+        if (result != OD_XFER_STREAM_OK) {
+            od_xfer_fail_active(od_xfer_stream_cause(result), "END", -1,
+                                state->written_bytes, 0u,
+                                OD_XFER_ABORT_STREAM_FAILED, false);
             od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_END_ACK);
             return OD_CMD_NACK;
         }
     } else if (state->geometry.layout == OD_COLOR_LAYOUT_CONTROLLER_PLANES
                && state->written_bytes != state->expected_bytes) {
-        od_xfer_abort_active(OD_XFER_ABORT_INCOMPLETE, false);
+        od_xfer_fail_active(OD_XFER_TERM_INCOMPLETE, "END", -1, 0u, 0u,
+                            OD_XFER_ABORT_INCOMPLETE, false);
         od_xfer_reply_simple_error(ctx, RESP_DIRECT_WRITE_END_ACK);
         return OD_CMD_NACK;
     }
