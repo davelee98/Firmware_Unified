@@ -218,11 +218,6 @@ static bool display_power_set(bool on)
   return true;
 }
 
-void opendisplay_display_power_off(void)
-{
-  display_power_set(false);
-}
-
 static bool wait_for_refresh(uint32_t timeout_ms)
 {
   uint32_t elapsed = 0;
@@ -484,7 +479,7 @@ extern "C" bool opendisplay_display_boot_apply(void)
     od_log_error("boot display: no display config");
     return false;
   }
-  if ((d->transmission_modes & TRANSMISSION_MODE_CLEAR_ON_BOOT) != 0u) {
+  if ((d->transmission_modes & OD_TRANSMISSION_MODE_CLEAR_ON_BOOT) != 0u) {
     od_log_info("boot display intentionally skipped by CLEAR_ON_BOOT");
     s_boot_applied = true;
     return true;

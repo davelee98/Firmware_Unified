@@ -191,8 +191,9 @@ void od_config_reset(struct od_config *cfg);
  * are represented only by bounded lengths/presence. A capability-off build emits nothing. */
 void od_config_log_dump(const struct od_config *cfg);
 
-/* True when any of the 16 key bytes is non-zero. Exposed because targets ask it outside the
- * parse (Nordic's od_security_key_set), and because it is half of the zero-key rule. */
+/* True when any of the 16 key bytes is non-zero. Exposed rather than kept private to the parse
+ * because it is half of the zero-key rule, which od_session and od_config_log both apply outside
+ * a parse: encryption is in force only when the enable flag is set AND a key is present. */
 bool od_config_security_key_set(const struct SecurityConfig *sec);
 
 /* Store one packet whose bounds the walk has already guaranteed. Safe to call directly for a

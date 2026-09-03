@@ -109,7 +109,7 @@ int od_hal_i2c_write_read(uint8_t bus_id, uint8_t addr7,
 	if (!select_bus(bus_id, &bus)) {
 		return OD_HAL_I2C_EINVAL;
 	}
-	/* stop=false leaves SCL low with no STOP, so od_i2c_read()'s START is a REPEATED start.
+	/* stop=false leaves SCL low with no STOP, so od_i2c_read_ex()'s START is a REPEATED start.
 	 * The SAME bus object carries both phases -- see the note at the top of this file. */
 	enum od_i2c_result r = od_i2c_write_ex(&bus, addr7, tx, tx_len, false);
 

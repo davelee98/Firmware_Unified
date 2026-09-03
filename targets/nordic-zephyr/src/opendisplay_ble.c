@@ -12,8 +12,8 @@
 #include "opendisplay_pipe.h"
 #include "factory_config.h"
 #include "opendisplay_battery.h"
-#include "opendisplay_sensor_sht40.h"
-#include "opendisplay_sensor_bq27220.h"
+#include "od_sensor_sht40.h"
+#include "od_sensor_bq27220.h"
 #include "opendisplay_sensor_npm1300.h"
 #include "opendisplay_nfc.h"
 #include "od_board.h"
@@ -195,7 +195,12 @@ static uint32_t s_adv_boost_start_ms;
 static bool s_adv_boost_on;
 static uint8_t s_msd_loop_counter;
 static uint8_t s_reboot_flag = 1; /* set after boot, cleared on first BLE connect */
-static uint8_t s_connection_requested; /* MSD status bit2; see opendisplay_ble_set_connection_requested */
+/* MSD status bit 2 (OD_MSD_STATUS_CONNECTION_REQUESTED). Nothing writes this; it is read once,
+ * when the advertisement is built, so the bit always goes out as 0. Dormant the same way on the
+ * other two targets -- ESP32's connectionRequested and BG22's equivalent are also read and never
+ * written. Kept as the field's placeholder rather than hardcoding false at the read. There is no
+ * setter: wire one up on every target together, not here alone. */
+static uint8_t s_connection_requested;
 static struct bt_le_adv_param s_adv_param = BT_LE_ADV_PARAM_INIT(
 	BT_LE_ADV_OPT_CONN,
 	OD_ADV_INTERVAL_MIN, OD_ADV_INTERVAL_MAX, NULL);
@@ -426,8 +431,8 @@ static void update_msd_payload(void)
 	/* Mirror the reference updatemsdata() ordering: refresh the sensor
 	 * dynamic slots, then the battery source (BQ27220-preferred, else SAADC),
 	 * before packing the frame. All three are TTL-cached (30 s). */
-	opendisplay_sensor_sht40_poll();
-	opendisplay_sensor_bq27220_poll();
+	od_sensor_sht40_poll(opendisplay_get_global_config(), k_uptime_get_32());
+	od_sensor_bq27220_poll(opendisplay_get_global_config(), k_uptime_get_32());
 	opendisplay_sensor_npm1300_poll();
 	battery_voltage_10mv = opendisplay_battery_get_10mv();
 	/* Reference updatemsdata() reads the die temperature per publish; every caller
@@ -652,21 +657,6 @@ bool opendisplay_ble_pipe_notify(const uint8_t *data, uint16_t len)
 bool opendisplay_ble_pipe_notify_enabled(void)
 {
 	return s_notify_enabled;
-}
-
-void opendisplay_ble_pipe_on_write(const uint8_t *data, uint16_t len, bool write_cmd)
-{
-	opendisplay_pipe_on_write(data, len, write_cmd);
-}
-
-void opendisplay_ble_pipe_on_connection_closed(void)
-{
-	opendisplay_pipe_on_connection_closed();
-}
-
-void opendisplay_ble_set_connection_requested(bool requested)
-{
-	s_connection_requested = requested ? 1u : 0u;
 }
 
 void opendisplay_ble_set_dynamic_byte(uint8_t index, uint8_t value)
@@ -1022,9 +1012,9 @@ void opendisplay_ble_init(void)
 	}
 	flash_powerdown_from_config();
 
-	opendisplay_sensor_bq27220_init();
+	od_sensor_bq27220_init(opendisplay_get_global_config());
 	opendisplay_sensor_npm1300_init();
-	opendisplay_sensor_sht40_init();
+	od_sensor_sht40_init(opendisplay_get_global_config());
 
 	opendisplay_led_init();
 	opendisplay_buzzer_init();

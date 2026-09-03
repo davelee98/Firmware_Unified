@@ -50,11 +50,6 @@ const struct SecurityConfig *od_get_parsed_security(void)
 	return (s_parsed != NULL) ? &s_parsed->security : &s_no_security;
 }
 
-bool od_security_key_set(void)
-{
-	return od_config_security_key_set(od_get_parsed_security());
-}
-
 bool od_security_enabled_snapshot(void)
 {
 	return __atomic_load_n(&s_security_enabled_snapshot, __ATOMIC_ACQUIRE) != 0u;

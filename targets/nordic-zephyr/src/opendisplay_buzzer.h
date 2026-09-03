@@ -26,7 +26,4 @@ int opendisplay_buzzer_activate(const uint8_t *payload, uint16_t payload_len);
 /* Advance the non-blocking playback state machine. Call from the main loop. */
 void opendisplay_buzzer_process(void);
 
-/* Stop any playback immediately and silence the buzzer. */
-void opendisplay_buzzer_stop(void);
-
 #endif

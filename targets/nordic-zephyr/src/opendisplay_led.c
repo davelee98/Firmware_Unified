@@ -31,7 +31,7 @@ static bool s_running;
 
 void od_led_app_write(uint8_t pin_cfg, bool level_high)
 {
-	if (pin_cfg == GPIO_PIN_UNUSED) {
+	if (pin_cfg == OD_PIN_UNUSED) {
 		return;
 	}
 	od_gpio_write(pin_cfg, level_high);
@@ -111,15 +111,15 @@ void opendisplay_led_init(void)
 	for (uint8_t i = 0; i < gc->led_count; i++) {
 		const struct LedConfig *led = &gc->leds[i];
 
-		if (led->led_1_r != GPIO_PIN_UNUSED) {
+		if (led->led_1_r != OD_PIN_UNUSED) {
 			od_gpio_configure_output(led->led_1_r,
 						 (led->led_flags & LED_FLAG_INVERT_RED) != 0u);
 		}
-		if (led->led_2_g != GPIO_PIN_UNUSED) {
+		if (led->led_2_g != OD_PIN_UNUSED) {
 			od_gpio_configure_output(led->led_2_g,
 						 (led->led_flags & LED_FLAG_INVERT_GREEN) != 0u);
 		}
-		if (led->led_3_b != GPIO_PIN_UNUSED) {
+		if (led->led_3_b != OD_PIN_UNUSED) {
 			od_gpio_configure_output(led->led_3_b,
 						 (led->led_flags & LED_FLAG_INVERT_BLUE) != 0u);
 		}

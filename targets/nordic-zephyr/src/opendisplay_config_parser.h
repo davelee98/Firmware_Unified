@@ -14,7 +14,6 @@ bool parseConfigBytes(uint8_t *configData, uint32_t configLen, struct od_config 
 bool loadGlobalConfig(struct od_config *globalConfig);
 
 const struct SecurityConfig *od_get_parsed_security(void);
-bool od_security_key_set(void);
 
 /* Atomic target-local view for callbacks that run outside the loop thread. */
 bool od_security_enabled_snapshot(void);

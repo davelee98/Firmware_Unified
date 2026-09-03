@@ -54,7 +54,7 @@ static void od_i2c_start(const struct od_i2c_bus *bus)
 	 * this, the only thing separating the two edges is GPIO reconfiguration time. Harmless on a
 	 * first START, where both lines are already idle.
 	 *
-	 * This is not new to touch: od_i2c_write(stop=false) + od_i2c_read() is how BQ27220 and
+	 * This is not new to touch: od_i2c_write_ex(stop=false) + od_i2c_read_ex() is how BQ27220 and
 	 * nPM1300 have always read, so their repeated STARTs were short too. */
 	od_delay(bus);
 	/* Both lines high, then SDA falls while SCL high. */
@@ -205,12 +205,6 @@ enum od_i2c_result od_i2c_write_ex(struct od_i2c_bus *bus, uint8_t addr7, const 
 	return OD_I2C_RES_OK;
 }
 
-bool od_i2c_write(struct od_i2c_bus *bus, uint8_t addr7, const uint8_t *data,
-		  size_t len, bool stop)
-{
-	return od_i2c_write_ex(bus, addr7, data, len, stop) == OD_I2C_RES_OK;
-}
-
 enum od_i2c_result od_i2c_read_ex(struct od_i2c_bus *bus, uint8_t addr7, uint8_t *data, size_t len)
 {
 	if (!bus->ready) {
@@ -236,9 +230,4 @@ enum od_i2c_result od_i2c_read_ex(struct od_i2c_bus *bus, uint8_t addr7, uint8_t
 	}
 	od_i2c_stop(bus);
 	return OD_I2C_RES_OK;
-}
-
-bool od_i2c_read(struct od_i2c_bus *bus, uint8_t addr7, uint8_t *data, size_t len)
-{
-	return od_i2c_read_ex(bus, addr7, data, len) == OD_I2C_RES_OK;
 }

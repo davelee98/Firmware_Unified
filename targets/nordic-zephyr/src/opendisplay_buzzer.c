@@ -36,7 +36,7 @@ void od_buzzer_app_tone_stop(uint8_t drive_pin)
 	s_tone.running = false;
 	k_timer_stop(&s_tone_timer);
 	s_tone.high = false;
-	if (drive_pin != GPIO_PIN_UNUSED) {
+	if (drive_pin != OD_PIN_UNUSED) {
 		od_gpio_write(drive_pin, false);
 	}
 }
@@ -48,7 +48,7 @@ bool od_buzzer_app_tone_start(uint8_t drive_pin, uint32_t centihz, uint8_t duty_
 	uint32_t on_us;
 
 	od_buzzer_app_tone_stop(drive_pin);
-	if (centihz == 0u || drive_pin == GPIO_PIN_UNUSED) {
+	if (centihz == 0u || drive_pin == OD_PIN_UNUSED) {
 		return false;
 	}
 	if (duty_percent == 0u || duty_percent > 100u) {
@@ -81,7 +81,7 @@ bool od_buzzer_app_tone_start(uint8_t drive_pin, uint32_t centihz, uint8_t duty_
 
 void od_buzzer_app_enable_write(uint8_t enable_pin, bool level_high)
 {
-	if (enable_pin != GPIO_PIN_UNUSED) {
+	if (enable_pin != OD_PIN_UNUSED) {
 		od_gpio_write(enable_pin, level_high);
 	}
 }
@@ -146,11 +146,11 @@ void opendisplay_buzzer_init(void)
 	for (uint8_t i = 0u; i < gc->passive_buzzer_count; i++) {
 		const struct BuzzerConfig *b = &gc->passive_buzzers[i];
 
-		if (b->drive_pin == GPIO_PIN_UNUSED) {
+		if (b->drive_pin == OD_PIN_UNUSED) {
 			continue;
 		}
 		od_gpio_configure_output(b->drive_pin, false);
-		if (b->enable_pin != GPIO_PIN_UNUSED) {
+		if (b->enable_pin != OD_PIN_UNUSED) {
 			const bool active_high =
 				(b->flags & OD_BUZZER_FLAG_ENABLE_ACTIVE_HIGH) != 0u;
 			od_gpio_configure_output(b->enable_pin, !active_high);
@@ -178,7 +178,7 @@ int opendisplay_buzzer_activate(const uint8_t *payload, uint16_t payload_len)
 		return 2;
 	}
 	b = &gc->passive_buzzers[instance];
-	if (b->drive_pin == GPIO_PIN_UNUSED) {
+	if (b->drive_pin == OD_PIN_UNUSED) {
 		return 3;
 	}
 	config.drive_pin = b->drive_pin;
@@ -202,11 +202,4 @@ void opendisplay_buzzer_process(void)
 	}
 	s_step_due = false;
 	buzzer_pump();
-}
-
-void opendisplay_buzzer_stop(void)
-{
-	od_buzzer_stop();
-	step_timer_stop();
-	s_running = false;
 }

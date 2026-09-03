@@ -3,7 +3,6 @@
 #include "od_log.h"
 
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/kernel.h>
 
 static const struct device *gpio_dev(uint8_t port)
@@ -169,11 +168,6 @@ void od_gpio_park(uint8_t cfg)
 	(void)gpio_pin_configure(gpio_dev(port), pin, GPIO_DISCONNECTED);
 }
 
-ssize_t od_hwinfo_get_device_id(uint8_t *buffer, size_t length)
-{
-	return hwinfo_get_device_id(buffer, length);
-}
-
 /* ------------------------------------------------------------------ pin interrupts ------- */
 
 /* One slot per attachable pin. A fixed table rather than an allocation: this runs on a part with
@@ -188,8 +182,6 @@ struct od_gpio_irq_slot {
 	uint8_t              port;
 	uint8_t              pin;
 	od_gpio_irq_fn       fn;
-	od_gpio_irq_arg_fn   fn_arg;
-	void                *arg;
 	bool                 used;
 };
 
@@ -205,10 +197,7 @@ static void od_gpio_irq_trampoline(const struct device *dev, struct gpio_callbac
 	if (!slot->used) {
 		return;
 	}
-	/* One or the other, never both -- config_irq clears the arg form and vice versa. */
-	if (slot->fn_arg != NULL) {
-		slot->fn_arg(slot->arg);
-	} else if (slot->fn != NULL) {
+	if (slot->fn != NULL) {
 		slot->fn();
 	}
 }
@@ -237,8 +226,7 @@ static gpio_flags_t edge_flags(od_gpio_edge_t edge)
 	}
 }
 
-static int irq_attach(uint8_t cfg, od_gpio_edge_t edge,
-		      od_gpio_irq_fn fn, od_gpio_irq_arg_fn fn_arg, void *arg)
+static int irq_attach(uint8_t cfg, od_gpio_edge_t edge, od_gpio_irq_fn fn)
 {
 	uint8_t port;
 	uint8_t pin;
@@ -266,8 +254,6 @@ static int irq_attach(uint8_t cfg, od_gpio_edge_t edge,
 	slot->port = port;
 	slot->pin = pin;
 	slot->fn = fn;
-	slot->fn_arg = fn_arg;
-	slot->arg = arg;
 	slot->used = true;
 
 	gpio_init_callback(&slot->cb, od_gpio_irq_trampoline, BIT(pin));
@@ -287,13 +273,7 @@ static int irq_attach(uint8_t cfg, od_gpio_edge_t edge,
 
 int od_gpio_config_irq(uint8_t cfg, od_gpio_edge_t edge, od_gpio_irq_fn handler)
 {
-	return irq_attach(cfg, edge, handler, NULL, NULL);
-}
-
-int od_gpio_config_irq_arg(uint8_t cfg, od_gpio_edge_t edge,
-			   od_gpio_irq_arg_fn handler, void *arg)
-{
-	return irq_attach(cfg, edge, NULL, handler, arg);
+	return irq_attach(cfg, edge, handler);
 }
 
 void od_gpio_clear_irq(uint8_t cfg)
@@ -311,32 +291,7 @@ void od_gpio_clear_irq(uint8_t cfg)
 	}
 	slot->used = false;
 	slot->fn = NULL;
-	slot->fn_arg = NULL;
-	slot->arg = NULL;
 }
-
-/* Mask and unmask keep the callback registered, so the handler and its argument survive. */
-static void irq_set_enabled(uint8_t cfg, bool on)
-{
-	struct od_gpio_irq_slot *slot = irq_slot_for(cfg, false);
-	const struct device *dev;
-
-	if (slot == NULL) {
-		return;
-	}
-	dev = gpio_dev(slot->port);
-	if (dev == NULL) {
-		return;
-	}
-	if (on) {
-		(void)gpio_pin_interrupt_configure(dev, slot->pin, edge_flags(OD_GPIO_EDGE_BOTH));
-	} else {
-		(void)gpio_pin_interrupt_configure(dev, slot->pin, GPIO_INT_DISABLE);
-	}
-}
-
-void od_gpio_irq_enable(uint8_t cfg) { irq_set_enabled(cfg, true); }
-void od_gpio_irq_disable(uint8_t cfg) { irq_set_enabled(cfg, false); }
 
 static unsigned int s_irq_lock_key;
 static uint32_t s_irq_lock_depth;

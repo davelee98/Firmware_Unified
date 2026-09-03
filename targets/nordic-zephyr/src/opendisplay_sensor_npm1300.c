@@ -164,18 +164,6 @@ static bool npm1300_sample_retries(const struct SensorData *s, unsigned attempts
 	return false;
 }
 
-bool opendisplay_sensor_npm1300_is_available(void)
-{
-	const struct SensorData *s = npm1300_config();
-
-	/* A CONFIG question, not a transaction. The helper this replaced built a bus object and
-	 * answered "did that resolve"; probing instead would put an address byte on the wire and
-	 * could spend a stretch timeout, which is not what a caller asking "is one configured" is
-	 * asking for. */
-	return s != NULL && s->bus_id != 0xFFu &&
-	       od_config_data_bus(opendisplay_get_global_config(), s->bus_id) != NULL;
-}
-
 bool opendisplay_sensor_npm1300_is_configured(void)
 {
 	return npm1300_config() != NULL;

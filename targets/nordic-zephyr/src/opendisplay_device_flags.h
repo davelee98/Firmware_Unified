@@ -3,11 +3,9 @@
 
 /* system_config.device_flags — shared with nRF52840 Firmware/src/main.h */
 
-#define DEVICE_FLAG_PWR_PIN           (1u << 0)
-#define DEVICE_FLAG_XIAOINIT          (1u << 1)
-#define DEVICE_FLAG_WS_PP_INIT        (1u << 2)
-#define DEVICE_FLAG_BATTERY_LATCH     (1u << 3)
-#define DEVICE_FLAG_PWR_LATCH_DFF     (1u << 4)
+/* Only the bit this target acts on. Bits 0-4 (PWR_PIN, XIAOINIT, WS_PP_INIT, BATTERY_LATCH,
+ * PWR_LATCH_DFF) are ESP32 behaviours with no Nordic implementation; they were defined here and
+ * never read. The wire meaning of every bit is opendisplay_structs.h's, not this file's. */
 #define DEVICE_FLAG_CHANNEL_SOUNDING  (1u << 5)
 
 #endif

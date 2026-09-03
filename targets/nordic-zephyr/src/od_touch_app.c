@@ -16,9 +16,9 @@
 
 #include <zephyr/kernel.h>
 
-/* One ISR per controller: od_gpio_config_irq() takes a bare handler, and the index has to come
- * from somewhere. The _arg variant exists and would collapse these, but it is what the button
- * port wants; keeping touch on the plain form leaves the two independent. */
+/* One ISR per controller: od_gpio_config_irq() takes a bare handler with no context pointer, so
+ * the controller index has to come from somewhere, and a distinct function per slot is where.
+ * This is the GPIO IRQ seam's only caller. */
 static volatile uint8_t s_irq_mask;
 
 static void touch_isr_0(void) { s_irq_mask |= 1u << 0; }
