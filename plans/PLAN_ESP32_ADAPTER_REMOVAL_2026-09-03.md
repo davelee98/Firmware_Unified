@@ -194,11 +194,15 @@ anything already there.
    the two targets differ in style. The alternative was renaming ESP32's files to
    `sensor_*_adapter.cpp` to match. Removal was chosen because ESP32's *sole caller already holds
    both dependencies the wrapper supplies* — `display_service.cpp` has `globalConfig` in scope and
-   already includes `od_hal_time.h` — so the forward buys nothing there. That is the actual
-   argument; it is not that ESP32's wrappers bridge only a name. They bridge the same config and
-   clock Nordic's do (`sensor_sht40_shim.cpp:11-12`), which is why Nordic's stay: its callers do
-   not have `opendisplay_get_global_config()` and `k_uptime_get_32()` equally to hand. Revisit if
-   a second ESP32 caller appears.
+   already includes `od_hal_time.h` — so the forward buys nothing there.
+
+   **CORRECTED 2026-09-03.** This entry originally added that Nordic's wrappers stay because "its
+   callers do not have `opendisplay_get_global_config()` and `k_uptime_get_32()` equally to hand".
+   That was wrong: `opendisplay_ble.c` *defines* `opendisplay_get_global_config()` (`:609`) and
+   calls `k_uptime_get_32()` at `:770`, `:986` and `:997`, and `opendisplay_battery.c` uses both
+   too. Nordic was in exactly the same position, and its wrappers were removed on the same
+   argument — see `PLAN_NORDIC_DEAD_CODE_2026-09-03.md` § 3. The divergence this entry accepted
+   never existed.
 2. **`od_session_app_security()` over `&securityConfig`.** Both compile. The accessor keeps
    `encryption_state.h` — which exports a C++ *reference* — out of files that do not already
    have it, and matches how the shared code reaches the same object.
