@@ -10,8 +10,6 @@ extern "C" {
 void opendisplay_sensor_npm1300_init(void);
 void opendisplay_sensor_npm1300_poll(void);
 
-/* True when config has OD_SENSOR_TYPE_NPM1300 and its data_bus resolves. */
-
 /* True when config has OD_SENSOR_TYPE_NPM1300. */
 bool opendisplay_sensor_npm1300_is_configured(void);
 

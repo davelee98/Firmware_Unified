@@ -32,9 +32,9 @@ struct od_i2c_bus {
 bool od_i2c_init(struct od_i2c_bus *bus, uint8_t scl_cfg, uint8_t sda_cfg,
 		 uint32_t speed_hz, bool scl_pullup, bool sda_pullup);
 
-/* Where a transfer failed. The bool entry points below cannot express this, and the shared
- * od_hal_i2c contract needs it: an address NACK is ENODEV ("nothing there") and everything else
- * is EIO ("the bus or the peer misbehaved"), and a caller that cannot tell them apart reports a
+/* Where a transfer failed, and why every entry point returns it rather than a bool: the shared
+ * od_hal_i2c contract maps an address NACK to ENODEV ("nothing there") and everything else to
+ * EIO ("the bus or the peer misbehaved"), and a caller that cannot tell them apart reports a
  * missing device as a bus fault. */
 enum od_i2c_result {
 	OD_I2C_RES_OK = 0,

@@ -195,10 +195,11 @@ static uint32_t s_adv_boost_start_ms;
 static bool s_adv_boost_on;
 static uint8_t s_msd_loop_counter;
 static uint8_t s_reboot_flag = 1; /* set after boot, cleared on first BLE connect */
-/* MSD status bit 2 (OD_MSD_STATUS_CONNECTION_REQUESTED). Never set: the bit is dormant across
- * the whole fleet -- ESP32's connectionRequested and BG22's equivalent are equally write-only --
- * so this stays as the field's placeholder rather than being hardcoded false at the one read
- * below. Its setter is gone; wire one up on every target together, not here alone. */
+/* MSD status bit 2 (OD_MSD_STATUS_CONNECTION_REQUESTED). Nothing writes this; it is read once,
+ * when the advertisement is built, so the bit always goes out as 0. Dormant the same way on the
+ * other two targets -- ESP32's connectionRequested and BG22's equivalent are also read and never
+ * written. Kept as the field's placeholder rather than hardcoding false at the read. There is no
+ * setter: wire one up on every target together, not here alone. */
 static uint8_t s_connection_requested;
 static struct bt_le_adv_param s_adv_param = BT_LE_ADV_PARAM_INIT(
 	BT_LE_ADV_OPT_CONN,
