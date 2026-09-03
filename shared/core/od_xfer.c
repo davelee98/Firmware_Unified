@@ -366,7 +366,8 @@ static void terminal_capture_at(od_xfer_terminal_snapshot_t *out, uint32_t now_m
     out->written_bytes = s_xfer.written_bytes;
     out->expected_bytes = s_xfer.expected_bytes;
     out->chunks = s_xfer_diag.chunks;
-    out->elapsed_ms = now_ms - s_xfer.started_ms;
+    out->elapsed_ms = (s_xfer.finalized ? s_xfer.finalized_ms : now_ms)
+        - s_xfer.started_ms;
     out->compressed = s_xfer.compressed;
     if (out->elapsed_ms != 0u) {
         scaled = ((uint64_t)out->written_bytes * 10000u
@@ -898,6 +899,12 @@ od_xfer_stream_result_t od_xfer_pipe_finalize(void)
     }
     return s_xfer.received_bytes != 0u
         ? od_xfer_stream_push(od_span_none(), true) : OD_XFER_STREAM_INFLATE_FAILED;
+}
+
+void od_xfer_pipe_mark_finalized(void)
+{
+    s_xfer.finalized_ms = od_xfer_app_now_ms();
+    s_xfer.finalized = true;
 }
 
 bool od_xfer_pipe_complete(void)

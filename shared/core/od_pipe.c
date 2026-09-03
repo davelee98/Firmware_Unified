@@ -267,6 +267,8 @@ static od_cmd_result_t pipe_refuse_origin(const od_cmd_ctx_t *ctx, uint8_t opcod
 
 static od_cmd_result_t pipe_finish(const od_cmd_ctx_t *ctx, od_span_t body)
 {
+    od_xfer_pipe_mark_finalized();
+
     const uint8_t end_ack[] = { RESP_ACK, 0x82u };
     const uint8_t refresh_ok[] = { RESP_ACK, RESP_DIRECT_WRITE_REFRESH_SUCCESS };
     const uint8_t refresh_timeout[] = { RESP_ACK, RESP_DIRECT_WRITE_REFRESH_TIMEOUT };

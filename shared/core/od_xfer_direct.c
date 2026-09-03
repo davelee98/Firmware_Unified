@@ -168,6 +168,10 @@ od_cmd_result_t od_xfer_direct_data_impl(const od_cmd_ctx_t *ctx, od_span_t body
 static od_cmd_result_t finish_refresh(const od_cmd_ctx_t *ctx, od_span_t body)
 {
     od_xfer_state_t *state = od_xfer_state();
+
+    state->finalized_ms = od_xfer_app_now_ms();
+    state->finalized = true;
+
     const od_reply_t owner = state->owner;
     const uint8_t ack[] = { RESP_ACK, RESP_DIRECT_WRITE_END_ACK };
     const uint8_t success[] = { RESP_ACK, RESP_DIRECT_WRITE_REFRESH_SUCCESS };

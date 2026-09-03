@@ -1263,3 +1263,19 @@ Ratcheted as "esp32: securityConfig declared only as a reference" in [tools/chec
 because neither the compiler nor the linker can see this class of error and no host test can
 either — the host suite never links `main.h`. The rule is an absence grep over `targets/`, so a
 second consumer re-declaring the alias fails the gate rather than silently reading rodata.
+
+## 28. Transfer rate ended after panel refresh instead of stream finalization (fixed 2026-09-03)
+
+`DW complete` reports decompressed bytes written per transfer episode. Its elapsed interval must
+therefore end when the byte stream is finalized, before the END acknowledgement, refresh barrier,
+and panel refresh. `Firmware` measures that interval at finalization for direct, partial, and PIPE
+uploads.
+
+The shared transfer implementation captured its terminal snapshot after refresh, so a slow panel
+inflated `t=` and understated `r=` even though `rx=`, `wr=`, `n=`, and `z=` were already settled.
+The snapshot remains at the terminal outcome where it can be emitted exactly once; transfer state
+now records a separate finalization timestamp and flag, and elapsed time uses that timestamp after
+the stream has completed. Failures before finalization continue measuring to capture time.
+
+Host refresh fakes advance the clock by 30 seconds. Direct, partial, and PIPE assertions pin `t=`
+and `r=` to the pre-refresh interval, including PIPE's DATA-driven auto-END path.
