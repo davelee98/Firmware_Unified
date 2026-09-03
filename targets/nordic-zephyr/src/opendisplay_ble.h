@@ -31,12 +31,9 @@ float opendisplay_ble_get_chip_temperature(void);
  * host to connect. No producer exists yet on this branch (nor in the reference,
  * where it is reserved-for-future and stays 0); this is the hook a future
  * feature / sibling branch wires. */
-void opendisplay_ble_set_connection_requested(bool requested);
 
 bool opendisplay_ble_pipe_notify(const uint8_t *data, uint16_t len);
 bool opendisplay_ble_pipe_notify_enabled(void);
-void opendisplay_ble_pipe_on_write(const uint8_t *data, uint16_t len, bool write_cmd);
-void opendisplay_ble_pipe_on_connection_closed(void);
 
 /* Low 24 bits of the advertised identity -- the "xxxxxx" in OD<xxxxxx>. Boards differ in
  * which FICR word this comes from, so every consumer must call this rather than re-derive it.

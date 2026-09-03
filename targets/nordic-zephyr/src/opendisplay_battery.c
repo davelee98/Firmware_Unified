@@ -1,7 +1,7 @@
 #include "opendisplay_battery.h"
 #include "od_log.h"
 #include "opendisplay_ble.h"
-#include "opendisplay_sensor_bq27220.h"
+#include "od_sensor_bq27220.h"
 #include "opendisplay_sensor_npm1300.h"
 #include "od_runtime_types.h"
 #include "od_gpio.h"
@@ -196,8 +196,8 @@ static float battery_read_uncached(void)
 			return v;
 		}
 	}
-	if (opendisplay_sensor_bq27220_is_configured()) {
-		float gauge_v = opendisplay_sensor_bq27220_voltage_volts();
+	if (od_sensor_bq27220_is_configured(opendisplay_get_global_config())) {
+		float gauge_v = od_sensor_bq27220_voltage_volts();
 		if (gauge_v >= 0.0f) {
 			return gauge_v;
 		}

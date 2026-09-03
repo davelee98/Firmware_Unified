@@ -122,7 +122,6 @@ void fake_nordic_reset(void)
 
 bool opendisplay_display_boot_apply(void) { return false; }
 void opendisplay_display_park_pins(void)  { }
-void opendisplay_display_power_off(void)  { }
 
 /* ---------------------------------------------------------------------- shared transfer seam --- */
 
@@ -322,7 +321,6 @@ int opendisplay_buzzer_activate(const uint8_t *p, uint16_t n)
 /* The parsed security configuration. The corpus runner owns the session, and od_session_app_security
  * is its seam, so this returns NULL: the command code only asks in the key-loss path. */
 const struct SecurityConfig *od_get_parsed_security(void) { return NULL; }
-bool od_security_key_set(void) { return false; }
 
 /* ----------------------------------------------------------------------------------- kernel --- */
 

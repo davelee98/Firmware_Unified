@@ -218,11 +218,6 @@ static bool display_power_set(bool on)
   return true;
 }
 
-void opendisplay_display_power_off(void)
-{
-  display_power_set(false);
-}
-
 static bool wait_for_refresh(uint32_t timeout_ms)
 {
   uint32_t elapsed = 0;

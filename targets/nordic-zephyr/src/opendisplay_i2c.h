@@ -47,15 +47,6 @@ enum od_i2c_result od_i2c_write_ex(struct od_i2c_bus *bus, uint8_t addr7, const 
 enum od_i2c_result od_i2c_read_ex(struct od_i2c_bus *bus, uint8_t addr7, uint8_t *data,
 				  size_t len);
 
-/* Write len bytes to addr7. If stop is false a repeated-start is expected next
- * (bus left with SCL low, no STOP). Returns true on full ACKed transfer. */
-bool od_i2c_write(struct od_i2c_bus *bus, uint8_t addr7, const uint8_t *data,
-		  size_t len, bool stop);
-
-/* Read len bytes from addr7 (issues START + addr|R, master ACKs all but the
- * last byte, then STOP). Returns true on success. */
-bool od_i2c_read(struct od_i2c_bus *bus, uint8_t addr7, uint8_t *data, size_t len);
-
 #ifdef __cplusplus
 }
 #endif

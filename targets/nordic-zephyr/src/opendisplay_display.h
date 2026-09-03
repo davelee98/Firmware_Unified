@@ -10,7 +10,6 @@ extern "C" {
 
 bool opendisplay_display_boot_apply(void);
 void opendisplay_display_park_pins(void);
-void opendisplay_display_power_off(void);
 
 #ifdef __cplusplus
 }

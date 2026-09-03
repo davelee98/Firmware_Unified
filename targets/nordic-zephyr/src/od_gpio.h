@@ -56,20 +56,11 @@ typedef enum {
 } od_gpio_edge_t;
 
 typedef void (*od_gpio_irq_fn)(void);
-typedef void (*od_gpio_irq_arg_fn)(void *arg);
 
 int od_gpio_config_irq(uint8_t cfg, od_gpio_edge_t edge, od_gpio_irq_fn handler);
-int od_gpio_config_irq_arg(uint8_t cfg, od_gpio_edge_t edge,
-			   od_gpio_irq_arg_fn handler, void *arg);
 
 /* Detaches and disables. Safe on a pin that was never attached. */
 void od_gpio_clear_irq(uint8_t cfg);
-
-/* Mask and unmask WITHOUT detaching, so a caller that re-baselines several pins does not have to
- * re-attach handlers -- re-attaching is where a wrong index lands one button's events on its
- * neighbour. */
-void od_gpio_irq_enable(uint8_t cfg);
-void od_gpio_irq_disable(uint8_t cfg);
 
 /* Global interrupt lock, for a caller that must read several pins as one snapshot. */
 void od_gpio_irq_lock(void);

@@ -203,10 +203,3 @@ void opendisplay_buzzer_process(void)
 	s_step_due = false;
 	buzzer_pump();
 }
-
-void opendisplay_buzzer_stop(void)
-{
-	od_buzzer_stop();
-	step_timer_stop();
-	s_running = false;
-}
