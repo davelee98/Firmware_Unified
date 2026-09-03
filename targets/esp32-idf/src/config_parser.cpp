@@ -3,7 +3,9 @@
 #include "structs.h"
 #include "od_log.h"
 #include "encryption_state.h"
-#include "encryption.h"
+#include "encryption.h"   // checkResetPin()
+#include "od_session.h"
+#include "od_session_app.h"
 #include "power_latch.h"
 #include "wifi_service.h"  // OPENDISPLAY_HAS_WIFI + lanActivePort()/lanTlsEnabled()
 
@@ -296,7 +298,7 @@ void full_config_init() {
     }
     if (configLoaded) {
         logWifiRuntimeState();
-        clearEncryptionSession();
+        od_session_clear(od_session_app_state());
         encryptionInitialized = true;
         checkResetPin();
         if (globalConfig.loaded && (globalConfig.system_config.device_flags & DEVICE_FLAG_WS_PP_INIT)) {

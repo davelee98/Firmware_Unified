@@ -198,13 +198,6 @@ float readChipTemperature();  // Returns chip temperature in degrees Celsius
 int displayBootPlane(uint8_t colorScheme);
 int displayBootBitsPerPixel(uint8_t colorScheme);
 
-// Encryption functions
-bool isEncryptionEnabled();
-bool isAuthenticated();
-void clearEncryptionSession();
-bool checkEncryptionSessionTimeout();
-void updateEncryptionSessionActivity();
-
 // chunked_write_state_t comes from config_parser.h so this file and
 // communication.cpp cannot drift apart on the buffer size.
 /* chunkedWriteState is GONE -- see config_parser.h. The 4 KB reassembly buffer now lives in

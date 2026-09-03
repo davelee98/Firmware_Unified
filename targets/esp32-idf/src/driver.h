@@ -1,4 +1,0 @@
-#ifndef OPENDISPLAY_GFX_DRIVER_H
-#define OPENDISPLAY_GFX_DRIVER_H
-
-#endif

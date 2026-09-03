@@ -5,15 +5,6 @@
 #include <stdint.h>
 
 void getAuthDeviceIdBytes(uint8_t* device_id);
-bool isEncryptionEnabled();
-bool isAuthenticated();
-void clearEncryptionSession();
-bool checkEncryptionSessionTimeout();
-void updateEncryptionSessionActivity();
-/// Derive the 16-byte TLS-PSK for the LAN TLS channel from the configured master
-/// key via AES-CMAC over a fixed KDF label. Returns false if encryption is not
-/// configured (no usable master key). The matching PSK IDENTITY is "opendisplay".
-bool deriveTlsPsk(uint8_t* psk_out16);
 
 /* The device identity string: exactly OD_CHIP_ID_HEX_LEN uppercase hex digits, zero-padded,
  * NUL-terminated. `out` needs OD_CHIP_ID_HEX_LEN + 1 bytes; a smaller buffer yields an empty

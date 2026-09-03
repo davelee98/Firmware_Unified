@@ -21,10 +21,9 @@
 #include "od_log.h"
 #include "od_watchdog_app.h"
 #include "buzzer_control.h"
-#include "sensor_sht40.h"
-#include "sensor_bq27220.h"
+#include "od_sensor_sht40.h"
+#include "od_sensor_bq27220.h"
 #include "communication.h"
-#include "encryption.h"
 #include "boot_screen.h"
 #include "link_owner.h"
 #include "session_guard.h"
@@ -945,8 +944,8 @@ void initSensors(){
             od_log_warn("  Unknown sensor type 0x%04X", sensor->sensor_type);
         }
     }
-    initSht40Sensors();
-    initBq27220Sensors();
+    od_sensor_sht40_init(&globalConfig);
+    od_sensor_bq27220_init(&globalConfig);
     od_log_info("=== Sensor Initialization Complete ===");
 }
 
@@ -1524,8 +1523,8 @@ int displayBootBitsPerPixel(uint8_t colorScheme) {
 }
 
 static float readBatteryVoltageUncached() {
-    if (bq27220IsConfigured()) {
-        float gaugeV = bq27220BatteryVoltageVolts();
+    if (od_sensor_bq27220_is_configured(&globalConfig)) {
+        float gaugeV = od_sensor_bq27220_voltage_volts();
         if (gaugeV >= 0.0f) {
             return gaugeV;
         }
@@ -1573,8 +1572,8 @@ float readChipTemperature() {
 
 void updatemsdata(){
     // od_log_debug("updatemsdata() called (mloopcounter: %u)", mloopcounter);
-    pollSht40SensorsForMsd();
-    pollBq27220ForMsd();
+    od_sensor_sht40_poll(&globalConfig, od_hal_uptime_ms());
+    od_sensor_bq27220_poll(&globalConfig, od_hal_uptime_ms());
     float batteryVoltage = readBatteryVoltage();
     float chipTemperature = readChipTemperature();
     // The 16 bytes are encoded by shared/core/od_advert.c, not here. What stays in this file is
