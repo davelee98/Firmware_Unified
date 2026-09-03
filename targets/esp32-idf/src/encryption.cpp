@@ -68,16 +68,8 @@ bool isAuthenticated() {
     return od_session_alive(od_session_app_state(), od_hal_uptime_ms(), NULL);
 }
 
-bool checkEncryptionSessionTimeout() {
-    return od_session_alive(od_session_app_state(), od_hal_uptime_ms(), NULL);
-}
-
 void clearEncryptionSession() {
     od_session_clear(od_session_app_state());
-}
-
-void updateEncryptionSessionActivity() {
-    od_session_touch(od_session_app_state(), od_hal_uptime_ms());
 }
 
 bool deriveTlsPsk(uint8_t* psk_out16) {
