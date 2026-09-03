@@ -217,7 +217,6 @@ target_sources(app PRIVATE
   ${SRC_DIR}/od_gpio.c
   ${SRC_DIR}/od_pin_codec.c
   ${SRC_DIR}/od_zephyr_time.c
-  ${SRC_DIR}/newlib_stubs.c
   ${SRC_DIR}/od_hal_log.c
   ${SRC_DIR}/od_hal_nvs.c
   ${SRC_DIR}/od_hal_i2c.c
