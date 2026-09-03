@@ -19,17 +19,16 @@ list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_LIST_DIR}/prj_ncs.conf)
 # build that promotes Kconfig warnings to errors. It now lives in boards/<board>.conf for the two
 # nRF54 boards.
 #
-# GUARDING THE APPEND ON ${BOARD} DOES NOT WORK, and the attempt is worth recording because the
-# failure is silent: BOARD is EMPTY here. find_package(Zephyr) sets it, and that runs on line 41,
-# after EXTRA_CONF_FILE has been assembled. `if(NOT BOARD MATCHES ...)` therefore always takes
-# the true branch. The pre-existing lm20 guard below has exactly the same defect -- it has never
-# fired -- which is why prj_lm20_extra.conf's content is ALSO mirrored into
-# boards/xiao_nrf54lm20a_nrf54lm20a_cpuapp.conf. That mirroring is what has been carrying it.
+# Guarding the append on ${BOARD} is only safe when the board comes from the command line:
+# `west build -b <board>` sets BOARD in the cache before this file runs, but a build that leaves
+# it to find_package(Zephyr) -- which runs below -- sees it empty here and takes the wrong arm.
+# Do not add a CS guard on that basis; boards/<board>.conf is where per-board Kconfig belongs.
 
-# DEAD BRANCH, left only as a marker: BOARD is empty here (see above), so this has never fired.
-# Its content is applied via boards/xiao_nrf54lm20a_nrf54lm20a_cpuapp.conf, whose own header
-# already said "also mirrored ... for sysbuild". Removing the file it references would be the
-# tidier fix; it is left in place so this change alters no nRF54 behaviour.
+# LIVE, despite an earlier comment here calling it dead. `west build -b xiao_nrf54lm20a` sets
+# BOARD before this runs, and build-nrf54lm20-debug/zephyr/build_info.yml records
+# prj_lm20_extra.conf among the applied conf files. Its content is ALSO mirrored into
+# boards/xiao_nrf54lm20a_nrf54lm20a_cpuapp.conf, so the two must stay in step -- that redundancy
+# is what made the branch look dead. Do not delete either on the strength of the other.
 if(BOARD MATCHES ".*lm20.*")
   list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_LIST_DIR}/prj_lm20_extra.conf)
 endif()

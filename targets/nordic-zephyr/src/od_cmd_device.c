@@ -139,9 +139,14 @@ od_cmd_result_t od_cmd_app_power_off(const od_cmd_ctx_t *ctx, od_span_t body)
 
 od_cmd_result_t od_cmd_app_deep_sleep(const od_cmd_ctx_t *ctx, od_span_t body)
 {
-  /* RECOGNISED AND SILENT, matching the reference nRF52840 build
-   * (device_control.cpp:691-705): the command is acted on but NO response is sent, so clients do
-   * not treat deep sleep as supported on this target.
+  /* RECOGNISED AND SILENT, matching Firmware's non-ESP32 arm
+   * (../Firmware/src/device_control.cpp:931-933, inside handleDeepSleepCommand at :895), which
+   * stays silent deliberately and says so. The command is acted on but NO response is sent.
+   *
+   * SILENCE IS NOT A DISCLAIMER, and the note below that clients will not treat deep sleep as
+   * supported is wrong about the canonical host: py-opendisplay reads a disconnect or timeout as
+   * a successful sleep. It is only saved today by still sending 0x0052. See docs/FOLLOWUPS.md
+   * item 27 before moving that host to 0x0053 -- the answer is the unsupported NACK, not silence.
    *
    * OPCODE CHANGED 0x0052 -> 0x0053 when this target adopted the canonical protocol header. The
    * subset header it used to carry still had the value from before the split that made 0x0052

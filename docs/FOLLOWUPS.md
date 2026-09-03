@@ -1532,3 +1532,54 @@ Because the pins are runtime config, a V2 board needs no firmware change — onl
 write with `busy = 0xBE`. This is a toolbox data gap, not a firmware defect.
 
 Not fixable from this repo — sibling repositories are read-only references.
+
+## 27. `Firmware_Unified` / nordic-zephyr — deep sleep is silent, and the host reads silence as success
+
+Recorded by `plans/PLAN_NORDIC_DEAD_CODE_2026-09-03.md` step 0. Not a defect introduced here;
+three separable questions the dead-code sweep surfaced, with the decisions taken.
+
+**What the target does.** `od_cmd_app_deep_sleep()` (`targets/nordic-zephyr/src/od_cmd_device.c:140`)
+is recognised and silent: it calls `opendisplay_ble_schedule_deep_sleep()`
+(`opendisplay_ble.c:1109`), whose entire body is `opendisplay_sensor_npm1300_enter_hibernate()`,
+and returns `OD_CMD_OK` without a reply. On a board with no nPM1300 the command does nothing at
+all.
+
+**Q1 — follow `Firmware`'s silent arm, or restore `Firmware_NRF`'s System OFF? DECIDED: stay
+silent.** The two upstream references disagree:
+
+- `../Firmware/src/device_control.cpp:931-933` is deliberately silent and says so — *"The
+  protocol permits a NACK here … but we intentionally stay silent to preserve existing behavior
+  — leave as-is unless a caller needs the NACK."*
+- `../Firmware_NRF/EPD/EPD_service.c:607` ACKs with `{0x00, RESP_DEEP_SLEEP}`, waits 100 ms, and
+  calls `enter_deep_sleep()` (`main.c:309`) → `sd_power_system_off()` (`:359`, `:365`) →
+  `nrf_power_system_off()` (`:373`).
+
+CLAUDE.md does **not** arbitrate this pair: its authority rule names `Firmware` over
+`Firmware_NRF54` (line 248), and decision 8 calls `Firmware_NRF` a compat floor only in terms of
+features it lacks. So this is decided on the merits, not inherited: implementing System OFF is a
+feature addition with no hardware verification behind it on any board in this fleet, and it is
+not the business of a dead-code cleanup. The silent arm stands, matching the field-proven
+`Firmware` behaviour.
+
+**Consequence:** `opendisplay_display_power_off()` and `opendisplay_buzzer_stop()` have no future
+caller and are deleted as dead code. Reopen this item before adding either back.
+
+**Q2 — how should nPM1300 hibernate be represented on the wire? OPEN.** It is a real partial
+sleep on nRF54 boards that have the PMIC, reached through an opcode the target answers with
+silence. Needs a protocol decision, not a firmware change.
+
+**Q3 — the host reads silence as success. OPEN, and the one with a sharp edge.**
+`../py-opendisplay/src/opendisplay/device.py:1301-1310` catches the read-side disconnect/timeout
+and logs *"device is sleeping"*; `:1286-1296` already treats a write-time `BLEConnectionError`
+the same way. The wire contract permits both readings —
+`shared/protocol/opendisplay_protocol.h:457-464` allows a successful sleep and an unsupported
+target to be equally silent.
+
+Today the damage is limited because py-opendisplay still sends the obsolete `0x0052` while this
+target answers `0x0053`. **Updating the host to `0x0053` — which `od_cmd_device.c`'s own comment
+asks for — would make a Nordic board without an nPM1300 stay awake while the host reports it
+asleep.** The fix is the NACK `Firmware` left unused: `[0xFF][0x53][OD_ERR_DEEP_SLEEP_UNSUPPORTED][0x00]`
+on targets that cannot sleep. That is a wire-behaviour change needing its own plan and a host
+update in step, so it is filed rather than done here.
+
+**Sequencing:** answer Q3 before py-opendisplay moves to `0x0053`, not after.
