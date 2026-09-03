@@ -24,7 +24,6 @@
 #include "od_sensor_sht40.h"
 #include "od_sensor_bq27220.h"
 #include "communication.h"
-#include "encryption.h"
 #include "boot_screen.h"
 #include "link_owner.h"
 #include "session_guard.h"

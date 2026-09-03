@@ -35,7 +35,6 @@
 #include "link_owner.h"
 #include "session_guard.h"
 
-bool isAuthenticated();
 extern struct od_config globalConfig;
 
 /* The chunked CONFIG_WRITE transfer in progress, if any. Replaces chunkedWriteState. Loop-task
@@ -188,7 +187,7 @@ static void reloadConfigAfterSave(void) {
     if (globalConfig.power_option.screen_timeout_seconds == 0 && epdSessionIsWarm()) {
         epdSessionForceOff();
     }
-    clearEncryptionSession();
+    od_session_clear(od_session_app_state());
 #ifdef OPENDISPLAY_HAS_WIFI
     // Non-blocking: a config write arrives over a live BLE link, and the blocking
     // form stalls the loop task for up to 36 s of connect retries, freezing BLE
@@ -196,7 +195,6 @@ static void reloadConfigAfterSave(void) {
     initWiFi(false);
 #endif
 }
-bool isEncryptionEnabled();
 void secureEraseConfig();
 // chunked_write_state_t comes from config_parser.h; this file used to redefine it
 // with a hardcoded 4096 in place of OD_CONFIG_MAX_SIZE.
@@ -399,9 +397,9 @@ enum ConfigWriteGate {
 // apply the same origin rule the dispatcher applied -- and until this existed, it did
 // not. The dispatcher exempts ORIGIN_LAN_TLS from the app-layer gate (SECTION 9 rule 4:
 // the TLS handshake IS the authentication on that port and 0x0050 is NOT used there),
-// but handleWriteConfig() then re-tested the raw isEncryptionEnabled() && !isAuthenti-
-// cated() pair. isAuthenticated() is set only by a successful app-layer 0x0050 exchange
-// (encryption.cpp), which a conforming TLS client never sends -- so a client that had
+// but handleWriteConfig() then re-tested the raw security-enabled && !authenticated pair.
+// A session is established only by a successful app-layer 0x0050 exchange, which a
+// conforming TLS client never sends -- so a client that had
 // already proved possession of the derived PSK could read config but not write it,
 // unless REWRITE_ALLOWED happened to be set. Encrypted WiFi supported half the workflow.
 //
@@ -415,7 +413,12 @@ static ConfigWriteGate configWriteGate(const od_cmd_ctx_t *ctx) {
     }
 #endif
     // BLE and plaintext LAN keep the pre-TLS rule unchanged.
-    if (!isEncryptionEnabled() || isAuthenticated()) {
+    // od_session_alive() is MUTATING: it clears a session that has expired, which is the
+    // liveness semantics this gate has always had. Do not reorder the short-circuit, and do
+    // not swap in od_session_authenticated() -- that one is pure and would leave an expired
+    // session standing.
+    if (!od_session_security_enabled(od_session_app_security()) ||
+        od_session_alive(od_session_app_state(), od_hal_uptime_ms(), NULL)) {
         return CONFIG_WRITE_ALLOWED;
     }
     const bool rewriteAllowed = (securityConfig.flags & (1 << 0)) != 0;

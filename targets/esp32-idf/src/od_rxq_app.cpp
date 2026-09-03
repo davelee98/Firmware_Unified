@@ -9,12 +9,13 @@
 
 #include "od_rxq_app.h"
 
-#include "encryption.h"   // isEncryptionEnabled()
+#include "od_session.h"
+#include "od_session_app.h"
 #include "od_xfer.h"
 
 extern "C" bool od_rxq_app_encryption_enabled(void)
 {
-    return isEncryptionEnabled();
+    return od_session_security_enabled(od_session_app_security());
 }
 
 extern "C" bool od_rxq_app_quiet(uint16_t cmd)
