@@ -8,7 +8,6 @@
 extern "C" {
 #endif
 
-#define OD_GPIO_PIN_UNUSED 0xFFu
 
 /* Encode Pport.pin for configs. Pins 0..15: (port<<4)|pin.
  * Pins 16..31: 0x80 | (port<<5) | pin  (needed for LM20 D1=P1.31 etc.). */

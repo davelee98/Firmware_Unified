@@ -14,9 +14,9 @@ set(GEN_DIR ${SRC_DIR}/generated)
 
 list(APPEND EXTRA_CONF_FILE ${CMAKE_CURRENT_LIST_DIR}/prj_ncs.conf)
 
-# NO prj_cs.conf HERE. Channel Sounding is an nRF54L radio feature and the nRF52840 has none, so
-# appending it unconditionally made every CS symbol report "assigned y but got n" -- fatal in a
-# build that promotes Kconfig warnings to errors. It now lives in boards/<board>.conf for the two
+# NO CHANNEL SOUNDING CONF HERE. CS is an nRF54L radio feature and the nRF52840 has none, so
+# appending it unconditionally makes every CS symbol report "assigned y but got n" -- fatal in a
+# build that promotes Kconfig warnings to errors. It lives in boards/<board>.conf for the two
 # nRF54 boards.
 #
 # Guarding the append on ${BOARD} is only safe when the board comes from the command line:
