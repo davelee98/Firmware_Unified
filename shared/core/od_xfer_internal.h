@@ -36,10 +36,12 @@ typedef struct {
     od_xfer_mode_t mode;
     od_reply_t owner;
     uint32_t started_ms;
+    uint32_t finalized_ms;       /* when the stream finished, if it did */
     uint32_t expected_bytes;
     uint32_t received_bytes;
     uint32_t written_bytes;
     bool compressed;
+    bool finalized;              /* separate because zero is a valid uptime */
     od_color_geometry_t geometry;
 #if OD_CAP_PARTIAL
     od_xfer_partial_state_t partial;
@@ -154,6 +156,7 @@ od_xfer_start_cause_t od_xfer_pipe_arm_partial(const od_cmd_ctx_t *ctx, uint32_t
 bool od_xfer_pipe_activate(void);
 od_xfer_stream_result_t od_xfer_pipe_consume(od_span_t payload);
 od_xfer_stream_result_t od_xfer_pipe_finalize(void);
+void od_xfer_pipe_mark_finalized(void);
 bool od_xfer_pipe_complete(void);
 void od_xfer_pipe_enter_fatal(void);
 od_xfer_barrier_t od_xfer_pipe_before_refresh(void);

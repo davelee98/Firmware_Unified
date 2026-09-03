@@ -217,6 +217,15 @@ static struct k_sem s_boot_display_done;
  * for this boot (Adafruit bledfu.begin() gating). */
 static bool s_ota_unlocked;
 
+/* The facts a callback may publish about advertising/MSD: edges, drained on the loop thread. */
+static volatile uint8_t s_adv_ended_pending = 0;
+static volatile uint8_t s_msd_publish_pending = 0;
+/* SDC applies TX power to the advertising role and can change it while advertising is running.
+ * Persistence across stop/start is an assumption for the hardware RSSI gate to verify. Apply only
+ * where the configured or controller-held value can have changed: boot, disconnect, and config
+ * reload. Set from the BT RX thread and consumed on the loop thread. */
+static volatile uint8_t s_adv_txp_pending = 1u;
+
 /* ---- advertising ownership (F4): loop-thread-only state, touched from exactly one context
  * (opendisplay_ble_process(), called only from main.c's superloop). Nothing below this point
  * may be touched from BT_CONN_CB_DEFINE callbacks (BT RX thread) or from the NFC driver's
@@ -225,10 +234,6 @@ static bool s_ota_unlocked;
 static struct od_adv_control s_adv;
 static bool s_adv_interval_is_boost;   /* which interval was last SUCCESSFULLY applied */
 static bool s_adv_restart_pending;     /* see request_adv_restart() */
-
-/* The facts a callback may publish about advertising/MSD: edges, drained on the loop thread. */
-static volatile uint8_t s_adv_ended_pending = 0;
-static volatile uint8_t s_msd_publish_pending = 0;
 
 /* Separate from msd_payload[]: this is the ONLY buffer ad[] points at, and it is written
  * exclusively by od_hal_adv_program(), which the shared controller calls only from the loop
@@ -599,6 +604,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	 * opendisplay_ble_process() pass. Replaces the blind 150ms k_work_schedule() that was
 	 * the reported bug -- see docs on od_adv_control.h / shared/hal/od_hal_adv.h for the
 	 * reconcile-every-pass design this now follows. */
+	__atomic_store_n(&s_adv_txp_pending, (uint8_t)1, __ATOMIC_RELEASE);
 	od_adv_app_boost();
 }
 
@@ -712,30 +718,8 @@ static void apply_tx_power(uint8_t handle_type, uint16_t handle)
 		return;
 	}
 	rp = (struct bt_hci_rp_vs_write_tx_power_level *)rsp->data;
-	/* Advertising: reported on CHANGE, not on every apply. The MSD refresh restarts the
-	 * advertiser once per sleep_timeout_ms and every restart re-applies TX power, so an
-	 * unconditional line turns a static config fact into a periodic message. A first apply, a
-	 * config write that moves the level, or the controller clamping to something new all still
-	 * print. Connections are deliberately exempt: that apply happens once per link, so it is
-	 * per-link evidence rather than repetition. */
-	{
-		int8_t selected = (int8_t)rp->selected_tx_power;
-		bool is_adv = (handle_type == BT_HCI_VS_LL_HANDLE_TYPE_ADV);
-		static bool s_adv_tx_reported;
-		static int8_t s_adv_tx_requested;
-		static int8_t s_adv_tx_selected;
-
-		if (!is_adv || !s_adv_tx_reported || s_adv_tx_requested != requested ||
-		    s_adv_tx_selected != selected) {
-			od_log_info("tx_power type=%u requested=%d selected=%d dBm",
-			       (unsigned)handle_type, (int)requested, (int)selected);
-		}
-		if (is_adv) {
-			s_adv_tx_reported = true;
-			s_adv_tx_requested = requested;
-			s_adv_tx_selected = selected;
-		}
-	}
+	od_log_info("tx_power type=%u requested=%d selected=%d dBm",
+	       (unsigned)handle_type, (int)requested, (int8_t)rp->selected_tx_power);
 	net_buf_unref(rsp);
 #else
 	ARG_UNUSED(handle_type);
@@ -829,7 +813,6 @@ enum od_hal_adv_result od_hal_adv_start(void)
 		 * s_adv_param to an already-running advertiser, or the corrective restart in
 		 * opendisplay_ble_advertising_tick() would be silently suppressed. */
 		s_adv_interval_is_boost = boost;
-		apply_tx_power(BT_HCI_VS_LL_HANDLE_TYPE_ADV, 0);
 		od_log_info("advertising as %s (interval=%u-%u ms)", s_dev_name,
 		       (unsigned)BT_GAP_ADV_INTERVAL_TO_MS(s_adv_param.interval_min),
 		       (unsigned)BT_GAP_ADV_INTERVAL_TO_MS(s_adv_param.interval_max));
@@ -890,6 +873,10 @@ static bool ble_service_advertising(bool start_allowed)
 	}
 
 	const enum od_adv_process_result r = od_adv_process(&s_adv, start_allowed);
+	if (s_adv.active && !s_adv.faulted
+	    && __atomic_exchange_n(&s_adv_txp_pending, (uint8_t)0, __ATOMIC_ACQUIRE)) {
+		apply_tx_power(BT_HCI_VS_LL_HANDLE_TYPE_ADV, 0);
+	}
 
 	if (s_adv_restart_pending) {
 		if (s_adv.faulted) {
@@ -957,8 +944,8 @@ void opendisplay_ble_reload_config_from_nvm(void)
 	flash_powerdown_from_config();
 	od_smp_sync();
 	opendisplay_nfc_apply_config(&s_od_global_config);
-	/* Re-apply advertising TX power in case the new config changed it. */
-	apply_tx_power(BT_HCI_VS_LL_HANDLE_TYPE_ADV, 0);
+	/* Apply advertising TX power once the advertiser is active again. */
+	__atomic_store_n(&s_adv_txp_pending, (uint8_t)1, __ATOMIC_RELEASE);
 	/* Called from od_cmd_config.c's handlers, which run on the loop thread -- safe to request
 	 * a restart directly. Only meaningful if something is actually on-air to refresh; if not
 	 * yet active the next natural start already picks up the new config. */
@@ -1062,10 +1049,9 @@ void opendisplay_ble_init(void)
 
 	od_adv_set_payload(&s_adv, msd_payload);
 	od_adv_request_start(&s_adv);
-	/* Advertising itself, device-name computation, and the TX-power apply all happen inside
-	 * od_hal_adv_start() on the first opendisplay_ble_process() pass (called from main.c
-	 * immediately after this function returns), not synchronously here -- so s_dev_name is
-	 * not yet valid at this log line, unlike the old "BLE ready as %s" line it replaces. */
+	/* Advertising, device-name computation, and the TX-power apply all happen on the first
+	 * opendisplay_ble_process() pass (called from main.c immediately after this function
+	 * returns), not synchronously here -- so s_dev_name is not yet valid at this log line. */
 	od_log_info("BLE init complete, advertising requested");
 }
 

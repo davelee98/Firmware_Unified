@@ -200,6 +200,7 @@ bool od_xfer_app_refresh(uint8_t mode, bool *completed)
 {
     (void)mode;
     ++g_refresh;
+    g_now_ms += 30000u;
     if (!g_refresh_ok || completed == NULL) return false;
     *completed = g_refresh_completed;
     return true;
@@ -329,6 +330,7 @@ static void test_start_and_auto_end(void)
     CHECK(od_xfer_owns_hardware() && od_xfer_frames_may_arrive());
 
     data[0] = 0u;
+    g_now_ms = 1334u;
     CHECK(od_pipe_data(&data_ctx, od_span_make(data, sizeof data)) == OD_CMD_OK);
     CHECK(g_written == 32u && g_write == 1u);
     CHECK(g_reply_n == 4u);
@@ -338,6 +340,7 @@ static void test_start_and_auto_end(void)
     CHECK(g_barrier == 1u && g_refresh == 1u && !od_xfer_frames_may_arrive());
     CHECK(log_count_prefix(OD_LOG_INFO, "DW complete:") == 1u);
     CHECK(log_contains(OD_LOG_INFO, "PIPE full rx=0.0KB wr=0.0/0.0KB n=1"));
+    CHECK(log_contains(OD_LOG_INFO, "t=0.1s r=0.3KB/s"));
     CHECK(log_contains(OD_LOG_INFO, "p[f=1 a=1 r=0 d=0 q=0]"));
 #if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_DEBUG
     CHECK(log_contains(OD_LOG_DEBUG,

@@ -277,6 +277,9 @@ od_cmd_result_t od_xfer_partial_end_impl(const od_cmd_ctx_t *ctx, od_span_t body
                                      OD_XFER_ABORT_INCOMPLETE);
     }
 
+    state->finalized_ms = od_xfer_app_now_ms();
+    state->finalized = true;
+
     if (od_xfer_reply_app(ctx, ack, (uint16_t)sizeof ack) != OD_TXQ_OK) {
 #if OD_LOG_EFFECTIVE_LEVEL >= OD_LOG_ERROR
         od_xfer_terminal_capture(&snapshot);

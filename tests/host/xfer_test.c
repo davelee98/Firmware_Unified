@@ -267,6 +267,7 @@ bool od_xfer_app_refresh(uint8_t mode, bool *completed)
     ++g_refresh_calls;
     CHECK(mode <= 2u);
     CHECK(log_count_prefix(OD_LOG_INFO, "DW complete:") == 0u);
+    g_now_ms += 30000u;
     if (completed != NULL) {
         *completed = g_refresh_completed;
     }
@@ -664,8 +665,12 @@ static void test_partial(void)
     CHECK(od_xfer_data(&owner, od_span_make(&a, 1u)) == OD_CMD_OK);
     CHECK(od_xfer_data(&owner, od_span_make(&b, 1u)) == OD_CMD_OK);
     CHECK(g_offsets[0] == 0u && g_offsets[1] == 1u);
+    g_now_ms = 2234u;
     CHECK(od_xfer_end(&owner, od_span_none()) == OD_CMD_OK);
     CHECK(g_etag == 0x55667788u && g_refresh_calls == 1u);
+    CHECK(logged(OD_LOG_INFO,
+                 "DW complete: direct partial rx=0.0KB wr=0.0/0.0KB n=2 "
+                 "t=1.0s r=0.0KB/s"));
 
     CASE("partial validation clears etag and replies plain");
     setup();
