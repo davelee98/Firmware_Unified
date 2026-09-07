@@ -7,8 +7,12 @@
 #include "od_nrf51_profile.h"
 #include "od_nrf51_slim.h"
 
+#ifdef OD_NRF51_PANEL_HOST_TEST
+#include "fake_nrf51_panel.h"
+#else
 #include <nrf.h>
 #include <nrf_soc.h>
+#endif
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -34,24 +38,40 @@ static uint32_t refresh_started_ms;
 
 static void pin_set(unsigned pin)
 {
+#ifdef OD_NRF51_PANEL_HOST_TEST
+    od_nrf51_panel_test_pin_set(pin);
+#else
     NRF_GPIO->OUTSET = 1u << pin;
+#endif
 }
 
 static void pin_clear(unsigned pin)
 {
+#ifdef OD_NRF51_PANEL_HOST_TEST
+    od_nrf51_panel_test_pin_clear(pin);
+#else
     NRF_GPIO->OUTCLR = 1u << pin;
+#endif
 }
 
 static bool pin_read(unsigned pin)
 {
+#ifdef OD_NRF51_PANEL_HOST_TEST
+    return od_nrf51_panel_test_pin_read(pin);
+#else
     return ((NRF_GPIO->IN >> pin) & 1u) != 0u;
+#endif
 }
 
 static void pin_output(unsigned pin)
 {
+#ifdef OD_NRF51_PANEL_HOST_TEST
+    od_nrf51_panel_test_pin_output(pin);
+#else
     NRF_GPIO->PIN_CNF[pin] =
         (GPIO_PIN_CNF_DIR_Output << GPIO_PIN_CNF_DIR_Pos) |
         (GPIO_PIN_CNF_INPUT_Disconnect << GPIO_PIN_CNF_INPUT_Pos);
+#endif
 }
 
 static void delay_ms(uint32_t duration)
@@ -64,11 +84,14 @@ static void delay_ms(uint32_t duration)
 
 static bool spi_byte(uint8_t value)
 {
-    const uint32_t start = od_nrf51_now_ms();
-
     if (!powered) {
         return false;
     }
+#ifdef OD_NRF51_PANEL_HOST_TEST
+    return od_nrf51_panel_test_spi(value);
+#else
+    const uint32_t start = od_nrf51_now_ms();
+
     NRF_SPI0->EVENTS_READY = 0u;
     NRF_SPI0->TXD = value;
     while (NRF_SPI0->EVENTS_READY == 0u) {
@@ -79,6 +102,7 @@ static bool spi_byte(uint8_t value)
     }
     (void)NRF_SPI0->RXD;
     return true;
+#endif
 }
 
 static bool command(uint8_t value)
@@ -156,7 +180,11 @@ void od_nrf51_panel_abort(void)
         pin_clear(PIN_RESET);
         pin_clear(PIN_DC);
         pin_set(PIN_CS);
+#ifdef OD_NRF51_PANEL_HOST_TEST
+        od_nrf51_panel_test_disable();
+#else
         NRF_SPI0->ENABLE = SPI_ENABLE_ENABLE_Disabled;
+#endif
     }
     powered = false;
     refreshing = false;
@@ -187,6 +215,9 @@ bool od_nrf51_panel_begin(void)
     pin_output(PIN_DC);
     pin_output(PIN_RESET);
     pin_output(PIN_BS);
+#ifdef OD_NRF51_PANEL_HOST_TEST
+    od_nrf51_panel_test_configure(PIN_SCLK, PIN_MOSI, PIN_BUSY);
+#else
     NRF_GPIO->PIN_CNF[PIN_BUSY] = GPIO_PIN_CNF_PULL_Pullup << GPIO_PIN_CNF_PULL_Pos;
     pin_clear(PIN_SCLK);
     pin_clear(PIN_MOSI);
@@ -198,6 +229,7 @@ bool od_nrf51_panel_begin(void)
     NRF_SPI0->FREQUENCY = SPI_FREQUENCY_FREQUENCY_M2;
     NRF_SPI0->CONFIG = 0u;
     NRF_SPI0->ENABLE = SPI_ENABLE_ENABLE_Enabled;
+#endif
     powered = true;
     refreshing = false;
     powering_off = false;

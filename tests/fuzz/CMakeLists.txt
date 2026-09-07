@@ -11,17 +11,22 @@
 #
 # Run one directly:
 #   build/fuzz/od_fuzz_session_open_sealed -max_total_time=60 tests/fuzz/corpus/session_open_sealed
-# A crash writes its input to ./crash-<sha1>; add it to the corpus AND pin it as a numbered case
-# in session_test.c, so the regression fails the ordinary gcc+clang run rather than only a fuzz
-# run nobody triggers.
+# A crash writes its input beside the invoked binary unless `-artifact_prefix` is supplied; add it
+# to the source corpus AND pin it as a numbered case in session_test.c, so the regression fails the
+# ordinary gcc+clang run rather than only a fuzz run nobody triggers.
 
 set(OD_FUZZ_FLAGS -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -g)
+
+# libFuzzer writes new coverage units to its first corpus directory. Keep that writable corpus
+# in the build tree and use the source tree only for stable, reviewed seeds.
+set(OD_FUZZ_WORK_ROOT ${CMAKE_CURRENT_BINARY_DIR}/work-corpus)
 
 # od_log_test_stub.c is listed here, not carried by od_session_fake: an archive member is only
 # extracted for a symbol already undefined when the linker reaches it, and nothing in a fuzz
 # harness references _od_log, so a stub inside the fake would be skipped and od_log.c pulled from
 # od_shared with no transport under it.
 foreach(target session_open_raw session_open_sealed session_auth)
+    file(MAKE_DIRECTORY ${OD_FUZZ_WORK_ROOT}/${target})
     add_executable(od_fuzz_${target} fuzz_${target}.c ../host/od_log_test_stub.c)
     target_link_libraries(od_fuzz_${target} od_session_fake)
     target_include_directories(od_fuzz_${target} PRIVATE ${CMAKE_CURRENT_LIST_DIR})
@@ -34,12 +39,14 @@ foreach(target session_open_raw session_open_sealed session_auth)
     # ordinary test run stays deterministic in length.
     add_test(NAME fuzz_${target}
              COMMAND od_fuzz_${target} -runs=2000 -print_final_stats=0
+                     ${OD_FUZZ_WORK_ROOT}/${target}
                      ${CMAKE_CURRENT_LIST_DIR}/corpus/${target})
     set_tests_properties(fuzz_${target} PROPERTIES
                          ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
 endforeach()
 
 foreach(target pipe_start pipe_data)
+    file(MAKE_DIRECTORY ${OD_FUZZ_WORK_ROOT}/${target})
     add_executable(od_fuzz_${target}
         fuzz_${target}.c
         fuzz_pipe_support.c)
@@ -49,7 +56,27 @@ foreach(target pipe_start pipe_data)
     target_link_options(od_fuzz_${target} PRIVATE ${OD_FUZZ_FLAGS})
     add_test(NAME fuzz_${target}
              COMMAND od_fuzz_${target} -runs=2000 -print_final_stats=0
+                     ${OD_FUZZ_WORK_ROOT}/${target}
                      ${CMAKE_CURRENT_LIST_DIR}/corpus/${target})
     set_tests_properties(fuzz_${target} PROPERTIES
                          ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
 endforeach()
+
+add_executable(od_fuzz_nrf51_slim
+    fuzz_nrf51_slim.c
+    ../../targets/nrf51-s130/src/slim_protocol.c
+    ../../targets/nrf51-s130/config/lt213a_config.c)
+target_include_directories(od_fuzz_nrf51_slim PRIVATE
+    ../../targets/nrf51-s130/include
+    ../../shared/protocol)
+target_compile_definitions(od_fuzz_nrf51_slim PRIVATE
+    OD_NRF51_BUILD_SHA8="1a2b3c4d")
+target_compile_options(od_fuzz_nrf51_slim PRIVATE ${OD_FUZZ_FLAGS})
+target_link_options(od_fuzz_nrf51_slim PRIVATE ${OD_FUZZ_FLAGS})
+file(MAKE_DIRECTORY ${OD_FUZZ_WORK_ROOT}/nrf51_slim)
+add_test(NAME fuzz_nrf51_slim
+         COMMAND od_fuzz_nrf51_slim -runs=2000 -print_final_stats=0
+                 ${OD_FUZZ_WORK_ROOT}/nrf51_slim
+                 ${CMAKE_CURRENT_LIST_DIR}/corpus/nrf51_slim)
+set_tests_properties(fuzz_nrf51_slim PROPERTIES
+                     ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")

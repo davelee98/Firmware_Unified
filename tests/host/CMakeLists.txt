@@ -165,6 +165,26 @@ target_compile_definitions(od_nrf51_ble_test PRIVATE
 target_link_libraries(od_nrf51_ble_test od_shared)
 add_test(NAME nrf51_ble COMMAND od_nrf51_ble_test)
 
+add_executable(od_nrf51_watchdog_policy_test
+    nrf51_watchdog_policy_test.c
+    ../../targets/nrf51-s130/src/main.c)
+target_include_directories(od_nrf51_watchdog_policy_test PRIVATE
+    fake_nrf51_s130
+    ../../targets/nrf51-s130/include)
+target_compile_definitions(od_nrf51_watchdog_policy_test PRIVATE
+    OD_NRF51_MAIN_HOST_TEST=1)
+add_test(NAME nrf51_watchdog_policy COMMAND od_nrf51_watchdog_policy_test)
+
+add_executable(od_nrf51_panel_trace_test
+    nrf51_panel_trace_test.c
+    ../../targets/nrf51-s130/panel/lt213a_panel.c)
+target_include_directories(od_nrf51_panel_trace_test PRIVATE
+    fake_nrf51_s130
+    ../../targets/nrf51-s130/include)
+target_compile_definitions(od_nrf51_panel_trace_test PRIVATE
+    OD_NRF51_PANEL_HOST_TEST=1)
+add_test(NAME nrf51_panel_trace COMMAND od_nrf51_panel_trace_test)
+
 # span: od_span_t itself. Header-only, so nothing else in this file would compile it on its own
 # terms -- and it is now the single place the config walk's "does this packet fit" arithmetic is
 # written, after fifteen copies of it on the pre-auth surface were collapsed into one. A defect
@@ -1086,6 +1106,9 @@ if(Python3_FOUND AND EXISTS ${OD_REPLAY_SCRIPT})
     if(OD_PYOD_IMPORT EQUAL 0)
         add_test(NAME replay_vectors
                  COMMAND ${Python3_EXECUTABLE} ${OD_REPLAY_SCRIPT} ${OD_VECTORS_DIR})
+        add_test(NAME nrf51_client
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_LIST_DIR}/nrf51_client_test.py)
         # The runner exits non-zero on failure and prints SKIP lines for vectors it cannot
         # express against the host API; those are not failures. It also exits non-zero on an
         # empty corpus — a runner that is green because it found nothing is the exact

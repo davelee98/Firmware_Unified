@@ -1359,10 +1359,10 @@ check "host suite (ASan + UBSan)" host_sanitizers
 #
 # A crash writes its input to ./crash-<sha1>. Commit it to the corpus AND pin it as a numbered
 # case in the corresponding ordinary host test, so the regression fails without fuzzing too.
-FUZZ_TARGETS=(session_open_raw session_open_sealed session_auth pipe_start pipe_data)
+FUZZ_TARGETS=(session_open_raw session_open_sealed session_auth pipe_start pipe_data nrf51_slim)
 
 fuzz_all() {
-    local dir="$BUILD_ROOT/fuzz" t
+    local dir="$BUILD_ROOT/fuzz" t work_corpus
     cmake -S tests/host -B "$dir" -DCMAKE_C_COMPILER=clang >/dev/null \
         && cmake --build "$dir" -j"$(nproc)" || return 1
     # If tests/fuzz ever stops being registered -- a renamed guard, a moved directory -- the loop
@@ -1375,9 +1375,13 @@ fuzz_all() {
     done
     for t in "${FUZZ_TARGETS[@]}"; do
         echo "--- $t (${FUZZ_TIME}s)"
+        # libFuzzer writes new coverage units to its first corpus directory. Keep those
+        # transient discoveries under build/ so a gate never dirties the committed seeds.
+        work_corpus="$dir/work-corpus/$t"
+        mkdir -p "$work_corpus" || return 1
         UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
             "$dir/fuzz/od_fuzz_$t" -max_total_time="$FUZZ_TIME" -runs=2000000 \
-            -print_final_stats=1 "tests/fuzz/corpus/$t" || return 1
+            -print_final_stats=1 "$work_corpus" "tests/fuzz/corpus/$t" || return 1
     done
 }
 
@@ -1394,10 +1398,13 @@ fi
 replay_pinned() {
     if command -v uv >/dev/null 2>&1; then
         uv run --python 3.13 --with 'py-opendisplay==7.14.0' \
-            python tests/host/replay_vectors.py tests/vectors
+            python tests/host/replay_vectors.py tests/vectors &&
+        uv run --python 3.13 --with 'py-opendisplay==7.14.0' \
+            python tests/host/nrf51_client_test.py
     else
         python3 -c 'import opendisplay' 2>/dev/null || return 127
-        python3 tests/host/replay_vectors.py tests/vectors
+        python3 tests/host/replay_vectors.py tests/vectors &&
+        python3 tests/host/nrf51_client_test.py
     fi
 }
 if command -v uv >/dev/null 2>&1 || python3 -c 'import opendisplay' 2>/dev/null; then

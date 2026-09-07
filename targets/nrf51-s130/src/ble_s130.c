@@ -23,6 +23,11 @@
 
 #define OD_SERVICE_UUID 0x2446u
 #define OD_ATT_BUSY (BLE_GATT_STATUS_ATTERR_APP_BEGIN + 0u)
+#define OD_NRF51_BLE_EVENT_BUFFER_SIZE 128u
+
+/* S130 event structs include one write byte; reserve the other MTU-23 value bytes explicitly. */
+typedef char od_nrf51_ble_event_buffer_must_fit[
+    (sizeof(ble_evt_t) + OD_NRF51_NOTIFY_MAX - 1u <= OD_NRF51_BLE_EVENT_BUFFER_SIZE) ? 1 : -1];
 
 static uint16_t connection = BLE_CONN_HANDLE_INVALID;
 static ble_gatts_char_handles_t characteristic;
@@ -345,7 +350,7 @@ static void handle_event(const ble_evt_t *event)
 
 bool od_nrf51_ble_process_one(void)
 {
-    uint8_t event_buffer[128] __attribute__((aligned(4)));
+    uint8_t event_buffer[OD_NRF51_BLE_EVENT_BUFFER_SIZE] __attribute__((aligned(4)));
     uint16_t length = sizeof(event_buffer);
     uint32_t result = sd_ble_evt_get(event_buffer, &length);
 

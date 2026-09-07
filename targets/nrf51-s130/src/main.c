@@ -2,9 +2,13 @@
 #include "od_nrf51_profile.h"
 #include "od_nrf51_slim.h"
 
+#ifdef OD_NRF51_MAIN_HOST_TEST
+#include "fake_nrf51_main.h"
+#else
 #include <nrf.h>
 #include <nrf_nvic.h>
 #include <nrf_soc.h>
+#endif
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -66,6 +70,9 @@ static bool heartbeat_start(void)
 
 static void watchdog_start(void)
 {
+    if (watchdog_started) {
+        return;
+    }
     NRF_WDT->CONFIG =
         (WDT_CONFIG_SLEEP_Run << WDT_CONFIG_SLEEP_Pos) |
         (WDT_CONFIG_HALT_Pause << WDT_CONFIG_HALT_Pos);
@@ -82,6 +89,15 @@ static void watchdog_feed(void)
     }
 }
 
+static void runtime_progress(void)
+{
+    if (od_nrf51_ble_healthy()) {
+        od_nrf51_ble_note_progress();
+        watchdog_feed();
+    }
+}
+
+#ifndef OD_NRF51_MAIN_HOST_TEST
 int main(void)
 {
     od_nrf51_slim_init();
@@ -97,12 +113,36 @@ int main(void)
 
         od_nrf51_slim_tick();
         od_nrf51_ble_flush();
-        if (od_nrf51_ble_healthy()) {
-            od_nrf51_ble_note_progress();
-            watchdog_feed();
-        }
+        runtime_progress();
         if (!had_event) {
             (void)sd_app_evt_wait();
         }
     }
 }
+#else
+void od_nrf51_main_test_reset(void)
+{
+    rtc_epochs = 0u;
+    watchdog_started = false;
+}
+
+bool od_nrf51_main_test_heartbeat_start(void)
+{
+    return heartbeat_start();
+}
+
+void od_nrf51_main_test_watchdog_start(void)
+{
+    watchdog_start();
+}
+
+void od_nrf51_main_test_watchdog_feed(void)
+{
+    watchdog_feed();
+}
+
+void od_nrf51_main_test_runtime_progress(void)
+{
+    runtime_progress();
+}
+#endif
