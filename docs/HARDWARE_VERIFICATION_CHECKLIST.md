@@ -20,6 +20,40 @@ right SHA to reach for; it just isn't a gate this checklist enforces.
 - `CLAUDE.md`'s Status section is the authoritative summary of what's verified; this file is
   the itemized detail behind it. Update both together.
 
+## nRF51822 S130 slim target — LT213A
+
+The target builds and its host tests pass; none of the rows below is hardware-qualified. Use an
+exact GreenTags LT213A tag and record its markings before the first destructive flash.
+
+- [ ] Dump and hash original code Flash, UICR and the factory identity; confirm the nRF51822 RAM
+      variant and preserve a recovery image.
+- [ ] Confirm S130 2.0.1 enables with application RAM beginning at or below `0x20001F00` and at
+      least 512 bytes of measured stack margin remain during the worst transfer/refresh path.
+- [ ] Prove S130 NOBUF+AUTH delivers every MTU-23 Prepare record through
+      `BLE_GATTS_EVT_RW_AUTHORIZE_REQUEST`, accepts Execute and needs no user-memory arena.
+- [ ] Linux/BlueZ and macOS CoreBluetooth issue a standard long write to the Write-Request-only
+      characteristic; Web Bluetooth is either proven or documented unsupported.
+- [ ] Notifications work on first connect and reconnect after `SYS_ATTR_MISSING`; an initiated
+      pairing request is refused promptly without stalling the connection.
+- [ ] Force `BLE_ERROR_NO_TX_PACKETS`; the retained response is sent after `BLE_EVT_TX_COMPLETE`
+      with no loss, duplication or CONFIG_READ reordering.
+- [ ] A competing command receives the target ATT busy error, the link stays connected, and the
+      same client succeeds after the active response producer completes.
+- [ ] Unmodified `py-opendisplay` reads the 133-byte config, version, MSD and NOT_CONFIG auth
+      response; every notification in the capture is at most 20 bytes.
+- [ ] Upload exactly 2,756 uncompressed bytes using 244-byte frames, then repeat with 20-byte
+      frames; both render the expected orientation and report END ACK before refresh success.
+- [ ] Exercise both 3-byte and 7-byte END frames and refresh values 0 and 1; both use the verified
+      full refresh and ignore the optional etag.
+- [ ] Capture the LT213A init, old-plane, new-plane, refresh, power-off and deep-sleep SPI/BUSY
+      trace and compare it byte-for-byte with the pinned donor path.
+- [ ] Overflow, short END, timeout, panel I/O fault, unsubscribe and disconnect abort safely with
+      SPI disabled and panel control pins in their intended low-power state.
+- [ ] WDT runs during sleep: long idle and maximum refresh do not reset, while a lost heartbeat or
+      deliberate loop stall resets within 30 seconds. Record the RTC heartbeat current cost.
+- [ ] Run 100 consecutive uploads including forced disconnects and malformed/unsupported commands;
+      observe no reset, stale state, lost notification or panel wedge.
+
 ---
 
 ## LED runner and panel rail — dedup D1/D2/D8 (2026-08-22)

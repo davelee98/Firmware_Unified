@@ -1,0 +1,153 @@
+{
+  "_meta": {
+    "schema": "opendisplay-wire-vectors/1",
+    "file": "nrf51_dispatch.json",
+    "subject": "nRF51822 constrained production dispatcher",
+    "profiles": "nrf51 vectors exercise the target-local slim dispatcher"
+  },
+  "vectors": [
+    {
+      "id": "dispatch/nrf51-firmware-version-fits-mtu23",
+      "profiles": ["nrf51"],
+      "dir": "h2d",
+      "frame": "0043",
+      "expect": {"reply": "0043020008316132623363346400"},
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored", "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored", "reply_source": "targets/nrf51-s130/src/slim_protocol.c"
+      }
+    },
+    {
+      "id": "dispatch/nrf51-auth-not-configured",
+      "profiles": ["nrf51"],
+      "dir": "h2d",
+      "frame": "005000",
+      "expect": {"reply": "005003"},
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored", "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored", "reply_source": "targets/nrf51-s130/src/slim_protocol.c"
+      }
+    },
+    {
+      "id": "dispatch/nrf51-config-read-mtu23-chunks",
+      "profiles": ["nrf51"],
+      "dir": "h2d",
+      "frame": "0040",
+      "expect": {
+        "replies": [
+          "0040000085008500010001ffff0100ff00000000",
+          "004001000000000000000000000000ffff010200",
+          "0040020000000000000000000000000000000000",
+          "00400300000000000002040100000000000000ff",
+          "00400400ff00000000000000000000ffff000000",
+          "0040050000000000000320000113006800d40000",
+          "00400600000000000001030402011e00000800ff",
+          "0040070000000000000000000000000000000000",
+          "0040080000000000000907"
+        ]
+      },
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored", "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored", "reply_source": "targets/nrf51-s130/config/lt213a_config.c"
+      }
+    },
+    {
+      "id": "dispatch/nrf51-config-write-refused",
+      "profiles": ["nrf51"],
+      "dir": "h2d",
+      "frame": "004101",
+      "expect": {"reply": "ff41"},
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored", "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored", "reply_source": "targets/nrf51-s130/src/slim_protocol.c"
+      }
+    },
+    {
+      "id": "dispatch/nrf51-direct-start-parameter-refused",
+      "profiles": ["nrf51"],
+      "dir": "h2d",
+      "frame": "007001",
+      "expect": {"reply": "ff70"},
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored", "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored", "reply_source": "targets/nrf51-s130/src/slim_protocol.c"
+      }
+    },
+    {
+      "id": "dispatch/nrf51-direct-data-without-start",
+      "profiles": ["nrf51"],
+      "dir": "h2d",
+      "frame": "0071aa",
+      "expect": {"reply": "ff71"},
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored", "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored", "reply_source": "targets/nrf51-s130/src/slim_protocol.c"
+      }
+    },
+    {
+      "id": "dispatch/nrf51-direct-end-incomplete",
+      "profiles": ["nrf51"],
+      "dir": "h2d",
+      "frame": "007200",
+      "state": {"xfer_active": true},
+      "expect": {"reply": "ff72"},
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored", "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored", "reply_source": "targets/nrf51-s130/src/slim_protocol.c"
+      }
+    },
+    {
+      "id": "dispatch/nrf51-partial-refused",
+      "profiles": ["nrf51"],
+      "dir": "h2d",
+      "frame": "0076",
+      "expect": {"reply": "ff760700"},
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored", "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored", "reply_source": "targets/nrf51-s130/src/slim_protocol.c"
+      }
+    },
+    {
+      "id": "dispatch/nrf51-pipe-refused",
+      "profiles": ["nrf51"],
+      "dir": "h2d",
+      "frame": "0080",
+      "expect": {"reply": "ff80"},
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored", "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored", "reply_source": "targets/nrf51-s130/src/slim_protocol.c"
+      }
+    },
+    {
+      "id": "dispatch/nrf51-unknown-is-silent",
+      "profiles": ["nrf51"],
+      "dir": "h2d",
+      "frame": "1234",
+      "expect": {"reply": null},
+      "proof": "target-production",
+      "origin": "ble",
+      "provenance": {
+        "frame": "authored", "frame_source": "shared/protocol/opendisplay_protocol.h",
+        "reply": "authored", "reply_source": "targets/nrf51-s130/src/slim_protocol.c"
+      }
+    }
+  ]
+}

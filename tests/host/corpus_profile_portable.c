@@ -65,6 +65,8 @@ unsigned od_corpus_profile_caps(void)
     return OD_VEC_CAP_PIPE | OD_VEC_CAP_CONFIG_4K | OD_VEC_CAP_RXQ;
 }
 
+unsigned od_corpus_profile_mask(void) { return OD_VEC_PROFILE_FULL; }
+
 /* Every hook here is a behaviour fixture, so the historical shapes are exactly
  * what it exists to reach. */
 bool od_corpus_profile_is_production(void) { return false; }

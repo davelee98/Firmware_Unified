@@ -66,7 +66,7 @@ test-scope narrative in this file, it belongs in the checklist instead.
   test runs, and read it (not this file) for row-level evidence.
 - **No CI.** `tools/check.sh` (repo root) is the only gate, and nothing runs it but you. Plain
   invocation covers host tests, sanitizers, fuzz targets and the wire corpus; `--targets` adds all
-  three target families and is required before merge. A skip is not a pass — read the summary,
+  four target families and is required before merge. A skip is not a pass — read the summary,
   which exits 2 on any skip.
 - `targets/esp32-idf/build.sh` builds every board fragment (sources ESP-IDF itself; never on
   `PATH`). `targets/esp32-idf/tools/run_host_tests.sh` runs host tests without ESP-IDF.
@@ -74,13 +74,16 @@ test-scope narrative in this file, it belongs in the checklist instead.
   `release/MANIFEST-<target>.txt` + one top-level summary and a log per target. `--list` prints
   the target table; every target still runs even if an earlier one fails. It does not activate
   any toolchain — export what each target's script expects first (docs/TOOLCHAINS.md).
-- **`shared/{core,hal}` implements the whole protocol stack** — dispatch, config, transfer
+- **`shared/{core,hal}` implements the whole protocol stack for the three full-stack targets** — dispatch, config, transfer
   (pump/direct/partial/PIPE/NFC), session/crypto, logging, watchdog, advertising, GT911 touch,
   buzzer, config storage — composed per target in named tiers from `shared/sources.cmake` (never
-  globbed; that file is the ground truth for which target takes which tier). No promoted
-  subsystem has a target-side reimplementation — enforced by the absence ratchets in
-  `tools/check.sh` and "The one rule" below. Layering and the `od_hal_*` interface contracts are
-  `docs/SHARED_API_DESIGN.md`.
+  globbed; that file is the ground truth for which target takes which tier). The experimental
+  `nrf51-s130` target is the explicit constrained-profile exception in decision 16. Absence
+  ratchets continue to cover every full-stack target, with separate bounded-reset checks for the
+  slim target. Layering and the `od_hal_*` contracts are `docs/SHARED_API_DESIGN.md`.
+- **Experimental nRF51822 target:** `targets/nrf51-s130` builds a 104 × 212 LT213A-only,
+  ATT-MTU-23 firmware against S130 2.0.1; all hardware qualification remains open in
+  `docs/HARDWARE_VERIFICATION_CHECKLIST.md`.
 - **Command/dispatch/session/rxq/watchdog/crypto path is shared on ESP32 and Nordic**, both
   hardware-verified for PIPE upload, config read/write and (ESP32 only) `CMD_PARTIAL_WRITE`,
   plaintext and encrypted — checklist has the per-opcode rows. `docs/OD_SESSION.md` is the
@@ -108,11 +111,10 @@ test-scope narrative in this file, it belongs in the checklist instead.
 - **Never hardware-verified:** the WiFi/LAN transport, and the F4/F7 correctness fixes.
 - Arduino shim fully removed from `esp32-idf` (docs/ARCHIVE_esp32_arduino_shim.md);
   `targets/esp32-idf/vendor/fastepd/` is its permanent (non-shim) FastEPD adapter.
-- **The wire corpus (`tests/vectors/dispatch.json`) is checked from both ends**:
-  `tests/host/corpus_runner.c` drives it through firmware's own `od_dispatch_frame()` (previously
-  only py-opendisplay's side was checked), across three target-composition executables with
-  different semantic guarantees — see that file's header comments for what each profile does and
-  doesn't prove before trusting a pass.
+- **The wire corpus (`tests/vectors/*.json`) is checked from both ends**:
+  `tests/host/corpus_runner.c` drives the three full-stack profiles through `od_dispatch_frame()`
+  and the nRF51 profile through its production slim route entry. See that file's header comments
+  for what each profile does and doesn't prove before trusting a pass.
 - Live plan: `plans/PLAN_TRANSFER_PHASE45_2026-08-20.md` — complete; its hardware rows are the
   outstanding work, not its steps. Earlier transfer-sequence plans and `docs/NEXT_STEPS.md` are
   superseded/historical.
@@ -151,8 +153,8 @@ before proposing anything under `shared/`; extend the pattern as targets are imp
    reliably loses. That is also the last point where switching is cheap.
 2. **One vtable, deliberately** — `od_panel_ops` (`targets/esp32-idf/hal/od_hal_panel.h`), for the
    one target with 2-3 panel backends. Keep it the only one.
-3. **Three toolchains stay three** (ESP-IDF, west/Zephyr, SLC), all CMake. Unification is about
-   shared *source*.
+3. **Four toolchains stay four** (ESP-IDF, west/Zephyr, SLC, Nordic SDK 12.3/S130), all CMake.
+   Unification is about shared *source* where the target can afford it.
 4. **Grouped by silicon vendor, not repo of origin.** nRF52840 is a *board* on `nordic-zephyr`,
    sharing its BT host, PSA Crypto, NVS and panel stack.
 5. **No PlatformIO, no Arduino** — no `platformio.ini`, `lib_deps`, Arduino APIs or `build_flags`
@@ -161,9 +163,10 @@ before proposing anything under `shared/`; extend the pattern as targets are imp
    (superloop + `sl_power_manager`).
 7. **No Kconfig in `shared/`'s config surface** — Silabs lacks it. Plain preprocessor constants;
    Kconfig is only how two targets set them.
-8. **No `targets/nrf52-sdk/`.** Legacy nRF52 stays in `Firmware_NRF` and sets the host's compat
-   floor (no compression, no `0x76`, no PIPE, no NFC). A dir under `targets/` means "a target this
-   repo builds".
+8. **No generic `targets/nrf52-sdk/`.** Legacy nRF52811 stays in `Firmware_NRF` and remains the
+   full-profile compatibility floor (no compression, no `0x76`, no PIPE, no NFC). The explicit
+   `nrf51-s130` target is narrower still: read-only config, no auth challenge, and 20-byte maximum
+   notifications. Host tooling must treat that constrained profile as the fleet worst case.
 9. **No lowest-common-denominator features.** Differences (PSRAM, ROM inflate, panel families,
    PIPE — absent on Silabs) go behind config and `#if`; a target must not pay for a feature it
    lacks.
@@ -204,12 +207,22 @@ before proposing anything under `shared/`; extend the pattern as targets are imp
     `py-opendisplay` must keep rejecting uploads, and firmware must keep rejecting operational
     use, until a separate device-qualified protocol/backend plan defines and tests the encoding.
     See `plans/PLAN_OD_COLOR_2026-08-18.md` § 2.1.
+16. **nRF51822 is an explicit slim-stack exception** (2026-09-06). S130 leaves 18,432 bytes of
+    application Flash and 8,448 bytes of RAM, so `targets/nrf51-s130` reimplements only the bounded
+    config/version/MSD and uncompressed direct-write subset and links no `OD_SHARED_SOURCES` tier.
+    It keeps canonical headers and ordinary command frames, uses ATT Prepare/Execute for frames up
+    to 244 bytes, emits notifications no larger than 20 bytes, and has no authentication, config
+    writes, compression, partial, PIPE, NFC or DFU. Its immutable config uses the target-local
+    `OD_NRF51_STATIC_CONFIG_MAX_SIZE=1024`; it does not alter `OD_CONFIG_MAX_SIZE` or the shared
+    config-assembly ABI. Full-stack ownership ratchets remain scoped to the three full targets;
+    slim reset/size/response checks are separate. See `plans/PLAN_NRF51822_SLIM_2026-09-06.md`.
 
 ## Layout
 
 `shared/{protocol,core,compress,hal}` — wire contract / dispatch + config + transfer + auth /
 inflate engines / interfaces targets implement.
-`targets/{esp32-idf,nordic-zephyr,efr32bg22-slc}` — chip drivers + build system + HAL impl.
+`targets/{esp32-idf,nordic-zephyr,efr32bg22-slc}` — full-stack targets; `targets/nrf51-s130` —
+constrained S130/LT213A composition.
 `third_party/` vendored cross-target libs (bb_epaper); `tools/`; `docs/`.
 
 ## Toolchains
@@ -221,10 +234,12 @@ Installed, but **none on `PATH`** — `which idf.py west` returning nothing ≠ 
 | ESP-IDF | v5.5.4 | `source ~/esp/esp-idf/export.sh` |
 | nRF Connect SDK / west | v3.3.1 / west v1.5.0 | `nrfutil toolchain-manager launch --ncs-version v3.3.1 -- <cmd>` |
 | Simplicity SDK | 2025.12.2 | `slt`; `slc` also needs the bundled Java on `PATH` |
+| Nordic nRF5 SDK / S130 | 12.3.0 / 2.0.1 | export `NRF5_SDK_ROOT`; put GNU Arm Embedded on `PATH` |
 
 Pin one ESP-IDF release; floors ≥ 5.1 (C6), ≥ 5.2 (`driver/i2c_master.h` — not the deprecated
-`driver/i2c.h`). Only ESP-IDF has built anything here. **Do not claim a build passes without
-running it.** docs/TOOLCHAINS.md has the version pins and the Arduino-API replacement census.
+`driver/i2c.h`). ESP-IDF and the nRF51/S130 target have built here; that says nothing about nRF51
+hardware qualification. **Do not claim a build passes without running it.** docs/TOOLCHAINS.md has
+the version pins and the Arduino-API replacement census.
 
 ## Protocol header — do not hand-edit
 

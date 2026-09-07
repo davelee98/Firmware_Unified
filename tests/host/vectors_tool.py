@@ -63,6 +63,10 @@ ORIGINS = {"ble", "lan-plain", "lan-tls"}
 #                         fixture reproduces it, and it may never be counted as target coverage
 PROOFS = {"shared", "target-production", "historical-fixture"}
 
+# Dispatcher compositions. `full` is the promoted shared stack; `nrf51` is the intentionally
+# separate constrained route table. A missing field retains the historical full-stack scope.
+PROFILES = {"full", "nrf51"}
+
 # How the bytes on each side came to be. See the C12 plan section 2.4: the corpus is NOT uniformly
 # authored, whatever FOLLOWUPS.md said -- several vectors copy real captures whose provenance was
 # never recorded, and pretending otherwise would let unattributed bytes pass as a regression
@@ -211,6 +215,15 @@ def check_file(path: pathlib.Path) -> list[dict]:
 
 
 def _check_vector(raw: dict) -> dict:
+    profiles = raw.get("profiles", ["full"])
+    if not isinstance(profiles, list) or not profiles:
+        raise Bad("`profiles` must be a non-empty array")
+    if len(set(profiles)) != len(profiles):
+        raise Bad("`profiles` has a duplicate")
+    unknown_profiles = set(profiles) - PROFILES
+    if unknown_profiles:
+        raise Bad(f"`profiles` names unknown composition(s) {sorted(unknown_profiles)}")
+
     req = raw.get("requires", [])
     forb = raw.get("forbids", [])
     for name, seq in (("requires", req), ("forbids", forb)):
@@ -313,6 +326,7 @@ def _check_vector(raw: dict) -> dict:
         "requires": sorted(req),
         "forbids": sorted(forb),
         "proof": proof,
+        "profiles": sorted(profiles),
         "state": raw.get("state", {}),
         "steps": norm,
     }
@@ -390,13 +404,14 @@ def emit(vectors: list[dict], out: pathlib.Path) -> None:
         sess = "1" if st.get("session") == "live" else "0"
         caps_req = " | ".join(f"OD_VEC_{c.upper()}" for c in v["requires"]) or "0u"
         caps_forb = " | ".join(f"OD_VEC_{c.upper()}" for c in v["forbids"]) or "0u"
+        profiles = " | ".join(f"OD_VEC_PROFILE_{p.upper()}" for p in v["profiles"])
         L.append(
             f'    {{"{v["id"]}", &k_steps[{step_base[vi]}], {len(v["steps"])}, '
             f'OD_PROOF_{v["proof"].upper().replace("-", "_")}, {caps_req}, {caps_forb}, '
             f'{int(bool(st.get("sec_enabled")))}, {sess}, '
             f'{int(bool(st.get("xfer_active")))}, {int(st.get("storage_ok", True))}, '
             f'{int(bool(st.get("fw_patch_byte", True)))}, '
-            f'"{st.get("fw_sha", "")}"}},')
+            f'"{st.get("fw_sha", "")}", {profiles}}},')
     L.append("};")
     L.append("")
     out.write_text("\n".join(L) + "\n")
@@ -442,11 +457,9 @@ def main(argv: list[str]) -> int:
     dispatch = [v for v in every if v["id"].startswith("dispatch/")]
     h2d = [v for v in dispatch if any(s["dir"] == "h2d" for s in v["steps"])]
     d2h_only = [v for v in dispatch if all(s["dir"] == "d2h" for s in v["steps"])]
-    # +6 at Phase 4 step 8: the 0x0083 vectors, addable only once dispatch reached the shared
-    # machine. All six are h2d.
-    for got, want, what in ((len(every), 33, "total vectors"),
-                            (len(dispatch), 26, "dispatch vectors"),
-                            (len(h2d), 23, "h2d dispatch vectors"),
+    for got, want, what in ((len(every), 43, "total vectors"),
+                            (len(dispatch), 36, "dispatch vectors"),
+                            (len(h2d), 33, "h2d dispatch vectors"),
                             (len(d2h_only), 3, "d2h-only dispatch vectors")):
         if got != want:
             print(f"corpus accounting: {what} is {got}, expected {want}. If this change is "

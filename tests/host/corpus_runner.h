@@ -1,6 +1,6 @@
 /* corpus_runner.h -- the shape of the generated vector table, and the seam a proof profile fills.
  *
- * ONE RUNNER, THREE EXECUTABLES. `od_cmd_app_*` is static link-time composition (C11), so multiple sets of
+ * ONE RUNNER, FOUR EXECUTABLES. `od_cmd_app_*` is static link-time composition (C11), so multiple sets of
  * hook definitions cannot coexist in one binary -- and the fix for that is emphatically NOT a
  * runtime registry, which C11's plan rejected for the same reason it rejected a vtable. Each
  * executable links the same runner and generated table against ONE profile, and resolves the seam
@@ -30,6 +30,9 @@
 #define OD_VEC_CAP_NFC          0x10u
 #define OD_VEC_CAP_CONFIG_4K    0x20u
 #define OD_VEC_CAP_RXQ          0x40u
+
+#define OD_VEC_PROFILE_FULL     0x01u
+#define OD_VEC_PROFILE_NRF51    0x02u
 
 /* What a passing vector is entitled to CLAIM. Reported separately so a fixture-produced legacy
  * shape can never be totalled as current target coverage. */
@@ -64,6 +67,7 @@ typedef struct {
     unsigned             storage_ok;
     unsigned             fw_patch_byte;
     const char          *fw_sha;      /* the build SHA this device reports; "" = unspecified */
+    unsigned             profiles;
 } od_vec_t;
 
 /* ------------------------------------------------------------------------ the profile seam --- */
@@ -71,6 +75,10 @@ typedef struct {
 /* Which capabilities this profile presents. A vector whose `requires` are not all present, or any
  * of whose `forbids` are, is excluded and counted as such -- never silently skipped. */
 unsigned od_corpus_profile_caps(void);
+
+/* Composition family this executable proves. Profile selection is independent of capabilities:
+ * nRF51 intentionally has a different dispatcher and command surface. */
+unsigned od_corpus_profile_mask(void);
 
 /* A human name for the report line, e.g. "portable" or "nordic-production". */
 const char *od_corpus_profile_name(void);
@@ -89,6 +97,13 @@ bool od_corpus_profile_is_production(void);
 /* Put the profile's command layer in the state this vector declares, and clear everything left
  * over from the previous one. Called before every vector, never between steps. */
 void od_corpus_profile_reset(const od_vec_t *vec);
+
+#ifdef OD_CORPUS_SLIM
+/* The constrained target has no od_dispatch_frame(). Its production route entry drains replies
+ * through od_corpus_capture(), keeping expectations private to the runner. */
+void od_corpus_profile_dispatch(const uint8_t *frame, uint16_t length);
+void od_corpus_capture(const uint8_t *frame, uint16_t length);
+#endif
 
 /* SEMANTIC KNOBS the profile reads while serving a vector. They are inputs a device would really
  * have -- a version, a driver's return code -- not wire bytes. */

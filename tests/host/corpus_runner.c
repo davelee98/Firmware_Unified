@@ -20,6 +20,7 @@
 
 #include "corpus_runner.h"
 
+#ifndef OD_CORPUS_SLIM
 #include "od_config_read.h"
 #include "od_dispatch.h"
 #include "od_reply.h"
@@ -27,6 +28,7 @@
 #include "od_session_app.h"
 #include "od_txq.h"
 #include "session_fake.h"
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -50,15 +52,26 @@ static unsigned g_checks;
 static struct { uint16_t len; uint8_t data[SENT_LEN]; } g_sent[SENT_MAX];
 static unsigned g_sent_n;
 
-od_radio_result_t od_hal_radio_send(od_origin_t origin, uint32_t tag,
-                                    const uint8_t *frame, uint16_t len)
+static void capture(const uint8_t *frame, uint16_t len)
 {
-    (void)origin; (void)tag;
     if (g_sent_n < SENT_MAX) {
         g_sent[g_sent_n].len = len;
         memcpy(g_sent[g_sent_n].data, frame, (len < SENT_LEN) ? len : SENT_LEN);
         ++g_sent_n;
     }
+}
+
+#ifdef OD_CORPUS_SLIM
+void od_corpus_capture(const uint8_t *frame, uint16_t len)
+{
+    capture(frame, len);
+}
+#else
+od_radio_result_t od_hal_radio_send(od_origin_t origin, uint32_t tag,
+                                    const uint8_t *frame, uint16_t len)
+{
+    (void)origin; (void)tag;
+    capture(frame, len);
     return OD_RADIO_SENT;
 }
 
@@ -101,6 +114,7 @@ void od_core_frame_done(const od_reply_t *rp, od_frame_outcome_t outcome)
 {
     (void)rp; (void)outcome;
 }
+#endif
 
 struct od_corpus_knobs od_corpus_knobs;
 
@@ -124,6 +138,7 @@ static void hex(const uint8_t *b, size_t n, char *out, size_t cap)
  * behind od_session's back, which would test a state the firmware cannot actually be in. */
 static bool arm(const od_vec_t *v)
 {
+#ifndef OD_CORPUS_SLIM
     uint8_t server_nonce[16];
 
     fake_reset();
@@ -150,13 +165,25 @@ static bool arm(const od_vec_t *v)
         g_sent_n = 0u;
         od_txq_reset();
     }
+#else
+    g_sent_n = 0u;
+    od_corpus_knobs.xfer_active = v->xfer_active;
+    od_corpus_knobs.storage_ok = v->storage_ok;
+    od_corpus_knobs.fw_patch_byte = v->fw_patch_byte;
+    od_corpus_knobs.fw_sha = v->fw_sha;
+    od_corpus_knobs.caps = od_corpus_profile_caps();
+    od_corpus_profile_reset(v);
+    if (v->sec_enabled || v->session_live) {
+        return false;
+    }
+#endif
     return true;
 }
 
 /* ----------------------------------------------------------------------------------- cases --- */
 
 struct totals {
-    unsigned discovered, executed, d2h_only, excluded, excluded_historical;
+    unsigned discovered, executed, d2h_only, excluded, excluded_profile, excluded_historical;
     unsigned by_proof[3];
 };
 
@@ -166,6 +193,11 @@ static void run_vector(const od_vec_t *v, struct totals *t)
     unsigned si;
 
     ++t->discovered;
+
+    if ((v->profiles & od_corpus_profile_mask()) == 0u) {
+        ++t->excluded_profile;
+        return;
+    }
 
     if ((v->requires_caps & ~caps) != 0u || (v->forbids_caps & caps) != 0u) {
         /* Counted, not skipped. A predicate exclusion is a statement about the profile, and an
@@ -197,7 +229,6 @@ static void run_vector(const od_vec_t *v, struct totals *t)
 
     for (si = 0u; si < v->step_n; ++si) {
         const od_vec_step_t *s = &v->steps[si];
-        od_reply_t rp;
         unsigned i;
 
         if (s->d2h) {
@@ -208,6 +239,10 @@ static void run_vector(const od_vec_t *v, struct totals *t)
         }
 
         g_sent_n = 0u;
+#ifdef OD_CORPUS_SLIM
+        od_corpus_profile_dispatch(s->frame, (uint16_t)s->frame_len);
+#else
+        od_reply_t rp;
         rp.origin = s->origin;
         rp.tag = 9u;
         {
@@ -216,6 +251,7 @@ static void run_vector(const od_vec_t *v, struct totals *t)
             od_core_frame_done(&rp, outcome);
         }
         (void)od_txq_process();
+#endif
         ++t->executed;
         ++g_checks;
 
@@ -262,9 +298,10 @@ int main(void)
     }
 
     printf("corpus[%s]: %u discovered, %u h2d steps executed, %u d2h direction-only, "
-           "%u excluded by predicate, %u historical (not production-provable)\n",
-           od_corpus_profile_name(), t.discovered, t.executed, t.d2h_only, t.excluded,
-           t.excluded_historical);
+           "%u excluded by profile, %u excluded by predicate, "
+           "%u historical (not production-provable)\n",
+           od_corpus_profile_name(), t.discovered, t.executed, t.d2h_only, t.excluded_profile,
+           t.excluded, t.excluded_historical);
     printf("corpus[%s]: shared=%u target-production=%u historical-fixture=%u\n",
            od_corpus_profile_name(), t.by_proof[OD_PROOF_SHARED],
            t.by_proof[OD_PROOF_TARGET_PRODUCTION], t.by_proof[OD_PROOF_HISTORICAL_FIXTURE]);

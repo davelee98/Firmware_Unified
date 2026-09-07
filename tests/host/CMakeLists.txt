@@ -132,6 +132,39 @@ add_executable(od_canary canary.c)
 target_link_libraries(od_canary od_shared)
 add_test(NAME canary COMMAND od_canary)
 
+# nRF51822 deliberately owns a tiny protocol composition rather than linking the full shared
+# stack. Compile that production slice directly so its 20-byte response ceiling, immutable
+# config, long-write assembler and bufferless panel transfer remain host-testable.
+add_executable(od_nrf51_slim_test
+    nrf51_slim_test.c
+    od_log_test_stub.c
+    ../../targets/nrf51-s130/src/slim_protocol.c
+    ../../targets/nrf51-s130/src/att_long_write.c
+    ../../targets/nrf51-s130/config/lt213a_config.c)
+target_include_directories(od_nrf51_slim_test PRIVATE
+    ../../targets/nrf51-s130/include
+    ../../shared/protocol)
+target_link_libraries(od_nrf51_slim_test od_shared)
+add_test(NAME nrf51_slim COMMAND od_nrf51_slim_test)
+
+# The production S130 event/egress translation compiled against a narrow fake SoftDevice ABI.
+# This pins authorization, NOBUF, CCC, pairing/system-attribute handling and retained HVX output.
+add_executable(od_nrf51_ble_test
+    nrf51_ble_test.c
+    ../../targets/nrf51-s130/src/ble_s130.c
+    ../../targets/nrf51-s130/src/slim_protocol.c
+    ../../targets/nrf51-s130/src/att_long_write.c
+    ../../targets/nrf51-s130/config/lt213a_config.c)
+target_include_directories(od_nrf51_ble_test PRIVATE
+    fake_nrf51_s130
+    ../../targets/nrf51-s130/include
+    ../../shared/protocol)
+target_compile_definitions(od_nrf51_ble_test PRIVATE
+    OD_NRF51_BLE_HOST_TEST=1
+    OD_NRF51_BUILD_SHA8="1a2b3c4d")
+target_link_libraries(od_nrf51_ble_test od_shared)
+add_test(NAME nrf51_ble COMMAND od_nrf51_ble_test)
+
 # span: od_span_t itself. Header-only, so nothing else in this file would compile it on its own
 # terms -- and it is now the single place the config walk's "does this packet fit" arithmetic is
 # written, after fifteen copies of it on the pre-auth surface were collapsed into one. A defect
@@ -782,7 +815,7 @@ if(Python3_FOUND)
     add_test(NAME vectors_schema
              COMMAND ${Python3_EXECUTABLE} ${OD_VEC_TOOL} --audit ${OD_VEC_DIR})
 
-    # ONE runner source, THREE executables. od_cmd_app_* is static link-time composition, so
+    # ONE runner source, FOUR executables. od_cmd_app_* is static link-time composition, so
     # profiles cannot share a binary -- and the answer to that is emphatically not a runtime
     # registry. Each executable resolves the seam once.
     #
@@ -901,6 +934,24 @@ if(Python3_FOUND)
     target_link_libraries(od_dispatch_corpus_silabs_test od_session_fake_silabs)
     add_dependencies(od_dispatch_corpus_silabs_test od_vectors_generated)
     add_test(NAME dispatch_corpus_silabs COMMAND od_dispatch_corpus_silabs_test)
+
+    # The nRF51822 composition deliberately has no shared dispatcher. OD_CORPUS_SLIM selects the
+    # runner's dispatch-entry seam, and every response still comes from production slim_protocol.c.
+    add_executable(od_dispatch_corpus_nrf51_test
+        corpus_runner.c
+        corpus_profile_nrf51.c
+        ../../targets/nrf51-s130/src/slim_protocol.c
+        ../../targets/nrf51-s130/config/lt213a_config.c
+        ${OD_VEC_INC})
+    target_include_directories(od_dispatch_corpus_nrf51_test PRIVATE
+        ../../targets/nrf51-s130/include
+        ../../shared/protocol)
+    target_compile_definitions(od_dispatch_corpus_nrf51_test PRIVATE
+        OD_CORPUS_SLIM=1
+        OD_NRF51_BUILD_SHA8="1a2b3c4d")
+    target_link_libraries(od_dispatch_corpus_nrf51_test od_shared)
+    add_dependencies(od_dispatch_corpus_nrf51_test od_vectors_generated)
+    add_test(NAME dispatch_corpus_nrf51 COMMAND od_dispatch_corpus_nrf51_test)
 
     # Target-specific failure policy: production BGAPI transport + production command hooks over
     # scripted vendor drivers. This is separate from the corpus because ordering, time and driver
@@ -1021,6 +1072,9 @@ set(OD_REPLAY_SCRIPT ${CMAKE_CURRENT_LIST_DIR}/replay_vectors.py)
 set(OD_VECTORS_DIR   ${CMAKE_CURRENT_LIST_DIR}/../vectors)
 
 if(Python3_FOUND AND EXISTS ${OD_REPLAY_SCRIPT})
+    add_test(NAME nrf51_image
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_LIST_DIR}/nrf51_image_test.py)
     # py-opendisplay must be importable by *this* interpreter. It declares
     # requires-python >=3.13, so a distro python of 3.12 or older cannot host it at all —
     # which is the common local case and must not present as a test failure.

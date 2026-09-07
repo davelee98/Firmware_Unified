@@ -8,6 +8,7 @@
 #   tools/check.sh --targets       also builds ESP32, Nordic, and Silabs targets. Required before
 #                                  merge.
 #   tools/check.sh --esp32         ESP32 only, as --targets used to be
+#   tools/check.sh --nrf51         nRF51822/S130 target only (requires NRF5_SDK_ROOT)
 #   tools/check.sh --fuzz-time 300 longer fuzz budget per target (default 60 s)
 #   tools/check.sh --latest        also replay the corpus against the NEWEST py-opendisplay
 #   tools/check.sh --list          print the checks and exit
@@ -27,14 +28,22 @@ FUZZ_TIME=60
 DO_ESP32=0
 DO_NORDIC=0
 DO_SILABS=0
+DO_NRF51=0
 DO_LATEST=0
+OD_FULL_STACK_TARGETS=(
+    targets/esp32-idf
+    targets/nordic-zephyr
+    targets/efr32bg22-slc
+)
+OD_SLIM_TARGETS=(targets/nrf51-s130)
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --esp32)      DO_ESP32=1 ;;
         --nordic)     DO_NORDIC=1 ;;
         --silabs)     DO_SILABS=1 ;;
-        --targets)    DO_ESP32=1; DO_NORDIC=1; DO_SILABS=1 ;;
+        --nrf51)      DO_NRF51=1 ;;
+        --targets)    DO_ESP32=1; DO_NORDIC=1; DO_SILABS=1; DO_NRF51=1 ;;
         --latest)     DO_LATEST=1 ;;
         --fuzz-time)  FUZZ_TIME="${2:?--fuzz-time needs a value}"; shift ;;
         --list)
@@ -450,10 +459,10 @@ promoted_response_literal_absent() {
     local rc=0
     absent_or_fail "target-side response constant for a promoted opcode returned" \
         '\bRESP_(NFC_ENDPOINT|DIRECT_WRITE_(START|DATA|END)_ACK|DIRECT_WRITE_REFRESH_(SUCCESS|TIMEOUT))\b' \
-        targets || rc=1
+        "${OD_FULL_STACK_TARGETS[@]}" || rc=1
     absent_or_fail "target-side raw response frame for a promoted opcode returned" \
         '\{[[:space:]]*(RESP_ACK|RESP_NACK|0x00u?|0xFFu?)[[:space:]]*,[[:space:]]*0x(7[0126]|8[012])u?' \
-        targets || rc=1
+        "${OD_FULL_STACK_TARGETS[@]}" || rc=1
     return $rc
 }
 check "transfer: no target response literal for a promoted opcode" promoted_response_literal_absent
@@ -480,9 +489,10 @@ check "esp32: securityConfig declared only as a reference" security_config_is_a_
 core_reset_is_the_teardown() {
     local rc=0 d n found=0
 
-    # Discover targets dynamically; each target must contain an od_core_reset() caller. Which file
-    # holds it is the target's business.
-    for d in targets/*/; do
+    # Full-stack targets must reach shared teardown. A constrained target must be added explicitly
+    # below with its own reset seam; silently discovering it here would make the intentional slim
+    # composition fail while a broad exclusion would let future full-stack targets escape.
+    for d in "${OD_FULL_STACK_TARGETS[@]}"; do
         [ -d "$d" ] || continue
         found=1
         n=$(grep -RIlE '\bod_core_reset[[:space:]]*\(' "$d" \
@@ -499,6 +509,70 @@ core_reset_is_the_teardown() {
     return $rc
 }
 check "reset: every target teardown uses od_core_reset" core_reset_is_the_teardown
+
+nrf51_slim_reset_is_the_teardown() {
+    local n
+    n=$(grep -RIlE '\bod_nrf51_slim_reset[[:space:]]*\(' "${OD_SLIM_TARGETS[0]}" \
+        --include='*.c' --include='*.h' --exclude-dir='build*' | wc -l)
+    if [ "$n" -eq 0 ]; then
+        echo "nRF51 slim target has no od_nrf51_slim_reset() caller"
+        return 1
+    fi
+}
+check "reset: nRF51 slim teardown uses its bounded reset seam" nrf51_slim_reset_is_the_teardown
+
+nrf51_slim_structure() {
+    local rc=0 source_hits watchdog_call ble_call
+    local slim_target="${OD_SLIM_TARGETS[0]}"
+    local profile="${slim_target}/include/od_nrf51_profile.h"
+
+    for row in \
+        'OD_NRF51_NOTIFY_MAX[[:space:]]+20u' \
+        'OD_NRF51_MAX_FRAME[[:space:]]+244u' \
+        'OD_NRF51_STATIC_CONFIG_MAX_SIZE[[:space:]]+1024u' \
+        'OD_NRF51_IMAGE_BYTES[[:space:]]+2756u'; do
+        if ! grep -qE "$row" "$profile"; then
+            echo "nRF51 bounded profile row missing: $row"
+            rc=1
+        fi
+    done
+    if grep -RInE '\bOD_SHARED_SOURCES\b|\bOD_CONFIG_MAX_SIZE\b' "$slim_target" \
+         --include='*.cmake' --include='CMakeLists.txt' --include='*.c' --include='*.h'; then
+        echo "nRF51 target must not link a shared tier or create a shared config-assembly ABI"
+        rc=1
+    fi
+    source_hits=$(grep -RInE '\b(malloc|calloc|realloc|free|printf|sprintf)[[:space:]]*\(' \
+        "${slim_target}/src" "${slim_target}/panel" "${slim_target}/config" \
+        --include='*.c' --include='*.h' 2>/dev/null || true)
+    if [ -n "$source_hits" ]; then
+        echo "$source_hits"
+        echo "nRF51 release source acquired heap or formatting code"
+        rc=1
+    fi
+    for required in \
+        BLE_GAP_EVT_SEC_PARAMS_REQUEST \
+        BLE_GATTS_EVT_SYS_ATTR_MISSING \
+        BLE_EVT_USER_MEM_REQUEST \
+        BLE_EVT_USER_MEM_RELEASE \
+        BLE_ERROR_NO_TX_PACKETS \
+        BLE_EVT_TX_COMPLETE \
+        WDT_CONFIG_SLEEP_Run; do
+        if ! grep -Rqs "$required" "${slim_target}/src"; then
+            echo "nRF51 mandatory S130 path missing: $required"
+            rc=1
+        fi
+    done
+    watchdog_call=$(grep -nE '^[[:space:]]*watchdog_start[[:space:]]*\([[:space:]]*\)[[:space:]]*;' \
+        "${slim_target}/src/main.c" | head -1 | cut -d: -f1)
+    ble_call=$(grep -nE '^[[:space:]]*od_nrf51_ble_init[[:space:]]*\([[:space:]]*\)[[:space:]]*;' \
+        "${slim_target}/src/main.c" | head -1 | cut -d: -f1)
+    if [ -z "$watchdog_call" ] || [ -z "$ble_call" ] || [ "$watchdog_call" -ge "$ble_call" ]; then
+        echo "nRF51 watchdog must start before SoftDevice initialization can fail"
+        rc=1
+    fi
+    return $rc
+}
+check "nrf51: bounded slim composition" nrf51_slim_structure
 
 transfer_single_pump_owner() {
     local hits rc
@@ -1464,6 +1538,27 @@ if [ "$DO_SILABS" = 1 ]; then
     check "silabs: BG22 headless build" silabs_bg22
 else
     skip "silabs: BG22 headless build" "needs --silabs/--targets (Simplicity SDK 2025.12.2)"
+fi
+
+# ====================================================================================== nRF51 ==
+nrf51_s130() {
+    if [ -z "${NRF5_SDK_ROOT:-}" ]; then
+        echo "NRF5_SDK_ROOT must name Nordic nRF5 SDK 12.3.0"
+        return 1
+    fi
+    targets/nrf51-s130/build.sh
+}
+if [ "$DO_NRF51" = 1 ] && [ -z "${NRF5_SDK_ROOT:-}" ]; then
+    skip "nrf51: S130 slim build and image validation" \
+         "NRF5_SDK_ROOT is unset (needs Nordic nRF5 SDK 12.3.0)"
+elif [ "$DO_NRF51" = 1 ] && ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
+    skip "nrf51: S130 slim build and image validation" \
+         "arm-none-eabi-gcc is not on PATH"
+elif [ "$DO_NRF51" = 1 ]; then
+    check "nrf51: S130 slim build and image validation" nrf51_s130
+else
+    skip "nrf51: S130 slim build and image validation" \
+         "needs --nrf51/--targets and NRF5_SDK_ROOT (nRF5 SDK 12.3.0)"
 fi
 
 # ===================================================================================== summary ==

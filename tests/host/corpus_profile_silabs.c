@@ -22,6 +22,8 @@ unsigned od_corpus_profile_caps(void)
     return OD_VEC_CAP_NFC;
 }
 
+unsigned od_corpus_profile_mask(void) { return OD_VEC_PROFILE_FULL; }
+
 bool od_corpus_profile_is_production(void) { return true; }
 const char *od_corpus_profile_name(void) { return "silabs-production"; }
 

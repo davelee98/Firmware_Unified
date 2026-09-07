@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Build every target into release/.
 #
-#   ./build-release.sh                    # all three targets
+#   ./build-release.sh                    # all four targets
 #   ./build-release.sh nordic esp32       # a subset
 #   PROFILE=debug ./build-release.sh      # nordic honours it; the others have no equivalent
 #   ./build-release.sh --list             # show targets and what each builds
 #
 # THIS DRIVES THE PER-TARGET SCRIPTS, it does not reimplement them. Each target owns its
-# toolchain activation (none of the three is on PATH), its board list, its artefact naming
+# toolchain activation, its board list, its artefact naming
 # and its own release/MANIFEST-<target>.txt. Those manifests stay separate on purpose: a
 # single shared one would only ever describe whichever target built last.
 #
@@ -31,6 +31,7 @@ od_target_dir() {
     esp32)  echo "targets/esp32-idf" ;;
     nordic) echo "targets/nordic-zephyr" ;;
     silabs) echo "targets/efr32bg22-slc" ;;
+    nrf51)   echo "targets/nrf51-s130" ;;
     *)      return 1 ;;
   esac
 }
@@ -44,11 +45,12 @@ od_target_cmd() {
     nordic) echo "./build.sh --all" ;;
     # Build only. The OTA/bootloader/artefact steps need Simplicity Commander and a board.
     silabs) echo "./build-and-flash.sh --no-flash" ;;
+    nrf51)  echo "./build.sh" ;;
     *)      return 1 ;;
   esac
 }
 
-ALL_TARGETS=(esp32 nordic silabs)
+ALL_TARGETS=(esp32 nordic silabs nrf51)
 
 if [[ "${1:-}" == "--list" ]]; then
   printf '%-8s %-24s %s\n' TARGET DIRECTORY COMMAND
