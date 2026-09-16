@@ -1057,3 +1057,50 @@ Every ESP32 row above applies here too and is untested. These are Nordic's alone
 The profile declines touch, the image links no touch symbol and no seam reference, and the
 capability-off arm answers idle, no address, not an interrupt pin. That is a link-time property the
 software gate checks; no board row follows from it.
+
+---
+
+## Boot-screen footer voltage and temperature — newlib float printf (2026-09-16)
+
+The footer's battery and die-temperature values rendered as a bare `V` and `C` with no digits.
+`od_boot_screen.c` formats both with `%.2f`/`%.1f`, and the Nordic build selected newlib-nano
+without `CONFIG_NEWLIB_LIBC_FLOAT_PRINTF`, so `-u_printf_float` was never passed and
+`_printf_float` stayed a NULL weak symbol: `nano-vfprintf` skips the conversion, steps the
+`va_arg` cursor over the double, and prints the rest of the format string. The digits vanish and
+the unit letter remains.
+
+Fixed by restoring the linker flag in `targets/nordic-zephyr/zephyr/prj.conf`, not by rewriting
+the renderer: `../Firmware/src/boot_screen.cpp:733-742` is the same source and prints correctly
+only because the Adafruit nRF52 Arduino platform passes `-u _printf_float` unconditionally
+(`platform.txt` `build.float_flags`). The port carried the source but not the flag.
+
+**No host test can catch this class of defect** — the host suite links glibc, which formats
+floats, and `tests/host/boot_screen_test.c` stubs the two readings without asserting on the text.
+ESP32 is unaffected (ESP-IDF's newlib carries the formatter), which is why the same renderer
+passed its ESP32-S3 run. The link-level check is `nm zephyr.elf | grep -E "_printf_float|_dtoa_r"`:
+absent before, present after.
+
+### Nordic nRF52840 (`xiao_ble/nrf52840`), 7.3" colour kit
+
+- [x] **The footer shows real battery and die-temperature values.** 2026-09-16, working tree on
+      commit `184c302` plus the `prj.conf` line. Reported in conversation. Acquisition was never
+      at fault: `update_msd_payload()` (`opendisplay_ble.c:1032`) samples both before
+      `schedule_boot_display_apply()` (`:1044`), so only the formatting was lost.
+
+Open on this board:
+
+- [ ] **The unavailable arms still read `--V` / `--C`.** Needs a board with
+      `battery_sense_pin == 0xFF`, or one whose SAADC read fails, to distinguish "no reading"
+      from the formatting defect above. Not exercised by the run.
+
+### Nordic nRF54L15 / nRF54LM20A — same fix, no board run
+
+Both take the flag from the shared `prj.conf` and link the float symbols (verified at link time,
+2/2 on each). Neither has been on a panel with this build.
+
+- [ ] The footer shows real values on an nRF54 board.
+
+### EFR32BG22 — nothing to run
+
+The target declines the `APP_BOOT` tier and its own `render_boot_screen()` prints no voltage or
+temperature, so the defect never reached it and the fix does not apply.
