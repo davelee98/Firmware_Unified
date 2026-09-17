@@ -1109,11 +1109,19 @@ temperature, so the defect never reached it and the fix does not apply.
 
 ## nRF52840 USB power gating
 
-- [ ] Battery idle current measured after 60 s with no cable, and after a plug/unplug cycle;
-      both traces show no 1 kHz logging ripple. Repeat with the debug build.
-- [ ] Cable attached before cold boot enumerates as CDC and exposes the boot log. **Release gate.**
-- [ ] UF2 bootloader-to-application hand-off with the cable held enumerates as CDC. **Release gate.**
-- [ ] Battery hot-plug enumerates; 20 unplug/replug cycles and a fast cable bounce settle without
+Merged in PR #90 (`4a61a7a`). Baseline before the change: ~2 mA idle while advertising on battery;
+`../Firmware` on the same board: ~55 µA.
+
+- [x] Battery idle current, battery build, no cable: **40 µA** measured (2026-09-17, bench
+      measurement reported with the PR #90 flash test). The idle-power regression is resolved.
+- [ ] Idle current after a plug/unplug cycle returns to the no-cable figure; traces show no 1 kHz
+      logging ripple. Repeat the no-cable measurement with the debug build.
+- [x] Cable attached before cold boot enumerates as CDC and exposes the boot log. **Release gate.**
+      (2026-09-17, bench test of PR #90: USB console works.)
+- [x] UF2 bootloader-to-application hand-off with the cable held enumerates as CDC. **Release gate.**
+      (2026-09-17, same test.)
+- [x] Battery hot-plug enumerates; 20 unplug/replug cycles and a fast cable bounce settle without
       USB errors or watchdog resets and return to the no-cable current after unplug.
+      (2026-09-17, same test.)
 - [ ] Plug/unplug during BLE upload does not interrupt the upload; a serial-monitor log burst may
       drop characters but does not block firmware work; UF2 drag-and-drop remains functional.
