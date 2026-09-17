@@ -176,30 +176,6 @@
  * disable of it would be a dangling reference on this board. */
 
 /*
- * hw-flow-control ON THE CDC CONSOLE. This is not about RTS/CTS wires -- there are none on a
- * USB CDC link. It is the flag cdc_acm_poll_out() checks to decide what to do when its TX ring
- * is full:
- *
- *     if (k_is_in_isr() || !data->flow_ctrl) {
- *             LOG_WRN_ONCE("Ring buffer full, discard data");
- *             break;                       <-- THE CHARACTER IS THROWN AWAY
- *     }
- *     k_msleep(1);                         <-- with flow_ctrl: wait for room instead
- *
- * (zephyr/subsys/usb/device_next/class/usbd_cdc_acm.c, cdc_acm_poll_out)
- *
- * Without it the console drops INDIVIDUAL CHARACTERS whenever output outruns the host,
- * including the native log backend's record terminators. Zephyr now owns record assembly and
- * line termination; this flag keeps the CDC transport from truncating those records afterward.
- *
- * The cost is that a stalled host now delays the logging thread instead of silently corrupting
- * the log. For a bench debug console that is the right trade.
- */
-&board_cdc_acm_uart {
-	hw-flow-control;
-};
-
-/*
  * uart0 DISABLED -- IT OWNS THE PANEL'S CS PIN.
  *
  * xiao_ble_common.dtsi enables uart0 with status="okay" and pinctrl uart0_default, whose
