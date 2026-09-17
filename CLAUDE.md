@@ -88,8 +88,8 @@ test-scope narrative in this file, it belongs in the checklist instead.
   panel key-state lines (checklist § Boot-screen key policy has the exact coverage and gaps,
   including the undecoded QR payload).
 - **nRF52840 idle power:** USB is enabled only while VBUS is present (PR #90). Battery idle current
-  measured at 40 µA, down from ~2 mA (`../Firmware`: ~55 µA). The USB enumeration gates are still
-  open (checklist § nRF52840 USB power gating).
+  measured at 40 µA, down from ~2 mA (`../Firmware`: ~55 µA), and the USB console still enumerates
+  (checklist § nRF52840 USB power gating has the remaining open rows).
 - **Never hardware-verified:** the WiFi/LAN transport, and the F4/F7 correctness fixes.
 - Arduino shim fully removed from `esp32-idf` (docs/ARCHIVE_esp32_arduino_shim.md);
   `targets/esp32-idf/vendor/fastepd/` is its permanent (non-shim) FastEPD adapter.
