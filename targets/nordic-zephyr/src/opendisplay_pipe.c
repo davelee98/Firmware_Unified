@@ -17,6 +17,7 @@
 #include "od_session.h"
 #include "od_session_app.h"
 #include "od_span.h"
+#include "opendisplay_idle_wake.h"
 #include "opendisplay_protocol.h"
 
 #include <zephyr/kernel.h>
@@ -49,7 +50,9 @@ void opendisplay_pipe_on_write(const uint8_t *data, uint16_t len, bool write_cmd
   /* The connection generation IS the frame's identity, and it travels with the frame rather than
    * being re-read at dispatch: a frame queued by a closed connection must not run against whoever
    * inherited the link. Same role as ESP32's packed owner word. */
-  (void)od_rxq_push(data, len, (uint32_t)atomic_get(&s_conn_gen));
+  if (od_rxq_push(data, len, (uint32_t)atomic_get(&s_conn_gen))) {
+    opendisplay_idle_wake();
+  }
 }
 
 void opendisplay_pipe_on_notify_changed(bool enabled)

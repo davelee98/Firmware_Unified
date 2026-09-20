@@ -49,7 +49,9 @@ test-scope narrative in this file, it belongs in the checklist instead.
 - **No CI.** `tools/check.sh` (repo root) is the only gate, and nothing runs it but you. Plain
   invocation covers host tests, sanitizers, fuzz targets and the wire corpus; `--targets` adds all
   three target families and is required before merge. A skip is not a pass — read the summary,
-  which exits 2 on any skip.
+  which exits 2 on any skip. Codex sandbox failures involving the Nordic Zephyr cache or
+  LeakSanitizer under `ptrace`, and their exact rerun procedure, are recorded in
+  `codex/known_issues.md`.
 - `targets/esp32-idf/build.sh` builds every board fragment (sources ESP-IDF itself; never on
   `PATH`). `targets/esp32-idf/tools/run_host_tests.sh` runs host tests without ESP-IDF.
 - `./build-release.sh` (repo root) drives every target's own build entry point, writing

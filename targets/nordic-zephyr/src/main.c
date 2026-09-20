@@ -4,6 +4,7 @@
 #include "opendisplay_ble.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_display.h"
+#include "opendisplay_idle_wake.h"
 #include "od_runtime_types.h"
 #include "od_watchdog_app.h"
 
@@ -13,13 +14,19 @@
 #include <zephyr/dfu/mcuboot.h>
 #endif
 
-static void idle_delay_ms(uint32_t delay_ms)
+enum idle_wait_result {
+	IDLE_WAIT_ELAPSED = 0,
+	IDLE_WAIT_INTERRUPTED,
+};
+
+static enum idle_wait_result idle_wait_until(int64_t deadline_ms)
 {
 	const uint32_t chunk_ms = 1000u;
-	uint32_t remaining = delay_ms;
 
-	while (remaining > 0u) {
-		uint32_t step = (remaining > chunk_ms) ? chunk_ms : remaining;
+	for (;;) {
+		int64_t now_ms;
+		int64_t remaining_ms;
+		uint32_t step_ms;
 
 		/* The idle wait is chunked at one second, so feeding here rather than only in the
 		 * caller is what keeps a configured sleep_timeout_ms of minutes from looking like
@@ -27,14 +34,33 @@ static void idle_delay_ms(uint32_t delay_ms)
 		 * requirement for a feed site. */
 		od_watchdog_app_service();
 		opendisplay_ble_process();
-		k_msleep(step);
-		remaining -= step;
+		if (opendisplay_ble_is_connected()) {
+			return IDLE_WAIT_INTERRUPTED;
+		}
+
+		now_ms = k_uptime_get();
+		if (now_ms >= deadline_ms) {
+			return IDLE_WAIT_ELAPSED;
+		}
+		remaining_ms = deadline_ms - now_ms;
+		step_ms = (remaining_ms > (int64_t)chunk_ms) ? chunk_ms : (uint32_t)remaining_ms;
+		if (opendisplay_idle_wait(step_ms)) {
+			return IDLE_WAIT_INTERRUPTED;
+		}
 	}
+}
+
+static enum idle_wait_result idle_wait_ms(uint32_t delay_ms)
+{
+	return idle_wait_until(k_uptime_get() + (int64_t)delay_ms);
 }
 
 int main(void)
 {
 	const struct od_config *cfg;
+	uint32_t msd_interval_ms = 0u;
+	int64_t msd_deadline_ms = 0;
+	bool msd_deadline_armed = false;
 
 	od_hal_log_open();
 	od_log_init();
@@ -57,13 +83,33 @@ int main(void)
 #endif
 
 	while (1) {
+		uint32_t configured_msd_interval_ms;
+		int64_t now_ms;
+
 		od_watchdog_app_service();
 		cfg = opendisplay_get_global_config();
+		configured_msd_interval_ms =
+			(cfg != NULL && cfg->loaded) ? cfg->power_option.sleep_timeout_ms : 0u;
+		if (configured_msd_interval_ms != msd_interval_ms) {
+			msd_interval_ms = configured_msd_interval_ms;
+			msd_deadline_armed = msd_interval_ms > 0u;
+			if (msd_deadline_armed) {
+				msd_deadline_ms = k_uptime_get() + (int64_t)msd_interval_ms;
+			}
+		}
 
 		if (opendisplay_ble_is_connected()) {
 			opendisplay_ble_process();
 			k_msleep(10);
 			continue;
+		}
+
+		now_ms = k_uptime_get();
+		if (msd_deadline_armed && now_ms >= msd_deadline_ms) {
+			opendisplay_ble_update_msd(true);
+			/* Schedule from the actual publication time. A connection may have held this
+			 * overdue for several intervals; publish once rather than replaying them. */
+			msd_deadline_ms = now_ms + (int64_t)msd_interval_ms;
 		}
 
 		if (!opendisplay_ble_advertising_active()) {
@@ -72,15 +118,14 @@ int main(void)
 			 * full idle chunk below, so a delayed restart attempt doesn't stall
 			 * rediscovery for up to ~1s. Resolves in one or two passes in the ordinary
 			 * case; not a standing battery cost since it only applies transiently. */
-			idle_delay_ms(50u);
-		} else if (cfg != NULL && cfg->loaded && cfg->power_option.sleep_timeout_ms > 0u) {
+			(void)idle_wait_ms(50u);
+		} else if (msd_deadline_armed) {
 			/* Matches nRF52840 Firmware: MSD refreshes once per sleep_timeout_ms
 			 * idle cycle; without a configured timeout there is no periodic MSD
 			 * update (buttons and adv restarts still refresh it). */
-			idle_delay_ms(cfg->power_option.sleep_timeout_ms);
-			opendisplay_ble_update_msd(true);
+			(void)idle_wait_until(msd_deadline_ms);
 		} else {
-			idle_delay_ms(500u);
+			(void)idle_wait_ms(500u);
 		}
 	}
 	return 0;
