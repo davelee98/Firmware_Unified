@@ -1,9 +1,8 @@
 # Plan: promptly leave Nordic idle processing on BLE activity
 
-Status: implemented on `codex/nordic-idle-wake`; all three Nordic target builds and
-the existing host/sanitizer/fuzz/corpus checks pass. Hardware latency and idle-power
-qualification remain pending. The full gate still reports the unrelated ignored
-`targets/nrf51-s130/` structural-ratchet failure recorded in `codex/known_issues.md`.
+Status: implemented on `codex/nordic-idle-wake`, including review corrections.
+`tools/check.sh --targets` passed on 2026-09-21: 46 passed, 0 failed, 0 skipped.
+Hardware latency and idle-power qualification remain pending.
 
 ## Outcome and scope
 
@@ -53,7 +52,7 @@ contains no application processing. `main.c` owns the idle and MSD deadline poli
 The semaphore must exist before BLE callbacks can fire, require no heap and retain a
 pending wake issued before the main thread actually blocks.
 
-Successful connection, connection failure, disconnect and accepted RX enqueue
+Successful connection, connection failure and disconnect
 publish their state/work first, then signal the wakeup. Use the existing synchronized
 queue and pending-state contracts; publish any new connection-level indicator with
 proper synchronization. Do not pass raw `bt_conn` lifetimes through the wake signal
@@ -82,26 +81,29 @@ Use monotonic elapsed time/deadlines for the idle interval and service slices so
 early wakes and processing time cannot be counted as an entire requested sleep.
 Retain the 500 ms default idle wait, the at-most-one-second idle watchdog/service
 interval and the 10 ms connected cadence. A leftover wake may cause one extra loop
-iteration; it must not cause a persistent spin.
+iteration; it must not cause a persistent spin. If processing has already passed the
+deadline, perform an interruptible wait of at least one tick before returning expiry.
+This prevents a legal 1 ms interval from spinning when a pump pass takes longer.
 
 Periodic MSD timing uses one absolute next-refresh deadline. Arm it from the last
 refresh (or initial disconnected scheduling point), and preserve it across connection
-and RX interruptions. Never refresh advertising while connected. On the first
+interruptions. Never refresh advertising while connected. On the first
 disconnected outer-loop pass at or after the deadline, publish once and advance the
 deadline without replaying missed intervals. This prevents frequent short connections
 from continually restarting a 60-second timer while also avoiding a catch-up burst
-after a long connection. If `sleep_timeout_ms` changes, the config write/RX wake
-returns to the outer loop, which already re-reads the config; recompute the deadline
-from that observation. Only the currently blocked wait can hold the old value.
+after a long connection. Config writes are processed synchronously on the main thread;
+if `sleep_timeout_ms` changes, recompute the deadline when the next outer-loop read
+observes the change. A temporary `loaded = false` during a successful reload is not
+visible to that read. A completed clear or failed reload disables the periodic deadline.
 
-Wake sources are deliberately limited to successful connection, failed connection,
-disconnect and accepted RX enqueue. LED, buzzer, touch and CCC work remains on the
-existing at-most-one-second idle service tick. That preserves current idle behavior;
-making those paths event-driven belongs to a separately measured responsiveness plan.
-An RX enqueue rejected because the ring is full does not give another wake: a full
-ring necessarily contains an earlier accepted frame whose give is already pending or
-whose work the main loop is servicing. The failed enqueue must not manufacture a
-second event or obscure the queue's existing overflow handling.
+Wake sources are deliberately limited to successful connection, failed connection
+and disconnect. RX enqueue does not signal: connected processing sleeps with
+`k_msleep(10)`, which a semaphore give cannot interrupt. LED, buzzer, touch and CCC
+work remains on the existing at-most-one-second idle service tick. That preserves
+current idle behavior; making those paths event-driven belongs to a separately
+measured responsiveness plan.
+Accepted RX frames are handled at the existing connected cadence, and the queue's
+overflow handling is unchanged.
 
 ## Implementation steps
 
@@ -114,12 +116,13 @@ second event or obscure the queue's existing overflow handling.
    Move MSD scheduling to the persistent absolute deadline described above. Keep
    all application processing on the main thread.
 3. **Connect wake producers.** Signal successful and failed connection attempts and
-   disconnects from `opendisplay_ble.c` after publishing their state. Signal from
-   `opendisplay_pipe.c` only after `od_rxq_push()` accepts a frame; its existing
-   disconnect cleanup publication remains ordered before the disconnect wake.
+   disconnects from `opendisplay_ble.c` after publishing their state. The existing
+   `opendisplay_pipe.c` disconnect cleanup publication remains ordered before the
+   disconnect wake. Do not signal on RX enqueue while the connected wait uses
+   `k_msleep(10)`.
    Put the failed-connect give after `s_adv_ended_pending` and `od_adv_app_boost()`,
    before the callback's early return. Verify all callback return paths,
-   initialization ordering and enqueue failure behavior. Do not add CCC, LED,
+   initialization ordering. Do not add CCC, LED,
    buzzer or touch wakes, and do not generate a periodic wake merely to keep the
    semaphore active.
 4. **Run target validation.** Use focused instrumented runs to cover the old
@@ -147,9 +150,10 @@ second event or obscure the queue's existing overflow handling.
 | No activity for a long configured interval | Existing service/watchdog cadence; one MSD refresh at the absolute deadline |
 | Repeated short connections before MSD deadline | Deadline survives interruptions; refresh occurs once when disconnected and due |
 | Connection spans the MSD deadline | No refresh while connected; one refresh after disconnect, with no catch-up burst |
-| Timeout changes while waiting | RX wake returns to outer config read; deadline is recomputed from the newly observed value |
+| Timeout changes in a config handler | Next outer config read recomputes the deadline from the newly observed value |
 | Zero/default timeout, short timeout, clock boundary | No unsigned underflow, premature expiry or infinite wait |
-| Coalesced/stale wake tokens, failed RX enqueue | Bounded extra work; no persistent busy loop or lost queued work |
+| Pump pass takes longer than a 1 ms configured interval | Expiry still performs a timed wait; no sustained CPU spin |
+| Coalesced/stale connection wake tokens | Bounded extra work; no persistent busy loop |
 | LED, buzzer, touch or CCC work while idle | Remains serviced on the existing at-most-one-second periodic tick |
 
 Do not add committed test targets for this change. Cover these cases with focused

@@ -48,8 +48,3 @@ rerun the same `./tools/check.sh` invocation with sandbox escalation. Inspect th
 unrestricted GCC, Clang, sanitizer and fuzz results independently. Remove a generated
 crash artifact only after confirming it came solely from this LeakSanitizer startup
 failure and is not tracked or user-owned.
-
-The separate structural failure about `targets/nrf51-s130/` is not caused by the
-sandbox. It comes from an ignored leftover directory being scanned by the ratchet and
-must remain visible in the final gate summary until the repository or gate owns a
-deliberate fix.

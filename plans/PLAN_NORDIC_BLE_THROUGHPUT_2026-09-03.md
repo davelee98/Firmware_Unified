@@ -10,8 +10,8 @@ these sections as written:
 
 - § 2 BLE RX/TX queue and controller tuning, § 3 the connection-parameter deferral, § 4 the
   per-target matrix, § 5 the RAM budget.
-- Wake sources this file lists beyond connect/disconnect/RX enqueue: CCC subscribe, and the LED,
-  buzzer and touch timers. The idle-wake plan leaves those on the periodic service tick.
+- RX enqueue and CCC subscribe wakes: the connected arm retains its 10 ms sleep. LED,
+  buzzer and touch timer wakes: those paths retain the periodic idle service tick.
 - The hot/periodic split of `opendisplay_ble_process()` (§ 1.2).
 
 Open review findings against this file, unfixed at the time it was superseded: the Channel

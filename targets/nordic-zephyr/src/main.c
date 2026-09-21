@@ -40,7 +40,9 @@ static enum idle_wait_result idle_wait_until(int64_t deadline_ms)
 
 		now_ms = k_uptime_get();
 		if (now_ms >= deadline_ms) {
-			return IDLE_WAIT_ELAPSED;
+			/* A pump pass can exceed a short configured interval. Still block for at
+			 * least one tick unless a connection event needs immediate service. */
+			return opendisplay_idle_wait(1u) ? IDLE_WAIT_INTERRUPTED : IDLE_WAIT_ELAPSED;
 		}
 		remaining_ms = deadline_ms - now_ms;
 		step_ms = (remaining_ms > (int64_t)chunk_ms) ? chunk_ms : (uint32_t)remaining_ms;
