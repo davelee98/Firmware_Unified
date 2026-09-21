@@ -224,6 +224,7 @@ target_sources(app PRIVATE
   ${SRC_DIR}/od_hal_wdt.c
   ${SRC_DIR}/od_hal_crypto.c
   ${SRC_DIR}/od_watchdog_app.c
+  ${SRC_DIR}/opendisplay_idle_wake.c
   ${SRC_DIR}/opendisplay_ble.c
   ${SRC_DIR}/opendisplay_battery.c
   ${SRC_DIR}/opendisplay_i2c.c

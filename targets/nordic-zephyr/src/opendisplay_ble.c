@@ -1,4 +1,5 @@
 #include "opendisplay_ble.h"
+#include "opendisplay_idle_wake.h"
 #include "od_log.h"
 #include "opendisplay_config_parser.h"
 #include "opendisplay_config_storage.h"
@@ -570,6 +571,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	if (err != 0) {
 		od_log_info("connect failed: %u", (unsigned)err);
 		od_adv_app_boost();
+		opendisplay_idle_wake();
 		return;
 	}
 	s_conn = bt_conn_ref(conn);
@@ -587,6 +589,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 		}
 	}
 #endif
+	opendisplay_idle_wake();
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -606,6 +609,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	 * reconcile-every-pass design this now follows. */
 	__atomic_store_n(&s_adv_txp_pending, (uint8_t)1, __ATOMIC_RELEASE);
 	od_adv_app_boost();
+	opendisplay_idle_wake();
 }
 
 /* .recycled is gone -- it was structurally dead code (scheduling an already-pending work item

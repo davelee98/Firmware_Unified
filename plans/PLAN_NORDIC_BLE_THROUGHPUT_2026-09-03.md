@@ -1,5 +1,25 @@
 # Plan — nordic-zephyr BLE upload throughput: loop timing and RX/TX tuning
 
+**SUPERSEDED 2026-09-20. Do not implement from this file.**
+
+§ 1 (loop timing) is replaced by `plans/PLAN_NORDIC_IDLE_WAKE_2026-09-20.md`, which owns the
+main-loop wake seam. Two designs for one loop cannot both land.
+
+Never carried forward, and still unaddressed — re-plan from measurements rather than lifting
+these sections as written:
+
+- § 2 BLE RX/TX queue and controller tuning, § 3 the connection-parameter deferral, § 4 the
+  per-target matrix, § 5 the RAM budget.
+- RX enqueue and CCC subscribe wakes: the connected arm retains its 10 ms sleep. LED,
+  buzzer and touch timer wakes: those paths retain the periodic idle service tick.
+- The hot/periodic split of `opendisplay_ble_process()` (§ 1.2).
+
+Open review findings against this file, unfixed at the time it was superseded: the Channel
+Sounding offset against a 15 ms event length and 15 ms connection interval (§ 2, P1); the shared
+HCI RX pool accounting (§ 2); reading PIPE duplicate counts as link-layer retries (§ 0); the
+connected wait not clamped to the housekeeping deadline (§ 1); and the double `k_uptime_get_32()`
+underflow in the idle-loop remaining delay (§ 1).
+
 Date: 2026-09-03
 Baseline: HEAD `182ad2c`.
 Targets: `nordic-zephyr` only — boards `xiao_ble` (nRF52840), `xiao_nrf54l15`, `xiao_nrf54lm20a`.

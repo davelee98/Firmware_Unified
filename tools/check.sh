@@ -478,12 +478,19 @@ check "esp32: securityConfig declared only as a reference" security_config_is_a_
 # call still satisfies it. It catches deletion and a target arriving without one. Anything stronger
 # needs the teardown driven, and core_reset_test.c is where that lives.
 core_reset_is_the_teardown() {
-    local rc=0 d n found=0
+    local rc=0 d n src_file found=0
 
     # Discover targets dynamically; each target must contain an od_core_reset() caller. Which file
     # holds it is the target's business.
     for d in targets/*/; do
         [ -d "$d" ] || continue
+        # Branch switches can leave only ignored build/cache files behind.
+        src_file=$(find "$d" -type d -name 'build*' -prune -o \
+            -type f \( -name '*.c' -o -name '*.cpp' \) -print -quit) || {
+            echo "could not scan ${d} for sources; the teardown rule is unproven"
+            return 1
+        }
+        [ -n "$src_file" ] || continue
         found=1
         n=$(grep -RIlE '\bod_core_reset[[:space:]]*\(' "$d" \
             --include='*.c' --include='*.cpp' --exclude-dir='build*' | wc -l)
@@ -493,7 +500,7 @@ core_reset_is_the_teardown() {
         fi
     done
     if [ "$found" -eq 0 ]; then
-        echo "no target directories found; the teardown rule is unproven"
+        echo "no targets with sources found; the teardown rule is unproven"
         rc=1
     fi
     return $rc

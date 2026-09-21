@@ -96,7 +96,7 @@ void opendisplay_button_init(void)
 /* Detection is by level comparison on each call, so a press and release that both complete
  * between two calls is not reported. The caller sets that window: opendisplay_ble_process() runs
  * every 10 ms while connected, but only every 500 ms to 1 s while idle-advertising, depending on
- * whether a sleep_timeout_ms is configured (main.c idle_delay_ms). Closing it needs the edge
+ * whether a sleep_timeout_ms is configured (main.c's idle wait). Closing it needs the edge
  * recorded in ISR context -- docs/FOLLOWUPS.md § 12. */
 void opendisplay_button_process(void)
 {
